@@ -1,0 +1,15 @@
+{
+  "name": "win10",
+  "mode": "verify",
+  "command": "",
+  "manual": false,
+  "capabilities": ["windows", "exe", "powershell", "gui-check"],
+  "repos": {
+    "light": "C:\\src\\light",
+    "lightmem": "C:\\src\\lightmem",
+    "lightharness": "C:\\src\\lightharness"
+  },
+  "worktrees": "C:\\hive-wt",
+  "max_concurrency": 1,
+  "created": "2026-10-22T23:30:00+08:00"
+}
