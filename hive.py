@@ -1371,6 +1371,13 @@ def main(argv=None) -> int:
     except HiveError as e:
         print(f"错误: {e}", file=sys.stderr)
         return 1
+    except BrokenPipeError:
+        # 例如 `hive status | head`：安静退出，别打 traceback
+        try:
+            sys.stdout.close()
+        except OSError:
+            pass
+        return 0
 
 
 if __name__ == "__main__":

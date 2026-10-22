@@ -176,3 +176,27 @@ def test_parse_card_rejects_bad_list(tmp_path):
     path.write_text("---\nid: T-0001\n  - 孤儿列表项\n---\n", encoding="utf-8")
     with pytest.raises(hive.HiveError):
         hive.parse_card(path)
+
+
+def test_concurrent_claims_share_one_clone(world, fake_cmd):
+    """两个 worker 共用一个 clone 抢卡：claim 分支必须带 claims/T-xxxx.json。
+
+    这是对「独立 GIT_INDEX_FILE」修复的回归测试：旧实现会互相踩 index，
+    可能推出一个没有 claims 文件的空分支。
+    """
+    world.add_agent("a1", "exec", command=fake_cmd)
+    world.add_agent("a2", "exec", command=fake_cmd)
+    for i in range(1, 4):
+        tid = f"T-000{i}"
+        world.add_task(tid)
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(HIVE), "--dir", str(world.hive1),
+                 "claim", tid, "--agent", name],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            for name in ("a1", "a2")
+        ]
+        codes = [p.wait() for p in procs]
+        assert sorted(codes) == [0, 1], (tid, codes)
+        data = json.loads(show(world, f"claim/{tid}:claims/{tid}.json"))
+        assert data["agent"] in ("a1", "a2"), data
