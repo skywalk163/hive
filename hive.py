@@ -35,19 +35,22 @@ import os
 import re
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
+import tempfile
 import time
+from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 
 TASK_FIELDS = [
     "id", "title", "repo", "base", "state", "owner", "agent", "fresh",
-    "priority", "paths", "verify", "depends_on",
+    "priority", "needs", "paths", "verify", "depends_on",
     "lease_minutes", "timeout_minutes", "created",
 ]
 
@@ -120,6 +123,13 @@ def rev_parse(cwd, ref) -> str | None:
 # 任务卡：极简 Markdown frontmatter（只支持标量与标量列表）
 # --------------------------------------------------------------------------- #
 
+def _unquote(v: str) -> str:
+    v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1]
+    return v
+
+
 def _scalar(v: str):
     v = v.strip()
     if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
@@ -149,7 +159,8 @@ def parse_card(path: Path):
         if line.startswith("  - ") or line.startswith("- "):
             if key is None or not isinstance(data.get(key), list):
                 raise HiveError(f"{path}:{lineno} 列表项没有归属: {line!r}")
-            data[key].append(_scalar(line.split("- ", 1)[1]))
+            # 列表项一律按字符串处理：verify 里的 "true"/"false" 是命令，不是布尔值
+            data[key].append(_unquote(line.split("- ", 1)[1]))
         elif ":" in line:
             k, v = line.split(":", 1)
             k, v = k.strip(), v.strip()
@@ -203,18 +214,27 @@ def commit_file_to_ref(repo: Path, path: str, content: str, ref: str,
     if not parent_sha:
         raise HiveError(f"{repo} 找不到 {parent}，先 git fetch")
     blob = git(["hash-object", "-w", "--stdin"], repo, input=content).stdout.strip()
+    # 用独立 index：即使多个 worker 共用同一个 clone，也不会互相踩 index
+    fd, idx = tempfile.mkstemp(prefix="hive-index-")
+    os.close(fd)
+    env = {**os.environ, "GIT_INDEX_FILE": idx}
     try:
-        git(["read-tree", parent_sha], repo)
-        git(["update-index", "--add", "--cacheinfo", f"100644,{blob},{path}"], repo)
-        tree = git(["write-tree"], repo).stdout.strip()
-        commit = git(
-            [*IDENT, "commit-tree", tree, "-p", parent_sha, "-m", message or f"hive: {path}"],
-            repo,
+        run(["git", "read-tree", parent_sha], cwd=repo, env=env)
+        run(["git", "update-index", "--add", "--cacheinfo", f"100644,{blob},{path}"],
+            cwd=repo, env=env)
+        tree = run(["git", "write-tree"], cwd=repo, env=env).stdout.strip()
+        commit = run(
+            ["git", *IDENT, "commit-tree", tree, "-p", parent_sha,
+             "-m", message or f"hive: {path}"],
+            cwd=repo, env=env,
         ).stdout.strip()
-        git(["push", "origin", f"{commit}:refs/heads/{ref}"], repo)
+        run(["git", "push", "origin", f"{commit}:refs/heads/{ref}"], cwd=repo)
         return commit
     finally:
-        git(["reset", "--hard", "-q", parent_sha], repo, check=False)
+        try:
+            os.unlink(idx)
+        except OSError:
+            pass
 
 
 def read_ref_file(repo: Path, ref: str, path: str):
@@ -225,6 +245,26 @@ def read_ref_file(repo: Path, ref: str, path: str):
         return json.loads(p.stdout)
     except json.JSONDecodeError:
         return p.stdout
+
+
+PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+def _pct(values, p: int) -> float:
+    if not values:
+        return 0.0
+    k = max(0, min(len(values) - 1, int(round((p / 100.0) * (len(values) - 1)))))
+    return float(values[k])
+
+
+def _fmt_dur(seconds: float) -> str:
+    if not seconds:
+        return "-"
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds / 3600:.1f}h"
 
 
 # --------------------------------------------------------------------------- #
@@ -293,19 +333,7 @@ class Hive:
 
     # -- 命令 -------------------------------------------------------------- #
     def cmd_assign(self, tid: str, agent: str) -> None:
-        card = self.card(tid)
-        card["state"] = "assigned"
-        card["owner"] = agent
-        self.agent(agent)  # 校验已登记
-        self.save_card(card)
-        inbox = self.dir / "inbox" / agent
-        inbox.mkdir(parents=True, exist_ok=True)
-        (inbox / f"{tid}.md").write_text(
-            f"# {tid} → {agent}\n\n"
-            f"assigned_at: {iso()}\n\n"
-            f"任务卡：`tasks/{tid}.md`\n",
-            encoding="utf-8",
-        )
+        self._assign_local(tid, agent)
         self.commit_and_push(f"assign {tid} -> {agent}")
         log(f"{tid} 已分派给 {agent}")
 
@@ -331,6 +359,312 @@ class Hive:
                 else:
                     log(f"删不掉 {ref}（可能受保护），保留不影响结果")
         log(f"{tid} 已关闭")
+
+    # -- 自动分派 / 体检 / 统计 ------------------------------------------- #
+    def agents(self) -> dict[str, dict]:
+        out = {}
+        for p in sorted((self.dir / "agents").glob("*.json")):
+            try:
+                cfg = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            out[cfg.get("name") or p.stem] = cfg
+        return out
+
+    def _load_counts(self, cards: dict) -> dict[str, int]:
+        # 已分派但还没 claim 的也要算负载，否则 dispatch 会把同一台机器塞爆
+        load: dict[str, int] = {}
+        for tid, c in cards.items():
+            if self.result_info(tid):
+                continue
+            claim = self.claim_info(tid)
+            if claim:
+                a = claim.get("agent") or "?"
+            elif c.get("state") == "assigned" and c.get("owner"):
+                a = c["owner"]
+            else:
+                continue
+            load[a] = load.get(a, 0) + 1
+        return load
+
+    def dep_done(self, dep: str) -> bool:
+        res = self.result_info(dep)
+        return bool(res and res.get("status") == "done")
+
+    def _assign_local(self, tid: str, agent: str) -> None:
+        self.agent(agent)  # 校验已登记
+        card = self.card(tid)
+        card["state"] = "assigned"
+        card["owner"] = agent
+        self.save_card(card)
+        inbox = self.dir / "inbox" / agent
+        inbox.mkdir(parents=True, exist_ok=True)
+        (inbox / f"{tid}.md").write_text(
+            f"# {tid} -> {agent}\n\n"
+            f"assigned_at: {iso()}\n\n"
+            f"任务卡：`tasks/{tid}.md`\n",
+            encoding="utf-8",
+        )
+
+    def cmd_dispatch(self, apply: bool = False, limit: int | None = None,
+                     only_agent: str | None = None, as_json: bool = False) -> None:
+        self.fetch()
+        cards = self.cards()
+        agents = self.agents()
+        if not agents:
+            raise HiveError("还没有登记任何 agent")
+        load = self._load_counts(cards)
+        ready = [c for c in cards.values()
+                 if c.get("state") == "ready" and not c.get("owner")]
+        ready.sort(key=lambda c: (PRIORITY_ORDER.get(c.get("priority"), 9), c["id"]))
+
+        plan: list[tuple[dict, str]] = []
+        skipped: list[tuple[str, str]] = []
+        planned = dict(load)
+        for c in ready:
+            if limit and len(plan) >= limit:
+                break
+            missing = [d for d in (c.get("depends_on") or []) if not self.dep_done(d)]
+            if missing:
+                skipped.append((c["id"], "依赖未完成: " + ", ".join(missing)))
+                continue
+            needs = set(c.get("needs") or [])
+            cands = []
+            for name, a in agents.items():
+                if only_agent and name != only_agent:
+                    continue
+                if c.get("agent") and name != c.get("agent"):
+                    continue
+                if c.get("repo") not in (a.get("repos") or {}):
+                    continue
+                if needs - set(a.get("capabilities") or []):
+                    continue
+                mode = a.get("mode") or ("manual" if a.get("manual") else "exec")
+                if mode == "verify" and (c.get("paths") or []):
+                    continue  # 验收机不改代码
+                if planned.get(name, 0) >= int(a.get("max_concurrency") or 1):
+                    continue
+                cands.append(name)
+            if not cands:
+                skipped.append((c["id"], "没有空闲且能力匹配的 agent"))
+                continue
+            cands.sort(key=lambda n: (planned.get(n, 0),
+                                      0 if c.get("agent") == n else 1, n))
+            name = cands[0]
+            plan.append((c, name))
+            planned[name] = planned.get(name, 0) + 1
+
+        if as_json:
+            print(json.dumps({
+                "plan": [{"task": c["id"], "agent": n, "repo": c.get("repo"),
+                          "priority": c.get("priority")} for c, n in plan],
+                "skipped": [{"task": t, "reason": r} for t, r in skipped],
+                "applied": bool(apply),
+            }, ensure_ascii=False, indent=2))
+            return
+
+        if plan:
+            print(f"{'TASK':<9}{'PRI':<5}{'REPO':<14}-> {'AGENT':<14}LOAD")
+            for c, n in plan:
+                print(f"{c['id']:<9}{c.get('priority', ''):<5}{c.get('repo', ''):<14}"
+                      f"-> {n:<14}{planned.get(n, 0)}/{int(agents[n].get('max_concurrency') or 1)}")
+        else:
+            print("没有可分派的任务")
+        for tid, reason in skipped:
+            print(f"  skip {tid}: {reason}")
+
+        if apply and plan:
+            for c, n in plan:
+                self._assign_local(c["id"], n)
+            summary = ", ".join(f"{c['id']}->{n}" for c, n in plan)
+            self.commit_and_push(f"dispatch: {summary}")
+            log(f"已分派 {len(plan)} 张卡")
+        elif plan:
+            print("（dry-run；加 --apply 才写入）")
+
+    def cmd_doctor(self) -> bool:
+        errors: list[str] = []
+        warns: list[str] = []
+        if not (self.dir / ".git").exists():
+            print("[ERR] 不是 git 仓库")
+            return False
+        try:
+            self.fetch()
+        except HiveError as e:
+            warns.append(f"fetch 失败（离线？）: {str(e).splitlines()[0]}")
+        if not rev_parse(self.dir, "origin/main"):
+            errors.append("缺少 origin/main")
+
+        cards: dict[str, dict] = {}
+        for p in sorted((self.dir / "tasks").glob("T-*.md")):
+            try:
+                data, _body = parse_card(p)
+            except HiveError as e:
+                errors.append(str(e))
+                continue
+            tid = data.get("id")
+            if tid != p.stem:
+                errors.append(f"{p.name}: id={tid!r} 与文件名不一致")
+            for k in ("title", "repo", "state"):
+                if not data.get(k):
+                    errors.append(f"{p.name}: 缺字段 {k}")
+            if tid in cards:
+                errors.append(f"重复 id {tid}")
+            cards[tid] = data
+
+        agents = self.agents()
+        if not agents:
+            warns.append("还没有登记 agent")
+        for name, a in agents.items():
+            mode = a.get("mode") or ("manual" if a.get("manual") else "exec")
+            if mode not in ("exec", "verify", "manual"):
+                errors.append(f"agent {name}: mode={mode!r} 非法")
+            if mode == "exec" and not a.get("command"):
+                errors.append(f"agent {name}: exec 模式没有 command")
+            if not a.get("repos"):
+                warns.append(f"agent {name}: 没有配置 repos")
+            for repo, path in (a.get("repos") or {}).items():
+                if not Path(path).expanduser().exists():
+                    warns.append(f"agent {name}: 本机看不到 {repo}={path}（可能不在本机）")
+
+        claim_refs = git(["for-each-ref", "--format=%(refname)",
+                          "refs/remotes/origin/claim/"], self.dir).stdout.split()
+        for ref in claim_refs:
+            tid = ref.rsplit("/", 1)[-1]
+            info = read_ref_file(self.dir, ref, f"claims/{tid}.json")
+            if tid not in cards:
+                warns.append(f"租约 {tid} 没有对应任务卡")
+            if not isinstance(info, dict) or not info.get("agent"):
+                errors.append(f"租约 {ref} 内容不合法")
+                continue
+            lease = info.get("lease_until")
+            if lease and not self.result_info(tid):
+                try:
+                    if parse_iso(lease) < now():
+                        warns.append(f"任务 {tid} 租约已过期（{info.get('agent')}）")
+                except ValueError:
+                    errors.append(f"租约 {tid} 的 lease_until 无法解析")
+
+        res_refs = git(["for-each-ref", "--format=%(refname)",
+                        "refs/remotes/origin/res/"], self.dir).stdout.split()
+        for ref in res_refs:
+            tid = ref.rsplit("/", 1)[-1]
+            data = read_ref_file(self.dir, ref, f"results/{tid}.json")
+            if tid not in cards:
+                warns.append(f"结果 {tid} 没有对应任务卡")
+            if not isinstance(data, dict):
+                errors.append(f"结果 {ref} 不是合法 JSON")
+                continue
+            if data.get("status") not in ("done", "failed"):
+                errors.append(f"结果 {tid} status={data.get('status')!r} 非法")
+            if data.get("status") == "done" and any(v.get("code") for v in data.get("verify") or []):
+                errors.append(f"结果 {tid} 标了 done 但 verify 有非零退出码")
+
+        for d in sorted((self.dir / "inbox").iterdir()):
+            if d.is_dir() and d.name not in agents:
+                warns.append(f"inbox/{d.name} 没有对应的 agent 登记")
+
+        for tid, c in cards.items():
+            if c.get("state") == "done" and not self.result_info(tid):
+                warns.append(f"任务 {tid} 已关闭但没有结果记录")
+            if c.get("state") == "ready" and c.get("owner"):
+                warns.append(f"任务 {tid} 是 ready 但有 owner")
+            for n in c.get("needs") or []:
+                if not any(n in (a.get("capabilities") or []) for a in agents.values()):
+                    warns.append(f"任务 {tid} 需要能力 {n!r}，但没有 agent 声明")
+
+        for w in warns:
+            print(f"[WARN] {w}")
+        for e in errors:
+            print(f"[ERR ] {e}")
+        if errors:
+            print(f"[FAIL] {len(errors)} 个错误，{len(warns)} 个警告")
+            return False
+        print(f"[ OK ] {len(cards)} 张任务，{len(agents)} 个 agent，"
+              f"{len(claim_refs)} 个进行中租约，{len(res_refs)} 个待合并结果")
+        return True
+
+    def cmd_stats(self, as_json: bool = False, days: int = 0) -> None:
+        self.fetch()
+        cards = self.cards()
+        nowdt = now()
+        rows = []
+        for tid, c in cards.items():
+            claim = self.claim_info(tid) or {}
+            res = self.result_info(tid) or {}
+            finished = res.get("finished_at") or ""
+            if days and finished:
+                try:
+                    if (nowdt - parse_iso(finished)).days > days:
+                        continue
+                except ValueError:
+                    pass
+            rows.append({
+                "id": tid,
+                "state": c.get("state") or "",
+                "repo": c.get("repo") or "",
+                "priority": c.get("priority") or "",
+                "agent": claim.get("agent") or res.get("agent") or "",
+                "status": res.get("status") or "",
+                "running": bool((claim and not res) or
+                                (c.get("state") == "assigned" and c.get("owner"))),
+                "duration_s": float(res.get("duration_s") or 0),
+                "finished_at": finished,
+            })
+
+        done = [r for r in rows if r["status"] == "done"]
+        failed = [r for r in rows if r["status"] == "failed"]
+        durations = sorted(r["duration_s"] for r in done if r["duration_s"] > 0)
+        rate = (len(done) / (len(done) + len(failed)) * 100) if (done or failed) else 0.0
+        median = statistics.median(durations) if durations else 0.0
+        p90 = _pct(durations, 90)
+
+        by_agent: dict[str, dict] = defaultdict(
+            lambda: {"done": 0, "failed": 0, "running": 0, "durations": []})
+        for r in rows:
+            key = r["agent"] or "(未领取)"
+            slot = by_agent[key]
+            if r["status"] == "done":
+                slot["done"] += 1
+                if r["duration_s"]:
+                    slot["durations"].append(r["duration_s"])
+            elif r["status"] == "failed":
+                slot["failed"] += 1
+            elif r["running"]:
+                slot["running"] += 1
+        by_repo = Counter(r["repo"] or "(未填)" for r in rows)
+
+        if as_json:
+            print(json.dumps({
+                "summary": {
+                    "tasks": len(rows), "done": len(done), "failed": len(failed),
+                    "rate": round(rate, 1), "median_s": round(median, 1),
+                    "p90_s": round(p90, 1),
+                    "running": sum(1 for r in rows if r["running"]),
+                    "ready": sum(1 for r in rows if r["state"] == "ready" and not r["agent"]),
+                    "closed": sum(1 for r in rows if r["state"] == "done"),
+                },
+                "agents": {k: {"done": v["done"], "failed": v["failed"],
+                               "running": v["running"]} for k, v in by_agent.items()},
+                "repos": dict(by_repo),
+                "tasks": rows,
+            }, ensure_ascii=False, indent=2))
+            return
+
+        print(f"任务 {len(rows)} ｜ 完成 {len(done)} ｜ 失败 {len(failed)} ｜ "
+              f"进行中 {sum(1 for r in rows if r['running'])} ｜ "
+              f"待领取 {sum(1 for r in rows if r['state'] == 'ready' and not r['agent'])} ｜ "
+              f"已关闭 {sum(1 for r in rows if r['state'] == 'done')}")
+        print(f"一次通过率 {rate:.1f}% ｜ 中位耗时 {_fmt_dur(median)} ｜ P90 {_fmt_dur(p90)}")
+        if by_agent:
+            print("按 agent:")
+            for name in sorted(by_agent, key=lambda n: -(by_agent[n]["done"] + by_agent[n]["failed"])):
+                v = by_agent[name]
+                med = statistics.median(v["durations"]) if v["durations"] else 0
+                print(f"  {name:<16} done {v['done']:<3} failed {v['failed']:<3} "
+                      f"running {v['running']:<3} 中位 {_fmt_dur(med)}")
+        if by_repo:
+            print("按仓库: " + "  ".join(f"{k} {v}" for k, v in by_repo.most_common()))
 
     def cmd_status(self, as_json: bool = False) -> None:
         self.fetch()
@@ -808,7 +1142,7 @@ def cmd_agent(args) -> None:
         "repos": repos,
         "launch": args.launch or "",
         "worktrees": args.worktrees or "",
-        "max_concurrency": 1,
+        "max_concurrency": args.max_concurrency or 1,
         "created": iso(),
     }
     p = h.dir / "agents" / f"{args.name}.json"
@@ -838,7 +1172,7 @@ def cmd_task(args) -> None:
     card = {
         "id": tid, "title": args.title, "repo": args.repo, "base": args.base,
         "state": "ready", "owner": None, "agent": None, "priority": args.priority,
-        "paths": args.paths or [], "verify": args.verify or [],
+        "needs": args.needs or [], "paths": args.paths or [], "verify": args.verify or [],
         "depends_on": args.depends or [], "fresh": False, "lease_minutes": args.lease,
         "timeout_minutes": args.timeout, "created": iso(),
     }
@@ -849,6 +1183,19 @@ def cmd_task(args) -> None:
 
 def cmd_assign(args) -> None:
     Hive(args.dir).cmd_assign(args.task, args.agent)
+
+
+def cmd_dispatch(args) -> None:
+    Hive(args.dir).cmd_dispatch(args.apply, args.limit, args.agent, args.json)
+
+
+def cmd_doctor(args) -> None:
+    if not Hive(args.dir).cmd_doctor():
+        sys.exit(1)
+
+
+def cmd_stats(args) -> None:
+    Hive(args.dir).cmd_stats(args.json, args.days)
 
 
 def cmd_close(args) -> None:
@@ -914,6 +1261,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", action="append", metavar="NAME=PATH")
     s.add_argument("--worktrees", help="worktree 根目录")
     s.add_argument("--launch", help="manual 模式下打开 GUI 的命令，支持 {worktree}/{task}/{prompt}")
+    s.add_argument("--max-concurrency", type=int, default=1)
     s.set_defaults(func=cmd_agent)
 
     s = sub.add_parser("task", help="任务卡")
@@ -923,6 +1271,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", required=False)
     s.add_argument("--base", default="main")
     s.add_argument("--priority", default="P1")
+    s.add_argument("--needs", nargs="*", help="能力标签，如 windows exe")
     s.add_argument("--paths", nargs="*")
     s.add_argument("--verify", action="append")
     s.add_argument("--depends", nargs="*")
@@ -931,6 +1280,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--body")
     s.add_argument("--body-file")
     s.set_defaults(func=cmd_task)
+
+    s = sub.add_parser("dispatch", help="自动分派（能力/负载/依赖感知）")
+    s.add_argument("--apply", action="store_true", help="真正写入；默认 dry-run")
+    s.add_argument("--limit", type=int, help="最多分派几张")
+    s.add_argument("--agent", help="只分派给这个 agent")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_dispatch)
+
+    s = sub.add_parser("doctor", help="检查协调仓库/任务/租约/结果")
+    s.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("stats", help="吞吐与成功率统计")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--days", type=int, default=0, help="只看最近 N 天完成的结果")
+    s.set_defaults(func=cmd_stats)
 
     s = sub.add_parser("assign", help="分派任务")
     s.add_argument("task")

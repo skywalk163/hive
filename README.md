@@ -6,6 +6,7 @@
 - **worker** 自己拉取、原子领取、在独立 worktree 里干活、把结果推回。
 - **不需要** SSH 进 Windows，**不需要**共享目录，**不需要**中央数据库。
 - 领取靠 `git push` 的原子性：两个 worker 抢同一张卡，只有一个 push 成功。
+- 自带 `dispatch`（能力/负载/依赖感知）、`doctor`（体检）、`stats`（成功率/耗时）。
 
 ## 1. 协调仓库
 
@@ -78,10 +79,16 @@ python3 ~/hive/hive.py --dir ~/hive task new \
   --depends T-0100 \
   --body-file /tmp/card.md
 
+# 手工指定
 python3 ~/hive/hive.py --dir ~/hive assign T-0101 --agent win10
+
+# 自动分派：先看计划，再 --apply
+python3 ~/hive/hive.py --dir ~/hive dispatch
+python3 ~/hive/hive.py --dir ~/hive dispatch --apply --limit 3
 ```
 
 任务卡就是 `tasks/T-0101.md`，可以直接改、可以 review、可以回滚。
+`dispatch` 只看 `ready`、依赖已完成的卡，按 `needs`/`repo` 匹配 agent，按 `max_concurrency` 控负载。
 
 ## 4. worker
 
@@ -111,6 +118,9 @@ python C:\hive\hive.py --dir C:\hive work --agent win10 --interval 60
 python3 ~/hive/hive.py --dir ~/hive status
 #  ID      STATE      OWNER        RESULT   CLAIM            TITLE
 #  T-0101  assigned   win10        done     win10@10-22T23 修复 LLVM 后端…
+
+python3 ~/hive/hive.py --dir ~/hive doctor   # 任务卡/租约/结果/agent 配置体检
+python3 ~/hive/hive.py --dir ~/hive stats    # 成功率、中位耗时、按 agent/仓库
 
 python3 ~/hive/hive.py --dir ~/hive result T-0101      # 看摘要
 python3 ~/hive/hive.py --dir ~/hive retry  T-0101      # 失败重跑（清结果+租约，续用原分支）
@@ -156,10 +166,11 @@ worker 把 worktree 和 `.hive/task.md` 准备好、把提示词放进 Windows �
 
 ## 8. 限制（v0.1 有意为之）
 
-- 一个 worker 串行跑任务（`max_concurrency` 还没实现）；要并行就在同一台机器起多个 worker + 多个 agent 名。
+- 一个 worker 串行跑任务；要并行就在同一台机器起多个 worker + 多个 agent 名（`max_concurrency` 只影响 dispatch 的分配）。
 - claim/res 是分支，只在进行中存在；`close` 会归档结果并删分支。
 - 没有内置 PR 创建；合并这一步留给人或总控用 git 做。
 - 任务卡 frontmatter 只支持标量和标量列表，够用就好。
+- 自建裸仓建议关掉 `receive.autogc` + `gc.auto`，夜间手动 gc；原因见 `docs/操作手册.md` §8。
 
 ## 9. 自测
 
@@ -168,3 +179,11 @@ python3 selftest.py
 ```
 
 会在临时目录里模拟「一个代码仓库 + 两个 worker 抢同一张卡」，断言只有一个领取成功、只产出一个结果；还覆盖 verify-only 模式、跨卡验收（base=task/T-xxxx）、失败上报、`retry`/`gc`。
+
+## 10. 更多文档
+
+- [操作手册](docs/操作手册.md)：每天的命令、总控流程、故障处理
+- [任务卡模板](docs/任务卡模板.md)：代码卡 / 验收卡 / 诊断卡 / 手动卡
+- [迁移指南](docs/迁移指南.md)：从聊天里手工分发迁到蜂巢
+- [Windows 接入](windows/README.md)：bootstrap.ps1 + 计划任务
+- [方案全文](../多机Agent协同开发方案.md)
