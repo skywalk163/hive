@@ -375,6 +375,9 @@ class Hive:
         # 已分派但还没 claim 的也要算负载，否则 dispatch 会把同一台机器塞爆
         load: dict[str, int] = {}
         for tid, c in cards.items():
+            # 只扫在飞的卡，别为几百张历史卡逐个 git show
+            if c.get("state") not in ("assigned", "running"):
+                continue
             if self.result_info(tid):
                 continue
             claim = self.claim_info(tid)
@@ -529,6 +532,7 @@ class Hive:
 
         claim_refs = git(["for-each-ref", "--format=%(refname)",
                           "refs/remotes/origin/claim/"], self.dir).stdout.split()
+        running_claims = 0
         for ref in claim_refs:
             tid = ref.rsplit("/", 1)[-1]
             info = read_ref_file(self.dir, ref, f"claims/{tid}.json")
@@ -537,8 +541,11 @@ class Hive:
             if not isinstance(info, dict) or not info.get("agent"):
                 errors.append(f"租约 {ref} 内容不合法")
                 continue
+            has_res = self.result_info(tid)
+            if not has_res:
+                running_claims += 1
             lease = info.get("lease_until")
-            if lease and not self.result_info(tid):
+            if lease and not has_res:
                 try:
                     if parse_iso(lease) < now():
                         warns.append(f"任务 {tid} 租约已过期（{info.get('agent')}）")
@@ -594,7 +601,7 @@ class Hive:
             print(f"[FAIL] {len(errors)} 个错误，{len(warns)} 个警告")
             return False
         print(f"[ OK ] {len(cards)} 张任务，{len(agents)} 个 agent，"
-              f"{len(claim_refs)} 个进行中租约，{len(res_refs)} 个待合并结果")
+              f"{running_claims} 个进行中租约，{len(res_refs)} 个待合并结果")
         return True
 
     def cmd_stats(self, as_json: bool = False, days: int = 0) -> None:
@@ -619,8 +626,8 @@ class Hive:
                 "priority": c.get("priority") or "",
                 "agent": claim.get("agent") or res.get("agent") or "",
                 "status": res.get("status") or "",
-                "running": bool((claim and not res) or
-                                (c.get("state") == "assigned" and c.get("owner"))),
+                "running": bool(not res.get("status") and
+                                (claim or (c.get("state") == "assigned" and c.get("owner")))),
                 "duration_s": float(res.get("duration_s") or 0),
                 "finished_at": finished,
             })
@@ -654,6 +661,8 @@ class Hive:
                     "rate": round(rate, 1), "median_s": round(median, 1),
                     "p90_s": round(p90, 1),
                     "running": sum(1 for r in rows if r["running"]),
+                    "merge": sum(1 for r in rows
+                                 if r["status"] == "done" and r["state"] != "done"),
                     "ready": sum(1 for r in rows if r["state"] == "ready" and not r["agent"]),
                     "closed": sum(1 for r in rows if r["state"] == "done"),
                 },
@@ -664,8 +673,9 @@ class Hive:
             }, ensure_ascii=False, indent=2))
             return
 
+        merge = sum(1 for r in rows if r["status"] == "done" and r["state"] != "done")
         print(f"任务 {len(rows)} ｜ 完成 {len(done)} ｜ 失败 {len(failed)} ｜ "
-              f"进行中 {sum(1 for r in rows if r['running'])} ｜ "
+              f"进行中 {sum(1 for r in rows if r['running'])} ｜ 待合并 {merge} ｜ "
               f"待领取 {sum(1 for r in rows if r['state'] == 'ready' and not r['agent'])} ｜ "
               f"已关闭 {sum(1 for r in rows if r['state'] == 'done')}")
         print(f"一次通过率 {rate:.1f}% ｜ 中位耗时 {_fmt_dur(median)} ｜ P90 {_fmt_dur(p90)}")

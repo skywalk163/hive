@@ -23,7 +23,9 @@
   会互相踩，可能推出一个不含 `claims/T-xxxx.json` 的 claim 分支。现在用独立的
   `GIT_INDEX_FILE` 构造提交，不碰工作区。
 - `dispatch` 的负载统计漏掉「已分派但未 claim」的卡，会把同一台机器塞爆。
-- `stats` 只把有 claim 的卡算进行中，漏掉已分派未领取的卡。
+- `stats` 只把有 claim 的卡算进行中，漏掉已分派未领取的卡；现在区分「进行中」和「待合并」。
+- `doctor` 把「有结果但还没 close」的租约也算进行中；现在只统计真正在跑的。
+- `dispatch` 的负载扫描只遍历在飞的卡，不再为几百张历史卡逐个 `git show`。
 - `close` 现在把 `res/` 结果归档到 `main:results/T-xxxx.json`，再删 `claim/`、`res/` 分支；
   `retry` 会同时撤掉归档，worker 能自愈重跑。
 
