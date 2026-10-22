@@ -560,9 +560,22 @@ class Hive:
             if data.get("status") == "done" and any(v.get("code") for v in data.get("verify") or []):
                 errors.append(f"结果 {tid} 标了 done 但 verify 有非零退出码")
 
-        for d in sorted((self.dir / "inbox").iterdir()):
-            if d.is_dir() and d.name not in agents:
-                warns.append(f"inbox/{d.name} 没有对应的 agent 登记")
+        inbox = self.dir / "inbox"
+        if inbox.is_dir():
+            for d in sorted(inbox.iterdir()):
+                if d.is_dir() and d.name not in agents:
+                    warns.append(f"inbox/{d.name} 没有对应的 agent 登记")
+
+        for p in sorted((self.dir / "results").glob("*.json")):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                errors.append(f"归档结果 {p.name} 不是合法 JSON")
+                continue
+            if p.stem not in cards:
+                warns.append(f"归档结果 {p.stem} 没有对应任务卡")
+            if data.get("status") not in ("done", "failed"):
+                errors.append(f"归档结果 {p.name} status={data.get('status')!r} 非法")
 
         for tid, c in cards.items():
             if c.get("state") == "done" and not self.result_info(tid):

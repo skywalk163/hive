@@ -1,6 +1,6 @@
 # hive —— 多机 AI Agent 协同的任务总线
 
-一个约 900 行的 Python 脚本 + 一个 git 仓库，把「总控 AI 拆任务」和「多台机器上的 agent 干活」连起来。
+一个约 1300 行的 Python 脚本 + 一个 git 仓库，把「总控 AI 拆任务」和「多台机器上的 agent 干活」连起来。
 
 - **总控**只做三件事：写任务卡、分派、验收。
 - **worker** 自己拉取、原子领取、在独立 worktree 里干活、把结果推回。
@@ -10,13 +10,24 @@
 
 ## 1. 协调仓库
 
-在 Gitea（`http://192.168.1.5:3000`）新建一个**空仓库** `skywalk/hive`，然后：
+推荐做法：**把本工具仓直接推成 `skywalk/hive`**，这样 `hive.py`、`windows/`、`docs/`
+都跟着仓库走：
 
 ```sh
-git clone http://192.168.1.5:3000/skywalk/hive.git ~/hive   # 空仓也行，先 clone 再 init
-# 或者直接从零：
-python3 hive.py --dir ~/hive init --remote http://192.168.1.5:3000/skywalk/hive.git
+cd ~/dswork/hive
+git remote add origin http://192.168.1.5:3000/skywalk/hive.git
+git push -u origin main
 ```
+
+任意机器 clone 之后跑一次 `init` 补齐任务目录：
+
+```sh
+git clone http://192.168.1.5:3000/skywalk/hive.git ~/hive
+python3 ~/hive/hive.py --dir ~/hive init
+```
+
+也可以从空仓库开始（`init --remote ...` 会建目录并推第一版），但那样就没有现成的
+`windows/` 和 `docs/`，需要自己拷。
 
 `init` 会把 `hive.py` 一起放进仓库，之后每台机器 clone 下来就能直接跑，不用另外装。
 

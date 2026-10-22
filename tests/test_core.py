@@ -43,6 +43,9 @@ def test_dispatch_auto_plans_and_applies(world, fake_cmd):
 
     # 都分完了，第二轮没有新计划
     assert world.hive_json("dispatch")["plan"] == []
+    # stats 把「已分派未领取」也算进行中
+    stats = json.loads(world.hive("stats", "--json").stdout)
+    assert stats["summary"]["running"] == 2, stats
 
 
 def test_dispatch_respects_max_concurrency(world, fake_cmd):
