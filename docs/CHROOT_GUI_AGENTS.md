@@ -10,7 +10,7 @@ GUI agent 只负责在 worktree 里改文件、写 summary。
 | agent | 用户 | 现状 | 为什么不直接 exec |
 |---|---|---|---|
 | 小浣熊 | `skywalk` | Electron + 深链登录，`box-agent-acp` 是 ACP runtime | 没有稳定的 `-p prompt` CLI；ACP 需要额外适配 |
-| WorkBuddy | `root` | Electron，自带 `codebuddy` CLI | chroot 里没有 `node`，`codebuddy` 起不来；先 manual |
+| WorkBuddy | `skywalk`（当前；历史上曾有 root 实例） | Electron，自带 `codebuddy` CLI | chroot 里没有 `node`，`codebuddy` 起不来；先 manual |
 
 好消息：**`/home` 和 `/tmp` 是 nullfs 共享的**，宿主和 chroot 里看到的是同一份文件，
 路径完全相同。所以 worker 建在 `/home/skywalk/.hive/wt/<agent>/T-xxxx` 的 worktree，
@@ -87,7 +87,8 @@ summary 路径照抄绝对路径，避免它写错地方。
 ## 权限与坑
 
 - **小浣熊**以 `skywalk` 跑，worktree 归 `skywalk`，读写都正常。
-- **WorkBuddy**以 `root` 跑，新建文件会是 root 所有：
+- **WorkBuddy 当前以 `skywalk` 跑**（进程命令行是 `sudo chroot ... su skywalk ...`），文件属主和 worker 一致；
+  如果以后改回 root，新建文件会是 root 所有：
   - worker（skywalk）**能读、能 commit**（文件默认 644）；
   - 如果它建了 root 所有的子目录，worker 删 worktree 可能删不干净；需要时：
     ```sh
