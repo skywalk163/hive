@@ -539,3 +539,68 @@ def test_paths_conflict_rules(world):
     assert h._paths_conflict(["hive.py"], []) is True
     assert h._paths_conflict(["tests/"], ["tests/unit/"]) is True
     assert h._paths_conflict(["tests/"], ["testing/"]) is False  # 前缀不是目录边界
+
+
+# --------------------------------------------------------------------------- #
+# paths 越界检测 + audit
+# --------------------------------------------------------------------------- #
+
+def test_out_of_paths_helper():
+    """越界判定：白名单内（含子路径）放行，白名单外拦下；没声明 paths 就不约束。"""
+    assert hive.out_of_paths(["hive.py"], ["hive.py"]) == []
+    assert hive.out_of_paths(["docs/"], ["docs/操作手册.md"]) == []
+    assert hive.out_of_paths(["hive.py", "docs/"],
+                             ["hive.py", "docs/a.md", "tests/x.py"]) == ["tests/x.py"]
+    assert hive.out_of_paths([], ["anything.py"]) == []      # 未声明 = 不约束
+    assert hive.out_of_paths(["tests/"], ["testing/a.py"]) == ["testing/a.py"]
+
+
+def test_worker_records_out_of_paths_but_still_finishes(world, fake_cmd):
+    """默认只警告不阻断：越界改动记进结果，任务照常完成。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    world.add_task("T-0001", paths=["docs/"], verify=["true"])  # 假 agent 会写 feature.txt
+    world.hive("assign", "T-0001", "--agent", "fb")
+    world.run_worker("fb")
+
+    res = json.loads(world.hive("result", "T-0001", "--json").stdout)
+    assert res["status"] == "done", res
+    assert "feature.txt" in res["out_of_paths"], res
+    assert "feature.txt" in res["changed_files"], res
+    assert res["declared_paths"] == ["docs/"]
+
+
+def test_worker_strict_paths_fails_the_task(world, fake_cmd):
+    """HIVE_STRICT_PATHS=1 时越界直接判失败，且不跑 verify、不提交。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    world.add_task("T-0001", paths=["docs/"], verify=["true"])
+    world.hive("assign", "T-0001", "--agent", "fb")
+    world.run_worker("fb", env={"HIVE_STRICT_PATHS": "1"})
+
+    res = json.loads(world.hive("result", "T-0001", "--json").stdout)
+    assert res["status"] == "failed", res
+    assert "越界" in res["error"], res
+    assert res["verify"] == [], "严格模式下不该跑验收"
+    assert res["out_of_paths"] == ["feature.txt"], res
+
+
+def test_audit_reports_risk_when_summary_confesses(world, fake_cmd):
+    """audit 要能把「summary 自称没跑测试」这类风险点出来。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    world.add_task("T-0001", paths=["docs/"], verify=["true"])
+    world.hive("assign", "T-0001", "--agent", "fb")
+    world.run_worker("fb")
+
+    # 把 summary 换成「没能跑测试」的口供
+    res_ref = world.hive("result", "T-0001", "--json")
+    res = json.loads(res_ref.stdout)
+    res["summary"] = "写完了，但本机环境没能跑测试"
+    wt = world.root / "light-fb"
+    from hive import commit_file_to_ref
+    commit_file_to_ref(
+        world.hive1, "results/T-0001.json", json.dumps(res, ensure_ascii=False),
+        "res/T-0001", "origin/main", "forge", force=True)
+
+    rep = json.loads(world.hive("audit", "T-0001", "--json").stdout)
+    assert rep["risk"] == "warn", rep
+    assert any("没能跑" in w for w in rep["warnings"]), rep
+    assert rep["out_of_paths"] == ["feature.txt"], rep

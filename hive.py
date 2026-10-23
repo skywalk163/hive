@@ -44,7 +44,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -172,6 +172,45 @@ def parse_card(path: Path):
         else:
             raise HiveError(f"{path}:{lineno} 无法解析: {line!r}")
     return data, body
+
+
+def changed_files(wt: Path) -> list[str]:
+    """worktree 里相对 HEAD 改动过的文件（含未跟踪的）。重命名取新名字。"""
+    out = []
+    p = git(["status", "--porcelain"], wt, check=False)
+    for line in p.stdout.splitlines():
+        if len(line) <= 3:
+            continue
+        name = line[3:].strip().strip('"')
+        if " -> " in name:
+            name = name.split(" -> ")[-1].strip().strip('"')
+        if name:
+            out.append(name)
+    return out
+
+
+def out_of_paths(declared, files) -> list[str]:
+    """改动里不在任务卡声明的 paths 白名单内的文件。
+
+    paths 为空表示不约束（返回空列表）；声明了就按「文件本身 or 它的子路径」判定。
+    """
+    allow = [str(p).strip().rstrip("/") for p in (declared or []) if str(p).strip()]
+    if not allow:
+        return []
+    bad = []
+    for f in files:
+        if any(f == a or f.startswith(a + "/") for a in allow):
+            continue
+        bad.append(f)
+    return bad
+
+
+def strict_paths(cfg: dict) -> bool:
+    """越界是否直接判失败。默认只警告，避免一上来就把正常流程卡死。"""
+    v = (os.environ.get("HIVE_STRICT_PATHS") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    return bool(cfg.get("strict_paths"))
 
 
 def _fmt_scalar(v) -> str:
@@ -1042,6 +1081,13 @@ class Hive:
 
         head = rev_parse(wt, "HEAD")
         try:
+            changed = changed_files(wt)
+            oop = out_of_paths(card.get("paths"), changed)
+            if oop:
+                log(f"{tid} 越界改动 {len(oop)} 个文件：{', '.join(oop[:8])}")
+                if strict_paths(cfg):
+                    raise HiveError(
+                        "越界改动（严格模式），拒绝提交：" + ", ".join(oop[:8]))
             git(["add", "-A"], wt)
             if git(["diff", "--cached", "--quiet"], wt, check=False).returncode != 0:
                 git([*IDENT, "commit", "-m",
@@ -1081,6 +1127,8 @@ class Hive:
             "started_at": started, "finished_at": iso(),
             "duration_s": round(duration, 1), "verify": verify, "summary": summary,
             "error": "" if ok else "verify 未通过",
+            "declared_paths": card.get("paths") or [],
+            "changed_files": changed, "out_of_paths": oop,
         }
         commit_file_to_ref(
             self.dir, f"results/{tid}.json",
@@ -1096,6 +1144,76 @@ class Hive:
         print(f"{tid} {result['status']} by {owner}（{result['duration_s']}s）"
               f"\nbranch: task/{tid}  head: {head}\n"
               f"verify: " + ", ".join(f"{v['code']}" for v in verify), flush=True)
+
+    # -- 审计 -------------------------------------------------------------- #
+    def cmd_audit(self, tid: str | None = None, all_cards: bool = False,
+                  as_json: bool = False) -> list[dict]:
+        """比对「agent 说做了什么」和「diff 里真有什么」，给人一页纸的合并前参考。"""
+        self.fetch()
+        cards = self.cards()
+        targets = ([t for t in sorted(cards) if self.result_info(t)]
+                   if all_cards else ([tid] if tid else []))
+        if not tid and not all_cards:
+            raise HiveError("audit 需要给任务号，或加 --all")
+        if tid and tid not in cards:
+            raise HiveError(f"没有任务 {tid}")
+
+        reports = []
+        for t in targets:
+            card = cards.get(t)
+            if card is None:
+                continue
+            res = self.result_info(t) or {}
+            warns: list[str] = []
+            if not (card.get("verify") or []):
+                warns.append("任务卡没有写 verify")
+            if not (card.get("paths") or []):
+                warns.append("没声明 paths，改动范围不受约束")
+            if res.get("out_of_paths"):
+                warns.append("有越界改动：" + ", ".join(res["out_of_paths"][:8]))
+            blob = (res.get("summary") or "").lower()
+            for kw in ("没能跑", "无法验证", "未测试", "没能测试", "没跑测试",
+                       "没有跑", "未能验证"):
+                if kw in blob:
+                    warns.append(f"summary 自称「{kw}」，验收结论要打折看")
+                    break
+            reports.append({
+                "task": t, "title": card.get("title", ""),
+                "state": card.get("state"), "result": res.get("status") or "",
+                "agent": res.get("agent") or "",
+                "declared_paths": card.get("paths") or [],
+                "out_of_paths": res.get("out_of_paths") or [],
+                "changed_files": res.get("changed_files") or [],
+                "verify": [{"cmd": v.get("cmd"), "code": v.get("code")}
+                           for v in (res.get("verify") or [])],
+                "summary": res.get("summary") or "",
+                "risk": "warn" if warns else "ok",
+                "warnings": warns,
+            })
+
+        if as_json:
+            print(json.dumps(reports if all_cards else
+                             (reports[0] if reports else {}),
+                             ensure_ascii=False, indent=2))
+            return reports
+        if not reports:
+            print("（没有可审计的卡）")
+            return reports
+        for r in reports:
+            print(f"\n=== {r['task']}  {r['title']}")
+            print(f"  状态 {r['state']} ｜ 结果 {r['result'] or '无'} ｜ "
+                  f"执行者 {r['agent'] or '-'} ｜ 风险 {r['risk']}")
+            print(f"  声明改动范围: {', '.join(r['declared_paths']) or '（未声明）'}")
+            if r["changed_files"]:
+                print(f"  实际改动 {len(r['changed_files'])} 个文件: "
+                      f"{', '.join(r['changed_files'][:12])}")
+            if r["out_of_paths"]:
+                print(f"  越界: {', '.join(r['out_of_paths'])}")
+            for v in r["verify"]:
+                print(f"  verify [{v['code']}] {v['cmd']}")
+            for w in r["warnings"]:
+                print(f"  ! {w}")
+        return reports
 
     def cmd_status(self, as_json: bool = False) -> None:
         self.fetch()
@@ -1496,9 +1614,22 @@ class Worker:
             code, out, timed_out = self._exec(self.cmd, wt, prompt, logfile,
                                               int(card.get("timeout_minutes") or 60) * 60, tid)
 
+        # 越界检查：自举时代码仓和协调仓库是同一个，agent 能顺手改掉自己的任务卡
+        changed: list[str] = changed_files(wt)
+        oop: list[str] = []
+        if not verify_only:
+            oop = out_of_paths(card.get("paths"), changed)
+            if oop:
+                log(f"{tid} 越界改动 {len(oop)} 个文件（paths 声明的是 "
+                    f"{', '.join(card.get('paths') or []) or '未声明'}）："
+                    f"{', '.join(oop[:8])}")
+
         # 提交 + push（agent 自己 commit 过也没关系）；验证模式不产出代码
         head = None
-        if verify_only:
+        blocked = oop and strict_paths(self.cfg)
+        if blocked:
+            log(f"{tid} 严格模式：有越界改动，不提交不验收，直接判失败")
+        elif verify_only:
             head = rev_parse(wt, "HEAD")
         else:
             try:
@@ -1511,13 +1642,22 @@ class Worker:
                 log(f"{tid} 推送代码分支失败: {e}")
 
         verify = []
-        for cmd in (card.get("verify") or []):
-            p = run(cmd, cwd=wt, check=False, shell=True, timeout=1800)
-            verify.append({"cmd": cmd, "code": p.returncode,
-                           "tail": (p.stdout + p.stderr).strip().splitlines()[-5:]})
-            log(f"{tid} 验证 {p.returncode}: {cmd}")
+        if not blocked:
+            for cmd in (card.get("verify") or []):
+                p = run(cmd, cwd=wt, check=False, shell=True, timeout=1800)
+                verify.append({"cmd": cmd, "code": p.returncode,
+                               "tail": (p.stdout + p.stderr).strip().splitlines()[-5:]})
+                log(f"{tid} 验证 {p.returncode}: {cmd}")
 
-        ok = code == 0 and not timed_out and all(v["code"] == 0 for v in verify)
+        ok = (not blocked and code == 0 and not timed_out
+              and all(v["code"] == 0 for v in verify))
+        if blocked:
+            error = "越界改动（严格模式）：" + ", ".join(oop[:8])
+        elif not ok:
+            error = ("超时" if timed_out else
+                     "verify 未通过" if verify_only else f"agent 退出码 {code}")
+        else:
+            error = ""
         if summary_file.exists() and summary_file.stat().st_size > 0:
             summary = summary_file.read_text(encoding="utf-8").strip()
         elif verify_only:
@@ -1532,10 +1672,9 @@ class Worker:
             "head": head, "exit_code": code, "timed_out": timed_out,
             "started_at": started, "finished_at": iso(),
             "duration_s": round(time.time() - t0, 1),
-            "verify": verify, "summary": summary,
-            "error": "" if ok else (
-                "超时" if timed_out else
-                "verify 未通过" if verify_only else f"agent 退出码 {code}"),
+            "verify": verify, "summary": summary, "error": error,
+            "declared_paths": card.get("paths") or [],
+            "changed_files": changed, "out_of_paths": oop,
         }
         self._write_result(tid, result)
 
@@ -1804,6 +1943,10 @@ def cmd_gc(args) -> None:
     Hive(args.dir).cmd_gc(args.minutes)
 
 
+def cmd_audit(args) -> None:
+    Hive(args.dir).cmd_audit(tid=args.task, all_cards=args.all, as_json=args.json)
+
+
 def cmd_prune(args) -> None:
     Hive(args.dir).cmd_prune(args.repo, args.apply)
 
@@ -1932,6 +2075,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s.add_argument("--note", help="close 时的完成备注")
     s.set_defaults(func=cmd_land)
+
+    s = sub.add_parser("audit", help="审计：比对 agent 的 summary 与真实 diff（合并前看一眼）")
+    s.add_argument("task", nargs="?", help="任务号；不给就加 --all")
+    s.add_argument("--all", action="store_true", help="审所有已有结果的卡")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_audit)
 
     s = sub.add_parser("status", help="看板")
     s.add_argument("--json", action="store_true")

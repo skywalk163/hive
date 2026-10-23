@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.7.0 — 2026-10-23
+
+### Added
+
+- **`hive audit [T-xxxx | --all] [--json]`**：合并前的一页纸。比对「agent 说做了什么」
+  和「diff 里真有什么」—— 声明的 paths、实际改动文件、越界清单、每条 verify 的退出码、
+  summary 全文，外加风险标记。风险来源：没有 verify、没声明 paths、有越界改动、
+  **summary 里出现「没能跑 / 无法验证 / 未测试」这类口供**（T-0101 那张卡就是这么过的）。
+- 结果 json 新增 `declared_paths` / `changed_files` / `out_of_paths` 三个字段。
+
+### Changed
+
+- **paths 越界检测**：worker 提交前算一次改动清单，跟任务卡声明的 `paths` 比对。
+  自举时代码仓和协调仓库是同一个，agent 能顺手改掉自己的任务卡 —— 现在能看见了。
+  - **默认只警告不阻断**（怕一上来把正常流程卡死）：越界写进结果和日志，任务照常完成；
+  - `HIVE_STRICT_PATHS=1` 或 agent 配置 `"strict_paths": true` 才判失败：
+    不提交、不跑 verify，error 里列出越界文件。
+  - `paths` 为空表示不约束（不检查，但 audit 会提醒一句）。
+- 测试 4 例，全量 44 passed。
+
 ## 0.6.1 — 2026-10-23
 
 ### Changed
