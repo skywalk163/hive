@@ -3,6 +3,12 @@
   "command": "",
   "mode": "manual",
   "manual": true,
+  "abilities": [
+    "docs",
+    "review",
+    "gui",
+    "verify"
+  ],
   "capabilities": [
     "gui",
     "chroot",

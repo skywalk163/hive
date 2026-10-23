@@ -20,14 +20,17 @@ def show(world, ref: str) -> str:
 # --------------------------------------------------------------------------- #
 
 def test_dispatch_auto_plans_and_applies(world, fake_cmd):
-    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
-    world.add_agent("win", "verify", caps=["windows"])
-    world.add_task("T-0001", needs=["freebsd"], paths=["src/"])
-    world.add_task("T-0002", needs=["windows"])
-    world.add_task("T-0003", needs=["windows"], paths=["src/"])   # 验收机不改代码
-    world.add_task("T-0004", depends=["T-0001"])                  # 依赖未完成
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd,
+                    repos={"hive": world.code_clone("fb")})
+    world.add_agent("win", "verify", caps=["windows"],
+                    repos={"hive": world.code_clone("win")})
+    world.add_task("T-0001", repo="hive", needs=["freebsd"], paths=["src/"])
+    world.add_task("T-0002", repo="hive", needs=["windows"])
+    world.add_task("T-0003", repo="hive", needs=["windows"],
+                   paths=["src/"])                              # 验收机不改代码
+    world.add_task("T-0004", repo="hive", depends=["T-0001"])   # 依赖未完成
 
-    out = world.hive_json("dispatch")
+    out = world.hive_json("dispatch", "--max-per-repo", "2")
     plan = {p["task"]: p["agent"] for p in out["plan"]}
     assert plan == {"T-0001": "fb", "T-0002": "win"}, out
     reasons = {s["task"]: s["reason"] for s in out["skipped"]}
@@ -36,25 +39,71 @@ def test_dispatch_auto_plans_and_applies(world, fake_cmd):
     # 默认 dry-run，不写
     assert world.card("T-0001")["owner"] is None
 
-    world.hive("dispatch", "--apply")
+    world.hive("dispatch", "--apply", "--max-per-repo", "2")
     assert world.card("T-0001")["owner"] == "fb"
     assert world.card("T-0002")["owner"] == "win"
     assert (world.hive1 / "inbox" / "fb" / "T-0001.md").exists()
 
     # 都分完了，第二轮没有新计划
-    assert world.hive_json("dispatch")["plan"] == []
+    assert world.hive_json("dispatch", "--max-per-repo", "2")["plan"] == []
     # stats 把「已分派未领取」也算进行中
     stats = json.loads(world.hive("stats", "--json").stdout)
     assert stats["summary"]["running"] == 2, stats
 
 
 def test_dispatch_respects_max_concurrency(world, fake_cmd):
-    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd,
+                    repos={"hive": world.code_clone("fb")})
     for i in range(3):
-        world.add_task(f"T-000{i + 1}")
+        world.add_task(f"T-000{i + 1}", repo="hive")
     out = world.hive_json("dispatch")
     assert len(out["plan"]) == 1
     assert {s["task"] for s in out["skipped"]} == {"T-0002", "T-0003"}
+
+
+def test_dispatch_ability(world, fake_cmd):
+    """abilities 是能力注册表；needs 缺能力时明确给出「能力缺失」。"""
+    world.hive("agent", "add", "--name", "fb", "--mode", "exec",
+               "--command", fake_cmd, "--abilities", "code", "docs",
+               "--repo", f"hive={world.code_clone('fb')}")
+    world.add_task("T-0001", repo="hive", needs=["code"])
+    world.add_task("T-0002", repo="hive", needs=["verify"])
+
+    out = world.hive_json("dispatch", "--max-per-repo", "2")
+    plan = {p["task"]: p["agent"] for p in out["plan"]}
+    assert plan == {"T-0001": "fb"}, out
+    reasons = {s["task"]: s["reason"] for s in out["skipped"]}
+    assert "能力缺失" in reasons["T-0002"], out
+
+
+def test_dispatch_concurrency(world, fake_cmd):
+    """默认同一 repo 只允许 1 张在飞；放宽 --max-per-repo 后才派第二张。"""
+    world.add_agent("a1", "exec", command=fake_cmd,
+                    repos={"hive": world.code_clone("a1")})
+    world.add_agent("a2", "exec", command=fake_cmd,
+                    repos={"hive": world.code_clone("a2")})
+    world.add_task("T-0001", repo="hive")
+    world.add_task("T-0002", repo="hive")
+
+    out = world.hive_json("dispatch", "--dry-run")
+    assert len(out["plan"]) == 1, out
+    reasons = {s["task"]: s["reason"] for s in out["skipped"]}
+    assert "同仓" in reasons["T-0002"], out
+
+    out = world.hive_json("dispatch", "--max-per-repo", "2")
+    assert len(out["plan"]) == 2, out
+
+
+def test_dispatch_non_hive_rejected(world, fake_cmd):
+    """现阶段只派 hive 仓任务，其它仓明确拒绝而不是静默跳过。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    world.add_task("T-0001", repo="light")
+
+    out = world.hive_json("dispatch", "--dry-run")
+    assert out["plan"] == [], out
+    reasons = {s["task"]: s["reason"] for s in out["skipped"]}
+    assert "非 hive 仓任务暂不派发" in reasons["T-0001"], out
+    assert world.card("T-0001")["owner"] is None
 
 
 # --------------------------------------------------------------------------- #

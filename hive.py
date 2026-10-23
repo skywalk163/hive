@@ -47,6 +47,7 @@ from pathlib import Path
 VERSION = "0.4.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
+DEFAULT_MAX_PER_REPO = 1
 
 TASK_FIELDS = [
     "id", "title", "repo", "base", "state", "owner", "agent", "fresh",
@@ -402,6 +403,18 @@ class Hive:
             load[a] = load.get(a, 0) + 1
         return load
 
+    def _repo_loads(self, cards: dict) -> dict[str, int]:
+        """统计每个 repo 当前 assigned/running 的在飞卡数（同仓并发检测）。"""
+        loads: dict[str, int] = {}
+        for tid, c in cards.items():
+            repo = c.get("repo") or ""
+            if not repo or c.get("state") not in ("assigned", "running"):
+                continue
+            if self.result_info(tid):
+                continue
+            loads[repo] = loads.get(repo, 0) + 1
+        return loads
+
     def dep_done(self, dep: str) -> bool:
         res = self.result_info(dep)
         return bool(res and res.get("status") == "done")
@@ -422,76 +435,128 @@ class Hive:
         )
 
     def cmd_dispatch(self, apply: bool = False, limit: int | None = None,
-                     only_agent: str | None = None, as_json: bool = False) -> None:
+                     only_agent: str | None = None, as_json: bool = False,
+                     max_per_repo: int | None = None,
+                     dry_run: bool = False) -> None:
+        # --dry-run 与默认行为一致；即使同时给了 --apply，也以 dry-run 为准
+        apply = bool(apply) and not bool(dry_run)
         self.fetch()
         cards = self.cards()
         agents = self.agents()
         if not agents:
             raise HiveError("还没有登记任何 agent")
+        if max_per_repo is None:
+            try:
+                max_per_repo = int(os.environ.get("HIVE_MAX_PER_REPO")
+                                   or DEFAULT_MAX_PER_REPO)
+            except ValueError:
+                max_per_repo = DEFAULT_MAX_PER_REPO
+        max_per_repo = max(1, int(max_per_repo or DEFAULT_MAX_PER_REPO))
         load = self._load_counts(cards)
+        repo_load = self._repo_loads(cards)  # 同仓并发：assigned + running 的在飞卡
         ready = [c for c in cards.values()
                  if c.get("state") == "ready" and not c.get("owner")]
         ready.sort(key=lambda c: (PRIORITY_ORDER.get(c.get("priority"), 9), c["id"]))
 
-        plan: list[tuple[dict, str]] = []
+        plan: list[tuple[dict, str, str]] = []
         skipped: list[tuple[str, str]] = []
         planned = dict(load)
+        planned_repo = dict(repo_load)
         for c in ready:
             if limit and len(plan) >= limit:
-                break
+                skipped.append((c["id"], f"超出本次 --limit {limit}"))
+                continue
+            repo = c.get("repo") or ""
+            # 现阶段只派 hive 仓：其它代码仓的 worktree/合并约定还没收口
+            if repo != "hive":
+                skipped.append(
+                    (c["id"], f"非 hive 仓任务暂不派发（repo={repo or '未填'}）"))
+                continue
             missing = [d for d in (c.get("depends_on") or []) if not self.dep_done(d)]
             if missing:
-                skipped.append((c["id"], "依赖未完成: " + ", ".join(missing)))
+                skipped.append((c["id"], "依赖未就绪: " + ", ".join(missing)))
                 continue
             needs = set(c.get("needs") or [])
-            cands = []
+            cands: list[str] = []
+            blocked: list[str] = []
             for name, a in agents.items():
                 if only_agent and name != only_agent:
                     continue
                 if c.get("agent") and name != c.get("agent"):
                     continue
-                if c.get("repo") not in (a.get("repos") or {}):
+                if repo not in (a.get("repos") or {}):
+                    blocked.append(f"仓不匹配（{name} 未登记 {repo}）")
                     continue
-                if needs - set(a.get("capabilities") or []):
+                # abilities 是新的能力注册表；capabilities 继续兼容旧配置
+                have = set(a.get("abilities") or []) | set(a.get("capabilities") or [])
+                lack = needs - have
+                if lack:
+                    blocked.append(
+                        f"能力缺失（{name} 缺 {', '.join(sorted(lack))}）")
                     continue
                 mode = a.get("mode") or ("manual" if a.get("manual") else "exec")
+                if mode == "manual":
+                    blocked.append(f"人工优先（{name} 是 manual 模式）")
+                    continue
                 if mode == "verify" and (c.get("paths") or []):
-                    continue  # 验收机不改代码
-                if planned.get(name, 0) >= int(a.get("max_concurrency") or 1):
+                    blocked.append(
+                        f"人工优先（{name} 是验收模式，不自动接改代码的卡）")
+                    continue
+                max_agent = int(a.get("max_concurrency") or 1)
+                if planned.get(name, 0) >= max_agent:
+                    blocked.append(
+                        f"负载已满（{name} {planned.get(name, 0)}/{max_agent}）")
+                    continue
+                if planned_repo.get(repo, 0) >= max_per_repo:
+                    blocked.append(
+                        f"同仓并发已满（{repo} {planned_repo.get(repo, 0)}/{max_per_repo}）")
                     continue
                 cands.append(name)
             if not cands:
-                skipped.append((c["id"], "没有空闲且能力匹配的 agent"))
+                seen: list[str] = []
+                for r in blocked:
+                    if r not in seen:
+                        seen.append(r)
+                skipped.append((c["id"], "；".join(seen) or "没有空闲且能力匹配的 agent"))
                 continue
             cands.sort(key=lambda n: (planned.get(n, 0),
                                       0 if c.get("agent") == n else 1, n))
             name = cands[0]
-            plan.append((c, name))
+            max_agent = int(agents[name].get("max_concurrency") or 1)
+            reason = (f"能力匹配；仓匹配（{repo}）；"
+                      f"负载 {planned.get(name, 0)}/{max_agent}；"
+                      f"同仓 {planned_repo.get(repo, 0)}/{max_per_repo}；依赖就绪")
+            plan.append((c, name, reason))
             planned[name] = planned.get(name, 0) + 1
+            planned_repo[repo] = planned_repo.get(repo, 0) + 1
 
         if as_json:
             print(json.dumps({
                 "plan": [{"task": c["id"], "agent": n, "repo": c.get("repo"),
-                          "priority": c.get("priority")} for c, n in plan],
+                          "priority": c.get("priority"), "reason": r}
+                         for c, n, r in plan],
                 "skipped": [{"task": t, "reason": r} for t, r in skipped],
+                "max_per_repo": max_per_repo,
                 "applied": bool(apply),
             }, ensure_ascii=False, indent=2))
             return
 
         if plan:
-            print(f"{'TASK':<9}{'PRI':<5}{'REPO':<14}-> {'AGENT':<14}LOAD")
-            for c, n in plan:
-                print(f"{c['id']:<9}{c.get('priority', ''):<5}{c.get('repo', ''):<14}"
-                      f"-> {n:<14}{planned.get(n, 0)}/{int(agents[n].get('max_concurrency') or 1)}")
+            print(f"{'TASK':<9}{'PRI':<5}{'REPO':<8}{'-> AGENT':<16}"
+                  f"{'LOAD':<8}REASON")
+            for c, n, r in plan:
+                max_agent = int(agents[n].get("max_concurrency") or 1)
+                print(f"{c['id']:<9}{c.get('priority', ''):<5}{c.get('repo', ''):<8}"
+                      f"{'-> ' + n:<16}{planned.get(n, 0)}/{max_agent:<6}派：{r}")
         else:
             print("没有可分派的任务")
         for tid, reason in skipped:
-            print(f"  skip {tid}: {reason}")
+            print(f"  skip {tid}（不派）: {reason}")
 
         if apply and plan:
-            for c, n in plan:
+            for c, n, _r in plan:
                 self._assign_local(c["id"], n)
-            summary = ", ".join(f"{c['id']}->{n}" for c, n in plan)
+            summary = ", ".join(f"{c['id']}->{n}" for c, n, _r in plan)
             self.commit_and_push(f"dispatch: {summary}")
             log(f"已分派 {len(plan)} 张卡")
         elif plan:
@@ -602,7 +667,9 @@ class Hive:
             if c.get("state") == "ready" and c.get("owner"):
                 warns.append(f"任务 {tid} 是 ready 但有 owner")
             for n in c.get("needs") or []:
-                if not any(n in (a.get("capabilities") or []) for a in agents.values()):
+                if not any(n in (set(a.get("abilities") or []) |
+                                 set(a.get("capabilities") or []))
+                           for a in agents.values()):
                     warns.append(f"任务 {tid} 需要能力 {n!r}，但没有 agent 声明")
 
         for w in warns:
@@ -1393,7 +1460,8 @@ def cmd_agent(args) -> None:
     if args.action == "list":
         for p in sorted((h.dir / "agents").glob("*.json")):
             cfg = json.loads(p.read_text(encoding="utf-8"))
-            print(f"{cfg.get('name'):<12} {cfg.get('capabilities', [])} "
+            print(f"{cfg.get('name'):<12} abilities={cfg.get('abilities', [])} "
+                  f"caps={cfg.get('capabilities', [])} "
                   f"{'manual' if cfg.get('manual') else cfg.get('command', '')[:60]}")
         return
     if not args.name:
@@ -1410,6 +1478,7 @@ def cmd_agent(args) -> None:
         "command": args.command or "",
         "mode": mode,
         "manual": mode == "manual",
+        "abilities": args.abilities or [],
         "capabilities": args.capabilities or [],
         "repos": repos,
         "launch": args.launch or "",
@@ -1466,7 +1535,10 @@ def cmd_submit(args) -> None:
 
 
 def cmd_dispatch(args) -> None:
-    Hive(args.dir).cmd_dispatch(args.apply, args.limit, args.agent, args.json)
+    Hive(args.dir).cmd_dispatch(
+        apply=args.apply, limit=args.limit, only_agent=args.agent,
+        as_json=args.json, max_per_repo=args.max_per_repo,
+        dry_run=args.dry_run)
 
 
 def cmd_doctor(args) -> None:
@@ -1541,6 +1613,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--manual", action="store_true", help="GUI 半自动模式（等价 --mode manual）")
     s.add_argument("--mode", choices=["exec", "verify", "manual"],
                    help="exec=调用 agent；verify=只跑验收；manual=等人")
+    s.add_argument("--abilities", nargs="*",
+                   help="能力注册表，如 code ci docs verify")
     s.add_argument("--capabilities", nargs="*")
     s.add_argument("--repo", action="append", metavar="NAME=PATH")
     s.add_argument("--worktrees", help="worktree 根目录")
@@ -1576,10 +1650,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--note", help="没有 summary.md 时的说明")
     s.set_defaults(func=cmd_submit)
 
-    s = sub.add_parser("dispatch", help="自动分派（能力/负载/依赖感知）")
+    s = sub.add_parser("dispatch", help="自动分派（能力/负载/依赖/同仓并发感知）")
     s.add_argument("--apply", action="store_true", help="真正写入；默认 dry-run")
+    s.add_argument("--dry-run", action="store_true",
+                   help="只输出派/不派原因（默认行为）")
     s.add_argument("--limit", type=int, help="最多分派几张")
     s.add_argument("--agent", help="只分派给这个 agent")
+    s.add_argument("--max-per-repo", "--same-repo-limit", dest="max_per_repo",
+                   type=int, default=None,
+                   help="同一 repo 同时在飞上限（默认 1，也可用 HIVE_MAX_PER_REPO）")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_dispatch)
 
