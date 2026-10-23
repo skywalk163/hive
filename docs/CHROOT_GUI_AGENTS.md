@@ -94,6 +94,8 @@ summary 路径照抄绝对路径，避免它写错地方。
     ```sh
     sudo chown -R skywalk:wheel /home/skywalk/.hive/wt/workbuddy/T-0100
     ```
+- 领取方式二选一：跑 manual worker（它自动领取并在 worktree 等 summary），
+  或用手工 `hive take` / `hive submit`（见操作手册 4.1）。
 - **一个 app 同一时间只接一张卡**（manual worker 会阻塞等 summary），卡要小：
   一张 60–120 分钟能做完；GUI 卡统一 `timeout_minutes: 180`、`lease_minutes: 240`。
   T-0003 实测小浣熊用了约 65 分钟，默认 60 分钟会在它写完 summary 前超时。

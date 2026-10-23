@@ -689,6 +689,110 @@ class Hive:
         if by_repo:
             print("按仓库: " + "  ".join(f"{k} {v}" for k, v in by_repo.most_common()))
 
+    # -- 手工领取 / 提交 ---------------------------------------------------- #
+    def cmd_take(self, tid: str, agent: str) -> None:
+        """人工领取：assign + claim + 准备 worktree，不启动 worker。"""
+        self.fetch()
+        card = self.card(tid)
+        if card.get("state") == "done" or self.result_info(tid):
+            raise HiveError(f"{tid} 已经有结果或已关闭")
+        claim = self.claim_info(tid)
+        if claim and claim.get("agent") != agent:
+            raise HiveError(f"{tid} 已被 {claim.get('agent')} 领取")
+
+        self._assign_local(tid, agent)
+        self.commit_and_push(f"take {tid} -> {agent}")
+
+        w = Worker(self.dir, agent)
+        wt = Path(w.cfg.get("worktrees") or (w.state / "wt")).expanduser() / tid
+        if not claim and not w.claim(tid):
+            raise HiveError(f"{tid} 领取失败（可能刚被抢走）")
+        if not (wt / ".hive" / "task.md").exists():
+            w.prepare(tid)
+
+        print(f"\n=== {tid} 已领取（{agent}）=== "
+              f"\n工作目录: {wt}"
+              f"\n任务卡:   {wt / '.hive' / 'task.md'}"
+              f"\n完成后写: {wt / '.hive' / 'summary.md'}"
+              f"\n提交:     python3 hive.py --dir {self.dir} submit {tid}"
+              f"\n（如果这个 agent 的 worker 正在跑，它会自动接手，不用再 submit）\n",
+              flush=True)
+
+    def cmd_submit(self, tid: str, keep: bool = False, note: str = "") -> None:
+        """人工提交：commit + push + verify + 写结果，不依赖 worker 在跑。"""
+        self.fetch()
+        card = self.card(tid)
+        if self.result_info(tid):
+            raise HiveError(f"{tid} 已经有结果")
+        owner = card.get("owner") or ""
+        if not owner:
+            raise HiveError(f"{tid} 没有 owner，先 take 或 assign")
+        cfg = self.agent(owner)
+        repo_path = (cfg.get("repos") or {}).get(card.get("repo") or "")
+        if not repo_path:
+            raise HiveError(f"agent {owner} 没有配置仓库 {card.get('repo')!r}")
+        repo = Path(repo_path).expanduser()
+        wt = Path(cfg.get("worktrees") or (DEFAULT_STATE / "agents" / owner / "wt")).expanduser() / tid
+        if not wt.exists():
+            raise HiveError(f"worktree 不存在: {wt}")
+
+        head = rev_parse(wt, "HEAD")
+        try:
+            git(["add", "-A"], wt)
+            if git(["diff", "--cached", "--quiet"], wt, check=False).returncode != 0:
+                git([*IDENT, "commit", "-m",
+                     f"hive({tid}): {card.get('title', '')} (manual submit)"], wt)
+            head = rev_parse(wt, "HEAD")
+            git(["push", "--force", "origin", f"HEAD:refs/heads/task/{tid}"], wt)
+        except HiveError as e:
+            raise HiveError(f"提交/推送失败: {e}")
+
+        verify = []
+        for cmd in (card.get("verify") or []):
+            p = run(cmd, cwd=wt, check=False, shell=True, timeout=1800)
+            verify.append({"cmd": cmd, "code": p.returncode,
+                           "tail": (p.stdout + p.stderr).strip().splitlines()[-5:]})
+            log(f"{tid} 验证 {p.returncode}: {cmd}")
+        ok = all(v["code"] == 0 for v in verify)
+
+        summary_file = wt / ".hive" / "summary.md"
+        if summary_file.exists() and summary_file.stat().st_size > 0:
+            summary = summary_file.read_text(encoding="utf-8").strip()
+        elif note:
+            summary = note
+        else:
+            summary = "（人工 submit，未写 summary）"
+
+        claim = self.claim_info(tid) or {}
+        started = claim.get("claimed_at") or iso()
+        try:
+            duration = (now() - parse_iso(started)).total_seconds()
+        except ValueError:
+            duration = 0.0
+        result = {
+            "task": tid, "agent": owner, "mode": "manual",
+            "status": "done" if ok else "failed",
+            "branch": f"task/{tid}", "base": card.get("base") or "main",
+            "head": head, "exit_code": 0, "timed_out": False,
+            "started_at": started, "finished_at": iso(),
+            "duration_s": round(duration, 1), "verify": verify, "summary": summary,
+            "error": "" if ok else "verify 未通过",
+        }
+        commit_file_to_ref(
+            self.dir, f"results/{tid}.json",
+            json.dumps(result, ensure_ascii=False, indent=2),
+            f"res/{tid}", "origin/main",
+            f"result {tid}: {result['status']} by {owner} (manual)",
+        )
+
+        if not keep:
+            git(["worktree", "remove", "--force", str(wt)], repo, check=False)
+            shutil.rmtree(wt, ignore_errors=True)
+
+        print(f"{tid} {result['status']} by {owner}（{result['duration_s']}s）"
+              f"\nbranch: task/{tid}  head: {head}\n"
+              f"verify: " + ", ".join(f"{v['code']}" for v in verify), flush=True)
+
     def cmd_status(self, as_json: bool = False) -> None:
         self.fetch()
         cards = self.cards()
@@ -867,6 +971,46 @@ class Worker:
             if "non-fast-forward" not in str(e) and "rejected" not in str(e):
                 log(str(e).splitlines()[0])
             return False
+
+    # -- 手工领取 / 提交（take / submit） ---------------------------------- #
+    def prepare(self, tid: str) -> dict:
+        """建 worktree + 写 task.md，不执行、不等待。供 `hive take` 使用。"""
+        card = self.h.card(tid)
+        repo_name = card.get("repo") or ""
+        repo_path = (self.cfg.get("repos") or {}).get(repo_name)
+        if not repo_path:
+            raise HiveError(f"agent {self.name} 没有配置仓库 {repo_name!r} 的本地路径")
+        repo = Path(repo_path).expanduser()
+        if not (repo / ".git").exists():
+            raise HiveError(f"本地仓库不存在: {repo}")
+
+        git(["fetch", "--prune", "origin"], repo)
+        wt_root = Path(self.cfg.get("worktrees") or (self.state / "wt")).expanduser()
+        wt_root.mkdir(parents=True, exist_ok=True)
+        wt = wt_root / tid
+        if wt.exists():
+            git(["worktree", "remove", "--force", str(wt)], repo, check=False)
+            shutil.rmtree(wt, ignore_errors=True)
+
+        base = f"origin/{card.get('base') or 'main'}"
+        if not card.get("fresh") and rev_parse(repo, f"origin/task/{tid}"):
+            base = f"origin/task/{tid}"
+        git(["worktree", "add", "-B", f"task/{tid}", str(wt), base], repo)
+
+        ex = git(["rev-parse", "--git-path", "info/exclude"], wt).stdout.strip()
+        ex_path = (wt / ex).resolve() if not os.path.isabs(ex) else Path(ex)
+        try:
+            old = ex_path.read_text(encoding="utf-8") if ex_path.exists() else ""
+            if ".hive/" not in old:
+                ex_path.write_text(old + "\n.hive/\n", encoding="utf-8")
+        except OSError:
+            pass
+
+        (wt / ".hive").mkdir(exist_ok=True)
+        prompt = PROMPT_HEADER.format(tid=tid) + self._render_card(card, wt)
+        (wt / ".hive" / "task.md").write_text(prompt, encoding="utf-8")
+        return {"card": card, "repo": repo, "wt": wt, "prompt": prompt,
+                "summary_file": wt / ".hive" / "summary.md"}
 
     # -- 执行 -------------------------------------------------------------- #
     def run_task(self, tid: str) -> dict:
@@ -1210,6 +1354,14 @@ def cmd_assign(args) -> None:
     Hive(args.dir).cmd_assign(args.task, args.agent)
 
 
+def cmd_take(args) -> None:
+    Hive(args.dir).cmd_take(args.task, args.agent)
+
+
+def cmd_submit(args) -> None:
+    Hive(args.dir).cmd_submit(args.task, args.keep, args.note or "")
+
+
 def cmd_dispatch(args) -> None:
     Hive(args.dir).cmd_dispatch(args.apply, args.limit, args.agent, args.json)
 
@@ -1305,6 +1457,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--body")
     s.add_argument("--body-file")
     s.set_defaults(func=cmd_task)
+
+    s = sub.add_parser("take", help="手工领取并准备 worktree（不启动 worker）")
+    s.add_argument("task")
+    s.add_argument("--agent", required=True)
+    s.set_defaults(func=cmd_take)
+
+    s = sub.add_parser("submit", help="手工提交：commit/push/verify/result")
+    s.add_argument("task")
+    s.add_argument("--keep", action="store_true", help="保留 worktree")
+    s.add_argument("--note", help="没有 summary.md 时的说明")
+    s.set_defaults(func=cmd_submit)
 
     s = sub.add_parser("dispatch", help="自动分派（能力/负载/依赖感知）")
     s.add_argument("--apply", action="store_true", help="真正写入；默认 dry-run")

@@ -178,6 +178,44 @@ def test_parse_card_rejects_bad_list(tmp_path):
         hive.parse_card(path)
 
 
+def test_take_and_submit_manual(world):
+    """手工领取（take）+ 手工提交（submit）：不依赖 worker 在跑。
+
+    对应「人工在面板/CLI 领取、标记 agent、完成后回主控验收」的工作流。
+    """
+    wt = world.root / "wt-manual"
+    world.add_agent("manual-agent", mode="manual", worktrees=str(wt))
+    world.add_task("T-0001", paths=["docs/"], verify=["test -f docs/ok.md"])
+    world.hive("take", "T-0001", "--agent", "manual-agent")
+    wtask = wt / "T-0001"
+    assert wtask.exists() and (wtask / ".hive" / "task.md").exists()
+
+    # 重复 take：claim 已在自己名下，复用同一 worktree
+    world.hive("take", "T-0001", "--agent", "manual-agent")
+
+    # 其他 agent 领取会被拒
+    world.add_agent("other", mode="manual", worktrees=str(world.root / "wt-other"))
+    rejected = False
+    try:
+        world.hive("take", "T-0001", "--agent", "other")
+    except AssertionError:
+        rejected = True
+    assert rejected
+
+    (wtask / "docs").mkdir(exist_ok=True)
+    (wtask / "docs" / "ok.md").write_text("x\n", encoding="utf-8")
+    (wtask / ".hive" / "summary.md").write_text("完成\n", encoding="utf-8")
+    world.hive("submit", "T-0001")
+    res = json.loads(world.hive("result", "T-0001", "--json").stdout)
+    assert res["status"] == "done"
+    assert res["mode"] == "manual"
+    assert res["agent"] == "manual-agent"
+    assert res["verify"][0]["code"] == 0
+    assert not wtask.exists()  # 默认清理 worktree
+    # 结果已写，但和 worker 流程一致：state 到 close 才翻成 done
+    assert world.card("T-0001")["state"] == "assigned"
+
+
 def test_concurrent_claims_share_one_clone(world, fake_cmd):
     """两个 worker 共用一个 clone 抢卡：claim 分支必须带 claims/T-xxxx.json。
 

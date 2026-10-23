@@ -89,7 +89,7 @@ class World:
         return json.loads(self.hive(*args, "--json", dir=dir).stdout)
 
     def add_agent(self, name: str, mode="exec", caps=(), repos=None,
-                  command="", launch=""):
+                  command="", launch="", worktrees=""):
         repos = repos or {"light": self.code_clone(name)}
         args = ["agent", "add", "--name", name, "--mode", mode]
         if caps:
@@ -98,6 +98,8 @@ class World:
             args += ["--command", command]
         if launch:
             args += ["--launch", launch]
+        if worktrees:
+            args += ["--worktrees", worktrees]
         for repo, path in repos.items():
             args += ["--repo", f"{repo}={path}"]
         self.hive(*args)
