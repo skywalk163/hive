@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light dark" />
+<title>蜂巢 Hive · 多机任务看板</title>
+<!-- inline favicon：避免浏览器再发一次 /favicon.ico 请求 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ctext x='2' y='25' font-size='24'%3E%F0%9F%90%9D%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="style.css" />
+<script>
+  /* 在首屏绘制前定好主题，避免深浅色闪烁；localStorage 不可用时回落到系统偏好。 */
+  (function () {
+    try {
+      var t = localStorage.getItem('hive.theme');
+      if (t !== 'dark' && t !== 'light') {
+        t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'light');
+    }
+  })();
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-row">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <!-- 蜂巢六边形 -->
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6">
+          <path d="M12 2.6l7.4 4.3v8.6L12 19.9 4.6 15.5V6.9z" />
+          <path d="M12 7.4l3.7 2.1v4.3L12 16l-3.7-2.2V9.5z" />
+        </svg>
+      </span>
+      <span class="brand-text"><strong>蜂巢 Hive</strong><span class="brand-sub">多机任务看板</span></span>
+    </div>
+
+    <div class="stats" id="stats" aria-live="polite"></div>
+
+    <div class="controls">
+      <label class="field"><span>仓库</span><select id="repo-filter"></select></label>
+      <label class="field"><span>Owner</span><select id="owner-filter"></select></label>
+      <label class="field grow"><span>搜索</span>
+        <input id="search" type="search" placeholder="id / 标题 / 摘要" autocomplete="off" />
+      </label>
+      <label class="switch"><input type="checkbox" id="auto-refresh" checked /><span>自动刷新</span></label>
+      <button type="button" class="btn" id="refresh-now">刷新</button>
+      <button type="button" class="btn" id="load-file">载入 JSON</button>
+      <button type="button" class="btn icon" id="theme-toggle" title="切换深色 / 浅色" aria-label="切换深色 / 浅色">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <circle cx="12" cy="12" r="4.2" />
+          <path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6" />
+        </svg>
+      </button>
+      <input type="file" id="file-input" accept="application/json,.json" hidden />
+    </div>
+  </div>
+
+  <div class="topbar-row meta">
+    <span id="meta">最后更新：—</span>
+    <span class="source" id="source">数据源：/api/status</span>
+  </div>
+
+  <div class="banner" id="banner" hidden></div>
+</header>
+
+<main class="wrap">
+  <div class="panel" id="state-panel" hidden></div>
+  <div class="columns" id="columns"></div>
+</main>
+
+<div class="overlay" id="overlay" aria-hidden="true"></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" aria-hidden="true"></aside>
+<div class="drop-hint" id="drop-hint" aria-hidden="true">松开鼠标即载入 status.json</div>
+
+<script src="app.js" defer></script>
+</body>
+</html>

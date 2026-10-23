@@ -191,7 +191,20 @@ python3 selftest.py
 
 会在临时目录里模拟「一个代码仓库 + 两个 worker 抢同一张卡」，断言只有一个领取成功、只产出一个结果；还覆盖 verify-only 模式、跨卡验收（base=task/T-xxxx）、失败上报、`retry`/`gc`。
 
-## 10. 更多文档
+## 10. 看板
+
+```sh
+cd ~/dswork/hive
+PORT=8787 INTERVAL=20 ./scripts/serve-dashboard.sh
+# 浏览器打开 http://127.0.0.1:8787
+```
+
+五列看板（待领取 / 进行中 / 待合并 / 异常 / 已关闭），租约过期实时变红，
+支持仓库/owner/搜索筛选、详情抽屉、深浅色。零依赖静态页，`serve.py` 只用标准库。
+说明见 [dashboard/README.md](dashboard/README.md)，实跑验收见
+[dashboard/VERIFICATION.md](dashboard/VERIFICATION.md)。
+
+## 11. 更多文档
 
 - [操作手册](docs/操作手册.md)：每天的命令、总控流程、故障处理
 - [任务卡模板](docs/任务卡模板.md)：代码卡 / 验收卡 / 诊断卡 / 手动卡
