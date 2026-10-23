@@ -1,0 +1,18 @@
+{
+  "name": "fb88-verify",
+  "command": "",
+  "mode": "verify",
+  "manual": false,
+  "capabilities": [
+    "freebsd",
+    "python",
+    "pytest"
+  ],
+  "repos": {
+    "light": "/home/skywalk/src/light"
+  },
+  "launch": "",
+  "worktrees": "/home/skywalk/.hive/wt",
+  "max_concurrency": 1,
+  "created": "2026-10-23T11:06:24+08:00"
+}
