@@ -1,0 +1,26 @@
+{
+  "task": "T-0101",
+  "agent": "fb88-dsh",
+  "status": "done",
+  "branch": "task/T-0101",
+  "base": "main",
+  "mode": "exec",
+  "head": "cb77835552397c34127c7a15ee1f1857785a891f",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-23T23:11:07+08:00",
+  "finished_at": "2026-10-23T23:16:40+08:00",
+  "duration_s": 333.1,
+  "verify": [
+    {
+      "cmd": "grep -q abilities agents/fb88-dsh.json && grep -q \"同仓\" hive.py && python3 -m pytest tests -q --tb=short",
+      "code": 0,
+      "tail": [
+        ".................                                                        [100%]",
+        "17 passed in 23.53s"
+      ]
+    }
+  ],
+  "summary": "已完成 T-0101 的代码改动：\n\n1. `agents/fb88-dsh.json`、`agents/workbuddy.json` 新增 `abilities` 注册表；`repos` 继续作为白名单。\n2. `hive.py` 的 agent 登记新增 `--abilities`，dispatch 用 `abilities ∪ capabilities` 兼容旧配置。\n3. `hive dispatch` 增加逐卡「派/不派」原因：能力缺失、仓不匹配、负载、依赖未就绪、人工优先。\n4. 新增同仓并发检测：默认同一 repo 最多 1 张 assigned/running 在飞，可用 `--max-per-repo` 或 `HIVE_MAX_PER_REPO` 配置。\n5. 现阶段 `repo != hive` 的卡一律拒绝，提示「非 hive 仓任务暂不派发」。\n6. 新增 `--dry-run` 显式开关，默认仍是 dry-run，`--apply` 行为保持。\n7. `tests/test_core.py` 增加 `test_dispatch_ability`、`test_dispatch_concurrency`、`test_dispatch_non_hive_rejected`，并把原 dispatch 用例改成 hive 仓基线。\n\n验证：本机 sandbox 后端不可用（workspace-write 无可用 backend，danger-full-access 无审批通道），\n`python3 -m pytest tests -q --tb=short` 与 `git status` 均未能启动，未得到实际测试结果。\n风险：测试全绿与否需由 worker 在有可用 sandbox 的环境跑验收命令确认；逻辑改动已按现有测试夹具静态核对。",
+  "error": ""
+}
