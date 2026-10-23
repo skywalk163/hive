@@ -141,6 +141,7 @@ python3 ~/hive/hive.py --dir ~/hive result T-0101      # 看摘要
 python3 ~/hive/hive.py --dir ~/hive retry  T-0101      # 失败重跑（清结果+租约，续用原分支）
 python3 ~/hive/hive.py --dir ~/hive retry  T-0101 --fresh  # 从 main 重来
 python3 ~/hive/hive.py --dir ~/hive gc --minutes 180   # 回收跑飞的租约
+python3 ~/hive/hive.py --dir ~/hive prune              # 清代码仓里已合并的 task/verify 分支（dry-run）
 python3 ~/hive/hive.py --dir ~/hive close T-0101 --note "已合并到 integration"
 
 # 不跑 worker 的人工链路（GUI agent 场景，与该 agent 的 worker 二选一）
@@ -150,6 +151,8 @@ python3 ~/hive/hive.py --dir ~/hive submit T-0101
 
 `close` 会把 `res/` 里的结果归档到 `main:results/T-0101.json`，然后删掉 `claim/T-0101`、`res/T-0101`
 两个分支——Gitea 分支列表里只留正在跑的任务，审计记录仍在 main 上。
+合并进代码仓 `main` 之后跑一次 `prune`：它只删「已合并且不在飞」的 `task/*`、`verify/*`
+分支（在飞的卡哪怕内容已并入也保留），默认 dry-run，`--apply` 才真删。
 
 `retry` 会把远端结果分支删掉；worker 下一轮发现「本地有完成标记但远端没结果」会自动重跑，不需要去每台机器清缓存。
 

@@ -238,3 +238,66 @@ def test_concurrent_claims_share_one_clone(world, fake_cmd):
         assert sorted(codes) == [0, 1], (tid, codes)
         data = json.loads(show(world, f"claim/{tid}:claims/{tid}.json"))
         assert data["agent"] in ("a1", "a2"), data
+
+
+# --------------------------------------------------------------------------- #
+# 分支清理（prune）
+# --------------------------------------------------------------------------- #
+
+def _code_refs(world, pattern="refs/heads/task/*") -> set[str]:
+    out = sh(["git", "--git-dir", world.code_origin, "for-each-ref",
+              "--format=%(refname)", pattern]).stdout
+    return {r.rsplit("/", 1)[-1] for r in out.split()}
+
+
+def test_prune_deletes_only_merged_branches(world, fake_cmd):
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
+    # 卡 1：跑通，然后由总控合并进代码仓 main
+    world.add_task("T-0001", verify=["true"])
+    world.hive("assign", "T-0001", "--agent", "fb")
+    world.run_worker("fb")
+    code = world.code_clone("fb")
+    sh(["git", "fetch", "-q", "origin"], cwd=code, env=world.git_env)
+    sh(["git", "checkout", "-q", "main"], cwd=code, env=world.git_env)
+    sh(["git", "merge", "--no-ff", "-q", "origin/task/T-0001", "-m", "merge T-0001"],
+       cwd=code, env=world.git_env)
+    sh(["git", "push", "-q", "origin", "main"], cwd=code, env=world.git_env)
+    row = next(r for r in world.hive_json("status") if r["id"] == "T-0001")
+    assert row["result"] == "done", row
+
+    # 卡 2：在飞（assigned、无结果）。分支内容哪怕已并入 main 也不许删
+    world.add_task("T-0002")
+    world.hive("assign", "T-0002", "--agent", "fb")
+    sh(["git", "push", "-q", "origin", "main:refs/heads/task/T-0002"],
+       cwd=code, env=world.git_env)
+    # T-9999：没有卡、也没合并，保留
+    sh(["git", "checkout", "-q", "-b", "task/T-9999", "origin/main"],
+       cwd=code, env=world.git_env)
+    (code / "junk.txt").write_text("x\n", encoding="utf-8")
+    sh(["git", "add", "-A"], cwd=code, env=world.git_env)
+    sh(["git", "commit", "-q", "-m", "junk"], cwd=code, env=world.git_env)
+    sh(["git", "push", "-q", "origin", "task/T-9999"], cwd=code, env=world.git_env)
+    sh(["git", "checkout", "-q", "main"], cwd=code, env=world.git_env)
+
+    before = _code_refs(world)
+    assert {"T-0001", "T-0002", "T-9999"} <= before, before
+
+    # dry-run：只列计划，一个分支都不动（hive 的日志走 stderr）
+    dry = world.hive("prune")
+    out = dry.stdout + dry.stderr
+    assert "[dry-run]" in out and "T-0001" in out, out
+    assert _code_refs(world) == before
+
+    # --apply：只删「已合并且不在飞」的 T-0001
+    run = world.hive("prune", "--apply")
+    out = run.stdout + run.stderr
+    assert _code_refs(world) == {"T-0002", "T-9999"}, out
+    assert "T-0002" in out and "T-9999" in out  # 两条保留的原因都交代了
+    assert "T-0001" in out and "已删除" in out
+
+
+def test_prune_rejects_unknown_repo(world):
+    world.add_agent("fb", "verify", caps=["windows"])
+    p = world.hive("prune", "--repo", "nope", check=False)
+    assert p.returncode != 0
+    assert "nope" in (p.stderr + p.stdout)

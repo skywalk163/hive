@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 — 2026-10-23
+
+### Added
+
+- `hive prune [--repo <name>] [--apply]`：清理**代码仓**里已合并的 `task/*`、`verify/*`
+  分支。安全规则：只认这两种前缀（`main`/`integration`/`release/*` 不碰）；必须同时满足
+  「已合并进 `origin/main`（真合并或 squash 后内容一致）」和「不在飞（卡没有结果）」才删；
+  默认 dry-run 只列计划，`--apply` 才推 `:refs/heads/<branch>`，本地分支能删就删。
+  覆盖测试：合并+在飞+未合并三种分支各一条，断言只删该删的。
+
 ## 0.3.0 — 2026-10-23
 
 ### Added

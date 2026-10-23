@@ -44,7 +44,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 
@@ -369,6 +369,14 @@ class Hive:
             except (OSError, json.JSONDecodeError):
                 continue
             out[cfg.get("name") or p.stem] = cfg
+        return out
+
+    def repos(self) -> dict[str, Path]:
+        """从 agent 配置收集代码仓 {名字: 路径}；同名保留先出现的。"""
+        out: dict[str, Path] = {}
+        for cfg in self.agents().values():
+            for name, path in (cfg.get("repos") or {}).items():
+                out.setdefault(name, Path(path))
         return out
 
     def _load_counts(self, cards: dict) -> dict[str, int]:
@@ -884,6 +892,81 @@ class Hive:
             removed += 1
         log(f"gc 完成，回收 {removed} 个")
 
+    # -- 分支清理 ---------------------------------------------------------- #
+    @staticmethod
+    def _default_remote_ref(repo: Path) -> str | None:
+        for cand in ("origin/main", "origin/master"):
+            if rev_parse(repo, cand):
+                return cand
+        return None
+
+    @staticmethod
+    def _merged_into(repo: Path, branch: str, base: str) -> bool:
+        # 真合并（tip 是 base 的祖先）或内容一致（squash 合并后 diff 为空）
+        if git_ok(["merge-base", "--is-ancestor", branch, base], repo):
+            return True
+        return git_ok(["diff", "--quiet", branch, base], repo)
+
+    def cmd_prune(self, repo: str | None = None, apply: bool = False) -> None:
+        """清理代码仓里已合并的 task/*、verify/* 分支。默认 dry-run。"""
+        self.fetch()
+        repos = self.repos()
+        if repo:
+            if repo not in repos:
+                raise HiveError(
+                    f"没有登记过代码仓 {repo!r}（已知：{', '.join(sorted(repos)) or '无'}）")
+            repos = {repo: repos[repo]}
+        if not repos:
+            log("没有登记任何代码仓（agent 配置的 repos 为空）")
+            return
+        # 在飞的卡不许碰：有卡没结果的，分支可能正被 worker 写着
+        cards = self.cards()
+        busy = {tid for tid, c in cards.items()
+                if c.get("state") in ("assigned", "running")
+                and not self.result_info(tid)}
+        deleted = kept = 0
+        for name, path in sorted(repos.items()):
+            if not path.is_dir():
+                log(f"{name}: 路径不存在 {path}，跳过")
+                continue
+            git(["fetch", "-q", "origin"], path, check=False)
+            base = self._default_remote_ref(path)
+            if not base:
+                log(f"{name}: 找不到 origin/main 或 origin/master，跳过")
+                continue
+            p = git(["for-each-ref", "--format=%(refname)",
+                     "refs/remotes/origin/task/", "refs/remotes/origin/verify/"],
+                    path, check=False)
+            branches = [r[len("refs/remotes/origin/"):] for r in p.stdout.split()]
+            if not branches:
+                continue
+            current = git(["branch", "--show-current"], path, check=False).stdout.strip()
+            for br in sorted(branches):
+                tid = br.split("/", 1)[1] if "/" in br else ""
+                if tid in busy:
+                    log(f"{name}/{br}: {tid} 在飞，保留")
+                    kept += 1
+                    continue
+                if not self._merged_into(path, f"origin/{br}", base):
+                    log(f"{name}/{br}: 未合并进 {base}，保留")
+                    kept += 1
+                    continue
+                if not apply:
+                    log(f"[dry-run] {name}/{br}: 已合并，将删除")
+                    deleted += 1
+                    continue
+                d = git(["push", "origin", f":refs/heads/{br}"], path, check=False)
+                if d.returncode != 0:
+                    log(f"{name}/{br}: 远端删除失败（受保护？），保留")
+                    kept += 1
+                    continue
+                if br != current:  # 本地分支也清；还被 worktree 占着就只删远端
+                    git(["branch", "-D", br], path, check=False)
+                log(f"{name}/{br}: 已删除（已合并进 {base}）")
+                deleted += 1
+        log(f"prune 完成：删除 {deleted}，保留 {kept}"
+            + ("" if apply else "（dry-run，加 --apply 才真删）"))
+
 
 # --------------------------------------------------------------------------- #
 # Worker
@@ -1387,6 +1470,10 @@ def cmd_gc(args) -> None:
     Hive(args.dir).cmd_gc(args.minutes)
 
 
+def cmd_prune(args) -> None:
+    Hive(args.dir).cmd_prune(args.repo, args.apply)
+
+
 def cmd_retry(args) -> None:
     Hive(args.dir).cmd_retry(args.task, args.agent, args.fresh)
 
@@ -1512,6 +1599,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("gc", help="回收过期租约")
     s.add_argument("--minutes", type=int, default=180)
     s.set_defaults(func=cmd_gc)
+
+    s = sub.add_parser("prune", help="清理代码仓里已合并的 task/verify 分支（默认 dry-run）")
+    s.add_argument("--repo", help="只清这个代码仓（默认：agent 登记的所有）")
+    s.add_argument("--apply", action="store_true", help="真删；默认只列计划")
+    s.set_defaults(func=cmd_prune)
 
     s = sub.add_parser("claim", help="手工领取")
     s.add_argument("task")
