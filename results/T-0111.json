@@ -1,0 +1,36 @@
+{
+  "task": "T-0111",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0111",
+  "base": "main",
+  "head": "20cef519e8cae44e6fd7541ac5e0223ab0352fca",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-23T23:14:37+00:00",
+  "finished_at": "2026-10-23T23:21:07+00:00",
+  "duration_s": 390.6,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests -q --tb=short",
+      "code": 0,
+      "tail": [
+        "........................................                                 [100%]",
+        "40 passed in 81.02s (0:01:21)"
+      ]
+    },
+    {
+      "cmd": "grep -q '_paths_conflict' hive.py",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import hive,sys; sys.exit(0 if hasattr(hive.Hive,'_paths_conflict') else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0111 完成：dispatch 的并发锁从 repo 细化到 paths\n\n执行者：workbuddy（manual 模式）\n\n## 改了什么\n\n原来 `_repo_loads()` 只按 `c.get(\"repo\")` 计数 —— 自举阶段 hive 是唯一在开发的仓，\n这一刀切等于**把所有卡强制串行**。现在按任务卡声明的 `paths` 判冲突：\n\n- 新增 `Hive._paths_conflict(a, b)` 与 `Hive._path_overlap(x, y)`：\n  相同、或父子目录关系（`docs/` vs `docs/操作手册.md`）→ 冲突；\n  前缀比较按**目录边界**走，所以 `tests/` 和 `testing/` 不算冲突；\n  **任一方没声明 paths 就算冲突**（未声明 = 可能改任何地方），保守优先。\n- `dispatch` 把「在飞集合」从 `dict[repo] -> 数量` 换成 `(tid, card)` 列表，\n  对每张候选卡数出「跟多少张在飞/已计划的卡抢同一片文件」，达到上限才拦。\n- 跳过原因从笼统的「同仓并发已满（hive 1/1）」改成**点名跟谁抢**：\n  「paths 冲突：与在飞的 T-0111 抢同一片文件（hive 同组上限 1）」。\n  看一眼就知道卡在谁身上，不用再去翻看板。\n\n## 向后兼容（按卡面的红线）\n\n- `--max-per-repo` / `--same-repo-limit` **名字和默认值都不变**（仍是 1），\n  只是语义变成「同一 repo 里 paths 互相冲突的卡同时在飞的上限」。\n- `dispatch` 的默认行为（dry-run、`--apply` 才写）没动。\n- `abilities` / 能力匹配那部分一行没碰（那是 T-0101 的成果）。\n\n## 测试\n\n新增 4 例，全量 **40 passed**：\n- 路径互斥的两张卡同时派给两个不同 agent（`hive.py` vs `docs/`）；\n- 父子路径的第二张被拦下、原因点名第一张；把上限放宽到 2 后两张都能派；\n- 空 paths 的卡按「可能改任何地方」保守处理；\n- `_paths_conflict` 的判定规则单测（9 条断言，含 `tests/` vs `testing/` 的边界）。\n\n顺带把既有的 `test_dispatch_concurrency` 按新语义改写了 —— 它断言的是旧文案「同仓」，\n现在改成断言「原因里点名了 T-0001 且提到 paths」。\n\n## 效果\n\n现在同一个仓里改互不相干目录的卡能并行。剩下的瓶颈是**只有 1 个 exec agent**\n（`fb88-dsh`，`max_concurrency=1`）；paths 锁解开之后，再加一个 exec agent 就能真正跑起来。",
+  "error": ""
+}
