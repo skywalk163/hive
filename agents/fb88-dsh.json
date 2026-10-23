@@ -1,6 +1,6 @@
 {
   "name": "fb88-dsh",
-  "command": "dsh --profile headless -",
+  "command": "/home/skywalk/dswork/hive/scripts/dsh-headless --profile headless -",
   "mode": "exec",
   "manual": false,
   "capabilities": [

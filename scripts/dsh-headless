@@ -1,0 +1,47 @@
+#!/bin/sh
+# dsh-headless — 在 FreeBSD + linuxulator 下运行 dsh headless 的封装。
+#
+# 背景（2026-10-23）：fb88 上唯一的 node 是 WorkBuddy 自带的 Linux 构建
+# （跑在 FreeBSD linuxulator 上，process.platform 报 "linux"）。dsh 的 FreeBSD
+# distfile 只打包了 freebsd 原生绑定，linuxulator 下加载器去找 linux 变体，
+# 找不到就 fatal（No usable native binding found ...）。
+# scripts/patch-dsh-linux-bindings.sh 负责把两个 linux 绑定包补进 dist 树；
+# 本封装负责三件事：找到可用的 node、补上 DEEPSEEK_API_KEY、转调 dsh 本体。
+#
+# 用法（prompt 从 stdin 进，与 hive exec 约定一致）：
+#   printf '任务文本' | scripts/dsh-headless --profile headless -
+#
+# 环境变量：
+#   DSH_DIST   dsh 运行时目录（默认见下）
+#   DSH_NODE   node 可执行文件（默认 command -v node，找不到就用 WorkBuddy 自带 node）
+#   HIVE_ENV   凭据文件（默认 ~/dswork/.env，取 OPENAI_API_KEY 行当 DEEPSEEK_API_KEY）
+set -u
+
+DSH_DIST="${DSH_DIST:-/home/skywalk/dsh-port-test/work/deepseek-harness-0.2.1-rc.2-freebsd-amd64}"
+HIVE_ENV="${HIVE_ENV:-$HOME/dswork/.env}"
+
+# 1) 找 node：PATH 里的优先，否则退回 WorkBuddy 自带（当前机器唯一的选择）
+NODE="${DSH_NODE:-}"
+if [ -z "$NODE" ]; then
+    NODE="$(command -v node 2>/dev/null || true)"
+fi
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+    for c in "$HOME"/.workbuddy/binaries/node/versions/*/bin/node; do
+        if [ -x "$c" ]; then NODE="$c"; break; fi
+    done
+fi
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+    echo "dsh-headless: 找不到可用的 node（试过 PATH 和 ~/.workbuddy/binaries）" >&2
+    exit 127
+fi
+
+# 2) DEEPSEEK_API_KEY：没显式给就从 .env 的 OPENAI_API_KEY 行取
+if [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -f "$HIVE_ENV" ]; then
+    key=$(grep -E '^OPENAI_API_KEY' "$HIVE_ENV" | head -1 | cut -d= -f2- | tr -d '\r' | sed 's/^"//;s/"$//')
+    if [ -n "$key" ]; then
+        DEEPSEEK_API_KEY="$key"
+        export DEEPSEEK_API_KEY
+    fi
+fi
+
+exec "$NODE" "$DSH_DIST/lib/bin.js" "$@"
