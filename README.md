@@ -170,7 +170,10 @@ python C:\hive\hive.py --dir C:\hive agent add --name win10-gui --mode manual `
 ```
 
 `launch` 支持 `{worktree}`、`{task}`、`{prompt}`；`trae` 不在 PATH 就写完整路径，或用 `explorer {worktree}`。
-worker 把 worktree 和 `.hive/task.md` 准备好、把提示词放进 Windows 剪贴板、执行 launch，然后等 GUI agent 改完并写出 `.hive/summary.md`。适合：
+worker 把 worktree 和 `.hive/task.md` 准备好、把提示词放进 Windows 剪贴板、执行 launch，然后等 GUI agent 改完并写出 `.hive/summary.md`。
+
+chroot 里的小浣熊 / WorkBuddy 的完整接法（共享 `/home`、manual worker、WorkBuddy root 权限坑）：
+[`docs/CHROOT_GUI_AGENTS.md`](docs/CHROOT_GUI_AGENTS.md)。适合：
 - 需要人盯着界面的操作（浏览器验证、IDE 重构）；
 - 小浣熊这种深链登录、沙箱受限的 Electron 客户端；
 - 暂时不想给 agent 配 API key 的机器。
