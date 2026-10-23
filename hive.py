@@ -174,6 +174,13 @@ def parse_card(path: Path):
     return data, body
 
 
+# 「agent 自己承认没真验」的口供。正则而非固定词表 —— T-0101 那张卡写的是
+# 「未能启动…未得到实际测试结果」，靠枚举词永远追不上措辞的变化。
+CONFESS_RE = re.compile(
+    r"未能(?:验证|运行|启动|测试|执行|跑)|没能(?:跑|验证|测试)|"
+    r"无法(?:验证|运行|启动|测试|执行)|没(?:有)?跑(?:测试|过)?|"
+    r"未(?:测试|验证|得到实际|能验证)|跑不了|没法跑|未实际运行")
+
 def changed_files(wt: Path) -> list[str]:
     """worktree 里相对 HEAD 改动过的文件（含未跟踪的）。重命名取新名字。"""
     out = []
@@ -1171,12 +1178,11 @@ class Hive:
                 warns.append("没声明 paths，改动范围不受约束")
             if res.get("out_of_paths"):
                 warns.append("有越界改动：" + ", ".join(res["out_of_paths"][:8]))
-            blob = (res.get("summary") or "").lower()
-            for kw in ("没能跑", "无法验证", "未测试", "没能测试", "没跑测试",
-                       "没有跑", "未能验证"):
-                if kw in blob:
-                    warns.append(f"summary 自称「{kw}」，验收结论要打折看")
-                    break
+            # 「agent 自己承认没真验」的口供。用正则而不是固定词表：
+            # T-0101 写的是「未能启动…未得到实际测试结果」，一个个枚举词永远追不上措辞
+            m = CONFESS_RE.search(res.get("summary") or "")
+            if m:
+                warns.append(f"summary 自称「{m.group(0)}」，验收结论要打折看")
             reports.append({
                 "task": t, "title": card.get("title", ""),
                 "state": card.get("state"), "result": res.get("status") or "",

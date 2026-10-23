@@ -604,3 +604,33 @@ def test_audit_reports_risk_when_summary_confesses(world, fake_cmd):
     assert rep["risk"] == "warn", rep
     assert any("没能跑" in w for w in rep["warnings"]), rep
     assert rep["out_of_paths"] == ["feature.txt"], rep
+
+
+def test_audit_catches_real_confession_wording(world, fake_cmd):
+    """T-0101 的真实措辞是「未能启动…未得到实际测试结果」—— 固定词表追不上，用正则。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    world.add_task("T-0001", paths=["docs/"], verify=["true"])
+    world.hive("assign", "T-0001", "--agent", "fb")
+    world.run_worker("fb")
+
+    from hive import commit_file_to_ref
+    for summary in ("本机 sandbox 后端不可用，pytest 未能启动，未得到实际测试结果",
+                    "环境有问题，没跑测试就交了",
+                    "无法验证，只能靠静态核对"):
+        res = json.loads(world.hive("result", "T-0001", "--json").stdout)
+        res["summary"] = summary
+        commit_file_to_ref(world.hive1, "results/T-0001.json",
+                           json.dumps(res, ensure_ascii=False),
+                           "res/T-0001", "origin/main", "forge", force=True)
+        rep = json.loads(world.hive("audit", "T-0001", "--json").stdout)
+        assert rep["risk"] == "warn", (summary, rep)
+        assert any("自称" in w for w in rep["warnings"]), (summary, rep)
+
+    # 正常 summary 不该被误报
+    res = json.loads(world.hive("result", "T-0001", "--json").stdout)
+    res["summary"] = "改完了，pytest 全绿，17 个用例通过"
+    commit_file_to_ref(world.hive1, "results/T-0001.json",
+                       json.dumps(res, ensure_ascii=False),
+                       "res/T-0001", "origin/main", "forge", force=True)
+    rep = json.loads(world.hive("audit", "T-0001", "--json").stdout)
+    assert not any("自称" in w for w in rep["warnings"]), rep
