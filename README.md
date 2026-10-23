@@ -228,7 +228,44 @@ PORT=8787 INTERVAL=20 ./scripts/serve-dashboard.sh
 说明见 [dashboard/README.md](dashboard/README.md)，实跑验收见
 [dashboard/VERIFICATION.md](dashboard/VERIFICATION.md)。
 
-## 11. 更多文档
+## 11. MCP：让 agent 自己来领活
+
+`hive mcp` 起一个 MCP stdio server，把任务总线暴露成 12 个工具。接上之后 agent
+不用等人喂卡，自助闭环：**查任务 → 领卡 → 干活 → 提交 → 干不下去还回去**。
+
+```sh
+python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy
+```
+
+客户端配置：
+
+```json
+{
+  "mcpServers": {
+    "hive-workbuddy": {
+      "command": "python3",
+      "args": ["/home/skywalk/hive/hive.py", "--dir", "/home/skywalk/hive",
+               "mcp", "--agent", "workbuddy"]
+    }
+  }
+}
+```
+
+| 工具 | 作用 |
+|---|---|
+| `hive_whoami` / `hive_list_tasks` / `hive_get_task` | 我是谁、有哪些卡、某张卡的全文 |
+| `hive_next` | 推荐一张现在就能干的卡（跳过能力不匹配/依赖未就绪/已被领走） |
+| `hive_claim` | 领取：指派给我 + 抢 claim 租约 + 备好 worktree 和提示词 |
+| `hive_submit` | 提交：commit + push `task/<id>` + 跑 verify + 写结果 |
+| `hive_abort` / `hive_extend_lease` / `hive_progress` | 放弃还卡 / 续租 / 中途记进度 |
+| `hive_result` / `hive_stats` / `hive_doctor` | 查结果 / 吞吐统计 / 体检 |
+
+零第三方依赖（标准库实现的 stdio JSON-RPC 2.0）；一个 server 进程 = 一个 agent，
+**只能操作自己**：不能替别人领卡、提交、终止租约，越权调用直接返回错误。
+返回沿用 LightMem 的 `{status, message, details}` 信封，失败时 `hint` 告诉你下一步。
+详见 [MCP 接入](docs/MCP接入.md)。
+
+## 12. 更多文档
 
 - [操作手册](docs/操作手册.md)：每天的命令、总控流程、故障处理
 - [任务卡模板](docs/任务卡模板.md)：代码卡 / 验收卡 / 诊断卡 / 手动卡
@@ -236,5 +273,6 @@ PORT=8787 INTERVAL=20 ./scripts/serve-dashboard.sh
 - [Windows 接入](windows/README.md)：bootstrap.ps1 + 计划任务
 - [Gitea 接入](docs/Gitea接入.md)：私有仓、host-scoped 凭据 helper、T-0001 冒烟记录
 - [chroot GUI agent](docs/CHROOT_GUI_AGENTS.md)：小浣熊 / WorkBuddy 的完整接法
+- [MCP 接入](docs/MCP接入.md)：让任意 agent 通过 MCP 查/领/交/终止任务
 - [方案全文](../多机Agent协同开发方案.md)
 - [CHANGELOG](CHANGELOG.md)

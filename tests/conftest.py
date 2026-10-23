@@ -118,6 +118,17 @@ class World:
             args += ["--verify", v]
         self.hive(*args)
 
+    def sync(self):
+        """把 hive1 的工作区同步到 origin/main。
+
+        卡片/agent 都存在工作区文件里，光 fetch 不更新；别的 clone 推了东西之后
+        不 reset 就读到旧卡。
+        """
+        sh(["git", "-C", str(self.hive1), "fetch", "--prune", "origin"], check=False,
+           env=self.git_env)
+        sh(["git", "-C", str(self.hive1), "reset", "--hard", "-q", "origin/main"],
+           check=False, env=self.git_env)
+
     def card(self, tid: str) -> dict:
         from hive import parse_card  # noqa: WPS433  (测试进程里动态导入)
         data, body = parse_card(self.hive1 / "tasks" / f"{tid}.md")

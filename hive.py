@@ -44,7 +44,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -811,7 +811,11 @@ class Hive:
         if not repo_path:
             raise HiveError(f"agent {owner} 没有配置仓库 {card.get('repo')!r}")
         repo = Path(repo_path).expanduser()
-        wt = Path(cfg.get("worktrees") or (DEFAULT_STATE / "agents" / owner / "wt")).expanduser() / tid
+        # 必须和 Worker.prepare 用同一套路径推导，否则设了 HIVE_STATE 时
+        # take 建在 A 处、submit 去 B 处找，直接报「worktree 不存在」
+        state_root = Path(os.environ.get("HIVE_STATE")
+                          or DEFAULT_STATE / "agents" / owner).expanduser()
+        wt = Path(cfg.get("worktrees") or (state_root / "wt")).expanduser() / tid
         if not wt.exists():
             raise HiveError(f"worktree 不存在: {wt}")
 
@@ -1541,6 +1545,17 @@ def cmd_dispatch(args) -> None:
         dry_run=args.dry_run)
 
 
+def cmd_mcp(args) -> int:
+    """启动 MCP server（stdio）。转发给 mcp_server.py，保持 CLI 一个入口。"""
+    import mcp_server
+    argv = ["--agent", args.agent]
+    if args.mcp_dir:
+        argv += ["--dir", args.mcp_dir]
+    if args.source:
+        argv += ["--source", args.source]
+    return mcp_server.main(argv)
+
+
 def cmd_doctor(args) -> None:
     if not Hive(args.dir).cmd_doctor():
         sys.exit(1)
@@ -1709,6 +1724,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--agent", required=True)
     s.set_defaults(func=cmd_claim)
 
+    s = sub.add_parser("mcp", help="启动 MCP server（stdio），让 agent 通过 MCP 查/领/交/终止任务")
+    s.add_argument("--agent", default=os.environ.get("HIVE_AGENT", ""),
+                   help="以哪个 agent 的身份运行（默认 $HIVE_AGENT）")
+    s.add_argument("--dir", dest="mcp_dir", default=None,
+                   help="协调仓库路径；不给就用 ~/.hive/clones/mcp-<agent>（独占 clone）")
+    s.add_argument("--source", help="自动建 clone 时从哪拷（默认 hive 工具仓本体）")
+    s.set_defaults(func=cmd_mcp)
+
     s = sub.add_parser("work", help="worker 主循环")
     s.add_argument("--agent", required=True)
     s.add_argument("--once", action="store_true")
@@ -1722,8 +1745,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        args.func(args)
-        return 0
+        rc = args.func(args)
+        # mcp 这类长驻子命令会自己返回退出码，其余子命令返回 None 当 0
+        return rc if isinstance(rc, int) else 0
     except HiveError as e:
         print(f"错误: {e}", file=sys.stderr)
         return 1

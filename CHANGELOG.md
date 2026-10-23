@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.5.0 — 2026-10-23
+
+### Added
+
+- **`hive mcp`：MCP stdio server**（`mcp_server.py`，零第三方依赖）。任意支持 MCP 的
+  agent 接上后能自助闭环：查阅任务 → 申请领取 → 干活 → 提交 → 干不下去还回去。
+  12 个工具：`hive_whoami` / `hive_list_tasks` / `hive_get_task` / `hive_next` /
+  `hive_claim` / `hive_submit` / `hive_abort` / `hive_extend_lease` / `hive_progress` /
+  `hive_result` / `hive_stats` / `hive_doctor`。见 `docs/MCP接入.md`。
+  - 协议层用标准库直接实现 MCP 的 stdio JSON-RPC 2.0（换行分隔），不引 `fastmcp`。
+    支持 `initialize` / `tools/list` / `tools/call` / `ping` / `resources/list` / `prompts/list`。
+  - 身份模型：**一个 server 进程 = 一个 agent**，所有写操作只作用在自己身上。
+    不能替别人领卡、不能提交别人的卡、不能终止/续租别人的租约，由代码强制。
+  - 沿用 LightMem 的返回约定：不抛异常，统一 `{status, message, details}` 信封；
+    失败时 `isError=true`，`details.hint` 给下一步动作。
+  - 工具执行期间把 `sys.stdout` 重定向到 stderr —— 底层 `cmd_submit` 有 print，
+    不接住就会把 JSON-RPC 流搅坏（测试里专门盯了这条）。
+  - 默认用独占 clone `~/.hive/clones/mcp-<agent>`：worker 初始化要 `reset --hard origin/main`，
+    共用主工作区会把人未提交的改动冲掉；自动克隆时取源仓的 origin URL，
+    不克隆成本地路径（否则 `push main` 被 `receive.denyCurrentBranch` 拒）。
+- 测试：`tests/test_mcp.py` 15 个用例，起真实 server 子进程走 stdio 端到端。
+- 夹具：`World.sync()` —— 卡片存在工作区文件里，别的 clone 推完不 `reset` 读到的还是旧卡。
+
+### Fixed
+
+- **`hive submit` 找 worktree 时忽略 `HIVE_STATE`**：路径推导和 `Worker.prepare` /
+  `take` 不一致（后者认 `HIVE_STATE`），设了 `HIVE_STATE` 就报「worktree 不存在」。
+  现在三处（`take` / `submit` / MCP）共用同一套推导：
+  `worktrees` > `$HIVE_STATE/wt` > `~/.hive/agents/<agent>/wt`。
+
+### Ops
+
+- T-0101（分配健全化）合入 main（`32870dd`）并 close，17 用例全绿；
+  `abilities` 注册表、dispatch 逐卡「派/不派」原因、`--max-per-repo` 同仓并发检测正式生效。
+
 ## 0.4.0 — 2026-10-23
 
 ### Added
