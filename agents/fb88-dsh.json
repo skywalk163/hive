@@ -3,6 +3,14 @@
   "command": "/home/skywalk/dswork/hive/scripts/dsh-exec",
   "mode": "exec",
   "manual": false,
+  "abilities": [
+    "code",
+    "ci",
+    "docs",
+    "verify",
+    "python",
+    "pytest"
+  ],
   "capabilities": [
     "freebsd",
     "python",
