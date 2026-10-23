@@ -1,0 +1,30 @@
+#!/bin/sh
+# dsh-exec — 在 linuxulator 里跑 dsh headless，作为 hive 的 exec worker 后端。
+#
+# 为什么不能直接跑：FreeBSD 原生 node（node22/node24 端口都试过）把 internal/*
+# 模块全部关掉了，dsh 的 app-boot 一 require('internal/modules/esm/loader')
+# 就 MODULE_NOT_FOUND 直接崩（host preparation failed）。WorkBuddy 自带的 Linux
+# node（chroot 内 /home/skywalk/.workbuddy/binaries/node/versions/22.22.2，真实路径
+# /opt/WorkBuddy/resources/runtime/node）有这些 internals；且 hive 仓路径在 chroot
+# 里因 nullfs 挂载与宿主一致，所以整条命令挪进 /compat/ubuntu 用 skywalk 身份跑
+# （dsh-headless 自己会补 DEEPSEEK_API_KEY）。
+#
+# 用法（与 hive exec worker 约定一致：prompt 走 stdin，回答走 stdout）：
+#   printf '任务文本' | scripts/dsh-exec
+#
+# 环境变量：
+#   DSH_NODE    覆盖 node 路径（默认 WorkBuddy 自带 Linux node）
+set -u
+
+DSH_NODE="${DSH_NODE:-/home/skywalk/.workbuddy/binaries/node/versions/22.22.2/bin/node}"
+
+# chroot 内才能看到 /home/skywalk/.workbuddy（它在 Ubuntu 根盘里，宿主看不到），
+# 所以存在性检查放到 chroot 内侧做，stdin/stdout 原样透传。
+exec sudo chroot /compat/ubuntu /bin/bash -c '
+  N="$1"
+  if [ ! -x "$N" ]; then
+    echo "dsh-exec: 找不到 linux node: $N" >&2
+    exit 127
+  fi
+  exec su skywalk -c "DSH_NODE=$N exec /home/skywalk/dswork/hive/scripts/dsh-headless --profile headless -"
+' _ "$DSH_NODE"
