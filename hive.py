@@ -917,7 +917,7 @@ class Worker:
             pass
 
         (wt / ".hive").mkdir(exist_ok=True)
-        prompt = PROMPT_HEADER.format(tid=tid) + self._render_card(card)
+        prompt = PROMPT_HEADER.format(tid=tid) + self._render_card(card, wt)
         (wt / ".hive" / "task.md").write_text(prompt, encoding="utf-8")
         summary_file = wt / ".hive" / "summary.md"
 
@@ -1008,8 +1008,10 @@ class Worker:
         log(f"{tid} 完成: {result['status']}（{result['duration_s']}s）")
         return result
 
-    def _render_card(self, card: dict) -> str:
-        lines = [f"- id: {card['id']}", f"- 标题: {card.get('title', '')}",
+    def _render_card(self, card: dict, wt) -> str:
+        lines = [f"- id: {card['id']}",
+                 f"- 工作目录（宿主机和 chroot 内是同一个路径）: {wt}",
+                 f"- 标题: {card.get('title', '')}",
                  f"- 仓库: {card.get('repo')}（基线 {card.get('base', 'main')}）",
                  f"- 允许修改: {', '.join(card.get('paths') or []) or '（未声明，尽量最小改动）'}"]
         if card.get("depends_on"):
