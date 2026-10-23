@@ -1,0 +1,29 @@
+{
+  "task": "T-0001",
+  "agent": "fb88-verify",
+  "status": "done",
+  "branch": "verify/T-0001",
+  "base": "main",
+  "mode": "verify",
+  "head": "a02a9b2b0d680ecdd103a897555480aaea7e69c7",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-23T11:07:17+08:00",
+  "finished_at": "2026-10-23T11:07:21+08:00",
+  "duration_s": 4.2,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_lpd_002_import_hint.py",
+      "code": 0,
+      "tail": [
+        "....                                                                     [100%]",
+        "============================= slowest 15 durations =============================",
+        "",
+        "(12 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "4 passed in 1.97s"
+      ]
+    }
+  ],
+  "summary": "verify-only 模式（无 agent 参与）\n$ python3 -m pytest -q tests/test_lpd_002_import_hint.py  ->  0\n....                                                                     [100%]\n============================= slowest 15 durations =============================\n\n(12 durations < 0.005s hidden.  Use -vv to show these durations.)\n4 passed in 1.97s",
+  "error": ""
+}
