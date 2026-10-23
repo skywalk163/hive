@@ -12,10 +12,29 @@
 
 ## 2. 仓库
 
-- 新建 **私有** 仓库：`http://192.168.1.5:3000/skywalk/hive`
+- 新建仓库：`http://192.168.1.5:3000/skywalk/hive`
 - 本地 `~/dswork/hive` 已 `init`（补齐 `tasks/ inbox/ results/ agents/`）并推送 `main`
 - 仓库内容：`hive.py`、`windows/`、`docs/`、`tests/`、`examples/`、`CHANGELOG.md`、`.gitignore`
 - 默认分支 `main`；目前只有 `main` 一个分支（冒烟任务的 claim/res 已随 `close` 删除）
+
+### 可见性变更记录
+
+| 时间 | 可见性 | 操作 |
+|---|---|---|
+| 2026-10-23 上午 | private | 建仓时为私有 |
+| 2026-10-23 10:45 | **public** | `PATCH /api/v1/repos/skywalk/hive {"private": false, "visibility": "public"}`；匿名访问网页和 `git clone` 均返回 200 |
+
+公开前做过敏感信息扫描：被跟踪文件里无真实密钥；`.env`（含 SSH 密码、管理员 token、
+各家 AI 密钥）未被跟踪且已在 `.gitignore`；`dashboard/status.json`、`status.err` 也已忽略。
+**注意公开后可见的内容**：README/docs 里的内网 IP（`192.168.1.5:3000`、`192.168.0.88`）、
+主机名（fb88 / fb5 / win10）、以及 `tasks/` `results/` 里的完整任务历史。要收回私有：
+
+```sh
+curl -X PATCH -H "Content-Type: application/json" \
+  -u "<user>:<token>" \
+  -d '{"private": true, "visibility": "private"}' \
+  http://192.168.1.5:3000/api/v1/repos/skywalk/hive
+```
 
 ## 3. 凭据 helper（不在 git 里存 token）
 

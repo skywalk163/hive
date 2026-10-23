@@ -33,7 +33,8 @@
 
 ### Ops
 
-- 工具仓推成 Gitea 私有仓 `skywalk/hive`，登记 4 个 agent
+- 工具仓推成 Gitea 仓 `skywalk/hive`（建仓为私有，10:45 改为公开，匿名可 clone；
+  变更记录与收回命令见 `docs/Gitea接入.md` §2），登记 4 个 agent
   （fb88-verify / fb88-dsh / raccoon / workbuddy）。
 - 真实任务闭环 4 张：T-0001 集成冒烟（verify 模式）、T-0002 / T-0003 known-issues
   状态同步、T-0004 VSCode 片段补齐，全部 `close`，代码合入 light main。
