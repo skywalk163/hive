@@ -24,6 +24,7 @@ STATIC_FILES = {
     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/sample-status.json": ("sample-status.json", "application/json; charset=utf-8"),
+    "/ci.json": ("ci.json", "application/json; charset=utf-8"),
 }
 
 API_PATH = "/api/status"

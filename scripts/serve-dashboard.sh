@@ -13,6 +13,8 @@ PORT="${PORT:-8787}"
 INTERVAL="${INTERVAL:-20}"
 DASH="$DIR/dashboard"
 STATUS="$DASH/status.json"
+CI_REPOS="${CI_REPOS:-skywalk/light skywalk/lighting}"
+CI_EVERY="${CI_EVERY:-6}"
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "python3 not found" >&2
@@ -29,11 +31,26 @@ refresh() {
     fi
 }
 
+# 顺手刷新 CI 状态到 ci.json（需要 Gitea 凭证，失败保留旧文件）
+refresh_ci() {
+    if CI_OUT="$DASH/ci.json.tmp" CI_REPOS="$CI_REPOS" "$DIR/scripts/ci-check.sh" >/dev/null 2>&1; then
+        mv "$DASH/ci.json.tmp" "$DASH/ci.json"
+    else
+        rm -f "$DASH/ci.json.tmp"
+    fi
+}
+
 refresh || true
+refresh_ci || true
+TICKS=0
 (
     while :; do
         sleep "$INTERVAL"
+        TICKS=$((TICKS + 1))
         refresh || true
+        if [ $((TICKS % CI_EVERY)) -eq 0 ]; then
+            refresh_ci || true
+        fi
     done
 ) &
 LOOP=$!

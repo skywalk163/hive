@@ -7,3 +7,5 @@ __pycache__/
 dashboard/status.json
 dashboard/status.json.tmp
 dashboard/status.err
+dashboard/ci.json
+dashboard/ci.json.tmp
