@@ -1,0 +1,23 @@
+{
+  "task": "T-0005",
+  "agent": "fb88-dsh",
+  "status": "done",
+  "branch": "task/T-0005",
+  "base": "main",
+  "mode": "exec",
+  "head": "b206ec842f1fe18bd5c0a3f052b666af697c968b",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-23T11:11:38+00:00",
+  "finished_at": "2026-10-23T11:17:01+00:00",
+  "duration_s": 322.6,
+  "verify": [
+    {
+      "cmd": "test -f docs/known-issues/R95-B1-实施方案.md && grep -q CreateJobObject docs/known-issues/R95-B1-实施方案.md && grep -q QueryInformationJobObject docs/known-issues/R95-B1-实施方案.md",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0005 执行摘要\n\n- 交付物：新增 `docs/known-issues/R95-B1-实施方案.md`（533 行，六节齐全，简体中文，含表格/引用块/代码草案）；另按任务规则写本摘要，未改任何现有文件。\n- §1 现状：核对 `stdlib/进程树.light` 全文后确认 Job 绑定（L341-418）已存在，缺 `QueryInformationJobObject`/`TerminateJobObject`；高危点是裸 PID `taskkill`（L599-601）与 4s `等待树清`（L650-667）的 TOCTOU，B-2 创建时间闸门挡不住新出生的无关进程。\n- §2 API：给出 CreateJobObjectW / AssignProcessToJobObject / QueryInformationJobObject(JobObjectBasicProcessIdList) / TerminateJobObject / CloseHandle 的作用、启动与杀树时序、ctypes 签名草案、结构体与常量、8 条已知坑。\n- §3 开关：设计配置项 `杀树引擎` 与环境变量 `LIGHT_KILL_TREE_ENGINE`（job/toolhelp/auto），默认 `auto`（Win8+ 走 job，Win7 或绑定失败降级），并给出光明伪代码与可观测属性。\n- §4 嵌套与权限：Win7 不支持嵌套 Job、Win8+ 可嵌套；`Assign` 需 PROCESS_SET_QUOTA+PROCESS_TERMINATE；指出仓库注释与 MS 文档在 breakaway 上的矛盾，设计 Step 0 归因探针与 hybrid 备选。\n- §5 测试：把 backlog 三条验收逐条映射为 A（单层/多层/迟建 100 轮）、B（25,285 短命树 PID 复用压力，复用 R93 探针口径）、C（全量 -n 4 有效轮 3 轮 + judge 新增红 0），含判定口径与反例 R1-R6。\n- §6 风险与回滚：列 9 条新增风险（ctypes 截断、Query 截断、Terminate 权限、breakaway 等）、6 步回滚、B-1/B-2 选择表与停止条件；附录含 commit 拆分与 V1-V8 待验证清单。\n- 验证：本机 workspace-write 沙箱后端不可用、提权无审批通道，**验收命令未能在本地执行**；已用 read 工具确认文件存在、总行数 533，并核对 `CreateJobObjectW`、`QueryInformationJobObject` 等关键字均出现，worker 跑验收命令应通过。\n- 遗留：V1-V8 需开工第一周探针定性；未提交 commit（按任务卡由 worker 统一提交），未 `git push`、未切分支。",
+  "error": ""
+}
