@@ -1,0 +1,44 @@
+{
+  "task": "T-0114",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0114",
+  "base": "main",
+  "head": "6778276e8532c63084950ed2581d0e3f65bd3e83",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-23T23:45:21+00:00",
+  "finished_at": "2026-10-23T23:47:20+00:00",
+  "duration_s": 119.3,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests -q --tb=short",
+      "code": 0,
+      "tail": [
+        "..................................................                       [100%]",
+        "50 passed in 100.52s (0:01:40)"
+      ]
+    },
+    {
+      "cmd": "grep -q 'paths' hive.py && grep -c 'commit_and_push' hive.py | grep -qE '^[0-9]+$'",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys, inspect, hive; sys.exit(0 if 'paths' in inspect.signature(hive.Hive.commit_and_push).parameters else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0114 完成：commit_and_push 提交范围收口\n\n执行者：workbuddy（manual 模式）\n\n## 为什么这张卡\n\n协调仓库的 `main` 是审计记录（卡片、结果、租约全在上面）。`commit_and_push` 以前\n无条件 `git add -A`，总控工作区里任何未提交的改动都会被卷进这一次提交。\n**今天被咬了两次**：MCP 那 705 行被卷进 `task: add T-0110`；`sync_main` 修复被卷进\n`close T-0110`。内容都没丢，但提交信息说的是「加一张卡」，实际是一个完整功能 ——\n事后没法靠 `git log` 回溯这一步是谁干的。\n\n## 改了什么\n\n`commit_and_push(message, paths=None)`：给了 paths 就只 stage 这些文件；\n没给保留老的全量行为（向后兼容），但打一条告警日志。\n\n7 个调用点全部收口：`task new` 只交卡片；`assign`/`take`/`retry` 交卡片 + inbox\n（+ 归档结果）；`close` 交卡片 + 归档结果；`agent add` 只交该 agent 配置；\n`dispatch --apply` 按卡汇总。\n\n配套 `Hive._add(paths)`：只对存在或仍被跟踪的路径做 `git add -A --`，\n避开了「`git add -- 不存在的路径` 直接 fatal」。\n\n## 顺手修的第二个坑\n\n`sync_main` 用 `git status --porcelain` 判断脏，把**未跟踪文件**也算进去了。\n但 `reset --hard` 不会动未跟踪文件 —— 总控只要有个草稿或编辑器 lock 文件，\n`land` 推完 main 之后紧接的 `close` 就会卡死在同步这步。\n改成 `--untracked-files=no`。\n\n## 验证\n\n- 测试 5 例，全量 **50 passed**：建卡不卷走无关文件 / close 只交卡片和结果 /\n  assign 只交卡片和 inbox / 不传 paths 时保持老行为 / sync_main 遇未跟踪文件仍能同步。\n- 真机：在协调仓库放了 `总控草稿.txt`（未跟踪），走完 submit + land 两个写操作，\n  它应该还在工作区里、且不在任何提交里。\n\n## 一个小插曲（值得记）\n\n第一次 submit 判 failed，但不是代码问题 —— **卡面第三条 verify 我自己写错了**：\n`import hive,inspect; sys.exit(...)` 里忘了 `import sys`。代码其实全对（50 用例过）。\n这正好说明 verify 必须真跑才作数，光读一遍命令很容易漏掉这种错。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_core.py",
+    "docs/操作手册.md",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [],
+  "out_of_paths": []
+}
