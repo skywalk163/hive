@@ -1,0 +1,23 @@
+{
+  "task": "T-0004",
+  "agent": "workbuddy",
+  "status": "done",
+  "branch": "task/T-0004",
+  "base": "main",
+  "mode": "manual",
+  "head": "ed7c94cfd7e49d1e91929ec997497e9a2e08e324",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-23T15:50:50+08:00",
+  "finished_at": "2026-10-23T17:14:17+08:00",
+  "duration_s": 5007.3,
+  "verify": [
+    {
+      "cmd": "python3 -m json.tool vscode-extension/snippets/light.json >/dev/null && grep -q \"引SQL\" vscode-extension/snippets/light.json && grep -q \"引Python\" vscode-extension/snippets/light.json && grep -q \"与资源\" vscode-extension/snippets/light.json && grep -q \"匿名\" vscode-extension/snippets/light.json",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "## T-0004 完成情况\n\n**做了什么**：在 `vscode-extension/snippets/light.json` 末尾追加 4 个片段，原有 34 个条目内容与顺序保持不变（追加后共 38 个）。\n\n**新增片段**：\n1. `引 SQL 块`（prefix `引SQL`）：L3 内嵌 SQL 块，body 为数组两行。\n2. `引 Python 块`（prefix `引Python`）：L4 沙箱引用 Python，body 为数组三行，含 `出 ${2:结果}`。\n3. `与资源`（prefix `与`）：资源管理 `与 ... 为 ...`，body 为数组两行。\n4. `匿名函数`（prefix `匿名`）：单表达式匿名函数，body 为单行字符串（与卡面一致，非数组）。\n\n**改了哪些文件**：只有 `vscode-extension/snippets/light.json`（`git status --porcelain` 仅此一项）。\n\n**跑过的验证**：\n- 卡面 verify 命令整体退出码 0（json.tool 可解析 + 四个关键词均可 grep 到）。\n- 额外用 Python 比对 `origin/main` 版本：前 34 个 key 顺序与内容完全一致，新增 4 个 key 顺序符合卡面要求；`prefix`/`body` 类型与卡面一致。\n\n**遗留风险**：`与资源` 的 key 名带「资源」，prefix 却是单个「与」字；按卡面原文照写，未擅自调整。JSON 本身合法，VSCode 可正常加载。",
+  "error": ""
+}
