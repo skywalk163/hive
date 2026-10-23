@@ -1,0 +1,36 @@
+{
+  "task": "T-0112",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0112",
+  "base": "main",
+  "head": "b5d79bfef7359af02cd03287b1be4c27de1c961b",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-23T23:23:44+00:00",
+  "finished_at": "2026-10-23T23:29:30+00:00",
+  "duration_s": 346.4,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests -q --tb=short",
+      "code": 0,
+      "tail": [
+        "............................................                             [100%]",
+        "44 passed in 89.55s (0:01:29)"
+      ]
+    },
+    {
+      "cmd": "grep -q 'def cmd_audit' hive.py",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import hive,sys; sys.exit(0 if hasattr(hive.Hive,'cmd_audit') else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0112 完成：paths 越界检测 + hive audit\n\n执行者：workbuddy（manual 模式）\n\n## 做了什么\n\n自举时**代码仓和协调仓库是同一个目录**，agent 能顺手改掉自己的任务卡、别人的结果文件。\n以前 `git add -A` 一提交，什么都看不出来。现在分两层：\n\n### A. paths 越界检测\n\nworker 提交前算一次改动清单（`git status --porcelain`），跟卡面声明的 `paths` 比对：\n\n- **默认只警告**：越界写进结果的 `out_of_paths` 字段和日志，任务照常完成。\n  不阻断是有意的 —— 一上来就把正常流程卡死，只会逼着人把 paths 写宽。\n- `HIVE_STRICT_PATHS=1` 或 agent 配置 `\"strict_paths\": true` 才判失败：\n  不提交、不跑 verify，error 里列出越界文件。\n- `paths` 为空表示不约束。\n\n结果 json 新增三个字段：`declared_paths` / `changed_files` / `out_of_paths`。\n\n### B. `hive audit [T-xxxx | --all] [--json]`\n\n合并前的一页纸，比对「agent 说做了什么」和「diff 里真有什么」：声明的 paths、\n实际改动、越界清单、每条 verify 的退出码、summary 全文，外加 `risk` 标记。\n\n会点名的风险：没写 verify / 没声明 paths / 有越界改动 /\n**summary 里出现「没能跑」「无法验证」「未测试」这类口供**。\n\n最后一条是最有价值的。T-0101 那张卡的 agent 自己在 summary 里写了\n「本机 sandbox 后端不可用，没能跑测试」，结果照样判 `done` —— 以前没有任何地方能发现这件事。\n\n## 实现中的一个坑\n\n改动清单必须在**提交之前**抓。我一开始在结果里又调了一次 `changed_files(wt)`，\n那时已经 `git add -A` + commit 过了，`git status` 是空的，`changed_files` 恒为 `[]` ——\n测试直接挂了才发现。现在提交前抓一次，前后共用同一份。\n\n## 测试\n\n新增 4 例，全量 **44 passed**：\n- `out_of_paths` 判定规则单测（含未声明=不约束、`tests/` vs `testing/` 边界）；\n- 默认只警告：越界记进结果，任务仍 done；\n- `HIVE_STRICT_PATHS=1`：判失败、不跑 verify、`error` 里列出越界文件；\n- audit 能把「summary 自称没能跑测试」点出来。\n\n## 一件自纠的事\n\n我一开始顺手把 `audit` 的用法写进了 README.md，但 README **不在本卡声明的 paths 里**\n—— 这正是本卡要实现的功能要抓的东西，我自己不能犯。已回退，改写到\n`docs/操作手册.md` §5.2 / §5.3（在 paths 内）。\n\n## 留给后面\n\n- 严格模式现在是默认关的。等卡面 paths 都写得靠谱了，可以考虑给 hive 仓默认打开。\n- `audit` 还没接进 `hive land` 的合入前置（合并前自动审一遍）—— 等 T-0122 的\n  verify 强度分级做完，两者可以合并成一个「能不能合」的判断。",
+  "error": ""
+}
