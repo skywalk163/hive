@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.0 — 2026-10-23
+
+### Added
+
+- **`hive land T-xxxx [--apply] [--all] [--json]`**：把闭环最后一步自动化 ——
+  以前 result=done 之后要人手工 merge + close（T-0101 就这样在分支上躺了两个小时）。
+  - 合入条件：结果是 done、verify 全绿、卡未 close、依赖已全部 close；不满足就列原因。
+  - 合并跑在临时 worktree（`~/.hive/land/<tid>`，用完即拆）里，**不碰主 checkout、不做 clone**；
+    预演是**真的把 merge 跑一遍**（不是 `merge-tree` 猜），所以报冲突就是真冲突。
+  - 冲突一律不自动解、不 force push；`conflicts` 给文件清单。非冲突性失败会带上 git 的原话。
+  - merge 显式带 `-c user.name/-c user.email`，不依赖机器有没有配 git 身份 —— 测试环境里
+    `git merge` 就是以「请告诉我你是谁」失败的，而且不留任何冲突标记，很难查。
+  - 默认 dry-run；`--all` 按优先级合所有能合的，遇冲突停下。
+  - 测试 4 例：合入并关闭 / 条件不满足被拦 / 真冲突且不 force / `--all` 只挑能合的。
+
+### Ops
+
+- T-0110 由 WorkBuddy 以 `workbuddy` agent 身份走 manual 模式（`hive take` + `hive submit`）
+  完成 —— 第一次真正用 hive 自己的流程开发 hive，绕开了缺 DeepSeek key 的 exec 后端。
+
 ## 0.5.0 — 2026-10-23
 
 ### Added

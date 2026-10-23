@@ -44,7 +44,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -364,6 +364,175 @@ class Hive:
                 else:
                     log(f"删不掉 {ref}（可能受保护），保留不影响结果")
         log(f"{tid} 已关闭")
+
+    # -- 合入 / land ------------------------------------------------------- #
+    def code_repo(self, repo_name: str) -> Path:
+        """找代码仓的本地路径：任意 agent 登记过就行（同名的都指向同一份内容）。"""
+        path = self.repos().get(repo_name)
+        if not path:
+            raise HiveError(f"没有 agent 登记代码仓 {repo_name!r} 的本地路径")
+        if not path.is_dir() or not (path / ".git").exists():
+            raise HiveError(f"本地代码仓不可用: {path}")
+        return path
+
+    def landable(self) -> list[str]:
+        """可以合入的卡：结果是 done、verify 全绿、还没 close、依赖都已 close。"""
+        cards = self.cards()
+        out = []
+        for tid, c in cards.items():
+            if c.get("state") == "done":
+                continue
+            res = self.result_info(tid)
+            if not res or res.get("status") != "done":
+                continue
+            if any(v.get("code") for v in (res.get("verify") or [])):
+                continue
+            if any((cards.get(d) or {}).get("state") != "done"
+                   for d in (c.get("depends_on") or [])):
+                continue
+            out.append(tid)
+        return sorted(out)
+
+    def land_one(self, tid: str, apply: bool = False, note: str = "") -> dict:
+        """把一张已完成的任务分支合进代码仓 main，再 close。
+
+        默认不推任何东西：先在临时 worktree 里把合并做一遍，这样冲突是**真的**冲突，
+        不是靠猜。 dry-run 时装作合并完就收工（并把这个 worktree 拆掉）。
+        """
+        plan: dict = {"task": tid, "repo": "", "branch": f"task/{tid}", "head": None,
+                      "status": "blocked", "strategy": "", "problems": [],
+                      "conflicts": [], "merged": False, "closed": False}
+        card = self.card(tid)
+        plan["repo"] = card.get("repo") or ""
+        target = card.get("base") or "main"
+        res = self.result_info(tid) or {}
+
+        if card.get("state") == "done":
+            plan["problems"].append("已经 close 过了")
+            return plan
+        if not res:
+            plan["problems"].append("还没有结果")
+            return plan
+        if res.get("status") != "done":
+            plan["problems"].append(f"结果是 {res.get('status')!r}，不是 done")
+            return plan
+        bad = [str(v.get("cmd")) for v in (res.get("verify") or []) if v.get("code")]
+        if bad:
+            plan["problems"].append("verify 未全绿: " + " | ".join(bad))
+            return plan
+        missing = [d for d in (card.get("depends_on") or [])
+                   if (self.cards().get(d) or {}).get("state") != "done"]
+        if missing:
+            plan["problems"].append("依赖未 close: " + ", ".join(missing))
+            return plan
+
+        repo_name = card.get("repo") or ""
+        try:
+            repo = self.code_repo(repo_name)
+        except HiveError as e:
+            plan["problems"].append(str(e))
+            return plan
+
+        git(["fetch", "--prune", "origin"], repo)
+        base, branch = f"origin/{target}", f"origin/task/{tid}"
+        base_head = rev_parse(repo, base)
+        task_head = rev_parse(repo, branch)
+        if not task_head:
+            plan["problems"].append(f"代码仓里没有 {branch} 分支")
+            return plan
+        if task_head == base_head:
+            plan["problems"].append(f"已经合进 {target} 了（内容一致，无需合并）")
+            return plan
+
+        wt = DEFAULT_STATE / "land" / tid
+        try:
+            git(["worktree", "remove", "--force", str(wt)], repo, check=False)
+            shutil.rmtree(wt, ignore_errors=True)
+            wt.parent.mkdir(parents=True, exist_ok=True)
+            git(["worktree", "add", "-B", f"land/{tid}", str(wt), base], repo)
+            # merge 要建 commit，临时 worktree 里不一定有 git 身份 —— 显式带上 IDENT，
+            # 别指望环境的 user.name（CI / 容器里经常没有）
+            try:
+                git([*IDENT, "merge", "--ff-only", "--no-edit", branch], wt)
+                plan["strategy"] = "ff"
+            except HiveError:
+                git(["merge", "--abort"], wt, check=False)
+                m = git([*IDENT, "merge", "--no-edit", "--no-ff", branch], wt, check=False)
+                if m.returncode != 0:
+                    conflicts = [l.strip() for l in git(
+                        ["diff", "--name-only", "--diff-filter=U"], wt,
+                        check=False).stdout.splitlines() if l.strip()]
+                    if conflicts:
+                        plan["status"] = "conflict"
+                        plan["conflicts"] = conflicts
+                        plan["problems"].append(
+                            f"合并冲突（{len(conflicts)} 个文件）："
+                            + ", ".join(conflicts[:8]))
+                    else:
+                        # 不是文件冲突（比如 git 身份缺失、目标被锁），把 git 的话带出来
+                        plan["status"] = "failed"
+                        tail = " | ".join(
+                            (m.stdout + m.stderr).strip().splitlines()[-3:])
+                        plan["problems"].append(f"合并失败: {tail}")
+                    return plan
+                plan["strategy"] = "merge"
+            plan["head"] = rev_parse(wt, "HEAD")
+            if not apply:
+                plan["status"] = "would-merge"
+                return plan
+            try:
+                git(["push", "origin", f"{plan['head']}:refs/heads/{target}"], repo)
+            except HiveError as e:
+                plan["problems"].append(f"推送 {target} 失败（可能别人刚推过）: {e}")
+                return plan
+            plan["merged"] = True
+        finally:
+            git(["worktree", "remove", "--force", str(wt)], repo, check=False)
+            shutil.rmtree(wt, ignore_errors=True)
+            git(["branch", "-D", f"land/{tid}"], repo, check=False)
+
+        self.cmd_close(tid, note=note or f"land {tid}")
+        plan["closed"] = True
+        plan["status"] = "landed"
+        return plan
+
+    def cmd_land(self, tid: str | None = None, apply: bool = False, note: str = "",
+                 all_tasks: bool = False, as_json: bool = False):
+        self.fetch()
+        if not tid and not all_tasks:
+            raise HiveError("land 需要给任务号，或加 --all")
+        if all_tasks:
+            targets = self.landable()
+        else:
+            if tid not in self.cards():
+                raise HiveError(f"没有任务 {tid}")
+            targets = [tid]
+        if not targets:
+            log("没有可以合入的卡")
+            results = []
+        else:
+            results = [self.land_one(t, apply=apply, note=note) for t in targets]
+        if as_json:
+            print(json.dumps(results if all_tasks else results[0],
+                             ensure_ascii=False, indent=2))
+            return results if all_tasks else (results[0] if results else None)
+        for r in results:
+            self._print_land(r, apply)
+        return results if all_tasks else (results[0] if results else None)
+
+    @staticmethod
+    def _print_land(r: dict, apply: bool) -> None:
+        tag = {"landed": "已合入并关闭", "would-merge": "可以合入（dry-run，没动）",
+               "conflict": "合并冲突", "failed": "合并失败",
+               "blocked": "不满足合入条件"}.get(r["status"], r["status"])
+        extra = f" [{r['strategy']}]" if r.get("strategy") else ""
+        print(f"{r['task']}  {tag}{extra}  branch={r['branch']}  head={r.get('head') or '-'}")
+        for p in r["problems"]:
+            print(f"    问题: {p}")
+        for c in r["conflicts"]:
+            print(f"    冲突文件: {c}")
+        if r["status"] == "would-merge":
+            print("    加 --apply 真的合入")
 
     # -- 自动分派 / 体检 / 统计 ------------------------------------------- #
     def agents(self) -> dict[str, dict]:
@@ -1569,6 +1738,12 @@ def cmd_close(args) -> None:
     Hive(args.dir).cmd_close(args.task, args.note or "")
 
 
+def cmd_land(args) -> None:
+    Hive(args.dir).cmd_land(
+        tid=getattr(args, "task", None), apply=args.apply,
+        note=args.note or "", all_tasks=args.all, as_json=args.json)
+
+
 def cmd_status(args) -> None:
     Hive(args.dir).cmd_status(args.json)
 
@@ -1694,6 +1869,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.add_argument("--note")
     s.set_defaults(func=cmd_close)
+
+    s = sub.add_parser("land", help="把已完成的任务分支合入代码仓 main 并 close")
+    s.add_argument("task", nargs="?", help="任务号；配合下面 --all 时可不给")
+    s.add_argument("--all", action="store_true", help="合入所有满足条件（依赖在前）的卡")
+    s.add_argument("--apply", action="store_true",
+                   help="真的推 main；默认只在临时 worktree 里预演")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--note", help="close 时的完成备注")
+    s.set_defaults(func=cmd_land)
 
     s = sub.add_parser("status", help="看板")
     s.add_argument("--json", action="store_true")

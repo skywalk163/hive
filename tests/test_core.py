@@ -360,3 +360,108 @@ def test_prune_rejects_unknown_repo(world):
     p = world.hive("prune", "--repo", "nope", check=False)
     assert p.returncode != 0
     assert "nope" in (p.stderr + p.stdout)
+
+
+# --------------------------------------------------------------------------- #
+# 合入（land）
+# --------------------------------------------------------------------------- #
+
+def _fake_done_card(world, agent, tid, verify=("true",)):
+    """用假 agent 跑出一张 status=done 的卡，返回它所在的代码仓 clone。"""
+    world.add_task(tid, verify=list(verify))
+    world.hive("assign", tid, "--agent", agent)
+    world.run_worker(agent)
+    row = next(r for r in world.hive_json("status") if r["id"] == tid)
+    assert row["result"] == "done", row
+    return world.code_clone(agent)
+
+
+def test_land_merges_and_closes(world, fake_cmd):
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
+    _fake_done_card(world, "fb", "T-0001")
+
+    # dry-run：只预演，不能动 main
+    dry = world.hive_json("land", "T-0001")
+    assert dry["status"] == "would-merge", dry
+    assert dry["strategy"] in ("ff", "merge"), dry
+    assert dry["merged"] is False and dry["closed"] is False
+
+    before = sh(["git", "--git-dir", world.code_origin, "rev-parse", "main"]).stdout.strip()
+
+    world.hive("land", "T-0001", "--apply")
+    after = sh(["git", "--git-dir", world.code_origin, "rev-parse", "main"]).stdout.strip()
+    assert after != before, "main 应该前进了"
+
+    # 真合并之后：卡 close、结果归档、claim/res 分支清掉
+    assert world.card("T-0001")["state"] == "done"
+    assert (world.hive1 / "results" / "T-0001.json").exists()
+    assert world.refs("refs/heads/res/T-0001") == []
+    assert world.refs("refs/heads/claim/T-0001") == []
+    # 产物真的在 main 里
+    blob = sh(["git", "--git-dir", world.code_origin, "show", "main:feature.txt"]).stdout
+    assert "made by fb for T-0001" in blob
+
+
+def test_land_rejects_unqualified_cards(world, fake_cmd):
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
+
+    # 没有结果的卡
+    world.add_task("T-0001")
+    out = world.hive_json("land", "T-0001")
+    assert out["status"] == "blocked" and any("还没有结果" in p for p in out["problems"])
+
+    # 跑完了但 verify 没过的卡：worker 会写 failed 结果，land 必须拦下
+    world.add_task("T-0002", verify=["false"])
+    world.hive("assign", "T-0002", "--agent", "fb")
+    world.run_worker("fb")
+    out = world.hive_json("land", "T-0002")
+    assert out["status"] == "blocked", out
+    assert any(("verify" in p) or ("failed" in p) for p in out["problems"]), out
+    assert out["merged"] is False
+
+
+def test_land_reports_conflicts_without_force(world, fake_cmd):
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
+    _fake_done_card(world, "fb", "T-0001")
+    code = world.code_clone("fb")
+
+    # 在 main 上改同一个文件，制造真冲突
+    sh(["git", "fetch", "-q", "origin"], cwd=code, env=world.git_env)
+    sh(["git", "checkout", "-q", "main"], cwd=code, env=world.git_env)
+    (code / "feature.txt").write_text("总分行的内容\n", encoding="utf-8")
+    sh(["git", "add", "-A"], cwd=code, env=world.git_env)
+    sh(["git", "commit", "-q", "-m", "conflict maker"], cwd=code, env=world.git_env)
+    sh(["git", "push", "-q", "origin", "main"], cwd=code, env=world.git_env)
+
+    out = world.hive_json("land", "T-0001", "--apply")
+    assert out["status"] == "conflict", out
+    assert "feature.txt" in out["conflicts"]
+    # 冲突时绝不 force push：main 仍然是冲突制造者那个 commit
+    head = sh(["git", "--git-dir", world.code_origin, "rev-parse", "main"]).stdout.strip()
+    msg = sh(["git", "--git-dir", world.code_origin, "log", "-1",
+              "--format=%s", head]).stdout.strip()
+    assert msg == "conflict maker", msg
+    assert world.card("T-0001")["state"] != "done", "冲突的卡不能被 close"
+
+
+def test_land_all_picks_only_landable(world, fake_cmd):
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
+    _fake_done_card(world, "fb", "T-0001")
+    world.add_task("T-0002")                       # 没有结果
+    world.add_task("T-0003", verify=["false"])     # 结果是 failed
+    world.hive("assign", "T-0003", "--agent", "fb")
+    world.run_worker("fb")
+
+    before = sh(["git", "--git-dir", world.code_origin, "rev-parse", "main"]).stdout.strip()
+    plan = world.hive_json("land", "--all")
+    assert [p["task"] for p in plan] == ["T-0001"], plan
+    assert plan[0]["status"] == "would-merge", plan
+    assert sh(["git", "--git-dir", world.code_origin,
+               "rev-parse", "main"]).stdout.strip() == before, "dry-run 不能动 main"
+
+    res = world.hive_json("land", "--all", "--apply")
+    assert [p["task"] for p in res] == ["T-0001"], res
+    assert res[0]["status"] == "landed" and res[0]["closed"], res
+    assert world.card("T-0001")["state"] == "done"
+    assert world.card("T-0002")["state"] == "ready", "没结果的卡不该被碰"
+    assert world.card("T-0003")["state"] == "assigned", "失败的卡不该被碰"
