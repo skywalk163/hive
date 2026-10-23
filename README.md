@@ -1,6 +1,6 @@
 # hive —— 多机 AI Agent 协同的任务总线
 
-一个约 1300 行的 Python 脚本 + 一个 git 仓库，把「总控 AI 拆任务」和「多台机器上的 agent 干活」连起来。
+一个约 1550 行的 Python 脚本 + 一个 git 仓库，把「总控 AI 拆任务」和「多台机器上的 agent 干活」连起来。
 
 - **总控**只做三件事：写任务卡、分派、验收。
 - **worker** 自己拉取、原子领取、在独立 worktree 里干活、把结果推回。
@@ -111,6 +111,10 @@ tmux new -s hive-fb88 -d "python3 ~/hive/hive.py --dir ~/hive work --agent fb88-
 python C:\hive\hive.py --dir C:\hive work --agent win10 --interval 60
 ```
 
+`scripts/` 下有两个省事的壳：`start-worker.sh <agent>`（自动把 `OPENAI_API_KEY`
+映射成 dsh 要的 `DEEPSEEK_API_KEY`，多 worker 用 `HIVE_DIR` 各自 clone）；
+`dispatch-loop.sh`（总控侧每分钟 `dispatch --apply`，自动分派循环）。
+
 每轮：
 
 1. `git fetch` + `reset --hard origin/main`（协调仓库只读）；
@@ -138,6 +142,10 @@ python3 ~/hive/hive.py --dir ~/hive retry  T-0101      # 失败重跑（清结�
 python3 ~/hive/hive.py --dir ~/hive retry  T-0101 --fresh  # 从 main 重来
 python3 ~/hive/hive.py --dir ~/hive gc --minutes 180   # 回收跑飞的租约
 python3 ~/hive/hive.py --dir ~/hive close T-0101 --note "已合并到 integration"
+
+# 不跑 worker 的人工链路（GUI agent 场景，与该 agent 的 worker 二选一）
+python3 ~/hive/hive.py --dir ~/hive take   T-0101 --agent workbuddy
+python3 ~/hive/hive.py --dir ~/hive submit T-0101
 ```
 
 `close` 会把 `res/` 里的结果归档到 `main:results/T-0101.json`，然后删掉 `claim/T-0101`、`res/T-0101`
@@ -172,19 +180,26 @@ python C:\hive\hive.py --dir C:\hive agent add --name win10-gui --mode manual `
 `launch` 支持 `{worktree}`、`{task}`、`{prompt}`；`trae` 不在 PATH 就写完整路径，或用 `explorer {worktree}`。
 worker 把 worktree 和 `.hive/task.md` 准备好、把提示词放进 Windows 剪贴板、执行 launch，然后等 GUI agent 改完并写出 `.hive/summary.md`。
 
+GUI 卡的 `timeout_minutes` 统一写 180、`lease_minutes` 写 240——实测小浣熊一张文档卡就要
+65 分钟左右，默认 60 分钟会在它写完 summary 前超时；超时之后 GUI 才写完的恢复步骤
+（补 commit/push + 补 summary + `retry` 不带 `--fresh`）见 chroot 文档。
+压根不想在这个 agent 上跑 worker 的话，也可以走人工链路：`take` 领取、`submit` 提交（见 §5）。
+
 chroot 里的小浣熊 / WorkBuddy 的完整接法（共享 `/home`、manual worker、WorkBuddy root 权限坑）：
 [`docs/CHROOT_GUI_AGENTS.md`](docs/CHROOT_GUI_AGENTS.md)。适合：
 - 需要人盯着界面的操作（浏览器验证、IDE 重构）；
 - 小浣熊这种深链登录、沙箱受限的 Electron 客户端；
 - 暂时不想给 agent 配 API key 的机器。
 
-## 8. 限制（v0.1 有意为之）
+## 8. 限制（有意为之，v0.3.0）
 
 - 一个 worker 串行跑任务；要并行就在同一台机器起多个 worker + 多个 agent 名（`max_concurrency` 只影响 dispatch 的分配）。
 - claim/res 是分支，只在进行中存在；`close` 会归档结果并删分支。
-- 没有内置 PR 创建；合并这一步留给人或总控用 git 做。
+- 没有内置 PR 创建、没有自动合并到 main；合并留给人或总控用 git 做，`close` 只做验收归档。
+- 看板是只读的；写操作（`take` / `submit` / `close` / `retry`）走 CLI。
 - 任务卡 frontmatter 只支持标量和标量列表，够用就好。
 - 自建裸仓建议关掉 `receive.autogc` + `gc.auto`，夜间手动 gc；原因见 `docs/操作手册.md` §8。
+- Windows 引导脚本只在 PowerShell 7 上验证过语法和 dry-run，没在真机跑过；国产 GUI agent 没有 CLI，走 `manual`。
 
 ## 9. 自测
 
@@ -206,6 +221,7 @@ PORT=8787 INTERVAL=20 ./scripts/serve-dashboard.sh
 
 五列看板（待领取 / 进行中 / 待合并 / 异常 / 已关闭），租约过期实时变红，
 支持仓库/owner/搜索筛选、详情抽屉、深浅色。零依赖静态页，`serve.py` 只用标准库。
+看板**只读**，写操作走 CLI（`take` / `submit` / `close` / `retry`）。
 说明见 [dashboard/README.md](dashboard/README.md)，实跑验收见
 [dashboard/VERIFICATION.md](dashboard/VERIFICATION.md)。
 
@@ -215,4 +231,7 @@ PORT=8787 INTERVAL=20 ./scripts/serve-dashboard.sh
 - [任务卡模板](docs/任务卡模板.md)：代码卡 / 验收卡 / 诊断卡 / 手动卡
 - [迁移指南](docs/迁移指南.md)：从聊天里手工分发迁到蜂巢
 - [Windows 接入](windows/README.md)：bootstrap.ps1 + 计划任务
+- [Gitea 接入](docs/Gitea接入.md)：私有仓、host-scoped 凭据 helper、T-0001 冒烟记录
+- [chroot GUI agent](docs/CHROOT_GUI_AGENTS.md)：小浣熊 / WorkBuddy 的完整接法
 - [方案全文](../多机Agent协同开发方案.md)
+- [CHANGELOG](CHANGELOG.md)

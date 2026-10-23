@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.3.0 — 2026-10-23
+
+### Added
+
+- `hive take T-xxxx --agent <name>`：不启动 worker 的人工领取（assign + claim + 建 worktree，
+  并打印工作目录 / 任务卡 / summary 路径），适合人盯着 GUI agent 干活的场景。
+  与该 agent 的 worker 二选一，不要同时用。
+- `hive submit T-xxxx`：人工提交（commit + push `task/T-xxxx` + 跑 verify + 写结果）；
+  验证不通过会写 `failed`，改完再 submit 一次即可。配套 `docs/操作手册.md` §4.1 和测试覆盖。
+- `dashboard/`：零依赖静态看板（`serve.py` 只用标准库）。五列分布、租约过期实时变红、
+  仓库/owner/搜索筛选、详情抽屉、深浅色；`scripts/serve-dashboard.sh` 用
+  `hive status --json` 定时刷新。jsdom 固定时钟 19 条 DOM 断言 +
+  `dashboard/verify.sh`（MIME、目录穿越、端口隔离）全部通过。
+- `scripts/gitea-credential.sh`：host-scoped 凭据 helper，从 `~/dswork/.env` 读 token，
+  不进 git 配置、不进进程参数。
+- `scripts/start-worker.sh`：启动 worker 时把 `OPENAI_API_KEY` 映射成 `DEEPSEEK_API_KEY`；
+  多 worker 用 `HIVE_DIR` 各自 clone，避免抢同一个 git index。
+- `scripts/dispatch-loop.sh`：总控侧自动分派循环（默认 60s 一次 `dispatch --apply`）。
+- `docs/CHROOT_GUI_AGENTS.md`：chroot 里小浣熊 / WorkBuddy 的完整接法——共享 `/home`、
+  manual worker、WorkBuddy root 权限坑、GUI 卡超时与「迟到 summary」的恢复步骤。
+- manual 交接时打印 worktree 绝对路径（flush 到终端），避免 GUI agent 找错目录。
+
+### Changed
+
+- 任务卡模板与 chroot 指南：GUI 卡统一 `timeout_minutes: 180`、`lease_minutes: 240`
+  （实测小浣熊一张文档卡约 65 分钟，默认 60 分钟会在它写完 summary 前超时）。
+
+### Fixed
+
+- `status` 在结果 summary 为空时不再崩（GUI agent 超时前只写了一半的场景）。
+
+### Ops
+
+- 工具仓推成 Gitea 私有仓 `skywalk/hive`，登记 4 个 agent
+  （fb88-verify / fb88-dsh / raccoon / workbuddy）。
+- 真实任务闭环 4 张：T-0001 集成冒烟（verify 模式）、T-0002 / T-0003 known-issues
+  状态同步、T-0004 VSCode 片段补齐，全部 `close`，代码合入 light main。
+
 ## 0.2.0 — 2026-10-23
 
 ### Added
