@@ -250,6 +250,11 @@ def _code_refs(world, pattern="refs/heads/task/*") -> set[str]:
     return {r.rsplit("/", 1)[-1] for r in out.split()}
 
 
+def _local_branches(world, pattern="verify/*") -> set[str]:
+    out = sh(["git", "-C", world.code_clone("fb"), "branch", "--list", pattern]).stdout
+    return {l.strip().removeprefix("* ").strip() for l in out.splitlines() if l.strip()}
+
+
 def test_prune_deletes_only_merged_branches(world, fake_cmd):
     world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
     # 卡 1：跑通，然后由总控合并进代码仓 main
@@ -278,6 +283,8 @@ def test_prune_deletes_only_merged_branches(world, fake_cmd):
     sh(["git", "commit", "-q", "-m", "junk"], cwd=code, env=world.git_env)
     sh(["git", "push", "-q", "origin", "task/T-9999"], cwd=code, env=world.git_env)
     sh(["git", "checkout", "-q", "main"], cwd=code, env=world.git_env)
+    # 本地 verify/* 遗留：verify 模式不推远端，worktree 删了分支还在，应被清掉
+    sh(["git", "branch", "verify/T-0008", "origin/main"], cwd=code, env=world.git_env)
 
     before = _code_refs(world)
     assert {"T-0001", "T-0002", "T-9999"} <= before, before
@@ -286,12 +293,15 @@ def test_prune_deletes_only_merged_branches(world, fake_cmd):
     dry = world.hive("prune")
     out = dry.stdout + dry.stderr
     assert "[dry-run]" in out and "T-0001" in out, out
+    assert "verify/T-0008" in out, out
     assert _code_refs(world) == before
+    assert _local_branches(world) == {"verify/T-0008"}
 
-    # --apply：只删「已合并且不在飞」的 T-0001
+    # --apply：只删「已合并且不在飞」的 T-0001，外加本地 verify 遗留
     run = world.hive("prune", "--apply")
     out = run.stdout + run.stderr
     assert _code_refs(world) == {"T-0002", "T-9999"}, out
+    assert _local_branches(world) == set(), out
     assert "T-0002" in out and "T-9999" in out  # 两条保留的原因都交代了
     assert "T-0001" in out and "已删除" in out
 

@@ -938,8 +938,6 @@ class Hive:
                      "refs/remotes/origin/task/", "refs/remotes/origin/verify/"],
                     path, check=False)
             branches = [r[len("refs/remotes/origin/"):] for r in p.stdout.split()]
-            if not branches:
-                continue
             current = git(["branch", "--show-current"], path, check=False).stdout.strip()
             for br in sorted(branches):
                 tid = br.split("/", 1)[1] if "/" in br else ""
@@ -964,6 +962,24 @@ class Hive:
                     git(["branch", "-D", br], path, check=False)
                 log(f"{name}/{br}: 已删除（已合并进 {base}）")
                 deleted += 1
+            # 本地 verify/* 遗留：verify 模式不推远端，worktree 删了分支还在。
+            # 这种分支随时能被 worker 按 base 重建，删了不丢东西
+            loc = git(["for-each-ref", "--format=%(refname)", "refs/heads/verify/"],
+                      path, check=False)
+            for ref in sorted(loc.stdout.split()):
+                br = ref[len("refs/heads/"):]
+                tid = br.split("/", 1)[1] if "/" in br else ""
+                if tid in busy:
+                    continue
+                if not apply:
+                    log(f"[dry-run] {name}/{br}: 本地遗留，将删除")
+                    deleted += 1
+                    continue
+                d = git(["branch", "-D", br], path, check=False)
+                if d.returncode == 0:
+                    log(f"{name}/{br}: 本地遗留，已删除")
+                    deleted += 1
+                # 删不掉说明还被某个 worktree 占着，不动它
         log(f"prune 完成：删除 {deleted}，保留 {kept}"
             + ("" if apply else "（dry-run，加 --apply 才真删）"))
 
