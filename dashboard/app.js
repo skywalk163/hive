@@ -697,6 +697,68 @@
 
     // 相对时间自行重算（不重新请求网络）
     setInterval(function () { if (!state.inflight) render(); }, TICK_MS);
+
+    // CI 状态条
+    setInterval(loadCI, CI_MS);
+  }
+
+  // ---------- CI 监控条 ----------
+  var CI_MS = 30000;
+
+  function ciStatusClass(st) {
+    return ({ Waiting: 'ci-wait', Running: 'ci-run', Success: 'ci-ok',
+              Failure: 'ci-bad', Canceled: 'ci-cancel', Blocked: 'ci-bad' })[st] || 'ci-unknown';
+  }
+
+  function ciBadge(st) {
+    return '<span class="ci-dot ' + ciStatusClass(st) + '"></span>' + esc(st || '?');
+  }
+
+  function renderCI(data) {
+    var root = document.getElementById('ci-strip');
+    if (!root) return;
+    if (!data) { root.hidden = true; root.innerHTML = ''; return; }
+    var html = '';
+    var rs = data.runners || [];
+    if (rs.length) {
+      html += '<div class="ci-group"><span class="ci-label">Runner</span>' +
+        rs.map(function (r) {
+          return '<span class="ci-chip"><span class="ci-dot ' +
+            (r.status === 'online' ? 'ci-ok' : 'ci-bad') + '"></span>' +
+            esc(r.name || '?') + ' <em>' + esc(r.status || '?') + '</em></span>';
+        }).join('') + '</div>';
+    }
+    var repos = data.repos || {};
+    var names = Object.keys(repos);
+    if (names.length) {
+      html += '<div class="ci-group"><span class="ci-label">CI</span>' +
+        names.map(function (r) {
+          var o = repos[r], l = o && o.latest;
+          var tail = '';
+          if (l && l.title) tail = '<em class="ci-title">' + esc(l.title.slice(0, 38)) + '</em>';
+          var st = (o && o.error) ? '' : (l ? l.status : '');
+          var body = o && o.error
+            ? '<span class="ci-dot ci-bad"></span>错误'
+            : ciBadge(st);
+          return '<span class="ci-chip">' + esc(r.split('/').pop()) + ': ' + body +
+            (l ? ' <em>#' + l.run + '</em>' : '') + tail + '</span>';
+        }).join('') + '</div>';
+    }
+    html += '<span class="ci-time">' +
+      esc(data.checked_at ? data.checked_at.slice(11, 19) : '') + '</span>';
+    root.innerHTML = html;
+    root.hidden = false;
+  }
+
+  function loadCI() {
+    try {
+      fetch('/ci.json', { cache: 'no-store', headers: { Accept: 'application/json' } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) { renderCI(d); })
+        .catch(function () { renderCI(null); });
+    } catch (e) {
+      renderCI(null);
+    }
   }
 
   // ---------- 启动 ----------
@@ -710,6 +772,7 @@
     el.auto.checked = state.autoRefresh;
 
     loadStatus();
+    loadCI();
   }
 
   init();

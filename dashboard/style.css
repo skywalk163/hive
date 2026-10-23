@@ -431,3 +431,30 @@ body.dropping .drop-hint { opacity: 1; visibility: visible; }
   .card.is-new { animation: none; }
   .overlay, .drawer, .drop-hint, .spinner { transition: none; animation: none; }
 }
+
+/* ---- CI 监控条 ---- */
+.ci-strip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px;
+  margin: 0 0 14px; padding: 8px 12px;
+  background: var(--surface, #1e2230); border: 1px solid var(--border, #2c3242);
+  border-radius: 8px; font-size: 12px; color: var(--text-2, #9aa3b5);
+}
+.ci-group { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.ci-label { font-weight: 600; color: var(--text-1, #e6e9f0); margin-right: 2px; }
+.ci-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border, #2c3242);
+}
+.ci-chip em { font-style: normal; color: var(--text-3, #6b7488); }
+.ci-chip .ci-title { color: var(--text-3, #6b7488); max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle; }
+.ci-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.ci-ok { background: #3fb950; }
+.ci-bad { background: #f85149; }
+.ci-run { background: #d29922; animation: ci-pulse 1.2s ease-in-out infinite; }
+.ci-wait { background: #9aa3b5; }
+.ci-cancel { background: #6b7488; }
+.ci-unknown { background: #8b949e; }
+.ci-time { margin-left: auto; color: var(--text-3, #6b7488); }
+@keyframes ci-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
