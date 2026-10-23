@@ -44,7 +44,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -351,20 +351,60 @@ class Hive:
                     self.dir, check=False).returncode == 0
         if ahead:
             return
-        dirty = git(["status", "--porcelain"], self.dir, check=False).stdout.strip()
+        # 只看**已跟踪**文件的改动：reset --hard 会丢的就是这些。
+        # 未跟踪的文件（草稿、编辑器 lock 文件）reset 不会动，不该拦着同步 ——
+        # 否则总控只要有个零散文件，land → close 就会在这里卡死。
+        dirty = git(["status", "--porcelain", "--untracked-files=no"],
+                    self.dir, check=False).stdout.strip()
         if dirty:
             raise HiveError(
-                "协调仓库落后于 origin/main，且工作区有未提交的改动，不敢自动 reset。"
+                "协调仓库落后于 origin/main，且有已跟踪文件被改动，不敢自动 reset。"
                 "先处理掉这些改动（或手动 git pull）再跑：" + dirty.replace("\n", " ")[:200])
         git(["reset", "--hard", "-q", "origin/main"], self.dir)
 
-    def commit_and_push(self, message: str) -> bool:
-        git(["add", "-A"], self.dir)
+    def _add(self, paths: list[str]) -> None:
+        """只 stage 这些路径（已删除但仍被跟踪的也算，好把删除记进去）。
+
+        路径不存在且没被跟踪时跳过 —— `git add -- 不存在的路径` 会直接 fatal。
+        """
+        want = []
+        for p in paths:
+            if (self.dir / p).exists():
+                want.append(p)
+            elif git(["ls-files", "--", p], self.dir, check=False).stdout.strip():
+                want.append(p)
+        if want:
+            git(["add", "-A", "--", *want], self.dir)
+
+    def commit_and_push(self, message: str, paths: list[str] | None = None) -> bool:
+        """提交并推 main。给了 paths 就只提交这些文件。
+
+        为什么必须收口：协调仓库的 main 是审计记录（卡片、结果、租约都在上面）。
+        以前无条件 `git add -A`，总控工作区里任何未提交的改动都会被卷进这一次提交 ——
+        提交信息说「加一张卡」，内容却是一个完整功能，事后没法靠 git log 回溯。
+        已经发生过两次（MCP 那 705 行、sync_main 那个修复）。
+
+        没给 paths 时保留老的全量行为（向后兼容），但会打一条告警。
+        """
+        if paths is not None:
+            self._add(paths)
+        else:
+            log("commit_and_push 未指定 paths：将提交工作区全部改动"
+                "（总控自己的手头活也会被卷进去）")
+            git(["add", "-A"], self.dir)
         if git(["diff", "--cached", "--quiet"], self.dir, check=False).returncode == 0:
             return False
         git([*IDENT, "commit", "-m", message], self.dir)
         git(["push", "origin", "main"], self.dir)
         return True
+
+    def _card_paths(self, tid: str, owner: str | None = None) -> list[str]:
+        """一张卡在协调仓库里涉及的文件：任务卡 + 收件箱信号（+ 归档结果）。"""
+        out = [f"tasks/{tid}.md"]
+        if owner:
+            out.append(f"inbox/{owner}/{tid}.md")
+        out.append(f"results/{tid}.json")
+        return out
 
     def cards(self) -> dict[str, dict]:
         out = {}
@@ -411,7 +451,8 @@ class Hive:
     # -- 命令 -------------------------------------------------------------- #
     def cmd_assign(self, tid: str, agent: str) -> None:
         self._assign_local(tid, agent)
-        self.commit_and_push(f"assign {tid} -> {agent}")
+        self.commit_and_push(f"assign {tid} -> {agent}",
+                             self._card_paths(tid, agent))
         log(f"{tid} 已分派给 {agent}")
 
     def cmd_close(self, tid: str, note: str = "") -> None:
@@ -426,7 +467,8 @@ class Hive:
         card["state"] = "done"
         body = card["_body"] + (f"\n\n---\n\n**完成备注（{iso()}）**：{note}\n" if note else "")
         self.save_card(card, body)
-        self.commit_and_push(f"close {tid}" + (f": {note}" if note else ""))
+        self.commit_and_push(f"close {tid}" + (f": {note}" if note else ""),
+                             [f"tasks/{tid}.md", f"results/{tid}.json"])
         # 收口：删掉 claim/res 分支，Gitea 分支列表里只剩进行中的任务
         for ref in (f"claim/{tid}", f"res/{tid}"):
             if rev_parse(self.dir, f"origin/{ref}"):
@@ -824,7 +866,10 @@ class Hive:
             for c, n, _r in plan:
                 self._assign_local(c["id"], n)
             summary = ", ".join(f"{c['id']}->{n}" for c, n, _r in plan)
-            self.commit_and_push(f"dispatch: {summary}")
+            paths: list[str] = []
+            for c, n, _r in plan:
+                paths += self._card_paths(c["id"], n)
+            self.commit_and_push(f"dispatch: {summary}", paths)
             log(f"已分派 {len(plan)} 张卡")
         elif plan:
             print("（dry-run；加 --apply 才写入）")
@@ -1047,7 +1092,7 @@ class Hive:
             raise HiveError(f"{tid} 已被 {claim.get('agent')} 领取")
 
         self._assign_local(tid, agent)
-        self.commit_and_push(f"take {tid} -> {agent}")
+        self.commit_and_push(f"take {tid} -> {agent}", self._card_paths(tid, agent))
 
         w = Worker(self.dir, agent)
         wt = Path(w.cfg.get("worktrees") or (w.state / "wt")).expanduser() / tid
@@ -1291,7 +1336,7 @@ class Hive:
         archived = self.dir / "results" / f"{tid}.json"
         if archived.exists():
             archived.unlink()  # 重新入队时把归档也撤掉，否则 worker 会以为已完成
-        self.commit_and_push(f"retry {tid}")
+        self.commit_and_push(f"retry {tid}", self._card_paths(tid, target))
         log(f"{tid} 已重新入队 -> {target}")
 
     def cmd_gc(self, minutes: int) -> None:
@@ -1858,7 +1903,8 @@ def cmd_agent(args) -> None:
     }
     p = h.dir / "agents" / f"{args.name}.json"
     p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    h.commit_and_push(f"agent: register {args.name}")
+    h.commit_and_push(f"agent: register {args.name}",
+                      [f"agents/{args.name}.json"])
     log(f"已登记 {args.name}")
 
 
@@ -1888,7 +1934,7 @@ def cmd_task(args) -> None:
         "timeout_minutes": args.timeout, "created": iso(),
     }
     write_card(h.dir / "tasks" / f"{tid}.md", card, body or f"# {args.title}\n")
-    h.commit_and_push(f"task: add {tid} {args.title}")
+    h.commit_and_push(f"task: add {tid} {args.title}", [f"tasks/{tid}.md"])
     log(f"已创建 {tid}")
 
 

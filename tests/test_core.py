@@ -634,3 +634,95 @@ def test_audit_catches_real_confession_wording(world, fake_cmd):
                        "res/T-0001", "origin/main", "forge", force=True)
     rep = json.loads(world.hive("audit", "T-0001", "--json").stdout)
     assert not any("自称" in w for w in rep["warnings"]), rep
+
+
+# --------------------------------------------------------------------------- #
+# 总控写命令的提交范围收口
+# --------------------------------------------------------------------------- #
+
+def _head_stat(world) -> str:
+    return sh(["git", "-C", str(world.hive1), "show", "--stat", "--format=",
+               "HEAD"]).stdout
+
+
+def _porcelain(world) -> str:
+    return sh(["git", "-C", str(world.hive1), "status", "--porcelain"]).stdout
+
+
+def test_task_new_does_not_sweep_unrelated_changes(world):
+    """建卡只提交那张卡 —— 总控工作区里别的改动不许被卷进来。
+
+    真实事故：mcp_server.py（705 行）等一批改动还没提交时跑了一次 `task new`，
+    全被塞进「task: add T-0110」提交推了上去。
+    """
+    (world.hive1 / "notes.tmp").write_text("总控手头的活\n", encoding="utf-8")
+
+    world.add_task("T-0001")
+
+    stat = _head_stat(world)
+    assert "T-0001" in stat, stat
+    assert "notes.tmp" not in stat, f"无关的改动被卷进来了：{stat}"
+    assert "notes.tmp" in _porcelain(world), "无关改动应该原样留在工作区"
+
+
+def test_close_commits_only_card_and_result(world, fake_cmd):
+    """close 只提交任务卡和归档结果。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    world.add_task("T-0001", verify=["true"])
+    world.hive("assign", "T-0001", "--agent", "fb")
+    world.run_worker("fb")
+
+    (world.hive1 / "scratch.txt").write_text("别卷我\n", encoding="utf-8")
+    world.hive("close", "T-0001", "--note", "ok")
+
+    stat = _head_stat(world)
+    assert "tasks/T-0001.md" in stat, stat
+    assert "results/T-0001.json" in stat, stat
+    assert "scratch.txt" not in stat, f"scratch.txt 被卷进来了：{stat}"
+    assert "scratch.txt" in _porcelain(world)
+
+
+def test_assign_and_take_only_touch_card_and_inbox(world, fake_cmd):
+    """assign / take 只动任务卡和对应的 inbox 信号。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    world.add_task("T-0001")
+    (world.hive1 / "wip.md").write_text("写到一半的文档\n", encoding="utf-8")
+
+    world.hive("assign", "T-0001", "--agent", "fb")
+    stat = _head_stat(world)
+    assert "tasks/T-0001.md" in stat and "inbox/fb/T-0001.md" in stat, stat
+    assert "wip.md" not in stat, stat
+    assert "wip.md" in _porcelain(world), "wip.md 应该还在工作区里"
+
+
+def test_commit_and_push_without_paths_keeps_old_behaviour(world):
+    """向后兼容：不传 paths 时仍然是全量提交（但会打告警）。"""
+    (world.hive1 / "legacy.txt").write_text("老行为\n", encoding="utf-8")
+
+    h = hive.Hive(world.hive1)
+    assert h.commit_and_push("legacy: 全量提交") is True
+
+    stat = _head_stat(world)
+    assert "legacy.txt" in stat, stat
+    assert "legacy.txt" not in _porcelain(world)
+
+
+def test_sync_main_keeps_untracked_files(world):
+    """同步时未跟踪的文件不该被当成「脏」—— reset --hard 不会动它们。
+
+    总控工作区里有个草稿或编辑器 lock 文件是常态，不能因此让 land → close 卡死。
+    """
+    (world.hive1 / "scratch.txt").write_text("总控的草稿\n", encoding="utf-8")
+
+    # 从另一个 clone 推一版，让 hive1 落后于 origin/main
+    (world.hive2 / "pushed-elsewhere.md").write_text("别的机器推的\n", encoding="utf-8")
+    for args in (["add", "-A"],
+                 ["commit", "-q", "-m", "from elsewhere"],
+                 ["push", "-q", "origin", "main"]):
+        sh(["git", "-C", str(world.hive2)] + args, env=world.git_env)
+
+    h = hive.Hive(world.hive1)
+    h.sync_main()  # 不该抛错
+
+    assert (world.hive1 / "scratch.txt").exists(), "未跟踪的文件不该被 reset 掉"
+    assert (world.hive1 / "pushed-elsewhere.md").exists(), "应该已经跟上了 origin/main"

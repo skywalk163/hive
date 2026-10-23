@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.1 — 2026-10-23
+
+### Fixed
+
+- **`commit_and_push` 收口**：新增 `paths` 参数，7 个调用点都改成只提交本命令该动的文件
+  （`task new` 只交卡片、`assign`/`take` 交卡片+inbox、`close` 交卡片+归档结果、
+  `retry` 交卡片+inbox+归档、`agent add` 只交该 agent 的配置）。
+  以前无条件 `git add -A`，总控工作区里任何未提交改动都会被卷进这次提交 ——
+  协调仓库的 main 是审计记录，提交信息和内容对不上之后就没法靠 `git log` 回溯。
+  **真实事故两起**：mcp_server.py（705 行）被卷进 `task: add T-0110`；
+  sync_main 修复被卷进 `close T-0110`。
+  没给 paths 时保留全量行为（向后兼容），但会打一条告警日志。
+- **`sync_main` 不再把未跟踪文件当「脏」**：`reset --hard` 不会动未跟踪文件，
+  之前用 `git status --porcelain` 判断会把草稿、编辑器 lock 文件也算进去，
+  导致 land 推完 main 之后紧接的 close 直接卡死。改成 `--untracked-files=no`。
+- 测试 5 例，全量 49 passed。
+
 ## 0.7.0 — 2026-10-23
 
 ### Added
