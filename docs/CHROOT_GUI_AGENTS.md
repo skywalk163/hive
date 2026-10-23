@@ -94,9 +94,15 @@ summary 路径照抄绝对路径，避免它写错地方。
     sudo chown -R skywalk:wheel /home/skywalk/.hive/wt/workbuddy/T-0100
     ```
 - **一个 app 同一时间只接一张卡**（manual worker 会阻塞等 summary），卡要小：
-  一张 30–60 分钟能做完，`timeout_minutes` 写 60–90。
+  一张 60–120 分钟能做完；GUI 卡统一 `timeout_minutes: 180`、`lease_minutes: 240`。
+  T-0003 实测小浣熊用了约 65 分钟，默认 60 分钟会在它写完 summary 前超时。
 - 如果 agent 没写 summary：worker 到点标 `failed`，worktree 保留（`--keep`）；
   看日志、补 summary，或 `hive retry` 重来。
+- **如果 GUI 在超时之后才写完**（T-0003 遇到过）：
+  1. 在保留的 worktree 里把它的改动 commit 并 push 到 `task/T-xxxx`；
+  2. 补写 `.hive/summary.md`（内容按它的实际改动写）；
+  3. `hive retry T-xxxx`（不要 `--fresh`），worker 会从已推送的分支重新 verify；
+  4. 通过后合并、`close`。
 - 不要让 GUI agent 自己 `git push`，冲突和凭据都不好处理；统一由 worker 提交。
 
 ## 清理 worktree
