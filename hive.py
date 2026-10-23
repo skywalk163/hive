@@ -286,6 +286,32 @@ class Hive:
     def fetch(self) -> None:
         git(["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"], self.dir)
 
+    def sync_main(self) -> None:
+        """把协调仓库的本地 main 对齐到 origin/main，写操作前调用。
+
+        只 fetch 不 reset 是不够的：卡片和结果是**工作区文件**，不 reset 读到的还是旧卡。
+        更麻烦的是自举场景 —— 协调仓库和代码仓是同一个，`land` 刚把 main 推走，
+        紧接着 `close` 还在旧的本地 main 上提交，`git push origin main` 必然非快进被拒。
+
+        安全边界：本地领先（有 origin 没有的提交）就不动，让 push 正常把它们带上去；
+        落后或分叉才 reset —— 且工作区必须是干净的，否则宁可报错也不丢人的改动。
+        """
+        self.fetch()
+        head = rev_parse(self.dir, "HEAD")
+        remote = rev_parse(self.dir, "origin/main")
+        if not remote or not head or head == remote:
+            return
+        ahead = git(["merge-base", "--is-ancestor", "origin/main", "HEAD"],
+                    self.dir, check=False).returncode == 0
+        if ahead:
+            return
+        dirty = git(["status", "--porcelain"], self.dir, check=False).stdout.strip()
+        if dirty:
+            raise HiveError(
+                "协调仓库落后于 origin/main，且工作区有未提交的改动，不敢自动 reset。"
+                "先处理掉这些改动（或手动 git pull）再跑：" + dirty.replace("\n", " ")[:200])
+        git(["reset", "--hard", "-q", "origin/main"], self.dir)
+
     def commit_and_push(self, message: str) -> bool:
         git(["add", "-A"], self.dir)
         if git(["diff", "--cached", "--quiet"], self.dir, check=False).returncode == 0:
@@ -343,8 +369,8 @@ class Hive:
         log(f"{tid} 已分派给 {agent}")
 
     def cmd_close(self, tid: str, note: str = "") -> None:
+        self.sync_main()
         card = self.card(tid)
-        self.fetch()
         res = read_ref_file(self.dir, f"origin/res/{tid}", f"results/{tid}.json")
         if res is not None:
             # 归档到 main：分支可以删，审计不会丢

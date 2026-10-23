@@ -1,0 +1,36 @@
+{
+  "task": "T-0110",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0110",
+  "base": "main",
+  "head": "a209dc271cbf088f4f5de02290e67a88250eaf91",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-23T22:49:44+00:00",
+  "finished_at": "2026-10-23T23:03:11+00:00",
+  "duration_s": 807.3,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests -q --tb=short",
+      "code": 0,
+      "tail": [
+        "....................................                                     [100%]",
+        "36 passed in 73.63s (0:01:13)"
+      ]
+    },
+    {
+      "cmd": "grep -q 'def cmd_land' hive.py",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import hive,sys; sys.exit(0 if hasattr(hive.Hive,'cmd_land') else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0110 完成：hive land —— 闭环最后一公里自动化\n\n执行者：workbuddy（manual 模式，`hive take` + `hive submit`）\n\n## 做了什么\n\n新增 `hive land T-xxxx [--apply] [--all] [--json]`，把「结果 done → 合入 main → close」\n这段以前全靠人手工的步骤自动化掉。\n\n**合入条件**（不满足就 `blocked` 并逐条列原因）：\n结果是 done / verify 全绿 / 卡未 close / `depends_on` 全部 close。\n\n**合并方式**：在临时 worktree `~/.hive/land/<tid>` 里做，用完即拆。\n不碰主 checkout，也不需要 clone。预演是**真跑一遍 merge**，不是用 `merge-tree` 猜，\n所以报冲突就是真冲突（这也意味着 dry-run 有真实成本，但换来的是确定性）。\n\n**安全**：冲突一律不自动解、不 force push，`conflicts` 给文件清单；\n默认 dry-run，`--all` 遇冲突停下。\n\n## 几个实现上的判断\n\n- **不在主 checkout 上 merge**：hive 自举时代码仓就是总控的工作目录，\n  在上面 merge 会动到人的工作区（有未提交改动时 git 还会直接拒绝）。用临时 worktree 隔开。\n- **merge 显式带 `-c user.name/-c user.email`**：第一天就踩了 —— 测试环境里\n  `git merge` 以「请告诉我你是谁」失败，而且**不留任何冲突标记**，\n  `--diff-filter=U` 查出来是空列表，看起来像「合并成功但没冲突」，非常难查。\n  现在除了带身份，非冲突性失败也会把 git 的原话塞进 `problems`。\n- **`--all` 遇到冲突停下而不是跳过**：后面的卡多半建立在冲突那张之上，跳过继续合只会更乱。\n- **不重复跑 verify**：结果里的 verify 已经是 worker 刚跑过的；重跑一遍是 T-0122\n  （verify 强度分级）该管的事，本卡不越界。\n\n## 测试\n\n`tests/test_core.py` 新增 4 例，全量 36 passed：\n- 合入并 close（含结果归档、claim/res 分支清理、产物真的进了 main）；\n- 条件不满足被拦（没结果 / 结果 failed）；\n- **真冲突且不 force**（main 保持在冲突制造者那个 commit，卡不被 close）；\n- `--all` 只挑能合的，dry-run 不动 main。\n\n## 已知边界 / 留给后面\n\n- 冲突状态字段（`conflict`）本卡没写 —— 等 T-0113 把状态机补齐后再接上，\n  现在只通过返回的 `conflicts` 字段表达。\n- `hive land` 还没暴露到 MCP（要等 T-0123 的 controller 角色）。\n- 没做 `--reverify`：合并前不重跑验收，信任 worker 的结果。",
+  "error": ""
+}
