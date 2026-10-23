@@ -1,30 +1,50 @@
 #!/bin/sh
-# dsh-exec — 在 linuxulator 里跑 dsh headless，作为 hive 的 exec worker 后端。
+# dsh-exec — 跑 dsh headless，作为 hive 的 exec worker 后端。
 #
-# 为什么不能直接跑：FreeBSD 原生 node（node22/node24 端口都试过）把 internal/*
+# 为什么需要包装：FreeBSD 原生 node（node22/node24 端口都试过）把 internal/*
 # 模块全部关掉了，dsh 的 app-boot 一 require('internal/modules/esm/loader')
-# 就 MODULE_NOT_FOUND 直接崩（host preparation failed）。WorkBuddy 自带的 Linux
-# node（chroot 内 /home/skywalk/.workbuddy/binaries/node/versions/22.22.2，真实路径
-# /opt/WorkBuddy/resources/runtime/node）有这些 internals；且 hive 仓路径在 chroot
-# 里因 nullfs 挂载与宿主一致，所以整条命令挪进 /compat/ubuntu 用 skywalk 身份跑
-# （dsh-headless 自己会补 DEEPSEEK_API_KEY）。
+# 就 MODULE_NOT_FOUND 直接崩（host preparation failed）。WorkBuddy 自带的 Linux node
+# （chroot 内 /home/skywalk/.workbuddy/binaries/node/versions/22.22.2）有这些 internals。
+#
+# 两种运行环境，自动判断：
+#   1) FreeBSD 宿主：看不到 /home/skywalk/.workbuddy（它在 Ubuntu 根盘里），
+#      但 /compat/ubuntu 在 —— 走 `sudo chroot /compat/ubuntu`。
+#      常驻 worker 没有 TTY，所以配 SUDO_ASKPASS 免交互（见 sudo-askpass.sh）。
+#   2) 已经在 linuxulator 里（/compat/ubuntu 不可见，uname 报 Linux on FreeBSD kernel）：
+#      .workbuddy 直接就看得见，不需要 chroot，也就不需要 sudo。
+#      WorkBuddy 自己的工具环境就是这种，所以这条路径是常态。
 #
 # 用法（与 hive exec worker 约定一致：prompt 走 stdin，回答走 stdout）：
 #   printf '任务文本' | scripts/dsh-exec
 #
 # 环境变量：
-#   DSH_NODE    覆盖 node 路径（默认 WorkBuddy 自带 Linux node）
+#   DSH_NODE       覆盖 node 路径
+#   SUDO_ASKPASS   宿主环境下给 `sudo -A` 用的取密码脚本
+#   HIVE_HOME      hive 仓路径（默认 ~/dswork/hive）
 set -u
 
 DSH_NODE="${DSH_NODE:-/home/skywalk/.workbuddy/binaries/node/versions/22.22.2/bin/node}"
+HIVE_HOME="${HIVE_HOME:-$HOME/dswork/hive}"
 
-# chroot 内才能看到 /home/skywalk/.workbuddy（它在 Ubuntu 根盘里，宿主看不到），
-# 所以存在性检查放到 chroot 内侧做，stdin/stdout 原样透传。
-exec sudo chroot /compat/ubuntu /bin/bash -c '
-  N="$1"
-  if [ ! -x "$N" ]; then
-    echo "dsh-exec: 找不到 linux node: $N" >&2
+# --- 路径 1：FreeBSD 宿主，chroot 进 linuxulator ------------------------------- #
+if [ -d /compat/ubuntu ]; then
+    SUDO_ASKPASS="${SUDO_ASKPASS:-$HIVE_HOME/scripts/sudo-askpass.sh}"
+    export SUDO_ASKPASS
+    exec sudo -A -p '' chroot /compat/ubuntu /bin/bash -c '
+      N="$1"
+      if [ ! -x "$N" ]; then
+        echo "dsh-exec: 找不到 linux node: $N" >&2
+        exit 127
+      fi
+      exec su skywalk -c "DSH_NODE=$N exec /home/skywalk/dswork/hive/scripts/dsh-headless --profile headless -"
+    ' _ "$DSH_NODE"
+fi
+
+# --- 路径 2：已经在 linuxulator 里，直接跑 ------------------------------------ #
+if [ ! -x "$DSH_NODE" ]; then
+    echo "dsh-exec: 找不到 node: $DSH_NODE" >&2
+    echo "  （宿主环境请确认 /compat/ubuntu 存在；或设 DSH_NODE 指向可用 node）" >&2
     exit 127
-  fi
-  exec su skywalk -c "DSH_NODE=$N exec /home/skywalk/dswork/hive/scripts/dsh-headless --profile headless -"
-' _ "$DSH_NODE"
+fi
+
+exec "$HIVE_HOME/scripts/dsh-headless" --profile headless -
