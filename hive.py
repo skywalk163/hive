@@ -945,7 +945,7 @@ class Worker:
                     log(f"启动 GUI 失败（继续手动）: {e}")
             log(f"{tid} 手动模式：请在 {wt} 里让 GUI agent 完成，然后写 {summary_file}")
             print(f"\n=== 任务 {tid} 已就绪 ===\n工作目录: {wt}\n任务卡:   {wt/'.hive'/'task.md'}"
-                  f"\n完成后写: {summary_file}（或在此按 Ctrl-C 放弃）\n")
+                  f"\n完成后写: {summary_file}（或在此按 Ctrl-C 放弃）\n", flush=True)
             deadline = time.time() + int(card.get("timeout_minutes") or 120) * 60
             while time.time() < deadline:
                 if summary_file.exists() and summary_file.stat().st_size > 0:
