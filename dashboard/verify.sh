@@ -20,8 +20,8 @@ FAIL=0
 pass() { echo "  [PASS] $1"; }
 fail() { echo "  [FAIL] $1"; FAIL=1; }
 cleanup() {
-  pkill -f "serve.py.*--port 8787" 2>/dev/null
-  pkill -f "serve.py.*--port 8799" 2>/dev/null
+  pkill -f "serve.py.*--port 8897" 2>/dev/null
+  pkill -f "serve.py.*--port 8899" 2>/dev/null
   rm -rf __pycache__
 }
 trap cleanup EXIT
@@ -36,25 +36,25 @@ fi
 
 echo
 echo "=== 验收 2: 服务能启动并打印 URL ==="
-"$PY" serve.py --status sample-status.json --port 8787 >/tmp/hive_8787.log 2>&1 &
+"$PY" serve.py --status sample-status.json --port 8897 >/tmp/hive_8897.log 2>&1 &
 SRV_PID=$!
 sleep 2
 if kill -0 "$SRV_PID" 2>/dev/null; then
-  pass "进程存活 (pid=$SRV_PID)，启动日志：$(cat /tmp/hive_8787.log)"
+  pass "进程存活 (pid=$SRV_PID)，启动日志：$(cat /tmp/hive_8897.log)"
 else
-  fail "进程已退出，日志：$(cat /tmp/hive_8787.log)"
+  fail "进程已退出，日志：$(cat /tmp/hive_8897.log)"
 fi
 
 echo
 echo "=== 验收 3: /api/status 返回 6 条 ==="
-N=$(curl -s --max-time 5 http://127.0.0.1:8787/api/status | "$PY" -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null)
+N=$(curl -s --max-time 5 http://127.0.0.1:8897/api/status | "$PY" -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null)
 if [ "$N" = "6" ]; then pass "元素个数 = 6"; else fail "元素个数 = '${N:-空}'，期望 6"; fi
 
 echo
 echo "=== 附加: 静态资源状态码与 MIME ==="
 check() { # $1=路径 $2=期望状态 $3=期望 content-type 片段
   local out code ct
-  out=$(curl -s -o /dev/null -w "%{http_code} %{content_type}" --max-time 5 "http://127.0.0.1:8787$1")
+  out=$(curl -s -o /dev/null -w "%{http_code} %{content_type}" --max-time 5 "http://127.0.0.1:8897$1")
   code=${out%% *}; ct=${out#* }
   if [ "$code" = "$2" ] && printf '%s' "$ct" | grep -q "$3"; then
     pass "$1 -> $code $ct"
@@ -68,14 +68,14 @@ check "/style.css"  200 "text/css"
 
 echo
 echo "=== 附加: 目录穿越应被白名单挡掉（期望 404）==="
-TRAV=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:8787/../serve.py")
+TRAV=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:8897/../serve.py")
 if [ "$TRAV" = "404" ]; then pass "/../serve.py -> 404"; else fail "/../serve.py -> ${TRAV:-空}（期望 404）"; fi
 
 echo
 echo "=== 附加: status 文件缺失应返回 503 + JSON error ==="
-"$PY" serve.py --status /tmp/hive_no_such_status.json --port 8799 >/tmp/hive_8799.log 2>&1 &
+"$PY" serve.py --status /tmp/hive_no_such_status.json --port 8899 >/tmp/hive_8899.log 2>&1 &
 sleep 1.5
-OUT=$(curl -s -w "|%{http_code}" --max-time 5 http://127.0.0.1:8799/api/status)
+OUT=$(curl -s -w "|%{http_code}" --max-time 5 http://127.0.0.1:8899/api/status)
 CODE=${OUT##*|}; BODY=${OUT%|*}
 if [ "$CODE" = "503" ] && printf '%s' "$BODY" | grep -q '"error"'; then
   pass "503 + $BODY"
