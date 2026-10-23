@@ -1,0 +1,26 @@
+{
+  "task": "T-0100",
+  "agent": "fb88-dsh",
+  "status": "done",
+  "branch": "task/T-0100",
+  "base": "main",
+  "mode": "exec",
+  "head": "708be7e878a59c899665cdd651cb7219fb4632f3",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-23T23:08:54+08:00",
+  "finished_at": "2026-10-23T23:11:04+08:00",
+  "duration_s": 129.5,
+  "verify": [
+    {
+      "cmd": "test -f .gitea/workflows/ci.yml && bash -n scripts/*.sh && python3 -m py_compile hive.py dashboard/serve.py && python3 -m json.tool agents/fb88-dsh.json >/dev/null && python3 -m pytest tests -q --tb=short",
+      "code": 0,
+      "tail": [
+        "..............                                                           [100%]",
+        "14 passed in 18.65s"
+      ]
+    }
+  ],
+  "summary": "# T-0100 完成情况\n\n- 已新增 `.gitea/workflows/ci.yml`：push main / pull_request / 手动触发，`runs-on: freebsd`，`timeout-minutes: 30`。\n- 步骤：本地 `actions/checkout@v4`（http://192.168.1.5:3000）→ 安装 pytest + pytest-xdist（失败回退公共 PyPI）→ `pytest tests -q --tb=short` → `bash -n scripts/*.sh` → `py_compile hive.py dashboard/serve.py` → 逐个 `json.tool agents/*.json`。\n- 依赖/测试命令用 `python3` 而非 `python`：FreeBSD 上不保证有 `python`，本仓脚本与验收命令也都用 `python3`。\n- 修改文件：`.gitea/workflows/ci.yml`；`.hive/summary.md`（本文件）。未改 README/手册，未动其它仓，未改 runner 配置，未加 label。\n- 观测链路：CI 文件名固定为 `ci.yml`，`CI_REPOS=skywalk/hive ./scripts/ci-check.sh` 的 `ci\\.yml #N` 正则可匹配最新 run，结果写 `dashboard/ci.json`，默认只盯 `skywalk/hive`（需至少有一次 run，否则显示 none）。\n- 验证未能执行：本会话所有 bash 调用均报 `sandbox mode \"workspace-write\" ... no sandbox backend is usable`，升级 danger-full-access 又无审批通道；子代理复现同一错误。因此 pytest、bash -n、py_compile、json.tool 均未在本地跑过。\n- 已做静态核对：YAML 结构、缩进与 Gitea Actions 语法手检通过；hive.py、dashboard/serve.py、agents/fb88-dsh.json、scripts/ci-check.sh 均存在且可读。\n- 遗留风险：首个真实 CI run 尚未验证；若 fb5 runner 的 `python3 -m pip` 受 externally-managed 限制，需要在后续小步改用 venv。\n- 任务卡验收还要求“README 或手册提一句 CI”，但本卡 paths 只允许 `.gitea/workflows/ci.yml`，按硬性规则未越界修改；建议总控合并时补一句或另开文档卡。\n- 下一步：worker 在正常 shell 环境跑卡内验收命令；全绿后由 worker 统一提交，再推 main 观察 Gitea Actions 首个 run。",
+  "error": ""
+}
