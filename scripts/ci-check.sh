@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # 检查 Gitea Actions：runner 状态 + 指定仓库最新 run，写 dashboard/ci.json
 #
-# 用法：  CI_REPOS="skywalk/light skywalk/lighting" ./scripts/ci-check.sh
+# 用法：  CI_REPOS="skywalk/hive" ./scripts/ci-check.sh
 # 输出：  dashboard/ci.json（面板可读）+ stdout 一行摘要
 #
 # 环境变量：
 #   HIVE_ENV   存放 gitea 凭证的文件（默认 ~/dswork/.env，取 `gitea =` 行）
 #   CI_OUT     输出 json 路径（默认 <hive>/dashboard/ci.json）
-#   CI_REPOS   要看的仓库（默认 skywalk/light）
+#   CI_REPOS   要看的仓库（默认 skywalk/hive —— 现阶段只盯 hive 自身）
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HIVE_DIR="${HIVE_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 HIVE_ENV="${HIVE_ENV:-$HOME/dswork/.env}"
 OUT="${CI_OUT:-$HIVE_DIR/dashboard/ci.json}"
-REPOS="${CI_REPOS:-skywalk/light}"
+REPOS="${CI_REPOS:-skywalk/hive}"
 
 export HIVE_DIR HIVE_ENV OUT REPOS
 

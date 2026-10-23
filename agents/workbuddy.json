@@ -9,7 +9,8 @@
     "linux"
   ],
   "repos": {
-    "light": "/home/skywalk/src/light"
+    "light": "/home/skywalk/src/light",
+    "hive": "/home/skywalk/dswork/hive"
   },
   "launch": "",
   "worktrees": "/home/skywalk/.hive/wt/workbuddy",

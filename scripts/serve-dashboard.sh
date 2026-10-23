@@ -13,7 +13,7 @@ PORT="${PORT:-8787}"
 INTERVAL="${INTERVAL:-20}"
 DASH="$DIR/dashboard"
 STATUS="$DASH/status.json"
-CI_REPOS="${CI_REPOS:-skywalk/light skywalk/lighting}"
+CI_REPOS="${CI_REPOS:-skywalk/hive}"
 CI_EVERY="${CI_EVERY:-6}"
 
 if ! command -v python3 >/dev/null 2>&1; then
