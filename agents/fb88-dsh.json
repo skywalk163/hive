@@ -1,0 +1,19 @@
+{
+  "name": "fb88-dsh",
+  "command": "dsh --profile headless -",
+  "mode": "exec",
+  "manual": false,
+  "capabilities": [
+    "freebsd",
+    "python",
+    "compiler",
+    "pytest"
+  ],
+  "repos": {
+    "light": "/home/skywalk/src/light"
+  },
+  "launch": "",
+  "worktrees": "/home/skywalk/.hive/wt",
+  "max_concurrency": 1,
+  "created": "2026-10-23T11:06:26+08:00"
+}
