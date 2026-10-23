@@ -1,0 +1,23 @@
+{
+  "task": "T-0002",
+  "agent": "fb88-dsh",
+  "status": "done",
+  "branch": "task/T-0002",
+  "base": "main",
+  "mode": "exec",
+  "head": "f2613376ee749db2fff433e59c80f3889cc57852",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-23T13:22:22+08:00",
+  "finished_at": "2026-10-23T13:22:48+08:00",
+  "duration_s": 25.4,
+  "verify": [
+    {
+      "cmd": "grep -q \"KI-R94-01.*resolved (R95)\" docs/known_issues.md",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0002 完成总结\n\n- 做了什么：将 `docs/known_issues.md` 第 8 行 KI-R94-01 的状态从 `open / known-risk`（机理未定性，仅规避）同步为 `resolved (R95)`（误杀面结构性关闭；残余=上游 xdist 高负载脆弱性，已规避），措辞与 `docs/known-issues/README.md` 看板一致。\n- 改动文件：仅 `docs/known_issues.md` 一行；未重排列表，未改其他内容。\n- 验证：`grep -q \"KI-R94-01.*resolved (R95)\" docs/known_issues.md` 退出码 0；复查第 8 行内容及两处状态一致性，均通过。\n- 风险/遗留：当前环境未提供可用的 git 元数据（`.git` 指向的 gitdir 不存在，`git status`/`git diff` 无法运行），因此未能用 diff 复核“仅改一行”，但编辑为单行定点替换，且仅触碰允许路径；提交由 worker 统一完成。",
+  "error": ""
+}
