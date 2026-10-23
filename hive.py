@@ -204,10 +204,13 @@ def write_card(path: Path, data: dict, body: str) -> None:
 # --------------------------------------------------------------------------- #
 
 def commit_file_to_ref(repo: Path, path: str, content: str, ref: str,
-                       parent: str = "origin/main", message: str = "") -> str:
+                       parent: str = "origin/main", message: str = "",
+                       force: bool = False) -> str:
     """构造 commit(parent=origin/main, tree=main+<path>) 并 push 到 refs/heads/<ref>。
 
-    push 非快进会被 git 服务端拒绝 —— 这正是 claim 的原子性来源。
+    push 非快进会被 git 服务端拒绝 —— 这正是 claim 的原子性来源（保持非快进）。
+    force=True 时改走 --force-with-lease：用于 result，新结果必须能顶掉上一次，
+    否则重跑一次就在 `res/<tid>` 上非快进失败，结果永远落不进去。
     返回 commit sha；失败抛 HiveError。
     """
     parent_sha = rev_parse(repo, parent)
@@ -228,7 +231,8 @@ def commit_file_to_ref(repo: Path, path: str, content: str, ref: str,
              "-m", message or f"hive: {path}"],
             cwd=repo, env=env,
         ).stdout.strip()
-        run(["git", "push", "origin", f"{commit}:refs/heads/{ref}"], cwd=repo)
+        push_cmd = ["git", "push"] + (["--force-with-lease"] if force else [])
+        run(push_cmd + ["origin", f"{commit}:refs/heads/{ref}"], cwd=repo)
         return commit
     finally:
         try:
@@ -790,7 +794,7 @@ class Hive:
             self.dir, f"results/{tid}.json",
             json.dumps(result, ensure_ascii=False, indent=2),
             f"res/{tid}", "origin/main",
-            f"result {tid}: {result['status']} by {owner} (manual)",
+            f"result {tid}: {result['status']} by {owner} (manual)", force=True,
         )
 
         if not keep:
@@ -1315,7 +1319,7 @@ class Worker:
             self.dir, f"results/{tid}.json",
             json.dumps(result, ensure_ascii=False, indent=2),
             f"res/{tid}", "origin/main",
-            f"result {tid}: {result['status']} by {self.name}",
+            f"result {tid}: {result['status']} by {self.name}", force=True,
         )
 
     # -- 主循环 ------------------------------------------------------------ #
