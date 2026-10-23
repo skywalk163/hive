@@ -17,7 +17,7 @@ WorkBuddy 交付时它的 shell 不可用（见交付目录里的 `BLOCKED.md`�
 ===== 全部通过 =====
 ```
 
-## 2. 前端行为（jsdom 实跑，19 项断言）
+## 2. 前端行为（jsdom 实跑，20 项断言）
 
 因为 fb88 没有浏览器，用 jsdom 加载 `index.html` + `app.js`，stub `fetch` 返回
 `sample-status.json`，把时钟固定在 `2026-10-23T11:00+08:00` 后断言 DOM：
@@ -42,6 +42,7 @@ ok  - 点卡片打开详情抽屉
 ok  - 抽屉里有失败用例名
 ok  - Esc 关闭抽屉
 ok  - 没有外链资源
+ok  - 没有 JS 运行错误（jsdomError=0）
 ALL UI CHECKS PASSED
 ```
 

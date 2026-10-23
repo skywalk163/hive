@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { JSDOM } = require('jsdom');
+const { JSDOM, VirtualConsole } = require('jsdom');
 
 const DIR = path.resolve(__dirname, '..');
 let html = fs.readFileSync(path.join(DIR, 'index.html'), 'utf8');
@@ -15,10 +15,14 @@ function assert(cond, msg) {
 }
 
 (async () => {
+  const vc = new VirtualConsole();
+  const jsErrors = [];
+  vc.on('jsdomError', e => jsErrors.push(String(e)));
   const dom = new JSDOM(html, {
     url: 'http://127.0.0.1:8787/',
     runScripts: 'outside-only',
     pretendToBeVisual: true,
+    virtualConsole: vc,
   });
   const w = dom.window;
   const RealDate = w.Date;
@@ -82,6 +86,7 @@ function assert(cond, msg) {
   assert(drawer.getAttribute('aria-hidden') === 'true', 'Esc 关闭抽屉');
 
   assert(doc.querySelectorAll('a[href^="http"], img[src^="http"], script[src^="http"]').length === 0, '没有外链资源');
+  assert(jsErrors.length === 0, '没有 JS 运行错误（jsdomError=' + jsErrors.length + '）');
   dom.window.close();
   console.log(process.exitCode ? '\nSOME CHECKS FAILED' : '\nALL UI CHECKS PASSED');
 })();

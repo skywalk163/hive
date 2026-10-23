@@ -199,6 +199,8 @@ PORT=8787 INTERVAL=20 ./scripts/serve-dashboard.sh
 # 浏览器打开 http://127.0.0.1:8787
 ```
 
+远程看：`ssh -L 8787:127.0.0.1:8787 skywalk@192.168.0.88`，浏览器开 `http://127.0.0.1:8787`。
+
 五列看板（待领取 / 进行中 / 待合并 / 异常 / 已关闭），租约过期实时变红，
 支持仓库/owner/搜索筛选、详情抽屉、深浅色。零依赖静态页，`serve.py` 只用标准库。
 说明见 [dashboard/README.md](dashboard/README.md)，实跑验收见

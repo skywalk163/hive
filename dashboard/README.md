@@ -44,6 +44,13 @@ PORT=8787 INTERVAL=20 ./scripts/serve-dashboard.sh
 脚本会每 20 秒执行一次 `hive status --json > dashboard/status.json`，再起 `serve.py`；
 `status.json` 已在 `.gitignore` 里。浏览器打开 `http://127.0.0.1:8787` 即可。
 
+在 Windows 上看（服务只监听 127.0.0.1）：
+
+```powershell
+ssh -L 8787:127.0.0.1:8787 skywalk@192.168.0.88
+# 然后浏览器打开 http://127.0.0.1:8787
+```
+
 参数：
 
 | 参数 | 默认值 | 说明 |
