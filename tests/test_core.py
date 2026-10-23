@@ -77,7 +77,10 @@ def test_dispatch_ability(world, fake_cmd):
 
 
 def test_dispatch_concurrency(world, fake_cmd):
-    """默认同一 repo 只允许 1 张在飞；放宽 --max-per-repo 后才派第二张。"""
+    """并发锁的粒度是 paths：paths 重叠的卡默认只允许多 1 张在飞。
+
+    这两张卡都没声明 paths，按「可能改任何地方」处理，所以第二张被拦下。
+    """
     world.add_agent("a1", "exec", command=fake_cmd,
                     repos={"hive": world.code_clone("a1")})
     world.add_agent("a2", "exec", command=fake_cmd,
@@ -88,7 +91,8 @@ def test_dispatch_concurrency(world, fake_cmd):
     out = world.hive_json("dispatch", "--dry-run")
     assert len(out["plan"]) == 1, out
     reasons = {s["task"]: s["reason"] for s in out["skipped"]}
-    assert "同仓" in reasons["T-0002"], out
+    # 跳过原因要点名跟谁抢，而不是笼统说「同仓满了」
+    assert "T-0001" in reasons["T-0002"] and "paths" in reasons["T-0002"], out
 
     out = world.hive_json("dispatch", "--max-per-repo", "2")
     assert len(out["plan"]) == 2, out
@@ -465,3 +469,73 @@ def test_land_all_picks_only_landable(world, fake_cmd):
     assert world.card("T-0001")["state"] == "done"
     assert world.card("T-0002")["state"] == "ready", "没结果的卡不该被碰"
     assert world.card("T-0003")["state"] == "assigned", "失败的卡不该被碰"
+
+
+# --------------------------------------------------------------------------- #
+# 并发锁的粒度：paths 而不是 repo
+# --------------------------------------------------------------------------- #
+
+def test_dispatch_paths_disjoint_parallel(world, fake_cmd):
+    """两张改互不相干目录的卡，应该能同时派给两个 agent。"""
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd,
+                    repos={"hive": world.code_clone("fb")})
+    world.add_agent("fb2", "exec", caps=["freebsd"], command=fake_cmd,
+                    repos={"hive": world.code_clone("fb2")})
+    world.add_task("T-0001", repo="hive", paths=["hive.py"])
+    world.add_task("T-0002", repo="hive", paths=["docs/"])
+
+    out = world.hive_json("dispatch")
+    plan = {p["task"]: p["agent"] for p in out["plan"]}
+    assert set(plan) == {"T-0001", "T-0002"}, out
+    assert plan["T-0001"] != plan["T-0002"], "两张无冲突的卡该分给不同 agent"
+
+    # 默认 max-per-repo=1 —— 老逻辑下这里只能派一张，现在两张都派得出去
+    assert out["max_per_repo"] == 1, out
+
+
+def test_dispatch_paths_overlap_blocked(world, fake_cmd):
+    """paths 重叠（含父子目录）的第二张卡要被拦下，且说清是跟谁冲突。"""
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd,
+                    repos={"hive": world.code_clone("fb")})
+    world.add_agent("fb2", "exec", caps=["freebsd"], command=fake_cmd,
+                    repos={"hive": world.code_clone("fb2")})
+    world.add_task("T-0001", repo="hive", paths=["docs/"])
+    world.add_task("T-0002", repo="hive", paths=["docs/操作手册.md"])  # 是 docs/ 的子路径
+
+    out = world.hive_json("dispatch")
+    assert [p["task"] for p in out["plan"]] == ["T-0001"], out
+    reason = {s["task"]: s["reason"] for s in out["skipped"]}["T-0002"]
+    assert "T-0001" in reason and "paths" in reason, reason
+
+    # 放宽上限后两张都能派
+    out2 = world.hive_json("dispatch", "--max-per-repo", "2")
+    assert {p["task"] for p in out2["plan"]} == {"T-0001", "T-0002"}, out2
+
+
+def test_dispatch_empty_paths_is_conservative(world, fake_cmd):
+    """没声明 paths 的卡按「可能改任何地方」处理，与在飞的卡一律冲突。"""
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd,
+                    repos={"hive": world.code_clone("fb")})
+    world.add_agent("fb2", "exec", caps=["freebsd"], command=fake_cmd,
+                    repos={"hive": world.code_clone("fb2")})
+    world.add_task("T-0001", repo="hive", paths=["docs/"])
+    world.add_task("T-0002", repo="hive")  # paths 为空
+
+    out = world.hive_json("dispatch")
+    assert [p["task"] for p in out["plan"]] == ["T-0001"], out
+    reason = {s["task"]: s["reason"] for s in out["skipped"]}["T-0002"]
+    assert "T-0001" in reason, reason
+
+
+def test_paths_conflict_rules(world):
+    """_paths_conflict 的判定规则：空=冲突、父子=冲突、不相干=不冲突。"""
+    h = hive.Hive(world.hive1)
+    assert h._paths_conflict(["hive.py"], ["hive.py"]) is True
+    assert h._paths_conflict(["docs/"], ["docs/操作手册.md"]) is True
+    assert h._paths_conflict(["docs/操作手册.md"], ["docs/"]) is True
+    assert h._paths_conflict(["hive.py"], ["docs/"]) is False
+    assert h._paths_conflict(["docs/"], ["tests/"]) is False
+    assert h._paths_conflict([], ["hive.py"]) is True      # 未声明 = 可能改任何地方
+    assert h._paths_conflict(["hive.py"], []) is True
+    assert h._paths_conflict(["tests/"], ["tests/unit/"]) is True
+    assert h._paths_conflict(["tests/"], ["testing/"]) is False  # 前缀不是目录边界

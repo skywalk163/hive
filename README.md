@@ -205,6 +205,8 @@ chroot 里的小浣熊 / WorkBuddy 的完整接法（共享 `/home`、manual wor
 ## 8. 限制（有意为之，v0.3.0）
 
 - 一个 worker 串行跑任务；要并行就在同一台机器起多个 worker + 多个 agent 名（`max_concurrency` 只影响 dispatch 的分配）。
+- `dispatch` 的并发锁粒度是 **paths 不是 repo**：同一个仓里改互不相干目录的卡可以同时派给不同 agent；
+  paths 重叠（含父子目录）或没声明 paths 的卡才互相排队，上限 `--max-per-repo`（默认 1）。
 - claim/res 是分支，只在进行中存在；`close` 会归档结果并删分支。
 - 没有内置 PR 创建、没有自动合并到 main；合并留给人或总控用 git 做，`close` 只做验收归档。
 - 看板是只读的；写操作（`take` / `submit` / `close` / `retry`）走 CLI。

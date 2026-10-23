@@ -44,7 +44,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -598,17 +598,38 @@ class Hive:
             load[a] = load.get(a, 0) + 1
         return load
 
-    def _repo_loads(self, cards: dict) -> dict[str, int]:
-        """统计每个 repo 当前 assigned/running 的在飞卡数（同仓并发检测）。"""
-        loads: dict[str, int] = {}
+    @staticmethod
+    def _path_overlap(x: str, y: str) -> bool:
+        """两条路径声明是否相互覆盖（含父子目录）。"""
+        nx, ny = x.strip().rstrip("/"), y.strip().rstrip("/")
+        if not nx or not ny:
+            return True          # 空串等于「任何地方」
+        if nx == ny:
+            return True
+        return nx.startswith(ny + "/") or ny.startswith(nx + "/")
+
+    def _paths_conflict(self, a, b) -> bool:
+        """两张卡声明的 paths 会不会打架。
+
+        保守优先：任一方没声明 paths 就算冲突（未声明 = 可能改任何地方）。
+        两张卡都只碰互不相干的子目录时返回 False —— 这样它们就能并行。
+        """
+        pa = [p for p in (a or []) if str(p).strip()]
+        pb = [p for p in (b or []) if str(p).strip()]
+        if not pa or not pb:
+            return True
+        return any(self._path_overlap(x, y) for x in pa for y in pb)
+
+    def _in_flight(self, cards: dict) -> list[tuple[str, dict]]:
+        """在飞的卡：已 assigned/running 且还没有结果。"""
+        out = []
         for tid, c in cards.items():
-            repo = c.get("repo") or ""
-            if not repo or c.get("state") not in ("assigned", "running"):
+            if c.get("state") not in ("assigned", "running"):
                 continue
             if self.result_info(tid):
                 continue
-            loads[repo] = loads.get(repo, 0) + 1
-        return loads
+            out.append((tid, c))
+        return out
 
     def dep_done(self, dep: str) -> bool:
         res = self.result_info(dep)
@@ -648,7 +669,9 @@ class Hive:
                 max_per_repo = DEFAULT_MAX_PER_REPO
         max_per_repo = max(1, int(max_per_repo or DEFAULT_MAX_PER_REPO))
         load = self._load_counts(cards)
-        repo_load = self._repo_loads(cards)  # 同仓并发：assigned + running 的在飞卡
+        # 并发锁的粒度是 paths，不是 repo：同一 repo 里改互不相干目录的卡可以同时跑。
+        # （自举阶段 hive 是唯一在开发的仓，按 repo 计数等于全串行）
+        occupied = [(tid, c) for tid, c in self._in_flight(cards)]
         ready = [c for c in cards.values()
                  if c.get("state") == "ready" and not c.get("owner")]
         ready.sort(key=lambda c: (PRIORITY_ORDER.get(c.get("priority"), 9), c["id"]))
@@ -656,7 +679,6 @@ class Hive:
         plan: list[tuple[dict, str, str]] = []
         skipped: list[tuple[str, str]] = []
         planned = dict(load)
-        planned_repo = dict(repo_load)
         for c in ready:
             if limit and len(plan) >= limit:
                 skipped.append((c["id"], f"超出本次 --limit {limit}"))
@@ -702,9 +724,13 @@ class Hive:
                     blocked.append(
                         f"负载已满（{name} {planned.get(name, 0)}/{max_agent}）")
                     continue
-                if planned_repo.get(repo, 0) >= max_per_repo:
+                clash = [t for t, bc in occupied
+                         if (bc.get("repo") or "") == repo
+                         and self._paths_conflict(c.get("paths"), bc.get("paths"))]
+                if len(clash) >= max_per_repo:
                     blocked.append(
-                        f"同仓并发已满（{repo} {planned_repo.get(repo, 0)}/{max_per_repo}）")
+                        f"paths 冲突：与在飞的 {clash[0]} 抢同一片文件"
+                        f"（{repo} 同组上限 {max_per_repo}）")
                     continue
                 cands.append(name)
             if not cands:
@@ -720,10 +746,10 @@ class Hive:
             max_agent = int(agents[name].get("max_concurrency") or 1)
             reason = (f"能力匹配；仓匹配（{repo}）；"
                       f"负载 {planned.get(name, 0)}/{max_agent}；"
-                      f"同仓 {planned_repo.get(repo, 0)}/{max_per_repo}；依赖就绪")
+                      f"paths 与在飞的卡不冲突（同组上限 {max_per_repo}）；依赖就绪")
             plan.append((c, name, reason))
             planned[name] = planned.get(name, 0) + 1
-            planned_repo[repo] = planned_repo.get(repo, 0) + 1
+            occupied.append((c["id"], c))  # 后续候选要躲开它占的 paths
 
         if as_json:
             print(json.dumps({
@@ -1866,7 +1892,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--note", help="没有 summary.md 时的说明")
     s.set_defaults(func=cmd_submit)
 
-    s = sub.add_parser("dispatch", help="自动分派（能力/负载/依赖/同仓并发感知）")
+    s = sub.add_parser("dispatch", help="自动分派（能力/负载/依赖/paths 冲突感知）")
     s.add_argument("--apply", action="store_true", help="真正写入；默认 dry-run")
     s.add_argument("--dry-run", action="store_true",
                    help="只输出派/不派原因（默认行为）")
@@ -1874,7 +1900,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--agent", help="只分派给这个 agent")
     s.add_argument("--max-per-repo", "--same-repo-limit", dest="max_per_repo",
                    type=int, default=None,
-                   help="同一 repo 同时在飞上限（默认 1，也可用 HIVE_MAX_PER_REPO）")
+                   help="同一 repo 里 paths 互相冲突的卡同时在飞的上限"
+                        "（默认 1，也可用 HIVE_MAX_PER_REPO；paths 不冲突的卡不受此限）")
+                   
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_dispatch)
 
