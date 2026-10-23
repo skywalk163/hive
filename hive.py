@@ -720,7 +720,7 @@ class Hive:
                 "duration_s": res.get("duration_s", 0),
                 "head": res.get("head") or "",
                 "verify": res.get("verify") or [],
-                "summary": (res.get("summary") or "").splitlines()[0][:60] if res else "",
+                "summary": ((res.get("summary") or "").splitlines() or [""])[0][:60] if res else "",
                 "result_summary": res.get("summary") or "",
             })
         if as_json:
