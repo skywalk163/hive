@@ -1,0 +1,52 @@
+# hive · 本地 CI（Gitea Actions，FreeBSD host 模式，无 Docker）
+#
+# 目的：给 hive 仓加回归兜底，改动不再只靠人工跑 `python3 -m pytest tests`。
+# 口径：push main / pull_request 触发；复用 fb5 上现有的 freebsd runner，
+#       不新增 label、不改 act_runner.conf。首次全绿即算过，不做基线对比。
+# 预算：整仓 pytest 几十秒级；job 超时 30 分钟即红。
+# 依赖：只装 pytest + pytest-xdist（本仓测试不需要 pytest-timeout）。
+# 观测：`CI_REPOS=skywalk/hive ./scripts/ci-check.sh` 会读取本 workflow 的最新 run
+#       并写到 dashboard/ci.json，默认只盯 skywalk/hive，不碰其它仓。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: pytest + shell/python/json 门禁
+    runs-on: freebsd
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        # 固定走本地 actions/checkout 镜像，避免 Gitea 对裸 uses 的解析回落到 github.com。
+        uses: http://192.168.1.5:3000/actions/checkout@v4
+
+      - name: 安装测试依赖
+        run: |
+          # 先走 runner 上的本地 pip 源；取不到再回退公共 PyPI。
+          python3 -m pip install pytest pytest-xdist || \
+            python3 -m pip install --index-url https://pypi.org/simple pytest pytest-xdist
+
+      - name: pytest
+        run: python3 -m pytest tests -q --tb=short
+
+      - name: shell 语法检查
+        run: bash -n scripts/*.sh
+
+      - name: Python 语法编译
+        run: python3 -m py_compile hive.py dashboard/serve.py
+
+      - name: agent 配置 JSON 校验
+        run: |
+          # json.tool 一次只接收一个文件，逐个校验 agents/*.json。
+          for f in agents/*.json; do
+            [ -f "$f" ] || continue
+            echo "check $f"
+            python3 -m json.tool "$f" >/dev/null
+          done
