@@ -9,7 +9,6 @@
     "pytest"
   ],
   "repos": {
-    "light": "/home/skywalk/src/light",
     "hive": "/home/skywalk/dswork/hive"
   },
   "launch": "",
