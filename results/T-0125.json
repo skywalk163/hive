@@ -1,0 +1,44 @@
+{
+  "task": "T-0125",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0125",
+  "base": "main",
+  "head": "6ca19bbd4332eb5a8f1e0cb150ccd7c34d96e161",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T03:37:00+00:00",
+  "finished_at": "2026-10-24T03:58:51+00:00",
+  "duration_s": 1311.5,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests -q --tb=short",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 75%]",
+        ".......................                                                  [100%]",
+        "95 passed in 206.74s (0:03:26)"
+      ]
+    }
+  ],
+  "summary": "# T-0125 worker 看门狗：租约心跳 + 自动回收死掉/孤儿/僵尸卡\n\n## 做了什么\n- **worker 租约心跳**：`Worker.run_task` 用 daemon 线程在任务运行期间周期性刷新\n  `claim/<tid>` 的 `lease_until`（间隔 `max(5, lease_minutes//3)` 分钟，父提交取当前\n  `origin/claim/<tid>` 才能快进）。活着的 worker 自己续租，看门狗才能把「租约过期」可靠判成死亡。\n  刷新全程 best-effort，失败只 log，绝不打断任务。\n- **`hive watchdog [--minutes M] [--apply] [--json]`**：扫描 `assigned`/`running` 卡，\n  判定 `orphan_running` / `orphan_assigned` / `zombie` / `stale` / `land_lag`，\n  回收 = 退回 `ready` + 清空 owner + `retries+1` + 删 claim 分支 + 留底备注。\n  **默认 dry-run 只报告，`--apply` 才动手**（与 gc/land 一致）。\n- **`hive doctor` 增强**：in-flight 卡的孤儿 / 僵尸 / land_lag 现在会被点名。\n- **MCP 总控视角补 `hive_watchdog`**（controller 专属，复用 `hive_gc` 接法）。\n\n## 改动文件\n- `hive.py`：心跳方法 + `cmd_watchdog` / `_reenqueue_ready` + doctor 增强 + 子命令/参数\n- `mcp_server.py`：controller 增 `hive_watchdog`\n- `tests/test_watchdog.py`：新增 9 例\n- `CHANGELOG.md` / `docs/操作手册.md` / `docs/MCP接入.md`：文档\n\n## 验证\n- `tests/test_watchdog.py` 全过（dry-run 零改动 / apply 回收 / 健康卡不误杀 / 心跳续租 / doctor 报孤儿僵尸）\n- 全量 `pytest tests/`：**95 passed**（原 86，+9）\n\n## 风险 / 遗留\n- `orphan_assigned` 默认（minutes=0）就会回收「assigned 但没来领」的卡；生产环境建议带\n  `--minutes 30` 之类阈值，给 worker 留领取窗口。已写进文档。\n- 心跳只在「claim 在自己名下」时续租；worker 未领取前不发心跳，属预期。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_watchdog.py",
+    "docs/操作手册.md",
+    "docs/MCP接入.md",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/MCP接入.md",
+    "docs/操作手册.md",
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_watchdog.py"
+  ],
+  "out_of_paths": []
+}
