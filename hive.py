@@ -46,7 +46,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.6"
+VERSION = "0.9.7"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -2715,6 +2715,11 @@ def cmd_orchestrate(args) -> None:
         stop_file=args.stop_file, as_json=args.json)
 
 
+def cmd_llm(args) -> None:
+    from llm_controller import run_llm
+    run_llm(args)
+
+
 def cmd_audit(args) -> None:
     Hive(args.dir).cmd_audit(tid=args.task, all_cards=args.all, as_json=args.json)
 
@@ -2935,6 +2940,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="每轮开始检查该文件，存在就优雅退出")
     s.add_argument("--json", action="store_true", help="每轮打印 tick 摘要 JSON")
     s.set_defaults(func=cmd_orchestrate)
+
+    s = sub.add_parser("llm", help="LLM 总控：用 controller MCP 工具面让 LLM 逐轮决策")
+    s.add_argument("--agent", default="controller", help="总控 agent 名（默认 controller）")
+    s.add_argument("--mcp", action="store_true",
+                   help="走真正的 MCP stdio 客户端（spawn mcp_server.py），默认 in-process 复用")
+    s.add_argument("--llm", choices=["openai", "heuristic"], default="heuristic",
+                   help="决策后端：openai=真 LLM；heuristic=无 key 回退（默认）")
+    s.add_argument("--model", default=None, help="覆盖 ${OPENAI_MODEL}")
+    s.add_argument("--base-url", default=None, help="覆盖 ${OPENAI_BASE_URL}")
+    s.add_argument("--api-key", default=None, help="覆盖 ${OPENAI_API_KEY}")
+    s.add_argument("--apply", action="store_true", help="真改 main（默认只预演）")
+    s.add_argument("--max-iter", type=int, default=12, help="最多决策几轮")
+    s.add_argument("--stop-file", dest="stop_file", default=None,
+                   help="出现该文件就停止循环")
+    s.add_argument("--once", action="store_true", help="只跑一轮决策就退")
+    s.set_defaults(func=cmd_llm)
 
     s = sub.add_parser("prune", help="清理代码仓里已合并的 task/verify 分支（默认 dry-run）")
     s.add_argument("--repo", help="只清这个代码仓（默认：agent 登记的所有）")

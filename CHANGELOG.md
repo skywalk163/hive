@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.7 — 2026-10-24
+
+### Added
+
+- **LLM 总控 `hive llm`**：用 controller MCP 工具面让 LLM 逐轮决策，补齐「带判断的总控」。
+  和 0.9.6 的确定性 `hive orchestrate` 互补——orchestrate 跑稳定路径（verify 全绿就 land），
+  `hive llm` 处理 `needs_review` / `conflict` / `failed` / `blocked` 这些需要判断的卡点，以及分派偏好。
+  - 新建 `llm_controller.py`（标准库实现，零第三方依赖）：工具后端 `ToolBackend`
+    （`InProcessBackend` 直接复用 `mcp_server.HiveMcp` 的 handler == controller MCP 工具面；
+    `McpStdioBackend` 真·spawn `mcp_server.py` 走 JSON-RPC 握手）、可插拔 `LlmClient`
+    （`OpenAiClient` 标准库 urllib 调 OpenAI 兼容端点 / `HeuristicClient` 无 key 回退 /
+    `MockClient` 测试）、决策循环 `ControllerLoop`。
+  - 每轮：拿 `hive_whoami`（controller）快照 → 渲染 → 问 LLM 下一个动作 → 执行（带 apply 安全闸）→ 记历史。
+  - **安全闸**：没传 `--apply` 时，dry-run 类工具（land/dispatch/gc/watchdog）强制 apply=false；
+    `hive_close/hive_retry/hive_assign` 这类无 dry-run 的破坏性操作直接跳过不执行。和全仓「破坏性操作默认 dry-run」一致。
+  - 参数：`--agent`（默认 controller）、`--mcp`（走真 MCP stdio 客户端）、`--llm openai|heuristic`
+    （默认 heuristic）、`--model/--base-url/--api-key`（覆盖 env）、`--apply`、`--max-iter`、
+    `--stop-file`、`--once`。
+
 ## 0.9.6 — 2026-10-24
 
 ### Added

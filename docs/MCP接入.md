@@ -122,6 +122,9 @@ needs_review、ready 各多少张 —— 总控 agent 开工前先看这个。
   `hive_dispatch` / `hive_land` / `hive_watchdog` / `hive_retry` / `hive_close`，
   在 `needs_review` / `conflict` / 依赖外部资源等卡点人工/LLM 介入。适合需要「挑 agent、看 diff、
   判重试」这类看门狗做不了的判断。
+  - 现成封装：`hive llm --llm openai --apply`（见《操作手册》§6.3）。它把上面这套 controller 工具面
+    直接喂给 LLM 逐轮决策——`InProcessBackend` 复用 `HiveMcp` 的 handler，`McpStdioBackend` 则真·spawn
+    `mcp_server.py` 走 JSON-RPC，两者是同一工具面。没 key 时 `--llm heuristic` 回退成「不做危险决策的 orchestrate」。
 
 两条路不冲突：确定性总控管「机械循环」，LLM 总控管「卡点决策」。
 
