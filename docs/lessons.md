@@ -59,6 +59,21 @@ digest + `hive doctor` 产出增补草稿（草稿走 `hive draft` 那套流程�
 - **自然语言的口供别用固定词表匹配**。`hive audit` 上线后第一次实跑就漏了它自己的
   动机案例：T-0101 写的是「未能启动…未得到实际测试结果」，词表里一条都没命中。
   → 改成正则 `CONFESS_RE`。
+- **「只构造对象」也可能有破坏性副作用**。`Worker.__init__` / `Worker.loop()` 曾无条件
+  `reset --hard origin/main`，于是 `hive take` / `work` / `submit` 会把协调仓里未提交的
+  已跟踪改动（正写到一半的 `drafts/` 草稿）**静默抹掉**——一次「草稿内容被还原」的排查就是它。
+  → 排查静默数据丢失用最小实锤法：**把一个已跟踪文件改脏 → 只触发可疑动作 → 看文件还在不在**；
+  写会动工作区的代码前先想清楚它跑在主工作区还是独占 clone（MCP 用独占 clone 就是为此）。
+  现改为复用 `sync_main()`：对齐/领先就不动，落后且脏直接报错。
+- **错误信息必须和实际入参一致**。`hive_land` 传了 `apply=true` 撞冲突时，仍回
+  「默认只预演，什么都没动」——这句话只在不传 apply 时成立。LLM 总控靠读 message 判断自己在
+  什么模式，会被误导成"我还在 dry-run"然后反复重试同一个 land。
+  → 断言错误信息时要覆盖「不同入参下措辞是否还成立」；单测只断言 `status` / `conflicts` 不够，
+  **实跑一轮 decision-point** 才暴露得了（这条就是实跑时发现的，已在 0.9.8 修掉）。
+- **`0` 是假值，别用 `or` 判断"有没有设置"**。
+  `int(card.get("max_retries") or DEFAULT_MAX_RETRIES)` 会把显式写的 `max_retries: 0`
+  误判成"没设置"而退回默认 3，于是「一次都不许自动重派」永远不生效。
+  → 判断有没有设置用 `is None`（或 `== ""`），别用 `or`。
 
 ## 五、hive 的用法
 
@@ -66,3 +81,7 @@ digest + `hive doctor` 产出增补草稿（草稿走 `hive draft` 那套流程�
   → `hive submit` → `hive land --apply` 自动合入关闭。
 - 合并前看一眼 `hive audit T-xxxx`：比对 agent 的 summary 和真实 diff。
 - 每天 `hive digest --days 1`，`hive doctor` 有 error 就退出码非 0。
+- **代码被回退后，卡片要同步「记作废」**。hive 的记录和代码仓库会脱节：把 light 仓库的
+  commit 撤掉后，hive 里对应卡片仍显示 `done/closed`，会骗人以为改动还在。
+  → 撤销代码后同步加备注：`hive close <tid> --note "作废（日期）：…"`
+  （`cmd_close` 可重复调用，只追加备注，对已关闭的卡也不会报错）。
