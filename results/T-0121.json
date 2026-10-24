@@ -1,0 +1,44 @@
+{
+  "task": "T-0121",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0121",
+  "base": "main",
+  "head": "423797ee447dd4f403ea08be61fa05b14a919b28",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T01:07:37+00:00",
+  "finished_at": "2026-10-24T01:14:04+00:00",
+  "duration_s": 387.5,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests -q --tb=short",
+      "code": 0,
+      "tail": [
+        "............................................................             [100%]",
+        "60 passed in 134.27s (0:02:14)"
+      ]
+    },
+    {
+      "cmd": "test -f docs/lessons.md && python3 -c \"import hive,sys; sys.exit(0 if hasattr(hive.Hive,'cmd_digest') else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0121 完成：hive digest 失败归因 + docs/lessons.md\n\n执行者：workbuddy（manual 模式）\n\n## 做了什么\n\n`hive digest [--days N] [--out FILE] [--json]`，把经验从结果里捞出来：\n\n- **失败归因**（重点）：从 `result.error` 聚类 —— 超时 / verify 未通过（附上挂掉的命令）/\n  paths 越界 / 分支推送失败 / 其它。每类列卡号，一眼看出是「卡写得太难」还是「环境不稳」。\n- 耗时最长的 5 张（卡拆得不够小的信号）+ 反复重跑的卡（第一版验收就没过）。\n- `--out docs/lessons.md` 写 markdown，`--json` 给机器消费。\n- **只读**：不写卡、不推分支，`--out` 只写普通文件。\n\n`docs/lessons.md` 第一版：五类教训全部来自真实踩过的坑。\n\n## 顺手修的三个真 bug（都是这轮被咬出来的）\n\n1. **`result.error` 在「agent 正常退出但 verify 挂掉」时写「agent 退出码 0」** ——\n   看着像成功，而且让 digest 的失败归因全跑偏（第一版测试就挂在这是）。\n2. **`retries` 计数**：想用「同一 id 出现多次结果」判断反复重跑，但 retry 会 force\n   覆盖旧结果，根本数不出来。改成在卡上累计 `retries` 字段。\n3. **`changed_files` 两个 git 输出陷阱**（第一次 submit 时自己被咬）：\n   - `core.quotePath`：git 把中文路径转义成八进制，`docs/操作手册.md` 被误判成越界；\n   - 未跟踪**目录**被折叠成目录名，里面的文件不出现在改动清单里。\n   两条都加了测试。\n\n## 验证\n\n测试 4 例，全量 **60 passed**。\n\n## 备注\n\n第一次 submit 后发现的 quotePath bug 属于本卡自己的产物，所以 retry 重做了一次把它并进来\n（`--fresh` 会把基线重置到 main，之前的改动要用 `git merge origin/task/T-0121` 合回来）。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_core.py",
+    "docs/lessons.md",
+    "docs/操作手册.md",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "hive.py",
+    "tests/test_core.py"
+  ],
+  "out_of_paths": []
+}
