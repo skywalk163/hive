@@ -913,3 +913,67 @@ def test_draft_new_generates_template(world):
     # 空模板过不了 lint —— 逼着填写
     errors, _ = hive.draft_lint(data, "T-0001", hive.Hive(world.hive1).agents(), {})
     assert errors, "空模板应该有 error"
+
+
+# --------------------------------------------------------------------------- #
+# 复盘摘要（digest）
+# --------------------------------------------------------------------------- #
+
+def test_digest_groups_failures_and_finds_slow_cards(world, fake_cmd):
+    """digest 要把失败归因、慢卡、反复重跑的卡都点出来。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    # 一张成功的
+    world.add_task("T-0001", verify=["true"])
+    world.hive("assign", "T-0001", "--agent", "fb")
+    world.run_worker("fb")
+    # 一张 verify 挂掉的
+    world.add_task("T-0002", verify=["false"])
+    world.hive("assign", "T-0002", "--agent", "fb")
+    world.run_worker("fb")
+
+    data = hive.Hive(world.hive1).digest_data(days=0)
+    assert data["summary"]["done"] == 1, data
+    assert data["summary"]["failed"] == 1, data
+    assert data["summary"]["pass_rate"] == 50.0, data
+    assert "T-0002" in data["failure_reasons"].get("verify 未通过", []), data
+    assert data["slowest"], data
+    assert data["by_agent"]["fb"]["done"] == 1, data
+    assert data["by_agent"]["fb"]["failed"] == 1, data
+
+
+def test_digest_flags_repeated_retries(world, fake_cmd):
+    """同一张卡出现多次结果 = 第一版验收就没过。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    world.add_task("T-0001", verify=["false"])
+    world.hive("assign", "T-0001", "--agent", "fb")
+    world.run_worker("fb")
+    world.hive("retry", "T-0001", "--agent", "fb")
+    world.run_worker("fb")
+
+    data = hive.Hive(world.hive1).digest_data(days=0)
+    assert "T-0001" in data["retried"], data
+
+
+def test_digest_is_read_only_and_writes_out(world, fake_cmd):
+    """digest 是只读的；--out 只写普通文件，不推分支不动卡。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    world.add_task("T-0001", verify=["true"])
+    world.hive("assign", "T-0001", "--agent", "fb")
+    world.run_worker("fb")
+
+    out_file = world.root / "digest.md"
+    h = hive.Hive(world.hive1)
+    before = sh(["git", "-C", str(world.hive1), "rev-parse", "HEAD"]).stdout.strip()
+    h.cmd_digest(days=0, out=str(out_file))
+    assert sh(["git", "-C", str(world.hive1), "rev-parse",
+               "HEAD"]).stdout.strip() == before, "digest 自己不该推提交"
+    text = out_file.read_text(encoding="utf-8")
+    assert "复盘摘要" in text, text          # 总在
+    assert "失败归因" not in text, text      # 没有失败就不该出现这一节
+    # 有失败时才出现失败归因
+    world.add_task("T-0002", verify=["false"])
+    world.hive("assign", "T-0002", "--agent", "fb")
+    world.run_worker("fb")
+    hive.Hive(world.hive1).cmd_digest(days=0, out=str(out_file))
+    assert "失败归因" in out_file.read_text(encoding="utf-8")
+    # 上面建卡/分派确实推了提交，但那不是 digest 干的
