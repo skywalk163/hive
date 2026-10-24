@@ -40,9 +40,12 @@ powershell -ExecutionPolicy Bypass -File C:\hive\windows\bootstrap.ps1 `
 1. 检查 git / python；
 2. `core.autocrlf=false`、`core.longpaths=true`；
 3. clone（或 pull）`C:\hive` 和 `C:\src\light`；
-4. `hive.py agent add --mode verify`，把本机登记成 `win10`；
-5. 注册计划任务 `HiveWorker-win10`（登录时启动 `run-worker.ps1`）；
-6. 尝试把 `C:\src`、`C:\hive-wt` 加进 Defender 排除项（需要管理员）。
+4. `hive.py agent add --mode verify`，把本机登记成 `win10`
+   （`-Abilities` 会传给 `--abilities`，否则 dispatch 按能力匹配时选不中这台机器）；
+5. **打印 MCP 客户端配置**，并写成 `C:\hive\mcp-config-win10.json`（见 §2.5）；
+6. 注册计划任务 `HiveWorker-win10`（登录时启动 `run-worker.ps1`）—— 只有走 worker
+   路线才需要，**走 MCP 的话不用装**；
+7. 尝试把 `C:\src`、`C:\hive-wt` 加进 Defender 排除项（需要管理员）。
 
 ## 2. 三种模式
 
@@ -57,6 +60,46 @@ powershell -ExecutionPolicy Bypass -File C:\hive\windows\bootstrap.ps1 `
 1. 诊断卡（win10 / verify）：跑复现命令，日志进结果；
 2. 修复卡（fb88 / exec）：读诊断，改代码，推 `task/T-xxxx`；
 3. 验收卡（win10 / verify，`base: task/T-xxxx`）：在 Windows 上复跑，绿了才算完。
+
+## 2.5 用 MCP 接入（推荐，不需要 worker）
+
+Windows 上的 agent（Claude Desktop / Cursor / VS Code / Codex CLI / 任何支持 MCP 的）
+**不需要命令行入口**，走 MCP 就能自助闭环。跑完 bootstrap 后它会打印这样一段：
+
+```json
+{
+  "mcpServers": {
+    "hive-win10": {
+      "command": "python",
+      "args": ["C:\\hive\\hive.py", "--dir", "C:\\hive", "mcp", "--agent", "win10"]
+    }
+  }
+}
+```
+
+把它粘进 agent 的 MCP 配置（各家的 key 名略有差异：Claude/Cursor 用 `mcpServers`，
+VS Code 用 `servers`，Codex 用 `mcp_servers`），重启客户端。之后那个 agent 依次调用：
+
+| 调用 | 作用 |
+|---|---|
+| `hive_whoami` | 确认身份：这台机器登记成了谁、有哪些能力、能领什么卡 |
+| `hive_next` | 让它推荐一张现在能干的卡 |
+| `hive_claim` | 领取：推租约、备好 worktree，返回工作目录 |
+| （在返回的目录里改代码） | 活是 agent 自己干 |
+| `hive_submit` | 提交：commit + push + 跑 verify + 写结果 |
+| `hive_result` | 看验收过没 |
+| `hive_abort` | 干不下去就把卡还回去，别耗到租约过期 |
+
+**和 worker 二选一，不要同时用** —— 两条路都会去领卡，会重复劳动。
+Windows 这种没有 agent CLI 的机器，优先走 MCP，计划任务（§3）可以不装。
+
+### 权限
+
+MCP server 以「一个 agent 的身份」运行，所有写操作只作用在自己身上：
+不能替别人领卡、不能提交别人的卡、不能终止别人的租约。越权调用会直接返回错误。
+
+想让它当**总控**（合入、关闭、重跑、分派），启动时加 `--role controller`，
+详见 [`docs/MCP接入.md`](../docs/MCP接入.md) §4.5。
 
 ## 3. 自动登录 + 常开
 
@@ -87,6 +130,13 @@ python3 hive.py --dir ~/hive status
 
 预期：`win10` 出现在 `agents/win10.json`；`inbox/win10/` 有任务时日志出现
 `领取成功`、`验证 0`、`完成: done`。
+
+走 MCP 的话（§2.5），在 agent 的对话里让它调 `hive_whoami`，能看到
+`"agent": "win10"` 和自己的 `claimable` 列表就算接上了。
+
+> **未在真机验证过**：`bootstrap.ps1` 的 PowerShell 语法只做过静态检查
+> （括号配对、关键串存在），没有 pwsh 环境可以实跑。第一次请在 VM 里先不带
+> `-Apply` 看 dry-run 输出，确认 MCP 配置那段对了再加 `-Apply`。
 
 ## 6. 排障
 

@@ -28,6 +28,7 @@ param(
     [string]$Command = "",
     [string]$Launch = "",
     [string[]]$Repos = @("light"),
+    [string[]]$Abilities = @(),
     [string]$Python = "python",
     [string]$Worktrees = "C:\hive-wt",
     [switch]$Register,
@@ -98,12 +99,42 @@ if ($Register) {
     $hivePy = Join-Path $Root "hive.py"
     $hiveArgs = @($hivePy, "--dir", $Root, "agent", "add", "--name", $Agent, "--mode", $Mode)
     if ($Command -ne "") { $hiveArgs += @("--command", $Command) }
+    if ($Abilities.Count -gt 0) { $hiveArgs += @("--abilities") + $Abilities }
     if ($Launch -ne "") { $hiveArgs += @("--launch", $Launch) }
     foreach ($repo in $Repos) {
         $hiveArgs += @("--repo", ($repo + "=" + (Join-Path $Src $repo)))
     }
     $hiveArgs += @("--worktrees", $Worktrees)
     Run $Python $hiveArgs
+}
+
+# 4.5 emit the MCP client config
+# 这一步才是「告诉 agent 到 hive 报道」：把下面这段 JSON 粘进 agent 的 MCP
+# 客户端配置（Claude Desktop / Cursor / VS Code / Codex CLI 都认这个格式），
+# 那个 agent 就能 hive_whoami 看自己、hive_next 挑卡、hive_claim 领卡、
+# 在返回的 worktree 里干活、hive_submit 提交。不需要 worker、不需要计划任务。
+$mcp = [ordered]@{
+    mcpServers = [ordered]@{
+        ("hive-" + $Agent) = [ordered]@{
+            command = $Python
+            args = @((Join-Path $Root "hive.py"), "--dir", $Root,
+                     "mcp", "--agent", $Agent)
+        }
+    }
+}
+$mcpJson = ($mcp | ConvertTo-Json -Depth 6)
+$mcpFile = Join-Path $Root ("mcp-config-" + $Agent + ".json")
+Say "---------------------------------------------------------------"
+Say "把下面这段粘进 agent 的 MCP 配置（Claude/Cursor/VS Code/Codex 都认这个格式）："
+Say ""
+Write-Host $mcpJson
+Say ""
+Say ("已写入: " + $mcpFile)
+Say "之后那个 agent 依次调用：hive_whoami -> hive_next -> hive_claim -> 干活 -> hive_submit"
+Say "（Windows 上 agent 没有命令行的话，这条 MCP 路子和 manual worker 二选一，别同时用）"
+Say "---------------------------------------------------------------"
+if ($Apply) {
+    Set-Content -Path $mcpFile -Value $mcpJson -Encoding UTF8
 }
 
 # 5. scheduled task at logon
