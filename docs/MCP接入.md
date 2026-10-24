@@ -112,6 +112,19 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy --role controller
 `hive_whoami` 在 controller 下会多返回 `todo`：待合入、conflict、blocked、
 needs_review、ready 各多少张 —— 总控 agent 开工前先看这个。
 
+### 4.5.1 两种总控形态
+
+- **确定性总控（推荐先上）**：直接跑 `hive orchestrate`（`hive.py` 里的一条命令），
+  它内部循环调用 `watchdog --apply` → `dispatch --apply` → `land --all --apply` → `doctor`，
+  把 exec 类任务从 `ready` 全自动推到 `closed`。常驻进程，加 `--once` / `--iterations N` /
+  `--stop-file` 控制生命周期。**它不暴露成 MCP 工具**（会阻塞调用方）。
+- **带判断的总控（LLM agent）**：起 controller 角色的 MCP server，让 LLM agent 自己循环调
+  `hive_dispatch` / `hive_land` / `hive_watchdog` / `hive_retry` / `hive_close`，
+  在 `needs_review` / `conflict` / 依赖外部资源等卡点人工/LLM 介入。适合需要「挑 agent、看 diff、
+  判重试」这类看门狗做不了的判断。
+
+两条路不冲突：确定性总控管「机械循环」，LLM 总控管「卡点决策」。
+
 ## 5. 典型流程
 
 ```

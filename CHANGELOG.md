@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.6 — 2026-10-24
+
+### Added
+
+- **总控进程 `hive orchestrate`**：把「看门狗 → 分派 → 合入 → 体检」串成常驻循环，替代人工 drive。
+  exec 类任务从 `ready` 到 `closed` 全自动跑完，人只需要在 `needs_review` / `conflict` / `blocked` 等卡点介入。
+  - 每轮 tick 顺序：`watchdog --apply` → `dispatch --apply` → `land --all --apply` → `doctor`；
+    任一阶段抛错都 catch 住、记 log、继续下一轮，绝不整进程崩。
+  - 参数：`--interval`（默认 60s）、`--once`、`--iterations N`、`--no-dispatch` / `--no-land` /
+    `--no-watchdog` / `--no-doctor`、`--stop-file PATH`、`--dispatch-limit N`、`--max-land N`、
+    `--watchdog-minutes`（默认 180）、`--orphan-grace`（默认 45）、`--json`。
+  - 只负责「脑」（分派+合入+回收）；worker 仍是各机器独立进程。manual agent 的卡不碰（人工优先保留）。
+  - 不暴露成 MCP 工具（会阻塞调用方）；「带判断的总控」用 controller MCP 由 LLM agent 自己循环调。
+
+### Changed
+
+- **看门狗 `orphan_assigned` 判定修对**：`_assigned_at` 改读 `inbox/<owner>/<tid>.md` 里
+  `_assign_local` 实际写的 `assigned_at`（原先读卡 body，导致「分派了但一直没来领」的死卡永远收不回）。
+  新增 `--orphan-grace`（默认 30 分钟）：分派时间超过 grace 才回收，刚分派的卡在 grace 内不会被误杀。
+- 版本号 `VERSION` 同步到 0.9.6。
+
 ## 0.9.5 — 2026-10-24
 
 ### Added

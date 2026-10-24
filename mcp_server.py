@@ -269,7 +269,9 @@ TOOLS: list[dict] = [
             "type": "object",
             "properties": {
                 "minutes": {"type": "integer", "default": 0,
-                            "description": "租约过期/assigned 无 claim 超过这么久（分钟）才回收，默认 0（立刻）"},
+                            "description": "租约过期超过这么久（分钟）才回收，默认 0（立刻）"},
+                "orphan_grace": {"type": "integer", "default": 30,
+                                 "description": "assigned 但一直没 claim 超过这么久（分钟）才回收，默认 30（刚分派的卡在 grace 内不回收）"},
                 "apply": {"type": "boolean", "default": False},
             },
             "required": [],
@@ -781,7 +783,8 @@ class HiveMcp:
         h = self.hive()
         try:
             n = h.cmd_watchdog(minutes=int(a.get("minutes") or 0),
-                               apply=bool(a.get("apply")))
+                               apply=bool(a.get("apply")),
+                               orphan_grace=int(a.get("orphan_grace") or 30))
         except HiveError as e:
             return err(str(e))
         return ok("看门狗检查完成",

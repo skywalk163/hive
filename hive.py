@@ -46,7 +46,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.4"
+VERSION = "0.9.6"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -696,12 +696,14 @@ class Hive:
         return plan
 
     def cmd_land(self, tid: str | None = None, apply: bool = False, note: str = "",
-                 all_tasks: bool = False, as_json: bool = False):
+                 all_tasks: bool = False, as_json: bool = False, limit: int | None = None):
         self.fetch()
         if not tid and not all_tasks:
             raise HiveError("land 需要给任务号，或加 --all")
         if all_tasks:
             targets = self.landable()
+            if limit:
+                targets = targets[:int(limit)]
         else:
             if tid not in self.cards():
                 raise HiveError(f"没有任务 {tid}")
@@ -959,6 +961,7 @@ class Hive:
             log(f"已分派 {len(plan)} 张卡")
         elif plan:
             print("（dry-run；加 --apply 才写入）")
+        return len(plan)
 
     def cmd_doctor(self) -> bool:
         errors: list[str] = []
@@ -1646,9 +1649,24 @@ class Hive:
         log(f"gc 完成，回收 {removed} 个")
 
     # -- 看门狗 ------------------------------------------------------------ #
-    @staticmethod
-    def _assigned_at(card: dict):
-        """从卡 body 里抠出 _assign_local 写的 assigned_at（没有就 None）。"""
+    def _assigned_at(self, card: dict):
+        """这张卡被分派的时间。
+
+        `_assign_local` 实际把 `assigned_at` 写在 `inbox/<owner>/<tid>.md`（不在卡
+        body），所以优先读那个文件；读不到再退回卡 body（兼容老卡）。
+        """
+        tid = card.get("id")
+        owner = card.get("owner")
+        if owner:
+            inbox = self.dir / "inbox" / owner / f"{tid}.md"
+            if inbox.exists():
+                m = re.search(r"^assigned_at:\s*(\S+)",
+                              inbox.read_text(encoding="utf-8"), re.MULTILINE)
+                if m:
+                    try:
+                        return parse_iso(m.group(1))
+                    except ValueError:
+                        pass
         body = card.get("_body") or ""
         m = re.search(r"^assigned_at:\s*(\S+)", body, re.MULTILINE)
         if not m:
@@ -1683,22 +1701,25 @@ class Hive:
         log(f"{tid} 已退回 ready（{reason}）")
 
     def cmd_watchdog(self, minutes: int = 0, apply: bool = False,
-                     as_json: bool = False) -> int:
+                     as_json: bool = False, orphan_grace: int = 30) -> int:
         """看门狗：找出死掉 / 孤儿 / 僵尸的 in-flight 卡。
 
         dry-run（默认）只报告、不改动；`--apply` 才把候选卡退回 ready。
         回收的判定（都满足「卡还在 in-flight、且没有 res 结果」为前提）：
           - orphan_running：state=running 但 claim 分支没了（崩溃 / 被 gc 清掉）
-          - orphan_assigned：state=assigned 且 assigned_at 早于 now-minutes（worker 一直没来领）
+          - orphan_assigned：state=assigned 但一直没 claim，且分派时间早于 now-orphan_grace
+                             （worker 一直没来领；刚分派的卡在 grace 内不回收，留给它领）
           - zombie：claim 的 agent 没在 agents/ 登记
           - stale：claim 的 lease_until 早于 now-minutes（心跳保证活着的 worker 不会过期）
           - land_lag（只 warn 不回收）：已经有 res 结果却还停在 in-flight，那是 land 的活
+        `minutes` 只管 stale；`orphan_grace`（默认 30）只管 orphan_assigned。
         返回将被/已被回收的卡数量。
         """
         self.fetch()
         cards = self.cards()
         nowdt = now()
         grace = timedelta(minutes=minutes)
+        ograce = timedelta(minutes=orphan_grace)
         candidates: list[dict] = []
         for tid, c in cards.items():
             if c.get("state") not in IN_FLIGHT_STATES:
@@ -1710,9 +1731,9 @@ class Hive:
             if claim is None:
                 if c.get("state") == "running":
                     candidates.append({"id": tid, "reason": "orphan_running", "action": "reclaim"})
-                else:  # assigned 但还没 claim：可能刚分派，按 minutes 阈值判断
+                else:  # assigned 但还没 claim：可能刚分派，按 orphan_grace 阈值判断
                     at = self._assigned_at(c)
-                    if at and at < nowdt - grace:
+                    if at is not None and at < nowdt - ograce:
                         candidates.append({"id": tid, "reason": "orphan_assigned",
                                           "action": "reclaim"})
                 continue
@@ -1748,6 +1769,66 @@ class Hive:
             log(f"[watchdog] 已回收 {c['id']}：{c['reason']}")
         log(f"[watchdog] 完成，回收 {len(to_reclaim)} 张")
         return len(to_reclaim)
+
+    # -- 总控进程 ---------------------------------------------------------- #
+    def cmd_orchestrate(self, interval: int = 60, once: bool = False,
+                        iterations: int | None = None, dispatch: bool = True,
+                        watchdog: bool = True, land: bool = True, doctor: bool = True,
+                        dispatch_limit: int | None = None, max_land: int | None = None,
+                        watchdog_minutes: int = 180, orphan_grace: int = 45,
+                        stop_file: str | None = None, as_json: bool = False) -> None:
+        """总控进程（脑）：循环跑 看门狗 → 分派 → 合入 → 体检，替代人工 drive。
+
+        每轮 tick 顺序：
+          1. watchdog --apply（回收死卡 / 孤儿 / 僵尸）
+          2. dispatch --apply（把 ready 卡分派给空闲且能力匹配的 exec agent）
+          3. land --all --apply（把 verify 全绿、依赖就绪的 done 卡合入并 close）
+          4. doctor（报告问题，不改动）
+        单轮内任何子步骤抛 HiveError 都 catch 住、记 log、继续下一轮，绝不整进程崩。
+        安全默认：三个写操作本身都是「带 --apply 才真改」，这里显式传了 --apply，
+        不引入新的破坏性开关。manual agent 的卡 dispatch 本来就不碰，留给人工。
+        """
+        total: dict[str, int] = {"reclaimed": 0, "dispatched": 0, "landed": 0, "ticks": 0}
+        while True:
+            total["ticks"] += 1
+            tick = {"tick": total["ticks"], "reclaimed": 0, "dispatched": 0,
+                    "landed": 0, "doctor_ok": True}
+            try:
+                if watchdog:
+                    reclaimed = self.cmd_watchdog(minutes=watchdog_minutes,
+                                                 apply=True, orphan_grace=orphan_grace)
+                    tick["reclaimed"] = reclaimed
+                if dispatch:
+                    dispatched = self.cmd_dispatch(apply=True, limit=dispatch_limit)
+                    tick["dispatched"] = dispatched
+                if land:
+                    res = self.cmd_land(all_tasks=True, apply=True, limit=max_land)
+                    ok = [r for r in res if isinstance(r, dict) and r.get("closed")]
+                    tick["landed"] = len(ok)
+                if doctor:
+                    tick["doctor_ok"] = self.cmd_doctor()
+            except HiveError as e:
+                log(f"[orchestrate] tick {total['ticks']} 出错（继续）: {e}")
+            total["reclaimed"] += tick["reclaimed"]
+            total["dispatched"] += tick["dispatched"]
+            total["landed"] += tick["landed"]
+
+            if as_json:
+                print(json.dumps(tick, ensure_ascii=False))
+            else:
+                log(f"[orchestrate] tick {total['ticks']} 完成: "
+                    f"回收={tick['reclaimed']} 分派={tick['dispatched']} "
+                    f"合入={tick['landed']} 体检={'OK' if tick['doctor_ok'] else '有告警'}")
+
+            if once:
+                break
+            if iterations and total["ticks"] >= int(iterations):
+                log(f"[orchestrate] 已跑满 {iterations} 轮，退出")
+                break
+            if stop_file and Path(stop_file).exists():
+                log(f"[orchestrate] 发现停止文件 {stop_file}，退出")
+                break
+            time.sleep(interval)
 
     # -- 分支清理 ---------------------------------------------------------- #
     @staticmethod
@@ -2620,7 +2701,18 @@ def cmd_gc(args) -> None:
 
 def cmd_watchdog(args) -> None:
     Hive(args.dir).cmd_watchdog(minutes=args.minutes, apply=args.apply,
-                                as_json=args.json)
+                                as_json=args.json, orphan_grace=args.orphan_grace)
+
+
+def cmd_orchestrate(args) -> None:
+    Hive(args.dir).cmd_orchestrate(
+        interval=args.interval, once=args.once,
+        iterations=args.iterations,
+        dispatch=not args.no_dispatch, watchdog=not args.no_watchdog,
+        land=not args.no_land, doctor=not args.no_doctor,
+        dispatch_limit=args.dispatch_limit, max_land=args.max_land,
+        watchdog_minutes=args.watchdog_minutes, orphan_grace=args.orphan_grace,
+        stop_file=args.stop_file, as_json=args.json)
 
 
 def cmd_audit(args) -> None:
@@ -2815,10 +2907,34 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("watchdog",
                        help="看门狗：回收死掉/孤儿/僵尸的 in-flight 卡（默认 dry-run）")
     s.add_argument("--minutes", type=int, default=0,
-                   help="租约过期/assigned 无 claim 超过这么久（分钟）才回收，默认 0（立刻）")
+                   help="租约过期超过这么久（分钟）才回收，默认 0（立刻）")
+    s.add_argument("--orphan-grace", dest="orphan_grace", type=int, default=30,
+                   help="assigned 但一直没 claim 超过这么久（分钟）才回收，默认 30（刚分派的卡在 grace 内不回收）")
     s.add_argument("--apply", action="store_true", help="真回收；默认只报告")
     s.add_argument("--json", action="store_true", help="输出结构化 JSON")
     s.set_defaults(func=cmd_watchdog)
+
+    s = sub.add_parser("orchestrate",
+                       help="总控进程：循环跑 看门狗→分派→合入→体检，替代人工 drive（默认常驻）")
+    s.add_argument("--interval", type=int, default=60, help="每轮间隔秒数，默认 60")
+    s.add_argument("--once", action="store_true", help="只跑一轮就退")
+    s.add_argument("--iterations", type=int, default=None, help="跑满 N 轮就退")
+    s.add_argument("--no-dispatch", action="store_true", help="关闭自动分派阶段")
+    s.add_argument("--no-land", action="store_true", help="关闭自动合入阶段")
+    s.add_argument("--no-watchdog", action="store_true", help="关闭看门狗回收阶段")
+    s.add_argument("--no-doctor", action="store_true", help="关闭体检阶段")
+    s.add_argument("--dispatch-limit", dest="dispatch_limit", type=int, default=None,
+                   help="每轮最多分派几张（默认不限制）")
+    s.add_argument("--max-land", dest="max_land", type=int, default=None,
+                   help="每轮最多合入几张（默认不限制）")
+    s.add_argument("--watchdog-minutes", dest="watchdog_minutes", type=int, default=180,
+                   help="看门狗判定 stale 的租约过期阈值（分钟），默认 180")
+    s.add_argument("--orphan-grace", dest="orphan_grace", type=int, default=45,
+                   help="看门狗回收孤儿的宽限（分钟），默认 45（刚分派的卡不会被误杀）")
+    s.add_argument("--stop-file", dest="stop_file", default=None,
+                   help="每轮开始检查该文件，存在就优雅退出")
+    s.add_argument("--json", action="store_true", help="每轮打印 tick 摘要 JSON")
+    s.set_defaults(func=cmd_orchestrate)
 
     s = sub.add_parser("prune", help="清理代码仓里已合并的 task/verify 分支（默认 dry-run）")
     s.add_argument("--repo", help="只清这个代码仓（默认：agent 登记的所有）")
