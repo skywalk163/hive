@@ -213,7 +213,7 @@ def test_parse_card_roundtrip(tmp_path):
     data = {
         "id": "T-0001", "title": "标题: 带冒号", "repo": "light", "base": "main",
         "state": "ready", "owner": None, "priority": "P1", "needs": ["windows"],
-        "paths": ["src/"], "verify": ["true"], "depends_on": [],
+        "paths": ["src/"], "verify": ["python3 -m pytest tests -q"], "depends_on": [],
         "lease_minutes": 30, "timeout_minutes": 10, "created": "2026-10-23T00:00:00+08:00",
     }
     hive.write_card(path, data, "# 正文\n")
@@ -802,7 +802,7 @@ def test_draft_lint_catches_unworkable_cards(world):
     h = hive.Hive(world.hive1)
     cards = h.cards()
 
-    ok_card = {"title": "写文档", "repo": "hive", "verify": ["true"],
+    ok_card = {"title": "写文档", "repo": "hive", "verify": ["python3 -m pytest tests -q"],
                "needs": [], "paths": ["docs/"]}
     errors, warns = hive.draft_lint(ok_card, "T-0001", h.agents(), cards)
     assert errors == [] and warns == [], (errors, warns)
@@ -811,21 +811,21 @@ def test_draft_lint_catches_unworkable_cards(world):
     errors, _ = hive.draft_lint(no_verify, "T-0002", h.agents(), cards)
     assert any("verify" in e for e in errors), errors
 
-    unknown_repo = {"title": "x", "repo": "light", "verify": ["true"]}
+    unknown_repo = {"title": "x", "repo": "light", "verify": ["python3 -m pytest tests -q"]}
     errors, _ = hive.draft_lint(unknown_repo, "T-0003", h.agents(), cards)
     assert any("永远派不出去" in e for e in errors), errors
 
-    nobody_can = {"title": "x", "repo": "hive", "verify": ["true"],
+    nobody_can = {"title": "x", "repo": "hive", "verify": ["python3 -m pytest tests -q"],
                   "needs": ["windows"]}
     errors, _ = hive.draft_lint(nobody_can, "T-0004", h.agents(), cards)
     assert any("僵尸卡" in e for e in errors), errors
 
-    bad_dep = {"title": "x", "repo": "hive", "verify": ["true"],
+    bad_dep = {"title": "x", "repo": "hive", "verify": ["python3 -m pytest tests -q"],
                "depends_on": ["T-9999"]}
     errors, _ = hive.draft_lint(bad_dep, "T-0005", h.agents(), cards)
     assert any("T-9999" in e for e in errors), errors
 
-    no_paths = {"title": "x", "repo": "hive", "verify": ["true"]}
+    no_paths = {"title": "x", "repo": "hive", "verify": ["python3 -m pytest tests -q"]}
     errors, warns = hive.draft_lint(no_paths, "T-0006", h.agents(), cards)
     assert errors == [] and any("paths" in w for w in warns), (errors, warns)
 
@@ -872,7 +872,7 @@ needs: []
 paths:
   - docs/
 verify:
-  - test -f docs/
+  - python3 -m pytest tests -q --tb=short
 depends_on: []
 ---
 ## 背景
@@ -891,7 +891,7 @@ agent 出的题。
     card = world.card("T-0001")
     assert card["state"] == "ready", card
     assert card["title"] == "草稿转正的卡"
-    assert card["verify"] == ["test -f docs/"]
+    assert card["verify"] == ["python3 -m pytest tests -q --tb=short"]
     assert not good.exists(), "转正后草稿要撤掉"
     # 转正后立刻能被 dispatch 看见
     out = world.hive_json("dispatch", "--agent", "fb")
@@ -996,3 +996,93 @@ def test_changed_files_handles_non_ascii_names(world):
     (repo / "越界文件.txt").write_text("x\n", encoding="utf-8")
     files2 = hive.changed_files(repo)
     assert hive.out_of_paths(["docs/"], files2) == ["越界文件.txt"], files2
+
+
+# --------------------------------------------------------------------------- #
+# verify 强度分级
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("cmd,expected", [
+    ("python3 -m pytest tests -q --tb=short", "strong"),
+    ("python -m pytest -q", "strong"),
+    ("npm test", "strong"),
+    ("go test ./...", "strong"),
+    ("cargo test", "strong"),
+    ("make test", "strong"),
+    ("make check", "strong"),
+    ("python3 -m unittest discover", "strong"),
+    # 弱：只查痕迹
+    ("test -f docs/lessons.md", "weak"),
+    ("grep -q abilities agents/fb88-dsh.json", "weak"),
+    ("which python3", "weak"),
+    ("echo ok", "weak"),
+    ("", "weak"),
+    # 混合管线按最弱的一环算 —— T-0101 那条就是这形状
+    ("grep -q abilities agents/fb88-dsh.json && grep -q 同仓 hive.py "
+     "&& python3 -m pytest tests -q", "weak"),
+    ("cat foo.txt && python3 -m pytest", "weak"),
+    # 不是测试框架的命令一律算弱（保守）
+    ("python3 -c \"import sys; sys.exit(0)\"", "weak"),
+])
+def test_verify_strength(cmd, expected):
+    assert hive._verify_strength(cmd) == expected, cmd
+
+
+def test_verify_verdict_levels():
+    """三种结论：全绿且有 strong / 全绿但只有 weak / 有红。"""
+    ok = [{"cmd": "python3 -m pytest tests -q", "code": 0}]
+    assert hive._verify_verdict(ok)["verdict"] == "strong-pass"
+
+    only_weak = [{"cmd": "test -f docs/lessons.md", "code": 0},
+                 {"cmd": "grep -q foo hive.py", "code": 0}]
+    v = hive._verify_verdict(only_weak)
+    assert v["verdict"] == "weak-pass"
+    assert v["has_strong"] is False
+
+    mixed = [{"cmd": "test -f x", "code": 0},
+             {"cmd": "python3 -m pytest tests -q", "code": 1}]
+    assert hive._verify_verdict(mixed)["verdict"] == "fail"
+
+
+def test_result_shows_strength(world, fake_cmd):
+    """`hive result` 要把强弱标出来；弱验收要有显式提醒。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    # 只有弱验收的卡
+    world.add_task("T-0001", verify=["test -f feature.txt"])
+    world.hive("assign", "T-0001", "--agent", "fb")
+    world.run_worker("fb")
+
+    res = json.loads(world.hive("result", "T-0001", "--json").stdout)
+    assert res["verify_strength"] == "weak-pass", res
+    assert res["verify_entries"][0]["strength"] == "weak", res
+
+    # 人类可读输出里也要提醒
+    out = world.hive("result", "T-0001")
+    assert "weak-pass" in out.stdout
+    assert "成果没有被真正执行验证" in out.stdout, out.stdout
+
+
+def test_doctor_flags_weak_only_cards(world, fake_cmd):
+    """只有弱验收的卡要被 doctor 点名。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    world.add_task("T-0001", verify=["test -f feature.txt"])
+    world.hive("assign", "T-0001", "--agent", "fb")
+    world.run_worker("fb")
+
+    out = world.hive("doctor", check=False)
+    text = out.stdout + out.stderr
+    assert "T-0001" in text and "弱验收" in text, text
+
+
+def test_draft_lint_requires_strong_verify(world):
+    """草稿没有强验收就报 error，挡转正。"""
+    from hive import draft_lint
+    agents = {"fb": {"repos": {"hive": "/tmp"}, "abilities": ["code"]}}
+    weak = {"title": "t", "repo": "hive", "paths": ["hive.py"],
+            "verify": ["test -f hive.py"], "needs": [], "depends_on": []}
+    errors, _ = draft_lint(weak, "T-0001", agents, {})
+    assert any("强验收" in e for e in errors), errors
+
+    strong = dict(weak, verify=["python3 -m pytest tests -q"])
+    errors2, _ = draft_lint(strong, "T-0001", agents, {})
+    assert not any("强验收" in e for e in errors2), errors2

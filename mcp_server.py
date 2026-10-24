@@ -31,7 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hive import (  # noqa: E402
     DEFAULT_STATE, HANDOFF_STATES, IDENT, PRIORITY_ORDER, VERSION, Hive,
     HiveError, Worker,
-    commit_file_to_ref, git, iso, now, parse_iso, rev_parse,
+    _verify_verdict, commit_file_to_ref, git, iso, now, parse_iso,
+    rev_parse,
 )
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -532,7 +533,14 @@ class HiveMcp:
         res = self.hive().result_info(tid)
         if not res:
             return err(f"{tid} 还没有结果")
-        return ok(f"{tid}：{res.get('status')}", result=res)
+        v = _verify_verdict(res.get("verify") or [])
+        res["verify_strength"] = v["verdict"]
+        res["verify_entries"] = v["verify"]
+        note = ("只有弱验收（grep/test -f 之类），成果没被真正执行验证"
+                if v["verdict"] == "weak-pass" else "")
+        return ok(f"{tid}：{res.get('status')}"
+                  + (f"（{note}）" if note else ""),
+                  result=res, verify_strength=v["verdict"])
 
     def t_stats(self, _a: dict) -> dict:
         h = self.hive()

@@ -44,7 +44,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -172,6 +172,67 @@ def parse_card(path: Path):
         else:
             raise HiveError(f"{path}:{lineno} 无法解析: {line!r}")
     return data, body
+
+
+# verify 强度：只检查痕迹的是 weak，真的会执行被测对象的才是 strong。
+# 判断刻意保守 —— 拿不准就算 weak。混合 shell 管线按「最弱的一环」算，
+# 所以 T-0101 那条 `grep && grep && pytest` 会被判成 weak（正是想要的信号）。
+STRONG_TOKENS = (
+    "pytest", "unittest", "npm test", "npm run test", "yarn test",
+    "go test", "cargo test", "make test", "make check", "ctest",
+    "tox", "nosetests", "rspec", "phpunit", "dotnet test",
+)
+WEAK_TOKENS = (
+    "grep", "test -f", "test -d", "test -e", "[ -f", "[ -d", "[ -e",
+    "which", "echo", "wc -l", "wc -c", "cat", "ls ", "head -", "tail -",
+    "git log", "git diff", "git show", "find ", "stat ", "file ",
+)
+
+
+def _verify_strength(cmd: str) -> str:
+    """一条 verify 命令是 strong（真跑测试）还是 weak（只查痕迹）。"""
+    if not cmd or not str(cmd).strip():
+        return "weak"
+    text = str(cmd).lower()
+    # 完整管线拆开，按最弱的一环算：`grep x && pytest` 里只要有一段是弱检查就算 weak
+    parts = [p.strip() for p in text.replace(";", "&&").split("&&") if p.strip()]
+    for part in parts:
+        if any(w in part for w in WEAK_TOKENS):
+            return "weak"
+    if any(t in text for t in STRONG_TOKENS):
+        return "strong"
+    return "weak"
+
+
+def _verify_verdict(verify: list, with_codes: bool = True) -> dict:
+    """给一张卡的所有 verify 一个总体结论。
+
+    `verify` 有两种形状：任务卡 frontmatter 里是**字符串列表**（还没有执行结果），
+    结果 json 里是 `{cmd, code, tail}` 字典列表。这里都要能吃下。
+    `with_codes=False` 时只看强弱、不看退出码（给卡面/草稿用）。
+    """
+    entries = []
+    for v in (verify or []):
+        if isinstance(v, dict):
+            cmd = str(v.get("cmd") or "")
+            entries.append({"cmd": cmd, "code": v.get("code"),
+                            "strength": _verify_strength(cmd)})
+        else:
+            cmd = str(v)
+            entries.append({"cmd": cmd, "code": None,
+                            "strength": _verify_strength(cmd)})
+    has_strong = any(e["strength"] == "strong" for e in entries)
+    if not with_codes:
+        return {"verdict": "strong" if has_strong else "weak",
+                "verify": entries, "has_strong": has_strong}
+    all_green = bool(entries) and all(e["code"] == 0 for e in entries)
+    if not all_green:
+        verdict = "fail"
+    elif has_strong:
+        verdict = "strong-pass"
+    else:
+        verdict = "weak-pass"
+    return {"verdict": verdict, "verify": entries, "has_strong": has_strong}
 
 
 # 「agent 自己承认没真验」的口供。正则而非固定词表 —— T-0101 那张卡写的是
@@ -1006,6 +1067,13 @@ class Hive:
                 warns.append(f"{tid}: blocked（等资源/等外部条件）")
             if st == "done" and not self.result_info(tid):
                 warns.append(f"任务 {tid} 已关闭但没有结果记录")
+            res_d = self.result_info(tid)
+            if res_d and res_d.get("verify"):
+                v = _verify_verdict(res_d["verify"])
+                if v["verdict"] == "weak-pass":
+                    warns.append(
+                        f"任务 {tid} 只有弱验收（grep/test -f 之类），"
+                        f"成果没被真正执行验证")
             if st == "ready" and c.get("owner"):
                 warns.append(f"任务 {tid} 是 ready 但有 owner")
             for n in c.get("needs") or []:
@@ -2200,6 +2268,12 @@ def draft_lint(card: dict, tid: str, agents: dict, cards: dict) -> tuple[list, l
         errors.append(f"repo {repo!r} 没有任何 agent 登记 —— 这张卡永远派不出去")
     if not (card.get("verify") or []):
         errors.append("一条 verify 都没有（没有验收机的卡不能转正）")
+    else:
+        v = _verify_verdict(card.get("verify") or [], with_codes=False)
+        if not v["has_strong"]:
+            errors.append(
+                "没有强验收：全是 grep/test -f 这类只查痕迹的命令，"
+                "agent 靠改个字符串就能糊弄过去（加一条 pytest 之类的）")
     if not (card.get("paths") or []):
         warns.append("没声明 paths，改动范围不受约束")
     needs = card.get("needs") or []
@@ -2398,11 +2472,19 @@ def cmd_result(args) -> None:
     res = h.result_info(args.task)
     if not res:
         raise HiveError(f"{args.task} 还没有结果")
+    verdict = _verify_verdict(res.get("verify") or [])
+    res["verify_strength"] = verdict["verdict"]
+    res["verify_entries"] = verdict["verify"]
     if args.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
     else:
         print(f"{res['task']}  {res['status']}  by {res['agent']}  ({res['duration_s']}s)")
         print(f"branch: {res.get('branch')}  head: {res.get('head')}")
+        print(f"验收强度: {verdict['verdict']}")
+        for e in verdict["verify"]:
+            print(f"  [{e['code']}] ({e['strength']}) {e['cmd']}")
+        if verdict["verdict"] == "weak-pass":
+            print("  ! 只有弱验收（grep/test -f 之类），成果没有被真正执行验证")
         print("-" * 60)
         print(res.get("summary", ""))
 

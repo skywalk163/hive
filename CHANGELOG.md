@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.3 — 2026-10-24
+
+### Added
+
+- **verify 强度分级**：`_verify_strength(cmd)` / `_verify_verdict(verify)`。
+  `strong` = 真的会执行被测对象（pytest / npm test / go test / cargo test /
+  make test / unittest…）；`weak` = 只查痕迹（grep / test -f / which / echo /
+  cat / wc…）。判断刻意保守，拿不准就算 weak；**混合 shell 管线按最弱的一环算** ——
+  T-0101 那条 `grep && grep && pytest` 因此被判成 weak，正是想要的信号。
+  - `hive result`：每条 verify 标强弱，整卡给结论 `strong-pass` / `weak-pass` /
+    `fail`；弱验收时显式提醒「成果没有被真正执行验证」。`--json` 带
+    `verify_strength` 与 `verify_entries`。
+  - `hive doctor`：只有弱验收的卡点名 warning。
+  - `draft lint`：**草稿没有强验收就报 error 挡转正**。
+  - MCP `hive_result` 返回带上 `verify_strength`。
+- 测试 5 组（含 15 个参数化用例），全量 **80 passed**。
+
 ## 0.9.2 — 2026-10-24
 
 ### Fixed
