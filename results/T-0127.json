@@ -1,0 +1,53 @@
+{
+  "task": "T-0127",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0127",
+  "base": "main",
+  "head": "f40b3910a52fa908200f35b10998954bb89f54d9",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T12:34:31+00:00",
+  "finished_at": "2026-10-24T13:07:03+00:00",
+  "duration_s": 1952.2,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_llm_controller.py -q",
+      "code": 0,
+      "tail": [
+        "............                                                             [100%]",
+        "12 passed in 19.65s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 63%]",
+        ".........................................                                [100%]",
+        "113 passed in 206.32s (0:03:26)"
+      ]
+    }
+  ],
+  "summary": "# T-0127 总结：LLM 总控 `hive llm`\n\n## 做了什么\n\n在 `llm_controller.py`（标准库实现，零第三方依赖，与全仓一致）里实现了「以 LLM 为决策核心的总控」，\n作为 0.9.6 确定性 `hive orchestrate` 的互补——orchestrate 跑稳定路径（verify 全绿就 land），\n`hive llm` 处理 `needs_review` / `conflict` / `failed` / `blocked` 这些需要判断的卡点，以及分派偏好。\n\n三个支柱：\n\n1. **工具后端 `ToolBackend`**（把 controller MCP 工具面暴露成 `{list_tools, call_tool}`）\n   - `InProcessBackend`：直接复用 `mcp_server.HiveMcp` 的 handler（**== controller MCP 工具面本身**），\n     无需再起进程；工具 schema 取自 `mcp_server.TOOLS` 中 controller + 只读 introspection 那部分，\n     再加合成工具 `done`（「本轮无事可做，停」）。\n   - `McpStdioBackend`：真·spawn `mcp_server.py --role controller`，走 JSON-RPC 握手\n     （initialize → tools/list → tools/call），是货真价实的 MCP 客户端（已加握手超时保护，不会卡死）。\n\n2. **可插拔 `LlmClient`**\n   - `OpenAiClient`：标准库 `urllib` POST 到 `${OPENAI_BASE_URL}/chat/completions`\n     （model = `${OPENAI_MODEL}`），system prompt 带工具 schema，要求只回一个 JSON 动作；带兜底解析。\n   - `HeuristicClient`：无 key 时的可用回退，等价于「不做危险决策的 orchestrate」。\n   - `MockClient`：测试用，依次吐 script。\n\n3. **决策循环 `ControllerLoop`**：每轮拿 `hive_whoami`（controller）快照 → 渲染 → 问 LLM 下一个动作 →\n   执行（带 **apply 安全闸**）→ 记滚动历史（防绕圈）。LLM 回 `done` / 到 `--max-iter` /\n   `--stop-file` 出现 / 一轮无动作 → 结束。\n\n**apply 安全闸**（和全仓「破坏性操作默认 dry-run」一致）：没传 `--apply` 时，dry-run 类工具\n（land/dispatch/gc/watchdog）强制 `apply=false`（只预演）；`hive_close/hive_retry/hive_assign`\n这类无 dry-run 的破坏性操作直接跳过不执行。\n\n**CLI**：`hive llm [--agent controller] [--mcp] [--llm openai|heuristic] [--model/--base-url/--api-key]\n[--apply] [--max-iter N] [--stop-file PATH] [--once]`。无 key 时自动从 openai 回退到 heuristic。\n\n## 验收\n\n- `tests/test_llm_controller.py` 新增 12 个用例全绿，覆盖：in-process 后端工具面、whoami、`MockClient`\n  驱动 land/close 决策点、preview 不改动、HeuristicClient 在 needs_review 上留给人工、OpenAiClient\n  解析与兜底、apply 安全闸（dry-run 强制 apply=false、force-mutating 跳过）、真实 MCP stdio 客户端握手。\n- 全量 `pytest` **113 passed**（原 101，+12），零回归。\n- CLI 烟测：`hive llm --llm heuristic --once` 能拉起后端、执行真实 handler、正常结束。\n\n## 改动文件\n\n- 新增 `llm_controller.py`\n- `hive.py`：加 `cmd_llm` + `llm` 子命令 + `VERSION` 0.9.6 → 0.9.7\n- `docs/操作手册.md` §6.3「LLM 总控 `hive llm`」；`docs/MCP接入.md` §4.5.1 补一句 `hive llm` 封装\n- `CHANGELOG.md` 0.9.7 条目\n\n（注：`mcp_server.py` 未改动——本卡只复用其 handler 与工具 schema，未改任何语义。）",
+  "error": "",
+  "declared_paths": [
+    "llm_controller.py",
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_llm_controller.py",
+    "docs/操作手册.md",
+    "docs/MCP接入.md",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/MCP接入.md",
+    "docs/操作手册.md",
+    "hive.py",
+    "llm_controller.py",
+    "tests/test_llm_controller.py"
+  ],
+  "out_of_paths": []
+}
