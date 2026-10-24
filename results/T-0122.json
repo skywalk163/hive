@@ -1,0 +1,48 @@
+{
+  "task": "T-0122",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0122",
+  "base": "main",
+  "head": "2ad5fcd4b5dbb4d3dc04441bee9f03e68b8a7ab6",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T01:17:54+00:00",
+  "finished_at": "2026-10-24T01:33:26+00:00",
+  "duration_s": 932.0,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests -q --tb=short",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 90%]",
+        "........                                                                 [100%]",
+        "80 passed in 189.27s (0:03:09)"
+      ]
+    },
+    {
+      "cmd": "python3 -c \"import hive,sys; sys.exit(0 if hasattr(hive,'_verify_strength') else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0122 完成：verify 强度分级\n\n执行者：workbuddy（manual 模式）\n\n## 做了什么\n\n`_verify_strength(cmd)` / `_verify_verdict(verify)`：\n\n- **strong** = 真的会执行被测对象（pytest / npm test / go test / cargo test /\n  make test / unittest…）；**weak** = 只查痕迹（grep / test -f / which / echo /\n  cat / wc…）。判断刻意保守，拿不准就算 weak。\n- **混合 shell 管线按最弱的一环算** —— T-0101 那条 `grep && grep && pytest`\n  因此被判成 weak，这正是想要的信号：整条命令绑在一起时，看板只看最终退出码，\n  看不出是哪条在把关。\n\n挂到四个地方：\n\n1. `hive result`：每条 verify 标强弱，整卡结论 `strong-pass` / `weak-pass` / `fail`；\n   弱验收时显式提醒「成果没有被真正执行验证」。`--json` 带 `verify_strength`。\n2. `hive doctor`：只有弱验收的卡点名 warning。\n3. `draft lint`：**草稿没有强验收就报 error 挡转正**。\n4. MCP `hive_result`：返回带 `verify_strength`。\n\n## 踩的两个坑\n\n1. **`_verify_verdict` 一开始只认字典**。任务卡 frontmatter 的 verify 是**字符串列表**，\n   结果 json 里才是 `{cmd, code, tail}`。加 `with_codes` 参数兼容两种形状。\n2. **我自己的测试断言写错了字**：代码输出「成果**被**真正执行验证」，\n   我断言「没有真正执行验证」（少了\"被\"），白失败一轮。\n3. 新规则让既有的两个 draft 测试挂了（它们的草稿 verify 是 `true` / `test -f`，\n   现在算弱验收）。已给它们补上强验收 —— 这是规则变严的预期后果。\n\n## 验证\n\n测试 5 组（15 个参数化用例 + 3 个集成用例），全量 **80 passed**。\n真机确认：T-0110 → `strong-pass`（pytest 那条是 strong，另两条 grep 是 weak）；\nT-0101 → `weak-pass` 并带提醒。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_core.py",
+    "tests/test_mcp.py",
+    "docs/操作手册.md",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/操作手册.md",
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_core.py"
+  ],
+  "out_of_paths": []
+}
