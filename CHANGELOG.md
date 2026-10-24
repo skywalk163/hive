@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.0 — 2026-10-24
+
+### Added
+
+- **`hive draft`：任务卡草稿，让 agent 也能出题**。以前只有人会写卡 ——
+  写一张卡要读代码、想 paths 和 verify、组织语言，几分钟到十几分钟；agent 一天能干
+  20 张卡的活，但只能等人把卡写出来。吞吐卡在出题这一端。
+  - `hive draft new [名字] [--repo hive]`：生成带「背景 / 目标 / 红线 / 验收」四段骨架的
+    模板（文件名给不给 `.md` 都认）；
+  - `hive draft list` / `hive draft lint [文件]`：草稿校验，不传文件就 lint 全部；
+  - `hive draft adopt <文件>`：**过 lint 才转正**，自动分配任务号、从 `drafts/` 移进
+    `tasks/`、草稿撤掉，并打印下一步。
+  - `draft_lint()` 抽成模块级函数（error / warning 分级），`doctor` 和 `adopt` 共用。
+    error 会挡住：没填 repo、repo 没被任何 agent 登记、**一条 verify 都没有**、
+    `needs` 里有没有任何 agent 能满足的能力、依赖不存在的卡。
+    最后两条是 T-0102 那种僵尸卡的成因，现在从源头拦住。
+  - `tasks/` 仍只能由 `adopt` 或 `task new` 写入 —— 草稿是给人 review 的界面：
+    agent 一次出十张是廉价的，人只做「同意/打回」这个 O(1) 判断。
+- 测试 3 例，全量 **56 passed**。
+
 ## 0.8.0 — 2026-10-23
 
 ### Added

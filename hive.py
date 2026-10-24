@@ -44,7 +44,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -1998,6 +1998,167 @@ def cmd_task(args) -> None:
     log(f"已创建 {tid}")
 
 
+DRAFT_TEMPLATE = """---
+id: {tid}
+title: （一句话说清要做什么）
+repo: {repo}
+base: main
+state: draft
+owner: null
+agent: null
+priority: P1
+needs: []
+paths: []
+verify: []
+depends_on: []
+lease_minutes: 180
+timeout_minutes: 120
+created: {now}
+---
+
+## 背景
+
+（为什么需要做这件事？现在卡在哪？引用具体现象，别写「为了更好」这种空话。）
+
+## 目标
+
+（要改哪些文件、加什么能力、验收标准是什么。能列点就列点。）
+
+## 红线
+
+（不许动什么、不许引入什么、不许改什么行为。）
+
+## 验收
+
+（`git show --stat HEAD` 应该覆盖哪些路径？verify 全过之外还有什么？）
+"""
+
+
+def draft_lint(card: dict, tid: str, agents: dict, cards: dict) -> tuple[list, list]:
+    """校验一张草稿卡。返回 (errors, warnings)。
+
+    error 会挡住转正；warning 只是提醒。判定规则写在这里，
+    让 `hive doctor` 和 `hive draft adopt` 共用同一套。
+    """
+    errors: list[str] = []
+    warns: list[str] = []
+    repo = card.get("repo") or ""
+    if not repo:
+        errors.append("没填 repo")
+    elif not any(repo in (a.get("repos") or {}) for a in agents.values()):
+        errors.append(f"repo {repo!r} 没有任何 agent 登记 —— 这张卡永远派不出去")
+    if not (card.get("verify") or []):
+        errors.append("一条 verify 都没有（没有验收机的卡不能转正）")
+    if not (card.get("paths") or []):
+        warns.append("没声明 paths，改动范围不受约束")
+    needs = card.get("needs") or []
+    have = set()
+    for a in agents.values():
+        have |= set(a.get("abilities") or []) | set(a.get("capabilities") or [])
+    lack = [n for n in needs if n not in have]
+    if lack:
+        errors.append(f"能力 {', '.join(lack)} 没有任何 agent 满足 —— 会变成僵尸卡")
+    for d in (card.get("depends_on") or []):
+        if d not in cards:
+            errors.append(f"依赖了不存在的卡 {d}")
+    if not (card.get("title") or "").strip():
+        errors.append("没填 title")
+    return errors, warns
+
+
+def _draft_name(file: str | None) -> str | None:
+    """用户给 'T-0100' 或 'T-0100.md' 都认，统一补上 .md。"""
+    if not file:
+        return None
+    return file if file.endswith(".md") else file + ".md"
+
+
+def cmd_draft(args) -> None:
+    h = Hive(args.dir)
+    h.sync_main()
+    ddir = h.dir / "drafts"
+    args.file = _draft_name(args.file)
+    if args.action == "list":
+        files = sorted(ddir.glob("*.md"))
+        if not files:
+            print("（没有草稿）")
+            return
+        for p in files:
+            data, _ = parse_card(p)
+            print(f"{p.name:<28} {data.get('title') or '(未填标题)'}")
+        return
+    if args.action == "lint":
+        agents = h.agents()
+        cards = h.cards()
+        files = [ddir / args.file] if args.file else sorted(ddir.glob("*.md"))
+        bad = 0
+        for p in files:
+            if not p.exists():
+                raise HiveError(f"草稿不存在：{p}")
+            data, _ = parse_card(p)
+            errors, warns = draft_lint(data, data.get("id") or p.stem, agents, cards)
+            for w in warns:
+                print(f"[WARN] {p.name}: {w}")
+            for e in errors:
+                print(f"[ERR ] {p.name}: {e}")
+            if errors:
+                bad += 1
+            else:
+                print(f"[ OK ] {p.name}")
+        if bad:
+            sys.exit(1)
+        return
+    if args.action == "adopt":
+        src = ddir / args.file
+        if not src.exists():
+            raise HiveError(f"草稿不存在：{src}")
+        data, body = parse_card(src)
+        errors, warns = draft_lint(data, data.get("id") or src.stem,
+                                   h.agents(), h.cards())
+        if errors:
+            for e in errors:
+                print(f"[ERR ] {args.file}: {e}", file=sys.stderr)
+            raise HiveError("草稿有问题，不转正（先改 drafts/ 里的内容再试）")
+        for w in warns:
+            log(f"提醒：{w}")
+        ids = [int(p.stem.split("-")[1]) for p in (h.dir / "tasks").glob("T-*.md")
+               if p.stem.split("-")[1].isdigit()]
+        tid = args.id or f"T-{max(ids, default=0) + 1:04d}"
+        if (h.dir / "tasks" / f"{tid}.md").exists():
+            raise HiveError(f"{tid} 已存在")
+        card = {
+            "id": tid, "title": data.get("title"), "repo": data.get("repo"),
+            "base": data.get("base") or "main", "state": "ready", "owner": None,
+            "agent": None, "priority": data.get("priority") or "P1",
+            "needs": data.get("needs") or [], "paths": data.get("paths") or [],
+            "verify": data.get("verify") or [], "depends_on": data.get("depends_on") or [],
+            "fresh": False, "lease_minutes": int(data.get("lease_minutes") or 180),
+            "timeout_minutes": int(data.get("timeout_minutes") or 120),
+            "created": iso(),
+        }
+        write_card(h.dir / "tasks" / f"{tid}.md", card, body)
+        src.unlink()  # 草稿转正后撤掉，别在 drafts/ 里留两份
+        h.commit_and_push(f"adopt draft {args.file} -> {tid} {card['title']}",
+                          [f"tasks/{tid}.md", f"drafts/{args.file}"])
+        log(f"草稿 {args.file} 已转为 {tid}")
+        print(f"\n=== {tid} 已入队 ===\n下一步：hive dispatch 或 "
+              f"hive assign {tid} --agent <name>\n", flush=True)
+        return
+    # new
+    repo = args.repo or "hive"
+    ids = [int(p.stem.split("-")[1]) for p in (h.dir / "tasks").glob("T-*.md")
+           if p.stem.split("-")[1].isdigit()]
+    tid = f"T-{max(ids, default=0) + 1:04d}"
+    name = args.file or f"{tid}.md"
+    if (ddir / name).exists():
+        raise HiveError(f"草稿 {name} 已存在")
+    ddir.mkdir(parents=True, exist_ok=True)
+    (ddir / name).write_text(
+        DRAFT_TEMPLATE.format(tid=tid, repo=repo, now=iso()), encoding="utf-8")
+    h.commit_and_push(f"draft: add {name}", [f"drafts/{name}"])
+    log(f"草稿已生成：drafts/{name}")
+
+
 def cmd_assign(args) -> None:
     Hive(args.dir).cmd_assign(args.task, args.agent)
 
@@ -2126,6 +2287,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--launch", help="manual 模式下打开 GUI 的命令，支持 {worktree}/{task}/{prompt}")
     s.add_argument("--max-concurrency", type=int, default=1)
     s.set_defaults(func=cmd_agent)
+
+    s = sub.add_parser("draft", help="任务卡草稿：agent 出题、人确认后转正")
+    s.add_argument("action", choices=["new", "list", "lint", "adopt"])
+    s.add_argument("file", nargs="?", help="草稿文件名（drafts/<file>）")
+    s.add_argument("--repo", default="hive", help="草稿针对哪个代码仓（默认 hive）")
+    s.add_argument("--id", help="转正时指定任务号（默认取当前最大号 +1）")
+    s.set_defaults(func=cmd_draft)
 
     s = sub.add_parser("task", help="任务卡")
     s.add_argument("action", choices=["new", "list"])
