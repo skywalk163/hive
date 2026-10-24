@@ -1,0 +1,50 @@
+{
+  "task": "T-0123",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0123",
+  "base": "main",
+  "head": "8eac6ca3e474f7a9c3e169ef912e11b944f88329",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T01:33:51+00:00",
+  "finished_at": "2026-10-24T02:16:20+00:00",
+  "duration_s": 2549.4,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests -q --tb=short",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 83%]",
+        "..............                                                           [100%]",
+        "86 passed in 203.94s (0:03:23)"
+      ]
+    },
+    {
+      "cmd": "grep -q 'role' mcp_server.py && grep -q 'hive_land' mcp_server.py",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0123 完成：MCP 总控视角\n\n执行者：workbuddy（manual 模式）\n\n## 做了什么\n\n`hive mcp --agent <name> --role controller`（或 `HIVE_ROLE=controller`）。以前 MCP 只有\nworker 视角，总控还得敲 CLI；现在合入/关闭/重跑/分派/回收都能走 MCP。\n\ncontroller 额外 6 个工具：`hive_land` / `hive_close` / `hive_retry` /\n`hive_assign` / `hive_dispatch` / `hive_gc`。\n\n**权限是真隔离，不是靠提示词叮嘱**：\n- worker 视角的 `tools/list` 里根本看不到这 6 个（测试断言集合交集为空）；\n- 即使 worker 猜到工具名去 `tools/call`，也会被 `_need_controller` 拒掉。\n\n**破坏性操作一律默认 dry-run**：`hive_land` / `hive_dispatch` / `hive_gc` 不传\n`apply=true` 就只出计划。`hive_land` 遇冲突返回 error 并把冲突文件提到\n`details.conflicts`，绝不自动解冲突、绝不 force push。\n\n`hive_whoami` 在 controller 下多返回 `role` 和 `todo`（待合入 / conflict /\nblocked / needs_review / ready 五类），总控 agent 开工前先看这个。\n`initialize` 的 instructions 也区分角色，controller 版明确写「你的操作会改动 main 分支」。\n\n## 踩的最大的坑\n\n**插入 6 个工具定义时漏了每个 dict 开头的 `{`**。Python 不报错 —— 那些 `\"name\": ...`\n被并进了上一个 dict，同名 key 互相覆盖，最后 `TOOLS` 还是 12 个。\n`py_compile` 照样显示\"编译 OK\"，差点以为成功。\n\n后面逐块补 `},` 又补出新的不平衡，最后干脆**从 git 取原始 TOOLS 块整体重写**才对。\n教训：**批量往列表字面量里插字典，一定要在改完后打印 `len(TOOLS)` 和工具名确认**，\n编译通过什么都不代表。\n\n另外两个小坑：测试读卡前忘了 `world.sync()`（卡片是工作区文件，land 推完 main 后\n不同步读到的还是旧的）；测试里用 `world.refs()` 查 task 分支，但那些分支在**代码仓**\n不在协调仓，补了 `code_refs()`。\n\n## 验证\n\n测试 6 例，全量 **86 passed**：\nworker 看不到总控工具 / controller 有全部工具和 todo / land 默认 dry-run、\napply 才合入并 close / 冲突时返回 error 且不 force / worker 调 land 被拒 /\nretry 后结果被清掉。",
+  "error": "",
+  "declared_paths": [
+    "mcp_server.py",
+    "hive.py",
+    "tests/test_mcp.py",
+    "docs/MCP接入.md",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/MCP接入.md",
+    "hive.py",
+    "mcp_server.py",
+    "tests/conftest.py",
+    "tests/test_mcp.py"
+  ],
+  "out_of_paths": [
+    "tests/conftest.py"
+  ]
+}
