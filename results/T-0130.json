@@ -1,0 +1,48 @@
+{
+  "task": "T-0130",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0130",
+  "base": "main",
+  "head": "b5b672957e2354016700be4df080e1182eb9c628",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T16:07:21+00:00",
+  "finished_at": "2026-10-24T16:24:18+00:00",
+  "duration_s": 1017.1,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_retry_cap.py -q",
+      "code": 0,
+      "tail": [
+        ".........                                                                [100%]",
+        "9 passed in 17.56s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 56%]",
+        "........................................................                 [100%]",
+        "128 passed in 278.47s (0:04:38)"
+      ]
+    }
+  ],
+  "summary": "# T-0130 总结：重试熔断（自动回收达上限转 blocked）\n\n## 背景\n\n`retries` 字段以前**只增不停**：`_reenqueue_ready`（看门狗自动回收）和 `cmd_retry` 都会 `retries + 1`，\n但全仓没有任何一处会因它停下。\n\n后果：一张注定失败的卡（verify 恒红、或 agent 一领就崩）会被「判死 → 退回 ready → 重新分派 →\n再判死」无限循环。`hive orchestrate` 是常驻进程，这个循环会 7×24 小时不停烧 agent 时间\n（exec agent 还是真花钱的 LLM 调用），而 `doctor` / `digest` 只能事后看到 retries 在涨，阻止不了。\n\n看门狗（T-0125）和总控（T-0126）把「自动推进」做出来了，缺一道**熔断**，本卡补上。\n\n## 改了什么\n\n1. 新增 `DEFAULT_MAX_RETRIES = 3`，`TASK_FIELDS` 加 `max_retries`；\n   建卡（`cmd_task` + `--max-retries`）和草稿转正（`cmd_draft` adopt）都会写入。\n2. 新增 `_max_retries(card)` / `_retries_left(card)` 两个辅助（静态方法，好测）。\n3. `_reenqueue_ready` 入口加熔断：额度用尽 → 用现有 `_set_state(tid,\"blocked\",…)` 判死并写明原因，\n   **不再退回 ready、也不再 +retries**。\n4. `cmd_watchdog`：候选里额度用尽的 `action` 从 `reclaim` 标成 `block`，\n   `--json` 新增 `would_block` / `blocked` 计数，日志区分「回收」与「转blocked」。\n5. `cmd_retry`：**人工显式 retry 不受限**，只在超额度时 log 一条提醒。\n6. `hive doctor`：对「重试额度烧光」单独点名，与「等外部资源」的 blocked 区分开。\n\n`blocked` 会被 `dispatch` / worker / `orchestrate` 全部跳过，所以熔断后的卡是真的退出流水线。\n\n## 踩到的坑\n\n- **`max_retries = 0` 被 `or DEFAULT` 吃掉**：`int(card.get(\"max_retries\") or DEFAULT_MAX_RETRIES)`\n  里 `0` 是假值，会被误判成「没设置」而退回默认 3，于是「不许自动重派」永远不生效。\n  改成先判 `is None / \"\"` 再 `int()`。已在代码注释里写明这个陷阱。\n\n## 验收\n\n- 新增 `tests/test_retry_cap.py` 9 例：额度内回 ready 且 +1、逐次消耗额度、额度用尽转 blocked、\n  blocked 后 retries 不再涨、`max_retries=0` 首次即 block、blocked 被 dispatch 跳过、\n  `--json` 的 action/would_block、doctor 点名、人工 retry 仍可用。\n- **已验证是真回归守卫**：临时把 `_retries_left` 改成恒返回 1（关掉熔断）→ 9 例中 **7 例红**；\n  恢复后全绿。\n- 全量 pytest 无回归。\n\n## 改动文件\n\n`hive.py`、`tests/test_retry_cap.py`（新）、`docs/操作手册.md`（新增 §6.1.1 重试熔断）、\n`CHANGELOG.md`（0.9.10）",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_retry_cap.py",
+    "docs/操作手册.md",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/操作手册.md",
+    "hive.py",
+    "tests/test_retry_cap.py"
+  ],
+  "out_of_paths": []
+}
