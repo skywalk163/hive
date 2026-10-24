@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.0 — 2026-10-23
+
+### Added
+
+- **状态机补齐**：新增 `needs_review` / `conflict` / `blocked` 三个状态，
+  异常卡终于有地方待，不用再靠反复 `retry` 清场。
+  - `hive block T-xxxx --reason "..."` / `hive unblock T-xxxx`：等外部资源时挂起。
+    dispatch 和 worker 都跳过它，`status` 里单独可见，`doctor` 计数。
+  - `land` 撞上合并冲突时自动把卡置为 `conflict`（以前只在返回里说，没有落点）；
+    `doctor` 把 `conflict` 当**错误**报（退出码非 0）—— 有卡冲突不解决，后面全堵着。
+  - `needs_review`：状态机支持，给后面「agent 出卡草稿 → 人确认」的流程预留。
+  - MCP 新增 `hive_block` / `hive_unblock`；`hive_next` 与 `whoami.claimable`
+    都不再推荐这三个状态的卡。
+- 状态常量集中到 `STATES` / `IN_FLIGHT_STATES` / `HANDOFF_STATES` / `ERROR_STATES`，
+  「在飞」的判断不再散落在各处字符串比较里（原来有 4 处硬编码 `("assigned","running")`）。
+
+### Ops
+
+- T-0102（Windows 接入）置为 `blocked`：它 `needs: windows`，但 4 个 agent 没有一个
+  声明这个能力，会永远躺在 ready 列表里骚扰 dispatch —— 这正是僵尸卡的成因。
+- 测试 3 例，全量 **53 passed**。
+
 ## 0.7.1 — 2026-10-23
 
 ### Fixed

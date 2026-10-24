@@ -44,7 +44,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.7.1"
+VERSION = "0.8.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -299,6 +299,15 @@ def read_ref_file(repo: Path, ref: str, path: str):
 
 
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+# 任务卡状态机。加新状态时务必同步改这几个集合，别让「在飞」的判断散落在各处字符串比较里。
+STATES = ("ready", "assigned", "running", "needs_review",
+          "conflict", "blocked", "done")
+IN_FLIGHT_STATES = ("assigned", "running")   # 占了并发额度、worker 会去接的
+# 需要人或另一个 agent 介入才能继续的：dispatch / worker 都跳过，doctor 要报
+HANDOFF_STATES = ("needs_review", "conflict", "blocked")
+# blocked 与 conflict 分开：conflict 是「必须尽快解」，doctor 按 error 报；blocked 是等资源
+ERROR_STATES = ("conflict",)
 
 
 def _pct(values, p: int) -> float:
@@ -578,6 +587,14 @@ class Hive:
                         check=False).stdout.splitlines() if l.strip()]
                     if conflicts:
                         plan["status"] = "conflict"
+                        try:
+                            self._set_state(
+                                tid, "conflict",
+                                f"land 合并冲突（{len(conflicts)} 个文件），需人工解决",
+                                "land", keep_owner=True)
+                            plan["state_set"] = "conflict"
+                        except HiveError as e:
+                            log(f"{tid} 标记 conflict 失败：{e}")
                         plan["conflicts"] = conflicts
                         plan["problems"].append(
                             f"合并冲突（{len(conflicts)} 个文件）："
@@ -672,7 +689,7 @@ class Hive:
         load: dict[str, int] = {}
         for tid, c in cards.items():
             # 只扫在飞的卡，别为几百张历史卡逐个 git show
-            if c.get("state") not in ("assigned", "running"):
+            if c.get("state") not in IN_FLIGHT_STATES:
                 continue
             if self.result_info(tid):
                 continue
@@ -712,7 +729,7 @@ class Hive:
         """在飞的卡：已 assigned/running 且还没有结果。"""
         out = []
         for tid, c in cards.items():
-            if c.get("state") not in ("assigned", "running"):
+            if c.get("state") not in IN_FLIGHT_STATES:
                 continue
             if self.result_info(tid):
                 continue
@@ -760,6 +777,7 @@ class Hive:
         # 并发锁的粒度是 paths，不是 repo：同一 repo 里改互不相干目录的卡可以同时跑。
         # （自举阶段 hive 是唯一在开发的仓，按 repo 计数等于全串行）
         occupied = [(tid, c) for tid, c in self._in_flight(cards)]
+        # needs_review / conflict / blocked 都跳过：要么等人、要么等资源、要么等解冲突
         ready = [c for c in cards.values()
                  if c.get("state") == "ready" and not c.get("owner")]
         ready.sort(key=lambda c: (PRIORITY_ORDER.get(c.get("priority"), 9), c["id"]))
@@ -974,9 +992,16 @@ class Hive:
                 errors.append(f"归档结果 {p.name} status={data.get('status')!r} 非法")
 
         for tid, c in cards.items():
-            if c.get("state") == "done" and not self.result_info(tid):
+            st = c.get("state")
+            if st in ERROR_STATES:
+                errors.append(f"{tid}: 状态 {st} —— 合并冲突，必须尽快解决")
+            elif st == "needs_review":
+                warns.append(f"{tid}: 状态 needs_review，等人确认")
+            elif st == "blocked":
+                warns.append(f"{tid}: blocked（等资源/等外部条件）")
+            if st == "done" and not self.result_info(tid):
                 warns.append(f"任务 {tid} 已关闭但没有结果记录")
-            if c.get("state") == "ready" and c.get("owner"):
+            if st == "ready" and c.get("owner"):
                 warns.append(f"任务 {tid} 是 ready 但有 owner")
             for n in c.get("needs") or []:
                 if not any(n in (set(a.get("abilities") or []) |
@@ -1313,6 +1338,41 @@ class Hive:
             print(f"{r['id']:<{w[0]}} {r['state']:<{w[1]}} {r['owner']:<{w[2]}} "
                   f"{r['result']:<{w[4]}} {r['claim']:<{w[5]}} {r['title'][:50]}")
 
+    # -- 挂起 / 恢复 ------------------------------------------------------- #
+    def _set_state(self, tid: str, state: str, reason: str, who: str,
+                   keep_owner: bool = False) -> None:
+        """把卡改成 needs_review / conflict / blocked，并写进完成备注。"""
+        if state not in STATES:
+            raise HiveError(f"未知状态 {state!r}（合法值：{', '.join(STATES)}）")
+        self.sync_main()
+        card = self.card(tid)
+        old = card.get("state")
+        card["state"] = state
+        if not keep_owner and state != "assigned":
+            card["owner"] = None if state == "blocked" else card.get("owner")
+        body = (card["_body"] + f"\n\n---\n\n**{state}（{iso()}，by {who}）**：{reason}\n")
+        self.save_card(card, body)
+        self.commit_and_push(f"{state} {tid} by {who}: {reason}",
+                             self._card_paths(tid))
+        log(f"{tid}: {old} -> {state}（{reason}）")
+
+    def cmd_block(self, tid: str, reason: str = "", who: str = "controller") -> None:
+        """挂起一张卡：等外部资源，不是出错。dispatch 和 worker 都会跳过它。"""
+        self._set_state(tid, "blocked", reason or "未说明", who)
+
+    def cmd_unblock(self, tid: str, reason: str = "", who: str = "controller") -> None:
+        """解除挂起，退回 ready（保留 owner 的话退成 assigned）。"""
+        self.sync_main()
+        card = self.card(tid)
+        if card.get("state") != "blocked":
+            raise HiveError(f"{tid} 的状态是 {card.get('state')}，不是 blocked")
+        card["state"] = "assigned" if card.get("owner") else "ready"
+        body = (card["_body"] + f"\n\n---\n\n**unblock（{iso()}，by {who}）**："
+                f"{reason or '已解除挂起'}，回到 {card['state']}\n")
+        self.save_card(card, body)
+        self.commit_and_push(f"unblock {tid} by {who}", self._card_paths(tid))
+        log(f"{tid} 已回到 {card['state']}")
+
     def cmd_retry(self, tid: str, agent: str | None = None, fresh: bool = False) -> None:
         card = self.card(tid)
         if fresh:
@@ -1387,7 +1447,7 @@ class Hive:
         # 在飞的卡不许碰：有卡没结果的，分支可能正被 worker 写着
         cards = self.cards()
         busy = {tid for tid, c in cards.items()
-                if c.get("state") in ("assigned", "running")
+                if c.get("state") in IN_FLIGHT_STATES
                 and not self.result_info(tid)}
         deleted = kept = 0
         for name, path in sorted(repos.items()):
@@ -1495,7 +1555,7 @@ class Worker:
             if claim and claim.get("agent") != self.name:
                 continue
             card = cards.get(tid)
-            if not card or card.get("state") in ("done", "blocked"):
+            if not card or card.get("state") in ("done",) + HANDOFF_STATES:
                 continue
             deps = card.get("depends_on") or []
             if any(not self._dep_done(d) for d in deps):
@@ -1977,6 +2037,14 @@ def cmd_stats(args) -> None:
     Hive(args.dir).cmd_stats(args.json, args.days)
 
 
+def cmd_block(args) -> None:
+    Hive(args.dir).cmd_block(args.task, args.reason or "", who="controller")
+
+
+def cmd_unblock(args) -> None:
+    Hive(args.dir).cmd_unblock(args.task, args.reason or "", who="controller")
+
+
 def cmd_close(args) -> None:
     Hive(args.dir).cmd_close(args.task, args.note or "")
 
@@ -2133,6 +2201,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="审所有已有结果的卡")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_audit)
+
+    s = sub.add_parser("block", help="挂起一张卡（等资源/等外部条件，dispatch 与 worker 都会跳过）")
+    s.add_argument("task")
+    s.add_argument("--reason", default="", help="为什么挂起（写进完成备注）")
+    s.set_defaults(func=cmd_block)
+
+    s = sub.add_parser("unblock", help="解除挂起，回到 ready 或 assigned")
+    s.add_argument("task")
+    s.add_argument("--reason", default="")
+    s.set_defaults(func=cmd_unblock)
 
     s = sub.add_parser("status", help="看板")
     s.add_argument("--json", action="store_true")

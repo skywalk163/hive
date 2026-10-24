@@ -29,7 +29,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from hive import (  # noqa: E402
-    DEFAULT_STATE, IDENT, PRIORITY_ORDER, VERSION, Hive, HiveError, Worker,
+    DEFAULT_STATE, HANDOFF_STATES, IDENT, PRIORITY_ORDER, VERSION, Hive,
+    HiveError, Worker,
     commit_file_to_ref, git, iso, now, parse_iso, rev_parse,
 )
 
@@ -99,6 +100,26 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "hive_block",
+        "description": "把一张卡挂起：等外部资源（比如 Windows 真机没装好）。挂起后 dispatch 和 worker 都会跳过它，不会再被派出去。自己手上干不下去但不该退回 ready 的卡用它。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务号"},
+                "reason": {"type": "string", "description": "为什么挂起（写进完成备注，便于以后回溯）"},
+            },
+            "required": ["task_id"],
+        },
+        "name": "hive_unblock",
+        "description": "解除挂起，把卡退回 ready（有 owner 的话退成 assigned）。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务号"},
+                "reason": {"type": "string"},
+            },
+            "required": ["task_id"],
+        },
         "name": "hive_abort",
         "description": "终止/放弃一张卡：释放我持有的租约，默认把卡退回 ready 让别人能领。已经出结果的卡不能终止（要先用 retry）。",
         "inputSchema": {
@@ -271,6 +292,8 @@ class HiveMcp:
         for tid, c in h.cards().items():
             if c.get("state") != "ready" or c.get("owner"):
                 continue
+            if c.get("state") in HANDOFF_STATES:
+                continue  # blocked / conflict / needs_review 不是「能领」
             if h.result_info(tid) or h.claim_info(tid):
                 continue
             good, _ = self._can_do(cfg, c, h)
@@ -325,6 +348,8 @@ class HiveMcp:
                              key=lambda kv: (PRIORITY_ORDER.get(kv[1].get("priority"), 9), kv[0])):
             if c.get("state") != "ready" or c.get("owner"):
                 continue
+            if c.get("state") in HANDOFF_STATES:
+                continue  # blocked / conflict / needs_review 不是「能领」
             if h.result_info(tid) or h.claim_info(tid):
                 continue
             good, why = self._can_do(cfg, c, h)
@@ -401,6 +426,33 @@ class HiveMcp:
                   hint=("verify 全绿就等总控合并；有红就改完再 hive_submit 一次"
                         if res.get("status") == "done" else
                         "verify 没过，看 verify 里的 tail 改代码后重新 hive_submit"))
+
+    def t_block(self, a: dict) -> dict:
+        tid = a["task_id"]
+        reason = (a.get("reason") or "").strip() or "未说明"
+        h = self.hive()
+        card = h.card(tid)
+        owner = card.get("owner") or ""
+        if owner and owner != self.agent:
+            return err(f"{tid} 归 {owner}，不能替别人挂起",
+                       hint="只能操作自己名下的卡")
+        try:
+            h.cmd_block(tid, reason, who=self.agent)
+        except HiveError as e:
+            return err(str(e))
+        return ok(f"{tid} 已挂起：{reason}", task_id=tid, state="blocked",
+                  hint="环境就绪后用 hive_unblock 放回队列")
+
+    def t_unblock(self, a: dict) -> dict:
+        tid = a["task_id"]
+        reason = (a.get("reason") or "").strip() or "已解除挂起"
+        h = self.hive()
+        try:
+            h.cmd_unblock(tid, reason, who=self.agent)
+        except HiveError as e:
+            return err(str(e), hint="只有 blocked 的卡能解除挂起")
+        st = self.hive().card(tid).get("state")
+        return ok(f"{tid} 已解除挂起，回到 {st}", task_id=tid, state=st)
 
     def t_abort(self, a: dict) -> dict:
         tid = a["task_id"]
@@ -531,6 +583,8 @@ class HiveMcp:
         "hive_next": t_next,
         "hive_claim": t_claim,
         "hive_submit": t_submit,
+        "hive_block": t_block,
+        "hive_unblock": t_unblock,
         "hive_abort": t_abort,
         "hive_extend_lease": t_extend_lease,
         "hive_progress": t_progress,

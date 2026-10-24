@@ -726,3 +726,66 @@ def test_sync_main_keeps_untracked_files(world):
 
     assert (world.hive1 / "scratch.txt").exists(), "未跟踪的文件不该被 reset 掉"
     assert (world.hive1 / "pushed-elsewhere.md").exists(), "应该已经跟上了 origin/main"
+
+
+# --------------------------------------------------------------------------- #
+# 状态机：blocked / conflict / needs_review
+# --------------------------------------------------------------------------- #
+
+def test_block_skips_dispatch_and_worker(world, fake_cmd):
+    """blocked 的卡：dispatch 不派、worker 不接。"""
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd,
+                    repos={"hive": world.code_clone("fb")})
+    world.add_task("T-0001", repo="hive", needs=["freebsd"], paths=["docs/"])
+
+    out = world.hive_json("dispatch")
+    assert [p["task"] for p in out["plan"]] == ["T-0001"], out
+    world.hive("dispatch", "--apply")
+    world.hive("block", "T-0001", "--reason", "等 Windows 真机")
+    assert world.card("T-0001")["state"] == "blocked"
+    assert world.card("T-0001")["owner"] is None, "挂起要收回 owner"
+
+    # 重新入队也派不出去（blocked 不在 ready 集合里）
+    out2 = world.hive_json("dispatch", "--agent", "fb")
+    assert out2["plan"] == [], out2
+    reasons = {s["task"]: s["reason"] for s in out2["skipped"]}
+    assert "T-0001" not in reasons or "blocked" in reasons["T-0001"], reasons
+
+    # worker 也不接它（inbox 里有也不跑）
+    row = next(r for r in world.hive_json("status") if r["id"] == "T-0001")
+    assert row["state"] == "blocked", row
+
+    world.hive("unblock", "T-0001", "--reason", "环境好了")
+    assert world.card("T-0001")["state"] == "ready", "没 owner 就该回 ready"
+    out3 = world.hive_json("dispatch", "--agent", "fb")
+    assert [p["task"] for p in out3["plan"]] == ["T-0001"], out3
+
+
+def test_doctor_flags_conflict_as_error(world, fake_cmd):
+    """conflict 是必须尽快解决的状态，doctor 要当错误报。"""
+    world.add_agent("fb", "exec", command=fake_cmd)
+    world.add_task("T-0001")
+    world.hive("assign", "T-0001", "--agent", "fb")
+    world.hive("close", "T-0001")  # 先混个 close 免得空状态干扰
+    # 手工把一张卡改成 conflict
+    world.hive("retry", "T-0001", "--agent", "fb")
+    p = world.hive1 / "tasks" / "T-0001.md"
+    p.write_text(p.read_text(encoding="utf-8").replace(
+        "state: assigned", "state: conflict", 1), encoding="utf-8")
+    sh(["git", "-C", str(world.hive1), "add", "-A"], env=world.git_env)
+    sh(["git", "-C", str(world.hive1), "commit", "-q", "-m", "make conflict"],
+       env=world.git_env)
+    sh(["git", "-C", str(world.hive1), "push", "-q", "origin", "main"],
+       env=world.git_env)
+
+    out = world.hive("doctor", check=False)
+    assert out.returncode != 0, "有 conflict 卡时 doctor 必须失败"
+    assert "T-0001" in (out.stdout + out.stderr)
+
+
+def test_states_are_centralised():
+    """状态机要有集中的常量，别散落在各处字符串比较。"""
+    assert "ready" in hive.STATES and "done" in hive.STATES
+    assert set(hive.HANDOFF_STATES) == {"needs_review", "conflict", "blocked"}
+    assert set(hive.IN_FLIGHT_STATES) == {"assigned", "running"}
+    assert hive.ERROR_STATES == ("conflict",)
