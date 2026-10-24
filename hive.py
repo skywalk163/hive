@@ -44,7 +44,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -52,7 +52,7 @@ DEFAULT_MAX_PER_REPO = 1
 TASK_FIELDS = [
     "id", "title", "repo", "base", "state", "owner", "agent", "fresh",
     "priority", "needs", "paths", "verify", "depends_on",
-    "lease_minutes", "timeout_minutes", "created",
+    "lease_minutes", "timeout_minutes", "created", "retries",
 ]
 
 PROMPT_HEADER = """\
@@ -1105,6 +1105,139 @@ class Hive:
         if by_repo:
             print("按仓库: " + "  ".join(f"{k} {v}" for k, v in by_repo.most_common()))
 
+    # -- 复盘摘要 ---------------------------------------------------------- #
+    def digest_data(self, days: int = 7) -> dict:
+        """汇总最近的结果，把失败原因聚成类。只读，不写任何东西。"""
+        self.fetch()
+        cards = self.cards()
+        cutoff = now() - timedelta(days=days) if days > 0 else None
+        rows = []
+        for tid, c in cards.items():
+            res = self.result_info(tid) or {}
+            if not res:
+                continue
+            finished = res.get("finished_at") or ""
+            if cutoff and finished:
+                try:
+                    if parse_iso(finished) < cutoff:
+                        continue
+                except ValueError:
+                    pass
+            rows.append({
+                "id": tid, "title": c.get("title") or "",
+                "agent": res.get("agent") or "", "status": res.get("status") or "",
+                "duration_s": float(res.get("duration_s") or 0),
+                "finished_at": finished,
+                "error": res.get("error") or "",
+                "verify": res.get("verify") or [],
+                "repo": c.get("repo") or "",
+                "state": c.get("state") or "",
+                "out_of_paths": res.get("out_of_paths") or [],
+            })
+        rows.sort(key=lambda r: r["finished_at"] or r["id"])
+
+        done = [r for r in rows if r["status"] == "done"]
+        failed = [r for r in rows if r["status"] == "failed"]
+        durs = sorted(r["duration_s"] for r in done if r["duration_s"] > 0)
+        total = len(done) + len(failed)
+
+        # 失败归因：从 error 归类，比「失败 3 张」有用得多
+        reasons: dict[str, list[str]] = {}
+        for r in failed:
+            e = r["error"] or "(未说明)"
+            if "超时" in e:
+                key = "超时（卡可能拆得太大，或环境起不来）"
+            elif "verify" in e:
+                key = "verify 未通过"
+            elif "越界" in e:
+                key = "paths 越界（严格模式拦下）"
+            elif "推送" in e:
+                key = "分支推送失败"
+            else:
+                key = "其它"
+            reasons.setdefault(key, []).append(r["id"])
+        for r in done:
+            if r["out_of_paths"]:
+                reasons.setdefault(
+                    "paths 越界（仅警告，未阻断）", []).append(r["id"])
+
+        slow = sorted(done, key=lambda r: -r["duration_s"])[:5]
+        # 反复重跑 = 第一版验收就没过。次数记在卡上（retry 会覆盖旧结果，
+        # 没法从结果列表里数出来）
+        retried = [tid for tid, c in cards.items()
+                   if int(c.get("retries") or 0) > 0]
+
+        return {
+            "window_days": days,
+            "summary": {
+                "tasks": len(rows), "done": len(done), "failed": len(failed),
+                "pass_rate": round(len(done) / total * 100, 1) if total else 0.0,
+                "median_s": round(durs[len(durs) // 2], 1) if durs else 0,
+                "p90_s": round(_pct(durs, 90), 1) if durs else 0,
+                "slow_count": len(slow),
+            },
+            "failure_reasons": {k: sorted(set(v)) for k, v in reasons.items()},
+            "slowest": [{"id": r["id"], "title": r["title"][:40],
+                         "duration_s": round(r["duration_s"], 1),
+                         "agent": r["agent"]} for r in slow],
+            "retried": sorted(set(retried)),
+            "by_agent": {
+                a: {"done": sum(1 for r in done if r["agent"] == a),
+                    "failed": sum(1 for r in failed if r["agent"] == a)}
+                for a in sorted({r["agent"] for r in rows if r["agent"]})
+            },
+            "tasks": rows,
+        }
+
+    def cmd_digest(self, days: int = 7, out: str = "", as_json: bool = False):
+        data = self.digest_data(days)
+        if as_json:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+            return data
+        s = data["summary"]
+        lines = [
+            f"# hive 复盘摘要（最近 {days} 天）",
+            "",
+            f"任务 {s['tasks']} ｜ 完成 {s['done']} ｜ 失败 {s['failed']} ｜ "
+            f"一次通过率 {s['pass_rate']}%",
+            f"中位耗时 {_fmt_dur(s['median_s'])} ｜ P90 {_fmt_dur(s['p90_s'])}",
+            "",
+        ]
+        if data["failure_reasons"]:
+            lines.append("## 失败归因")
+            lines.append("")
+            for reason, tids in sorted(data["failure_reasons"].items(),
+                                       key=lambda kv: -len(kv[1])):
+                lines.append(f"- **{reason}**（{len(tids)} 张）：{', '.join(tids)}")
+            lines.append("")
+        if data["slowest"]:
+            lines.append("## 耗时最长（可能是卡拆得不够小）")
+            lines.append("")
+            for r in data["slowest"]:
+                lines.append(f"- {r['id']} {_fmt_dur(r['duration_s'])}"
+                             f"（{r['agent']}）{r['title']}")
+            lines.append("")
+        if data["retried"]:
+            lines.append("## 反复重跑的卡（第一版验收就没过）")
+            lines.append("")
+            lines.append("- " + ", ".join(data["retried"]))
+            lines.append("")
+        if data["by_agent"]:
+            lines.append("## 按 agent")
+            lines.append("")
+            for a, v in data["by_agent"].items():
+                lines.append(f"- {a}: done {v['done']} ｜ failed {v['failed']}")
+            lines.append("")
+        text = "\n".join(lines)
+        if out:
+            path = Path(out)
+            if path.parent and str(path.parent):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            log(f"复盘摘要已写入 {path}")
+        print(text)
+        return data
+
     # -- 手工领取 / 提交 ---------------------------------------------------- #
     def cmd_take(self, tid: str, agent: str) -> None:
         """人工领取：assign + claim + 准备 worktree，不启动 worker。"""
@@ -1385,6 +1518,12 @@ class Hive:
         card["state"] = "assigned"
         if agent:
             card["owner"] = agent
+        # retry 会覆盖上一次的结果，所以重跑次数只能记在卡上 ——
+        # 否则 digest 永远看不出「这张卡反复在重跑」
+        try:
+            card["retries"] = int(card.get("retries") or 0) + 1
+        except (TypeError, ValueError):
+            card["retries"] = 1
         self.save_card(card)
         target = card.get("owner")
         if target:
@@ -1765,8 +1904,15 @@ class Worker:
         if blocked:
             error = "越界改动（严格模式）：" + ", ".join(oop[:8])
         elif not ok:
-            error = ("超时" if timed_out else
-                     "verify 未通过" if verify_only else f"agent 退出码 {code}")
+            # 顺序很重要：verify 挂掉时 agent 的退出码往往是 0，
+            # 写「agent 退出码 0」既误导人，也让 digest 的失败归因全跑偏
+            bad = [str(v.get("cmd")) for v in verify if v.get("code")]
+            if timed_out:
+                error = "超时"
+            elif bad:
+                error = "verify 未通过: " + " | ".join(bad[:2])
+            else:
+                error = f"agent 退出码 {code}"
         else:
             error = ""
         if summary_file.exists() and summary_file.stat().st_size > 0:
@@ -2194,6 +2340,11 @@ def cmd_doctor(args) -> None:
         sys.exit(1)
 
 
+def cmd_digest(args) -> None:
+    Hive(args.dir).cmd_digest(days=args.days, out=args.out or "",
+                              as_json=args.json)
+
+
 def cmd_stats(args) -> None:
     Hive(args.dir).cmd_stats(args.json, args.days)
 
@@ -2339,6 +2490,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("doctor", help="检查协调仓库/任务/租约/结果")
     s.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("digest", help="复盘摘要：失败归因 + 慢卡 + 反复重跑的卡（只读）")
+    s.add_argument("--days", type=int, default=7, help="只看最近 N 天（默认 7，0=全部）")
+    s.add_argument("--out", help="把 markdown 摘要写到这个文件（比如 docs/lessons.md）")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_digest)
 
     s = sub.add_parser("stats", help="吞吐与成功率统计")
     s.add_argument("--json", action="store_true")
