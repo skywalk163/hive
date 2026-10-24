@@ -46,15 +46,18 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.9"
+VERSION = "0.9.10"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
+# 一张卡最多被看门狗**自动**回收几次；超了就转 blocked 退出流水线，不再无限重派。
+# 0 = 一次都不许自动重派（首次判死即 blocked）。人工显式 `hive retry` 不受此限。
+DEFAULT_MAX_RETRIES = 3
 
 TASK_FIELDS = [
     "id", "title", "repo", "base", "state", "owner", "agent", "fresh",
     "priority", "needs", "paths", "verify", "depends_on",
-    "lease_minutes", "timeout_minutes", "created", "retries",
+    "lease_minutes", "timeout_minutes", "created", "retries", "max_retries",
 ]
 
 PROMPT_HEADER = """\
@@ -1069,7 +1072,15 @@ class Hive:
             elif st == "needs_review":
                 warns.append(f"{tid}: 状态 needs_review，等人确认")
             elif st == "blocked":
-                warns.append(f"{tid}: blocked（等资源/等外部条件）")
+                # 「重试额度烧光」和「等外部资源」是两回事，得分开点名：
+                # 前者说明这张卡反复失败、自动重派已停，需要人来决断。
+                if self._retries_left(c) <= 0 and int(c.get("retries") or 0) > 0:
+                    warns.append(
+                        f"{tid}: blocked —— 重试额度烧光（retries="
+                        f"{c.get('retries')} / max={self._max_retries(c)}），"
+                        f"自动重派已停，需人工决断（hive retry 或改 max_retries）")
+                else:
+                    warns.append(f"{tid}: blocked（等资源/等外部条件）")
             # 看门狗视角：in-flight 卡的死活（与 hive watchdog 同源判定）
             if st in IN_FLIGHT_STATES:
                 if self.result_info(tid) is not None:
@@ -1616,6 +1627,11 @@ class Hive:
             card["retries"] = int(card.get("retries") or 0) + 1
         except (TypeError, ValueError):
             card["retries"] = 1
+        # 人工显式 retry 不受 max_retries 熔断限制（那是人在明确要求重跑），
+        # 但超出额度时提醒一句，免得人自己也没意识到这张卡已经反复失败很多次了。
+        if self._retries_left(card) < 0:
+            log(f"提醒：{tid} 已重跑 {card['retries']} 次，超过 max_retries="
+                f"{self._max_retries(card)}（自动回收早就停了，这次是你手工 retry）")
         self.save_card(card)
         target = card.get("owner")
         if target:
@@ -1676,11 +1692,39 @@ class Hive:
         except ValueError:
             return None
 
+    @staticmethod
+    def _max_retries(card: dict) -> int:
+        """这张卡允许被自动回收几次（卡面 max_retries 优先，缺省 DEFAULT_MAX_RETRIES）。
+
+        注意别写成 `card.get("max_retries") or DEFAULT` —— 0 是假值，
+        会被误当成「没设置」而退回默认 3，于是 max_retries=0 永远不生效。
+        """
+        v = card.get("max_retries")
+        if v is None or v == "":
+            return DEFAULT_MAX_RETRIES
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_RETRIES
+
+    @staticmethod
+    def _retries_left(card: dict) -> int:
+        """还剩几次自动回收额度。<=0 表示额度用尽，该判死转 blocked 了。"""
+        try:
+            used = int(card.get("retries") or 0)
+        except (TypeError, ValueError):
+            used = 0
+        return Hive._max_retries(card) - used
+
     def _reenqueue_ready(self, tid: str, reason: str) -> None:
         """把一张 in-flight 卡退回 ready 池：删 claim 分支、清空 owner、+retries、留底备注。
 
         与 cmd_retry 的区别：retry 回到 assigned 并保留 owner（同 agent 续跑），
         这里回到 ready 且清空 owner（放回任务池，让 dispatch 重新分派）。
+
+        熔断：自动回收额度（max_retries）用尽后不再退回 ready，转 blocked 退出流水线 ——
+        否则一张注定失败的卡会被判死→重派→判死无限循环，常驻的 orchestrate 会一直烧 agent。
+        人工显式 `hive retry` 不受此限（那是人在明确要求重跑）。
         """
         if rev_parse(self.dir, f"origin/claim/{tid}"):
             git(["push", "origin", f":refs/heads/claim/{tid}"], self.dir, check=False)
@@ -1688,6 +1732,15 @@ class Hive:
         if archived.exists():
             archived.unlink()  # 重新入队时把归档也撤掉，否则 worker 会以为已完成
         card = self.card(tid)
+        if self._retries_left(card) <= 0:
+            used = card.get("retries") or 0
+            mx = self._max_retries(card)
+            self._set_state(tid, "blocked",
+                            f"自动回收额度用尽（retries={used} / max={mx}），"
+                            f"停止自动重派以免无限循环；最后一次判定原因：{reason}。"
+                            f"确认后人工 hive retry 或改 max_retries。", who="watchdog")
+            log(f"{tid} 自动回收额度用尽（{used}/{mx}），转 blocked 等人工")
+            return
         card["state"] = "ready"
         card["owner"] = None
         try:
@@ -1750,25 +1803,40 @@ class Hive:
                 if expired:
                     candidates.append({"id": tid, "reason": "stale", "action": "reclaim"})
 
+        # 熔断：自动回收额度用尽的，不再退回 ready，改判 blocked 退出流水线
+        for c in candidates:
+            if c["action"] != "reclaim":
+                continue
+            card = cards[c["id"]]
+            if self._retries_left(card) <= 0:
+                c["action"] = "block"
+                c["retries"] = int(card.get("retries") or 0)
+                c["max_retries"] = self._max_retries(card)
+
         to_reclaim = [c for c in candidates if c["action"] == "reclaim"]
+        to_block = [c for c in candidates if c["action"] == "block"]
         if as_json:
             print(json.dumps({
                 "candidates": candidates,
                 "would_reclaim": len(to_reclaim) if not apply else 0,
+                "would_block": len(to_block) if not apply else 0,
                 "reclaimed": len(to_reclaim) if apply else 0,
+                "blocked": len(to_block) if apply else 0,
             }, ensure_ascii=False, indent=2))
         if not apply:
             for c in candidates:
-                tag = "回收" if c["action"] == "reclaim" else "提示"
+                tag = {"reclaim": "回收", "block": "转blocked"}.get(c["action"], "提示")
                 log(f"[watchdog] {tag} {c['id']}：{c['reason']}")
-            log(f"[watchdog] dry-run：{len(to_reclaim)} 张将被回收"
-                f"（--apply 才动手）")
-            return len(to_reclaim)
-        for c in to_reclaim:
+            log(f"[watchdog] dry-run：{len(to_reclaim)} 张将被回收、"
+                f"{len(to_block)} 张将转 blocked（--apply 才动手）")
+            return len(to_reclaim) + len(to_block)
+        for c in to_reclaim + to_block:
             self._reenqueue_ready(c["id"], c["reason"])
-            log(f"[watchdog] 已回收 {c['id']}：{c['reason']}")
-        log(f"[watchdog] 完成，回收 {len(to_reclaim)} 张")
-        return len(to_reclaim)
+            verb = "已转 blocked" if c["action"] == "block" else "已回收"
+            log(f"[watchdog] {verb} {c['id']}：{c['reason']}")
+        log(f"[watchdog] 完成，回收 {len(to_reclaim)} 张、"
+            f"转 blocked {len(to_block)} 张")
+        return len(to_reclaim) + len(to_block)
 
     # -- 总控进程 ---------------------------------------------------------- #
     def cmd_orchestrate(self, interval: int = 60, once: bool = False,
@@ -2461,6 +2529,7 @@ def cmd_task(args) -> None:
         "needs": args.needs or [], "paths": args.paths or [], "verify": args.verify or [],
         "depends_on": args.depends or [], "fresh": False, "lease_minutes": args.lease,
         "timeout_minutes": args.timeout, "created": iso(),
+        "max_retries": args.max_retries,
     }
     write_card(h.dir / "tasks" / f"{tid}.md", card, body or f"# {args.title}\n")
     h.commit_and_push(f"task: add {tid} {args.title}", [f"tasks/{tid}.md"])
@@ -2610,6 +2679,7 @@ def cmd_draft(args) -> None:
             "fresh": False, "lease_minutes": int(data.get("lease_minutes") or 180),
             "timeout_minutes": int(data.get("timeout_minutes") or 120),
             "created": iso(),
+            "max_retries": int(data.get("max_retries") or DEFAULT_MAX_RETRIES),
         }
         write_card(h.dir / "tasks" / f"{tid}.md", card, body)
         src.unlink()  # 草稿转正后撤掉，别在 drafts/ 里留两份
@@ -2817,6 +2887,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--depends", nargs="*")
     s.add_argument("--lease", type=int, default=180)
     s.add_argument("--timeout", type=int, default=60)
+    s.add_argument("--max-retries", dest="max_retries", type=int,
+                   default=DEFAULT_MAX_RETRIES,
+                   help="看门狗最多自动回收几次；用尽转 blocked 不再无限重派"
+                        f"（默认 {DEFAULT_MAX_RETRIES}，0=一次都不自动重派）")
     s.add_argument("--body")
     s.add_argument("--body-file")
     s.set_defaults(func=cmd_task)

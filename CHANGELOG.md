@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.10 — 2026-10-24
+
+### Added
+
+- **重试熔断：自动回收达上限后转 `blocked`**（T-0130）。`retries` 以前只增不停，一张注定失败的卡
+  会被「判死 → 退回 ready → 重新分派 → 再判死」无限循环，常驻的 `orchestrate` 会一直烧 agent 时间。
+  - 卡面新增 `max_retries`（默认 `DEFAULT_MAX_RETRIES = 3`，`hive task new --max-retries N`，
+    `0` = 一次都不许自动重派）；
+  - 看门狗回收前先判额度：用尽则**不再退回 ready**，用 `_set_state(tid,"blocked",…)` 判死并在卡里
+    写明原因。`blocked` 被 `dispatch` / worker / `orchestrate` 全部跳过，等于自动退出流水线；
+  - watchdog `--json` 里这类卡 `action` 是 `block`（另有 `would_block` / `blocked` 计数）；
+  - `hive doctor` 对「重试额度烧光」单独点名，与「等外部资源」的 blocked 区分开；
+  - **人工显式 `hive retry` 不受此限**（那是人在明确要求重跑），只在超额度时提醒一句。
+  - 新增 `tests/test_retry_cap.py` 9 例作回归守卫（关掉熔断时其中 7 例会红）。
+
 ## 0.9.9 — 2026-10-24
 
 ### Fixed
