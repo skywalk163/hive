@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.9 — 2026-10-24
+
+### Fixed
+
+- **`Worker` 不再裸 `reset --hard`**（T-0129）：`Worker.__init__` 和 `Worker.loop()` 以前都是
+  无条件 `git fetch` + `git reset --hard origin/main`。因为 `hive take` / `work` / `submit`
+  跑在**主工作区**上，这会**静默抹掉协调仓里未提交的已跟踪改动**——比如正写到一半的 `drafts/`
+  草稿（`Worker.loop()` 更糟，轮询期间每轮抹一次）。
+  - 现改为复用 `Hive.sync_main()`：与 `origin/main` 对齐或本地领先 → 不动工作区；
+    落后且干净 → 才 reset；落后且脏 → **报错**（`不敢自动 reset`），绝不静默丢改动。
+  - 排查「草稿内容被还原」时抓到，已用「改脏文件 → 只构造 Worker → 文件变回原样」实锤确认。
+  - **未动** `mcp_server.py` 的两处 reset（`HiveMcp.hive()` / 启动探测）：它们作用在 MCP 独占
+    clone 上，reset 是其每次调用读到最新卡的设计前提。
+  - 新增 `tests/test_worker_guard.py` 3 例作回归守卫（退回旧行为时这 3 例会红）。
+
 ## 0.9.8 — 2026-10-24
 
 ### Fixed

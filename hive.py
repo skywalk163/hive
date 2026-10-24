@@ -46,7 +46,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.8"
+VERSION = "0.9.9"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -1932,9 +1932,12 @@ class Worker:
         self.h = Hive(hive_dir)
         self.dir = self.h.dir
         self.name = agent_name
-        # 先同步再读配置：agent 的登记信息可能刚由总控推到 main
-        self.h.fetch()
-        git(["reset", "--hard", "-q", "origin/main"], self.dir)
+        # 先同步再读配置：agent 的登记信息可能刚由总控推到 main。
+        # 用 sync_main 而不是裸 `fetch + reset --hard`：worker 常常跑在**主工作区**上
+        # （hive take / work / submit 都是），裸 reset 会把人未提交的已跟踪改动静默抹掉
+        # —— 比如正写到一半的 drafts/ 草稿。sync_main 的守卫：对齐或领先就不动工作区，
+        # 落后且干净才 reset，落后且脏直接报错（宁可报错也不丢人的改动）。
+        self.h.sync_main()
         self.cfg = self.h.agent(agent_name)
         self.keep = keep_worktree
         self.state = Path(hive_state or os.environ.get("HIVE_STATE")
@@ -2333,8 +2336,10 @@ class Worker:
         log(f"worker {self.name} 启动（{self.dir}），轮询间隔 {interval}s")
         while True:
             try:
-                self.h.fetch()
-                git(["reset", "--hard", "-q", "origin/main"], self.dir)
+                # 同 __init__：轮询也不能裸 reset，否则常驻 worker 每隔 interval 秒
+                # 就把主工作区里未提交的改动抹一次。落后+脏时 sync_main 抛 HiveError，
+                # 下面本来就 catch 住并继续下一轮，不会崩。
+                self.h.sync_main()
                 pending = self.pending()
                 for tid, _card in pending:
                     if self.claim(tid):
