@@ -1,0 +1,51 @@
+{
+  "task": "T-0124",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0124",
+  "base": "main",
+  "head": "bdc4709fec5166cddbe125c36190698a3090f860",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T02:48:10+00:00",
+  "finished_at": "2026-10-24T02:53:15+00:00",
+  "duration_s": 305.0,
+  "verify": [
+    {
+      "cmd": "grep -q 'mcp-config-' windows/bootstrap.ps1",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "grep -q 'abilities' windows/bootstrap.ps1",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "grep -q 'MCP' windows/README.md",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -m pytest tests -q --tb=short",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 83%]",
+        "..............                                                           [100%]",
+        "86 passed in 189.83s (0:03:09)"
+      ]
+    }
+  ],
+  "summary": "# T-0124 完成：Windows agent 通过 MCP 接入\n\n执行者：workbuddy（manual 模式）；本卡是第一张**用 `draft` 流程出的题**。\n\n## 做了什么\n\n`bootstrap.ps1` 以前做了 clone、注册 agent、装计划任务，但**没告诉 agent 怎么连上 hive**。\n计划任务是给「没有 agent CLI 的机器」用的老路；现在 MCP 已经能做 worker 视角的全部事。\n\n1. **`bootstrap.ps1` 注册完 agent 后直接输出 MCP 客户端配置 JSON** —— 打印到屏幕，\n   同时写成 `C:\\hive\\mcp-config-<agent>.json`，并写清接下来调哪几个工具。\n2. **`agent add` 带上 `--abilities`**（新增 `-Abilities` 参数）—— 否则 dispatch\n   按能力匹配时永远选不中这台机器（T-0102 僵尸卡的另一个成因）。\n3. **`windows/README.md` 新增 §2.5「用 MCP 接入」**：配置粘到哪（各家的 key 名差异：\n   Claude/Cursor 用 `mcpServers`、VS Code 用 `servers`、Codex 用 `mcp_servers`）、\n   七步调用序列表、权限说明、以及**「和 worker 二选一，不要同时用」**。\n4. 明确写了「走 MCP 就不用装计划任务」。\n\n## 验证\n\n卡面 4 条 verify 全过（grep mcp-config- / abilities / README 的 MCP / pytest）。\nPowerShell 只做了**静态检查**（括号配对 31/31、新块自平衡、关键串存在）——\n本机没有 pwsh，这一点在 README 里明确标注了\"未在真机验证过\"，\n并建议第一次先不带 `-Apply` 看 dry-run。",
+  "error": "",
+  "declared_paths": [
+    "windows/bootstrap.ps1",
+    "windows/README.md"
+  ],
+  "changed_files": [
+    "windows/README.md",
+    "windows/bootstrap.ps1"
+  ],
+  "out_of_paths": []
+}
