@@ -1,0 +1,48 @@
+{
+  "task": "T-0129",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0129",
+  "base": "main",
+  "head": "419abf3d146f27dc583e21e297a343242d1f230e",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T15:51:34+00:00",
+  "finished_at": "2026-10-24T16:03:03+00:00",
+  "duration_s": 689.1,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_worker_guard.py -q",
+      "code": 0,
+      "tail": [
+        "...                                                                      [100%]",
+        "3 passed in 3.15s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 60%]",
+        "...............................................                          [100%]",
+        "119 passed in 234.91s (0:03:54)"
+      ]
+    }
+  ],
+  "summary": "# T-0129 总结：Worker 不再裸 reset --hard\n\n## 背景（怎么发现的）\n\n排查「草稿内容被还原」时抓到的真凶，已实锤：\n\n`Worker.__init__` 和 `Worker.loop()` 都是**无条件** `git fetch` + `git reset --hard origin/main`。\n实锤实验：把 `drafts/T-0128.md` 改脏（611 字节、` M`）→ 只构造一个 `Worker(...)`、不跑任何业务 →\n文件立刻变回 668 字节骨架、`git status` 变干净。\n\n因为 `hive take` / `work` / `submit` 跑在**主工作区**上，任何构造 Worker 的命令都会静默抹掉协调仓\n里未提交的已跟踪改动。`Worker.loop()` 更糟——轮询期间每一轮都抹一次。\n\n设计上早知道这个坑（`HiveMcp.worker()` 的注释就写着），MCP 用独占 clone 规避了；但主工作区上的\n`take` / `work` 没规避。\n\n## 改了什么\n\n`hive.py` 两处，换成现成的 `Hive.sync_main()`（它已有正确守卫）：\n\n1. `Worker.__init__`：`fetch` + `reset --hard` → `self.h.sync_main()`\n2. `Worker.loop()`：轮询里的 `fetch` + `reset --hard` → `self.h.sync_main()`\n   （`loop()` 本来就 catch `HiveError` 并继续，所以落后+脏只会记 log，不会崩）\n\n`sync_main()` 的守卫：对齐或本地领先 → 不动工作区；落后且干净 → 才 reset；\n落后且脏 → raise `不敢自动 reset`。\n\n**没动**：\n- `hive.py:440` —— 那就是 `sync_main` 自己带守卫的 reset；\n- `mcp_server.py:338`（`HiveMcp.hive()`）和 `mcp_server.py:1021`（启动探测）—— 作用在 MCP 独占\n  clone 上，reset 是它每次调用读到最新卡的设计前提。\n\n## 验收\n\n- 新建 `tests/test_worker_guard.py` 3 例：\n  1. 构造 Worker 后，改脏的已跟踪文件必须还在；\n  2. `hive work --once` 跑一轮后同样必须还在；\n  3. 落后+脏时必须 **raise**（`不敢自动 reset`），不能静默丢弃。\n- **已验证是真正的回归守卫**：临时把 `Worker.__init__` 退回裸 reset 后，3 例全红\n  （第 3 例报 `DID NOT RAISE`，正好证明旧代码是静默抹掉）；恢复后全绿。\n- 全量 pytest 无回归。\n\n## 改动文件\n\n`hive.py`（两处 + VERSION 0.9.8→0.9.9）、`tests/test_worker_guard.py`（新）、\n`docs/操作手册.md`（§4.1 注意事项补一条）、`CHANGELOG.md`（0.9.9）",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_worker_guard.py",
+    "docs/操作手册.md",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/操作手册.md",
+    "hive.py",
+    "tests/test_worker_guard.py"
+  ],
+  "out_of_paths": []
+}
