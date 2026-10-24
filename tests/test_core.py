@@ -789,3 +789,127 @@ def test_states_are_centralised():
     assert set(hive.HANDOFF_STATES) == {"needs_review", "conflict", "blocked"}
     assert set(hive.IN_FLIGHT_STATES) == {"assigned", "running"}
     assert hive.ERROR_STATES == ("conflict",)
+
+
+# --------------------------------------------------------------------------- #
+# 任务卡草稿：agent 出题、人确认后转正
+# --------------------------------------------------------------------------- #
+
+def test_draft_lint_catches_unworkable_cards(world):
+    """草稿校验要拦住「永远派不出去」和「没有验收」的卡。"""
+    world.add_agent("fb", "exec", command="true",
+                    repos={"hive": world.code_clone("fb")})
+    h = hive.Hive(world.hive1)
+    cards = h.cards()
+
+    ok_card = {"title": "写文档", "repo": "hive", "verify": ["true"],
+               "needs": [], "paths": ["docs/"]}
+    errors, warns = hive.draft_lint(ok_card, "T-0001", h.agents(), cards)
+    assert errors == [] and warns == [], (errors, warns)
+
+    no_verify = {"title": "x", "repo": "hive", "verify": []}
+    errors, _ = hive.draft_lint(no_verify, "T-0002", h.agents(), cards)
+    assert any("verify" in e for e in errors), errors
+
+    unknown_repo = {"title": "x", "repo": "light", "verify": ["true"]}
+    errors, _ = hive.draft_lint(unknown_repo, "T-0003", h.agents(), cards)
+    assert any("永远派不出去" in e for e in errors), errors
+
+    nobody_can = {"title": "x", "repo": "hive", "verify": ["true"],
+                  "needs": ["windows"]}
+    errors, _ = hive.draft_lint(nobody_can, "T-0004", h.agents(), cards)
+    assert any("僵尸卡" in e for e in errors), errors
+
+    bad_dep = {"title": "x", "repo": "hive", "verify": ["true"],
+               "depends_on": ["T-9999"]}
+    errors, _ = hive.draft_lint(bad_dep, "T-0005", h.agents(), cards)
+    assert any("T-9999" in e for e in errors), errors
+
+    no_paths = {"title": "x", "repo": "hive", "verify": ["true"]}
+    errors, warns = hive.draft_lint(no_paths, "T-0006", h.agents(), cards)
+    assert errors == [] and any("paths" in w for w in warns), (errors, warns)
+
+
+def test_draft_adopt_validates_then_queues(world):
+    """草稿要过 lint 才能转正；转正后进 tasks/，草稿本身撤掉。"""
+    world.add_agent("fb", "exec", command="true",
+                    repos={"hive": world.code_clone("fb")})
+    ddir = world.hive1 / "drafts"
+    ddir.mkdir(parents=True, exist_ok=True)
+
+    # 不合格的草稿：没有 verify
+    bad = ddir / "bad.md"
+    bad.write_text("""---
+id: T-0001
+title: 没写验收的卡
+repo: hive
+state: draft
+needs: []
+paths:
+verify:
+---
+## 背景
+测试
+""", encoding="utf-8")
+    sh(["git", "-C", str(world.hive1), "add", "-A"], env=world.git_env)
+    sh(["git", "-C", str(world.hive1), "commit", "-q", "-m", "bad draft"],
+       env=world.git_env)
+    sh(["git", "-C", str(world.hive1), "push", "-q", "origin", "main"],
+       env=world.git_env)
+
+    p = world.hive("draft", "adopt", "bad.md", check=False)
+    assert p.returncode != 0, "没有 verify 的草稿不该转正"
+    assert not (world.hive1 / "tasks" / "T-0001.md").exists()
+
+    # 合格的草稿
+    good = ddir / "good.md"
+    good.write_text("""---
+id: T-0001
+title: 草稿转正的卡
+repo: hive
+state: draft
+needs: []
+paths:
+  - docs/
+verify:
+  - test -f docs/
+depends_on: []
+---
+## 背景
+
+agent 出的题。
+""", encoding="utf-8")
+    sh(["git", "-C", str(world.hive1), "add", "-A"], env=world.git_env)
+    sh(["git", "-C", str(world.hive1), "commit", "-q", "-m", "good draft"],
+       env=world.git_env)
+    sh(["git", "-C", str(world.hive1), "push", "-q", "origin", "main"],
+       env=world.git_env)
+
+    world.hive("draft", "lint", "good.md")
+    world.hive("draft", "adopt", "good.md")
+
+    card = world.card("T-0001")
+    assert card["state"] == "ready", card
+    assert card["title"] == "草稿转正的卡"
+    assert card["verify"] == ["test -f docs/"]
+    assert not good.exists(), "转正后草稿要撤掉"
+    # 转正后立刻能被 dispatch 看见
+    out = world.hive_json("dispatch", "--agent", "fb")
+    assert [x["task"] for x in out["plan"]] == ["T-0001"], out
+
+
+def test_draft_new_generates_template(world):
+    """`draft new` 生成的模板要能直接被 agent 填写。"""
+    world.add_agent("fb", "exec", command="true",
+                    repos={"hive": world.code_clone("fb")})
+    world.hive("draft", "new", "T-0001", "--repo", "hive")
+    ddir = world.hive1 / "drafts"
+    files = sorted(ddir.glob("*.md"))
+    assert len(files) == 1, files
+    data, body = hive.parse_card(files[0])
+    assert data["repo"] == "hive" and data["state"] == "draft"
+    for sec in ("背景", "目标", "红线", "验收"):
+        assert sec in body, f"模板缺「{sec}」段"
+    # 空模板过不了 lint —— 逼着填写
+    errors, _ = hive.draft_lint(data, "T-0001", hive.Hive(world.hive1).agents(), {})
+    assert errors, "空模板应该有 error"
