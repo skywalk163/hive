@@ -44,7 +44,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -184,7 +184,12 @@ CONFESS_RE = re.compile(
 def changed_files(wt: Path) -> list[str]:
     """worktree 里相对 HEAD 改动过的文件（含未跟踪的）。重命名取新名字。"""
     out = []
-    p = git(["status", "--porcelain"], wt, check=False)
+    # core.quotePath=false：git 默认把非 ASCII 路径转义成八进制
+    # （docs/操作手册.md → "docs/\346\223\245..."），中文名文件会被误判成越界
+    # -uall：默认会把「整个未跟踪目录」折叠成目录名（docs/），
+    # 里面的文件就看不见了，paths 检查会漏
+    p = git(["-c", "core.quotePath=false", "status", "--porcelain", "-uall"],
+            wt, check=False)
     for line in p.stdout.splitlines():
         if len(line) <= 3:
             continue

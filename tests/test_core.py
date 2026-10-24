@@ -977,3 +977,22 @@ def test_digest_is_read_only_and_writes_out(world, fake_cmd):
     hive.Hive(world.hive1).cmd_digest(days=0, out=str(out_file))
     assert "失败归因" in out_file.read_text(encoding="utf-8")
     # 上面建卡/分派确实推了提交，但那不是 digest 干的
+
+
+def test_changed_files_handles_non_ascii_names(world):
+    """中文文件名不能被 git 的八进制转义误判成越界（core.quotePath）。
+
+    T-0121 提交时自己被这条咬过一次：改动只有 docs/操作手册.md（就在 paths 里），
+    却报「越界改动 1 个文件」—— git 把中文路径转义成了 \346\223\245...。
+    """
+    repo = world.code_clone("fb")
+    (repo / "docs").mkdir(exist_ok=True)
+    (repo / "docs" / "操作手册.md").write_text("改了一行\n", encoding="utf-8")
+
+    files = hive.changed_files(repo)
+    assert "docs/操作手册.md" in files, files
+    assert hive.out_of_paths(["docs/操作手册.md"], files) == [], files
+    # 白名单外的一样能抓出来
+    (repo / "越界文件.txt").write_text("x\n", encoding="utf-8")
+    files2 = hive.changed_files(repo)
+    assert hive.out_of_paths(["docs/"], files2) == ["越界文件.txt"], files2
