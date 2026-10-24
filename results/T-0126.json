@@ -1,0 +1,52 @@
+{
+  "task": "T-0126",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0126",
+  "base": "main",
+  "head": "d86934a5c3168f930f76c3b5d3b20dd582f951f9",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T11:59:25+00:00",
+  "finished_at": "2026-10-24T12:15:15+00:00",
+  "duration_s": 950.7,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_orchestrate.py -q",
+      "code": 0,
+      "tail": [
+        "......                                                                   [100%]",
+        "6 passed in 17.36s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 71%]",
+        ".............................                                            [100%]",
+        "101 passed in 205.75s (0:03:25)"
+      ]
+    }
+  ],
+  "summary": "# T-0126 总控进程 hive orchestrate —— 实现总结\n\n## 做了什么\n\n给 hive 加了一个「总控进程」角色：一条 `hive orchestrate` 命令，把 **看门狗回收 → 自动分派 → 自动合入 → 体检** 串成常驻循环，替代人工 drive。exec 类任务从 `ready` 到 `closed` 全自动跑完，人只需要在 `needs_review` / `conflict` / `blocked` 等卡点介入。\n\n## 改动\n\n### hive.py\n1. **新命令 `cmd_orchestrate`**：每轮 tick 顺序跑\n   `watchdog --apply` → `dispatch --apply` → `land --all --apply` → `doctor`。\n   - 参数：`--interval`(60s) / `--once` / `--iterations N` / `--no-dispatch` `--no-land` `--no-watchdog` `--no-doctor` / `--stop-file` / `--dispatch-limit N` / `--max-land N` / `--watchdog-minutes`(180) / `--orphan-grace`(45) / `--json`。\n   - 单轮内任一子步骤抛 `HiveError` 都 catch 住、记 log、继续下一轮，绝不整进程崩。\n2. **watchdog `orphan_assigned` 修对 + `--orphan-grace`**：\n   - `_assigned_at` 原来读卡 body，但 `_assign_local` 实际把 `assigned_at` 写在 `inbox/<owner>/<tid>.md` —— 导致「分派了但一直没来领」的死卡以前永远收不回。改为优先读 inbox 文件。\n   - 新增 `--orphan-grace`（默认 30 分钟，orchestrate 用 45）：分派时间超过 grace 才回收，刚分派的卡在 grace 内不会被误杀（留给 worker 去领）。\n3. `cmd_dispatch` 现在 `return len(plan)`（便于总控统计）。\n4. `cmd_land` 新增 `limit` 参数（支撑 `--max-land` 每轮合入上限）。\n5. `VERSION` → 0.9.6。\n\n### mcp_server.py\n- `hive_watchdog` controller 工具新增 `orphan_grace` 入参，schema 同步说明。\n- （按红线，**没有**把 `orchestrate` 做成 MCP 工具——会阻塞调用方；带判断的总控仍由 controller MCP 让 LLM agent 自己循环调。）\n\n### 测试\n- 新增 `tests/test_orchestrate.py`（6 个用例）：分派阶段、合入阶段、看门狗回收阶段、\n  orphan_grace 不误杀刚分派的卡、`--iterations` 退出条件、watchdog orphan_grace 阈值。\n- 全量 `pytest`：**101 passed**（原 95 + 6）。\n\n### 文档\n- `CHANGELOG.md`：新增 0.9.6 条目。\n- `docs/操作手册.md`：§6.1 补 `--orphan-grace` 说明；新增 §6.2「`hive orchestrate`：总控进程」。\n- `docs/MCP接入.md`：§4.5.1 区分两种总控形态（确定性 `orchestrate` vs 带判断的 LLM controller MCP）。\n\n## 用法\n\n```bash\nhive orchestrate                       # 常驻：每 60s 一轮，Ctrl-C 退出\nhive orchestrate --once                # 跑一轮就退（cron / 手动触发）\nhive orchestrate --iterations 10 --stop-file /tmp/hive.stop\nhive orchestrate --no-dispatch --no-land   # 只跑看门狗+体检\n```\n\n## 边界（设计取舍）\n- 只负责「脑」（分派+合入+回收）；worker 仍是各机器独立进程，两者解耦。\n- manual agent 的卡 dispatch 不碰（人工优先保留）。\n- 三个写操作本身 dry-run 默认，这里显式传 `--apply`，不引入新的破坏性开关。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_orchestrate.py",
+    "docs/操作手册.md",
+    "docs/MCP接入.md",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/MCP接入.md",
+    "docs/操作手册.md",
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_orchestrate.py"
+  ],
+  "out_of_paths": []
+}
