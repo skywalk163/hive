@@ -1,0 +1,51 @@
+{
+  "task": "T-0128",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0128",
+  "base": "main",
+  "head": "51b83036fd6ffa0df342219b55945a198601ce6d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T15:12:47+00:00",
+  "finished_at": "2026-10-24T15:29:37+00:00",
+  "duration_s": 1010.9,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_mcp_controller.py -q",
+      "code": 0,
+      "tail": [
+        "...                                                                      [100%]",
+        "3 passed in 12.52s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 62%]",
+        "............................................                             [100%]",
+        "116 passed in 247.92s (0:04:07)"
+      ]
+    }
+  ],
+  "summary": "# T-0128 总结：修 hive_land 冲突时的误导性错误信息\n\n## 背景（怎么发现的）\n\nT-0127 交付 LLM 总控后，我用**真 MCP stdio 客户端**（`McpStdioBackend`）驱动 controller 角色，\n在一个隔离世界里实跑了一轮 decision-point 走查：1 张 needs_review、1 张结果红、1 对互相冲突的卡、\n1 张 blocked。跑到冲突那张卡时暴露了这个 bug：\n\n`hive_land` **已经传了 `apply=true`**，撞冲突却回「合入没成功（**默认只预演**，什么都没动）」。\n这句话只在没传 `apply` 时成立。危害直接：LLM 总控靠读这条 message 判断自己处在什么模式，\n传了 apply=true 却被告诉\"你在预演\"，它会误判、可能反复重试同一个 land。\n\n## 改了什么\n\n`mcp_server.py` 的 `t_land`：冲突返回的 message 按实际 `apply` 分叉，并补结构化字段。\n\n- 没传 `apply` → 仍回「合入没成功（默认只预演，什么都没动）」（dry-run 语义不变）；\n- 传了 `apply=true` → 回「合入冲突：已传 apply=true，也未改动任何东西（绝不自动解冲突、绝不 force push）」；\n- 两个分支都带 `details.applied`（成功分支本来就带，保持一致），调用方不依赖自然语言也能判断。\n\n**没有动**任何合并/冲突判定逻辑，没动 `cmd_land` / `land_one`，没动成功分支措辞，\n冲突仍然是 `status=error`、卡仍被标 `conflict` 状态。\n\n## 验收\n\n- 新建 `tests/test_mcp_controller.py` 3 例：\n  - `apply=true` 撞冲突 → message 含 `apply=true`、**不含**「默认只预演」、`details.applied=True`、\n    `conflicts` 列出 `feature.txt`；\n  - 不传 apply 撞冲突 → message 仍含「只预演」、`applied=False`（防止改坏 dry-run 语义）；\n  - 成功分支 → 仍报「已合入并关闭」、`applied=True`（防止回归）。\n- 全量 pytest 无回归。\n\n## 改动文件\n\n`mcp_server.py`、`tests/test_mcp_controller.py`（新）、`docs/MCP接入.md`、`CHANGELOG.md`、\n`hive.py`（VERSION 0.9.7 → 0.9.8）\n\n## 备注（待跟进，未在本卡处理）\n\n实跑中发现草稿流程有个小蹊跷：`draft new` 会立即 commit 骨架，随后对 `drafts/<id>.md` 的\n未提交修改在某些情况下会被还原成骨架（本次 lint/adopt 因此报「没 verify」，但 `take`\n最终仍取到了完整内容，卡片本身没问题）。怀疑与沙箱 overlay 或某条命令的工作区复位有关，\n值得单独一张卡排查——它可能让\"写完草稿直接 lint\"静默丢内容。",
+  "error": "",
+  "declared_paths": [
+    "mcp_server.py",
+    "tests/test_mcp_controller.py",
+    "docs/MCP接入.md",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/MCP接入.md",
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_mcp_controller.py"
+  ],
+  "out_of_paths": [
+    "hive.py"
+  ]
+}
