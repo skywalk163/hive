@@ -1,0 +1,44 @@
+{
+  "task": "T-0120",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0120",
+  "base": "main",
+  "head": "9e94090beeabf5ba4fbd379f682d29acdcb9d797",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T00:29:44+00:00",
+  "finished_at": "2026-10-24T00:32:33+00:00",
+  "duration_s": 169.5,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests -q --tb=short",
+      "code": 0,
+      "tail": [
+        "........................................................                 [100%]",
+        "56 passed in 117.53s (0:01:57)"
+      ]
+    },
+    {
+      "cmd": "python3 -c \"import hive,sys; sys.exit(0 if hasattr(hive,'draft_lint') else 1)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 hive.py draft --help >/dev/null",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0120 完成：hive draft —— 让 agent 也能出题\n\n执行者：workbuddy（manual 模式）\n\n## 为什么\n\n以前只有人会写任务卡。写一张卡要读代码、想清楚 paths 和 verify、组织语言，\n几分钟到十几分钟。而 agent 一天能干 20 张卡的活 —— **吞吐卡在出题这一端**。\n\n但不能让 agent 直接往 `tasks/` 里写：「谁出题谁做题」，验收会失去意义。\n所以走 **草稿 → 人确认 → 转正** 的三段式，且 hive 本体不调 LLM（保持零依赖），\n内容由 agent 生成，hive 只管格式、校验和入队。\n\n## 做了什么\n\n- `hive draft new [名字] [--repo hive]`：生成带「背景 / 目标 / 红线 / 验收」\n  四段骨架的模板。\n- `hive draft list` / `hive draft lint [文件]`：草稿校验（不传文件就 lint 全部）。\n- `hive draft adopt <文件>`：**过 lint 才转正**，自动分配任务号、从 `drafts/` 移进\n  `tasks/`、草稿撤掉，并打印下一步。\n- `draft_lint()` 抽成模块级函数（error / warning 分级），`doctor` 和 `adopt` 共用。\n\n**error 会挡住转正**：没填 repo、repo 没被任何 agent 登记、**一条 verify 都没有**、\n`needs` 里有没有任何 agent 能满足的能力、依赖不存在的卡。\n最后两条正是 T-0102 那种僵尸卡的成因 —— 它 `needs: windows` 而没有一个 agent 声明，\n以前会永远躺在 ready 里骚扰 dispatch，现在从源头拦住。\n\n## 两个实现细节\n\n1. **`draft new T-0130` 和 `draft new T-0130.md` 都认**（`_draft_name` 统一补 `.md`）。\n   第一版没补，测试里 glob(\"*.md\") 直接空 —— 用户给裸名字是自然预期，\n   不能让人记着带后缀。\n2. **草稿转正后 `src.unlink()`**：不留在 `drafts/` 里当第二份真相。\n   `commit_and_push` 的 paths 同时带了 `tasks/<tid>.md` 和 `drafts/<file>`，\n   让删除也进同一个提交。\n\n## 验证\n\n测试 3 例，全量 **56 passed**：\n- `draft_lint` 逐条拦住不可用的卡（含正常卡不该报错）；\n- 不合格草稿拒绝转正、合格草稿转正后进 tasks/ 且草稿撤掉、立刻能被 dispatch 看见；\n- `draft new` 生成的模板含四段骨架，且**空模板过不了 lint**（逼着填写）。\n\n## 一件值得记的事\n\n第一次 submit 判 failed，但**代码没问题（56 用例全过）** —— 卡面第二条 verify 写的是\n`hasattr(hive.Hive, 'cmd_draft')`，而 `cmd_draft` 是模块级函数（和 `cmd_task` 一致）。\n这是今天第二次卡面 verify 自己写错挡住正确实现（上次是 T-0114 忘 `import sys`）。\n\n**规律**：卡面 verify 等于「用另一只手把同一件事再实现一遍」，出错率不低，\n而且它拦住的恰恰是正确的代码。已把卡面改成 `python3 hive.py draft --help` 这种\n直接测 CLI 存在的形式。后面 `hive audit` 应该把「result=failed 但 summary 说改完了」\n也当风险信号 —— 那通常意味着验收本身有问题，而不是活干错了。\n\n## 留给后面\n\n`needs_review` 状态（T-0113 留的）还没和草稿流程接上 —— 理想是草稿先落\n`needs_review` 等人点头再 `adopt`。现在 `adopt` 本身就是那道人工闸门，暂时够用。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_core.py",
+    "docs/操作手册.md",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [],
+  "out_of_paths": []
+}
