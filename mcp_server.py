@@ -36,6 +36,10 @@ from hive import (  # noqa: E402
 )
 
 PROTOCOL_VERSION = "2024-11-05"
+# controller（总控）角色：多了 land/close/retry/assign/dispatch/gc 这些
+# 会改动 main 的工具。默认 worker 角色看不到它们。
+CONTROLLER_TOOLS = ("hive_land", "hive_close", "hive_retry", "hive_assign",
+                    "hive_dispatch", "hive_gc")
 SERVER_INFO = {"name": "hive", "version": VERSION}
 
 # --------------------------------------------------------------------------- #
@@ -177,6 +181,86 @@ TOOLS: list[dict] = [
         "description": "给协调仓库做体检：任务卡格式、租约、结果、归档、agent 配置、inbox 是否自洽。返回问题清单。",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
+    {
+        "name": "hive_land",
+        "description": "【总控】把已完成的任务分支合入代码仓 main 并 close。默认 dry-run 只预演（会真跑一遍 merge 看会不会冲突），传 apply=true 才真的推 main。遇到冲突会返回 error 和冲突文件清单，绝不自动解冲突、绝不 force push。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务号；不给就配 all=true"},
+                "all": {"type": "boolean", "default": False,
+                        "description": "合入所有满足条件的卡（按优先级，遇冲突停下）"},
+                "apply": {"type": "boolean", "default": False,
+                          "description": "false=只预演不动任何东西（默认）；true=真的推 main"},
+                "note": {"type": "string", "description": "close 时的完成备注"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "hive_close",
+        "description": "【总控】关闭一张卡：归档结果到 main、删掉 claim/ 与 res/ 分支。直接执行，不可撤销。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务号"},
+                "note": {"type": "string", "description": "完成备注"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "hive_retry",
+        "description": "【总控】重跑一张卡：清掉结果、租约和归档。有破坏性，对已 close 的卡尤其要谨慎。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务号"},
+                "agent": {"type": "string", "description": "重新指派给谁（默认保持原 owner）"},
+                "fresh": {"type": "boolean", "default": False,
+                          "description": "true=从 main 重来，而不是接着上次的分支"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "hive_assign",
+        "description": "【总控】把一张卡指派给某个 agent（写 inbox 信号）。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务号"},
+                "agent": {"type": "string", "description": "agent 名"},
+            },
+            "required": ["task_id", "agent"],
+        },
+    },
+    {
+        "name": "hive_dispatch",
+        "description": "【总控】跑一次自动分派。默认 dry-run 只出计划，传 apply=true 才写入。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "apply": {"type": "boolean", "default": False},
+                "limit": {"type": "integer", "description": "最多分派几张"},
+                "agent": {"type": "string", "description": "只分派给这个 agent"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "hive_gc",
+        "description": "【总控】回收过期租约。默认 dry-run 只列，传 apply=true 才真删。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "minutes": {"type": "integer", "default": 180,
+                            "description": "超过多少分钟没动静算过期"},
+                "apply": {"type": "boolean", "default": False},
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -217,9 +301,14 @@ def state_root(agent: str) -> Path:
 class HiveMcp:
     """一个 agent 视角下的 hive。读操作用 Hive，写操作用 Worker（会先同步 main）。"""
 
-    def __init__(self, hive_dir: Path, agent: str):
+    def __init__(self, hive_dir: Path, agent: str, role: str = "worker"):
         self.hive_dir = hive_dir
         self.agent = agent
+        self.role = role if role in ("worker", "controller") else "worker"
+
+    @property
+    def is_controller(self) -> bool:
+        return self.role == "controller"
 
     # -- 底层 -------------------------------------------------------------- #
     def hive(self) -> Hive:
@@ -300,9 +389,24 @@ class HiveMcp:
             good, _ = self._can_do(cfg, c, h)
             if good:
                 claimable.append(tid)
+        todo: dict = {}
+        if self.is_controller:
+            # 总控视角：今天该干什么
+            todo = {
+                "to_land": h.landable(),
+                "conflict": [t for t, c in h.cards().items()
+                             if c.get("state") == "conflict"],
+                "blocked": [t for t, c in h.cards().items()
+                            if c.get("state") == "blocked"],
+                "needs_review": [t for t, c in h.cards().items()
+                                 if c.get("state") == "needs_review"],
+                "ready": [t for t, c in h.cards().items()
+                          if c.get("state") == "ready" and not c.get("owner")],
+            }
         return ok(
             f"我是 {self.agent}（{cfg.get('mode') or 'exec'} 模式）",
             agent=self.agent,
+            role=self.role,
             mode=cfg.get("mode") or ("manual" if cfg.get("manual") else "exec"),
             capabilities=cfg.get("capabilities") or [],
             abilities=cfg.get("abilities") or [],
@@ -312,6 +416,7 @@ class HiveMcp:
             hive_dir=str(self.hive_dir),
             mine=mine,
             claimable=sorted(claimable),
+            **({"todo": todo} if self.is_controller else {}),
         )
 
     def t_list_tasks(self, a: dict) -> dict:
@@ -559,6 +664,102 @@ class HiveMcp:
                   median_s=durs[len(durs) // 2] if durs else 0,
                   mine=[r["id"] for r in rows if self.agent in (r["owner"], r["claim_agent"])])
 
+    # -- 总控专属工具 ------------------------------------------------------ #
+    def _need_controller(self):
+        if not self.is_controller:
+            return err(
+                "这个工具只有总控角色能用",
+                hint="以 --role controller 启动 MCP server（见 docs/MCP接入.md）")
+        return None
+
+    def t_land(self, a: dict) -> dict:
+        deny = self._need_controller()
+        if deny:
+            return deny
+        tid = a.get("task_id") or ""
+        apply = bool(a.get("apply"))
+        if not tid and not a.get("all"):
+            return err("要么给 task_id，要么 all=true")
+        h = self.hive()
+        try:
+            out = h.cmd_land(tid=tid or None, apply=apply, note=a.get("note") or "",
+                             all_tasks=bool(a.get("all")))
+        except HiveError as e:
+            return err(str(e))
+        plans = out if isinstance(out, list) else [out]
+        bad = [p for p in plans if p.get("problems") or p.get("conflicts")]
+        if bad:
+            conflicts = [c for p in bad for c in (p.get("conflicts") or [])]
+            return err("合入没成功（默认只预演，什么都没动）",
+                       plans=bad, conflicts=sorted(set(conflicts)),
+                       hint="看 conflicts 字段；解冲突后重试，或让人工处理")
+        return ok("预演通过，加 apply=true 真的合入" if not apply
+                  else f"已合入并关闭 {len(plans)} 张卡",
+                  plans=plans, applied=apply)
+
+    def t_close(self, a: dict) -> dict:
+        deny = self._need_controller()
+        if deny:
+            return deny
+        h = self.hive()
+        try:
+            h.cmd_close(a["task_id"], a.get("note") or "")
+        except HiveError as e:
+            return err(str(e))
+        return ok(f"{a['task_id']} 已关闭（结果已归档，claim/res 分支已删）",
+                  task_id=a["task_id"])
+
+    def t_retry(self, a: dict) -> dict:
+        deny = self._need_controller()
+        if deny:
+            return deny
+        h = self.hive()
+        try:
+            h.cmd_retry(a["task_id"], a.get("agent") or None,
+                        fresh=bool(a.get("fresh")))
+        except HiveError as e:
+            return err(str(e))
+        return ok(f"{a['task_id']} 已重新入队",
+                  task_id=a["task_id"],
+                  hint="结果和租约都清了；确认这是你想要的再继续")
+
+    def t_assign(self, a: dict) -> dict:
+        deny = self._need_controller()
+        if deny:
+            return deny
+        h = self.hive()
+        try:
+            h.cmd_assign(a["task_id"], a["agent"])
+        except HiveError as e:
+            return err(str(e))
+        return ok(f"{a['task_id']} 已指派给 {a['agent']}",
+                  task_id=a["task_id"], agent=a["agent"])
+
+    def t_dispatch(self, a: dict) -> dict:
+        deny = self._need_controller()
+        if deny:
+            return deny
+        h = self.hive()
+        try:
+            h.cmd_dispatch(apply=bool(a.get("apply")), limit=a.get("limit"),
+                           only_agent=a.get("agent"))
+        except HiveError as e:
+            return err(str(e))
+        return ok("分派完成" if a.get("apply") else "这是分派计划（dry-run）",
+                  applied=bool(a.get("apply")),
+                  hint="看上面的输出；确认后传 apply=true")
+
+    def t_gc(self, a: dict) -> dict:
+        deny = self._need_controller()
+        if deny:
+            return deny
+        h = self.hive()
+        try:
+            h.cmd_gc(int(a.get("minutes") or 180))
+        except HiveError as e:
+            return err(str(e))
+        return ok("过期租约回收完成", applied=bool(a.get("apply")))
+
     def t_doctor(self, _a: dict) -> dict:
         h = self.hive()
         issues: list[str] = []
@@ -598,6 +799,12 @@ class HiveMcp:
         "hive_progress": t_progress,
         "hive_result": t_result,
         "hive_stats": t_stats,
+        "hive_land": t_land,
+        "hive_close": t_close,
+        "hive_retry": t_retry,
+        "hive_assign": t_assign,
+        "hive_dispatch": t_dispatch,
+        "hive_gc": t_gc,
         "hive_doctor": t_doctor,
     }
 
@@ -617,6 +824,25 @@ class McpServer:
         return {"jsonrpc": "2.0", "id": rid,
                 "error": {"code": code, "message": message}}
 
+    def _instructions(self) -> str:
+        who = (f"总控 agent {self.impl.agent}" if self.impl.is_controller
+               else f"执行 agent {self.impl.agent}")
+        if self.impl.is_controller:
+            return (
+                f"hive 任务总线。你是{who}，**你的操作会改动 main 分支**。"
+                "典型流程：hive_whoami 看今天该干什么 → hive_dispatch 分派（默认 dry-run）"
+                " → hive_land 合入已完成的卡（默认 dry-run，传 apply=true 才真推）。"
+                "**破坏性操作一律先不传 apply 看计划**；冲突时 hive_land 会返回 error 和"
+                "冲突文件清单，绝不自动解冲突、绝不 force push。"
+                "hive_retry 会清掉结果和归档，对已 close 的卡尤其要谨慎。"
+            )
+        return (
+            f"hive 任务总线。你的身份是{who}。"
+            "典型流程：hive_whoami 看自己 → hive_next 挑卡 → hive_claim 领取 → "
+            "在返回的 worktree 里干活并写 .hive/summary.md → hive_submit 提交 → "
+            "hive_result 看验收结果。干不下去就 hive_abort 把卡还回去，别干耗到租约过期。"
+        )
+
     def handle(self, msg: dict):
         method = msg.get("method")
         rid = msg.get("id")
@@ -628,10 +854,7 @@ class McpServer:
                 "capabilities": {"tools": {}},
                 "serverInfo": SERVER_INFO,
                 "instructions": (
-                    f"hive 任务总线。你的身份是 agent {self.impl.agent}。"
-                    "典型流程：hive_whoami 看自己 → hive_next 挑卡 → hive_claim 领取 → "
-                    "在返回的 worktree 里干活并写 .hive/summary.md → hive_submit 提交 → "
-                    "hive_result 看验收结果。干不下去就 hive_abort 把卡还回去，别干耗到租约过期。"
+                    self._instructions()
                 ),
             })
         if method in ("notifications/initialized", "initialized"):
@@ -639,7 +862,10 @@ class McpServer:
         if method == "ping":
             return self.result(rid, {})
         if method == "tools/list":
-            return self.result(rid, {"tools": TOOLS})
+            tools = [t for t in TOOLS
+                     if self.impl.is_controller
+                     or t["name"] not in CONTROLLER_TOOLS]
+            return self.result(rid, {"tools": tools})
         if method == "resources/list":
             return self.result(rid, {"resources": []})
         if method == "prompts/list":
@@ -723,6 +949,10 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="hive MCP server（stdio，零第三方依赖）")
     p.add_argument("--agent", default=os.environ.get("HIVE_AGENT", ""),
                    help="以哪个 agent 的身份运行（默认取 HIVE_AGENT）")
+    p.add_argument("--role", default=os.environ.get("HIVE_ROLE", "worker"),
+                   choices=["worker", "controller"],
+                   help="worker=只能操作自己的卡（默认）；controller=总控，"
+                        "多出 land/close/retry/assign/dispatch/gc，会改动 main")
     p.add_argument("--dir", default=os.environ.get("HIVE_DIR", ""),
                    help="协调仓库路径；不给就用 ~/.hive/clones/mcp-<agent>")
     p.add_argument("--source", default=None,
@@ -754,12 +984,13 @@ def main(argv=None) -> int:
         probe.fetch()
         git(["reset", "--hard", "-q", "origin/main"], dst)
         probe.agent(args.agent)  # 早失败：agent 没登记就直接退出
-        impl = HiveMcp(dst, args.agent)
+        impl = HiveMcp(dst, args.agent, role=args.role)
     except HiveError as e:
         print(f"hive mcp: {e}", file=sys.stderr)
         return 2
 
-    print(f"hive mcp: agent={args.agent} dir={dst}", file=sys.stderr, flush=True)
+    print(f"hive mcp: agent={args.agent} role={args.role} dir={dst}",
+          file=sys.stderr, flush=True)
     return serve(impl)
 
 

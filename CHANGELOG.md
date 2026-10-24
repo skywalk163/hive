@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.4 — 2026-10-24
+
+### Added
+
+- **MCP 总控视角**：`hive mcp --agent <name> --role controller`（或 `HIVE_ROLE=controller`）。
+  以前 MCP 只有 worker 视角，总控还得敲 CLI；现在合入/关闭/重跑/分派/回收都能走 MCP。
+  - controller 额外 6 个工具：`hive_land` / `hive_close` / `hive_retry` /
+    `hive_assign` / `hive_dispatch` / `hive_gc`。
+  - **权限隔离有明确证据**：worker 视角的 `tools/list` 里根本看不到这 6 个
+    （测试直接断言集合交集为空），即使 worker 猜到工具名去 `tools/call` 也会被拒。
+  - **破坏性操作一律默认 dry-run**：`hive_land` / `hive_dispatch` / `hive_gc`
+    不传 `apply=true` 就只出计划；`hive_land` 遇冲突返回 error 并把冲突文件提到
+    `details.conflicts`，绝不自动解冲突、绝不 force push。
+  - `hive_whoami` 在 controller 下多返回 `role` 和 `todo`
+    （待合入 / conflict / blocked / needs_review / ready 五类计数），
+    让总控 agent 知道今天该干什么。
+  - `initialize` 的 instructions 区分角色，controller 版明确写「你的操作会改动 main 分支」。
+- 测试 6 例（含权限隔离与冲突不 force），全量 **86 passed**。
+
 ## 0.9.3 — 2026-10-24
 
 ### Added

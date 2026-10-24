@@ -44,7 +44,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.3"
+VERSION = "0.9.4"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -2406,7 +2406,7 @@ def cmd_dispatch(args) -> None:
 def cmd_mcp(args) -> int:
     """启动 MCP server（stdio）。转发给 mcp_server.py，保持 CLI 一个入口。"""
     import mcp_server
-    argv = ["--agent", args.agent]
+    argv = ["--agent", args.agent, "--role", args.role]
     if args.mcp_dir:
         argv += ["--dir", args.mcp_dir]
     if args.source:
@@ -2659,6 +2659,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dir", dest="mcp_dir", default=None,
                    help="协调仓库路径；不给就用 ~/.hive/clones/mcp-<agent>（独占 clone）")
     s.add_argument("--source", help="自动建 clone 时从哪拷（默认 hive 工具仓本体）")
+    s.add_argument("--role", default=os.environ.get("HIVE_ROLE", "worker"),
+                   choices=["worker", "controller"],
+                   help="worker=只能操作自己的卡；controller=总控，会改动 main")
     s.set_defaults(func=cmd_mcp)
 
     s = sub.add_parser("work", help="worker 主循环")

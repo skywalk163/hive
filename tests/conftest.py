@@ -143,6 +143,15 @@ class World:
                    "--state-dir", state or self.root / f"state-{agent}"],
                   check=False, env={**os.environ, "FAKE_SLEEP": "0", **(env or {})})
 
+    def code_refs(self, pattern: str = "refs/heads/task/*") -> set[str]:
+        """代码仓（light.git）里的分支。task/verify 分支推的是代码仓，不是协调仓。"""
+        out = sh(["git", "--git-dir", self.code_origin, "for-each-ref",
+                  "--format=%(refname)", pattern]).stdout
+        return {r.rsplit("/", 1)[-1] for r in out.split()}
+
+    def result_refs(self, tid: str) -> list[str]:
+        return [r for r in self.refs("refs/heads/res/*") if r.endswith(f"/{tid}")]
+
     def refs(self, pattern: str) -> list[str]:
         out = sh(["git", "--git-dir", self.hive_origin, "for-each-ref",
                   "--format=%(refname)", pattern]).stdout

@@ -78,6 +78,39 @@ Windows 上把 `command` 换成 `python`、`args` 里的路径换成 `C:\hive\hi
 | `hive_stats` | 吞吐与成功率、中位/P90、待合并数 | |
 | `hive_doctor` | 体检：卡片格式、租约、结果、归档、agent 配置 | |
 
+## 4.5 总控视角（controller）
+
+worker 视角只能操作自己的卡。要让 agent 当**总控**（合入、关闭、重跑、分派），
+起 server 时加 `--role controller`：
+
+```sh
+python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy --role controller
+```
+
+多出 6 个工具，全都是会改动 main 的操作：
+
+| 工具 | 作用 | 默认行为 |
+|---|---|---|
+| `hive_land` | 合入已完成的卡 | **dry-run**，`apply=true` 才真推 |
+| `hive_close` | 关闭一张卡 | 直接执行 |
+| `hive_retry` | 重跑（清结果和租约） | 直接执行 |
+| `hive_assign` | 指派给某个 agent | 直接执行 |
+| `hive_dispatch` | 自动分派 | **dry-run**，`apply=true` 才写 |
+| `hive_gc` | 回收过期租约 | **dry-run**，`apply=true` 才删 |
+
+权限是**真的隔离**，不是靠提示词叮嘱：worker 视角的 `tools/list` 里看不到这 6 个，
+即使猜到名字去调也会被拒。
+
+三条硬约定：
+
+1. 破坏性操作一律默认 dry-run，先看计划再 `apply=true`；
+2. `hive_land` 遇冲突返回 error 并把冲突文件放在 `details.conflicts` ——
+   **绝不自动解冲突、绝不 force push**；
+3. `hive_retry` 会清掉结果和归档，对已 close 的卡尤其要谨慎。
+
+`hive_whoami` 在 controller 下会多返回 `todo`：待合入、conflict、blocked、
+needs_review、ready 各多少张 —— 总控 agent 开工前先看这个。
+
 ## 5. 典型流程
 
 ```

@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import HIVE, sh
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 MCP = ROOT / "mcp_server.py"
@@ -27,15 +29,18 @@ EXPECTED_TOOLS = {
 class McpClient:
     """极简 MCP stdio 客户端，够测试用。"""
 
-    def __init__(self, agent: str, hive_dir: Path, state_dir: Path, env: dict):
+    def __init__(self, agent: str, hive_dir: Path, state_dir: Path, env: dict,
+                 role: str = "worker"):
         env = {
             **os.environ,
             **env,
             "HIVE_AGENT": agent,
+            "HIVE_ROLE": role,
             "HIVE_STATE": str(state_dir),
         }
         self.proc = subprocess.Popen(
-            [sys.executable, str(MCP), "--agent", agent, "--dir", str(hive_dir)],
+            [sys.executable, str(MCP), "--agent", agent, "--role", role,
+             "--dir", str(hive_dir)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, cwd=str(ROOT), env=env, bufsize=1,
         )
@@ -96,9 +101,9 @@ def mcp(world):
     """每起一个 MCP client 就配一个独立的 state 目录。"""
     clients: list[McpClient] = []
 
-    def _make(agent: str, hive_dir: Path | None = None):
+    def _make(agent: str, hive_dir: Path | None = None, role: str = "worker"):
         c = McpClient(agent, hive_dir or world.hive2,
-                      world.root / f"mcp-state-{agent}", world.git_env)
+                      world.root / f"mcp-state-{agent}", world.git_env, role=role)
         clients.append(c)
         return c
 
@@ -369,3 +374,131 @@ def test_mcp_doctor_and_stats(world, mcp):
     assert stats["tasks"] == 1
     assert stats["ready"] == 1
     assert stats["mine"] == []
+
+
+# --------------------------------------------------------------------------- #
+# 总控角色（controller）
+# --------------------------------------------------------------------------- #
+
+CONTROLLER_TOOL_NAMES = {
+    "hive_land", "hive_close", "hive_retry", "hive_assign",
+    "hive_dispatch", "hive_gc",
+}
+
+
+def test_worker_role_cannot_see_controller_tools(world, mcp):
+    """权限隔离要有明确证据：worker 视角看不到任何总控工具。"""
+    world.add_agent("a1", "exec", caps=["python"], command="true")
+    c = mcp("a1")
+    c.initialize()
+    names = {t["name"] for t in c.tools()}
+    assert not (names & CONTROLLER_TOOL_NAMES), (
+        f"worker 视角泄漏了总控工具：{sorted(names & CONTROLLER_TOOL_NAMES)}")
+    # instructions 也不该提总控
+    init = c.initialize()
+    assert "改动 main" not in init["instructions"]
+
+
+def test_controller_role_has_extra_tools(world, mcp):
+    world.add_agent("a1", "exec", caps=["python"], command="true")
+    c = mcp("a1", role="controller")
+    init = c.initialize()
+    names = {t["name"] for t in c.tools()}
+    assert CONTROLLER_TOOL_NAMES <= names, sorted(names)
+    assert "改动 main" in init["instructions"], init["instructions"]
+    # whoami 报角色和待办
+    who = c.ok("hive_whoami")["details"]
+    assert who["role"] == "controller", who
+    assert "todo" in who and "to_land" in who["todo"], who
+
+
+def test_controller_land_is_dry_run_by_default(world, mcp, fake_cmd):
+    """hive_land 默认只预演；apply=true 才真的合入并 close。"""
+    world.add_agent("a1", "exec", caps=["python"], command=fake_cmd)
+    world.add_task("T-0001", verify=["true"])
+    world.hive("assign", "T-0001", "--agent", "a1")
+    world.run_worker("a1")
+    assert "T-0001" in world.code_refs("refs/heads/task/*")
+
+    c = mcp("a1", role="controller")
+    c.initialize()
+
+    # 不传 apply：预演，什么都不动
+    env, is_err = c.call("hive_land", task_id="T-0001")
+    assert env["status"] == "success", env
+    assert env["details"]["applied"] is False, env
+    assert world.card("T-0001")["state"] != "done", "dry-run 不该 close"
+
+    # apply=true：真的合入
+    env2, _ = c.call("hive_land", task_id="T-0001", apply=True)
+    assert env2["status"] == "success", env2
+    assert env2["details"]["applied"] is True, env2
+    world.sync()   # 卡片是工作区文件，land 推完 main 后要同步才读得到
+    assert world.card("T-0001")["state"] == "done"
+    assert "refs/heads/res/T-0001" not in world.refs("refs/heads/res/*")
+
+
+def test_controller_land_reports_conflict_without_force(world, mcp, fake_cmd):
+    """冲突时必须返回 error 和文件清单，绝不 force push。"""
+    world.add_agent("a1", "exec", caps=["python"], command=fake_cmd)
+    world.add_task("T-0001", verify=["true"])
+    world.hive("assign", "T-0001", "--agent", "a1")
+    world.run_worker("a1")
+    code = world.code_clone("a1")
+
+    sh(["git", "fetch", "-q", "origin"], cwd=code, env=world.git_env)
+    sh(["git", "checkout", "-q", "main"], cwd=code, env=world.git_env)
+    (code / "feature.txt").write_text("总控侧的内容\n", encoding="utf-8")
+    sh(["git", "add", "-A"], cwd=code, env=world.git_env)
+    sh(["git", "commit", "-q", "-m", "conflict maker"], cwd=code, env=world.git_env)
+    sh(["git", "push", "-q", "origin", "main"], cwd=code, env=world.git_env)
+
+    c = mcp("a1", role="controller")
+    c.initialize()
+    env, is_err = c.call("hive_land", task_id="T-0001", apply=True)
+    assert env["status"] == "error", env
+    assert is_err is True
+    assert "conflicts" in env["details"], env
+    head = sh(["git", "--git-dir", world.code_origin, "rev-parse",
+               "main"]).stdout.strip()
+    msg = sh(["git", "--git-dir", world.code_origin, "log", "-1",
+              "--format=%s", head]).stdout.strip()
+    assert msg == "conflict maker", msg
+    world.sync()
+    assert world.card("T-0001")["state"] != "done"
+
+
+def test_worker_role_cannot_call_land(world, mcp, fake_cmd):
+    """即使知道工具名，worker 视角也调不动总控工具。"""
+    world.add_agent("a1", "exec", caps=["python"], command=fake_cmd)
+    world.add_task("T-0001", verify=["true"])
+    world.hive("assign", "T-0001", "--agent", "a1")
+    world.run_worker("a1")
+
+    c = mcp("a1")  # 默认 worker
+    c.initialize()
+    r = c.request("tools/call", {"name": "hive_land",
+                                 "arguments": {"task_id": "T-0001",
+                                               "apply": True}})
+    # tools/call 会走到 _call_tool，_need_controller 拒绝
+    assert "result" in r, r
+    env = json.loads(r["result"]["content"][0]["text"])
+    assert env["status"] == "error", env
+    assert "总控" in env["message"], env
+
+
+def test_controller_retry_clears_result(world, mcp, fake_cmd):
+    """hive_retry 之后结果被清掉，卡回到可重跑状态。"""
+    world.add_agent("a1", "exec", caps=["python"], command=fake_cmd)
+    world.add_task("T-0001", verify=["true"])
+    world.hive("assign", "T-0001", "--agent", "a1")
+    world.run_worker("a1")
+    assert world.result_refs("T-0001")
+
+    c = mcp("a1", role="controller")
+    c.initialize()
+    env, _ = c.call("hive_retry", task_id="T-0001")
+    assert env["status"] == "success", env
+    assert not world.result_refs("T-0001"), "retry 后结果分支应该没了"
+    world.sync()
+    assert world.card("T-0001")["state"] == "assigned", world.card("T-0001")
