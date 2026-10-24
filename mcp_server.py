@@ -115,6 +115,8 @@ TOOLS: list[dict] = [
             },
             "required": ["task_id"],
         },
+    },
+    {
         "name": "hive_unblock",
         "description": "解除挂起，把卡退回 ready（有 owner 的话退成 assigned）。",
         "inputSchema": {
@@ -125,6 +127,8 @@ TOOLS: list[dict] = [
             },
             "required": ["task_id"],
         },
+    },
+    {
         "name": "hive_abort",
         "description": "终止/放弃一张卡：释放我持有的租约，默认把卡退回 ready 让别人能领。已经出结果的卡不能终止（要先用 retry）。",
         "inputSchema": {

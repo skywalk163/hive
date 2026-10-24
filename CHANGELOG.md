@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.11 — 2026-10-24
+
+### Fixed
+
+- **`hive_block` / `hive_unblock` 从 MCP `tools/list` 消失**（T-0135，raccoon 发现）：
+  `mcp_server.py` 的 `TOOLS` 列表里 `hive_block` 条目漏了收尾的 `}, {`，三个 dict
+  （block/unblock/abort）被并成一个、同名 key 互相覆盖——最后只剩覆盖后的
+  `hive_abort`。handler 其实都在（`HANDLERS` 照常注册），知道名字直接 `tools/call`
+  仍能调通，所以 CLI 一直是好的；坏掉的只是 MCP 广告位，GUI / LLM 客户端根本
+  看不到这两个工具。
+  - 修法：把并掉的 dict 拆回三个，`TOOLS` 19 → 21，worker 视角 12 → 14。
+  - `tests/test_mcp.py` 的 `EXPECTED_TOOLS` 补上 block/unblock（旧值把 bug 表面
+    固化成了"预期"）。
+  - 新增不变式测试 `test_every_handler_is_advertised_in_tools_list`：handler 与
+    广告位必须一一对应、不许重名、条目结构合法——T-0123 踩过同类的坑，当时只有
+    「改完打印 len(TOOLS)」的口头纪律，这次变成机器检查。
+
 ## 0.9.10 — 2026-10-24
 
 ### Added

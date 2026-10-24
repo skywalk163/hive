@@ -21,7 +21,8 @@ MCP = ROOT / "mcp_server.py"
 
 EXPECTED_TOOLS = {
     "hive_whoami", "hive_list_tasks", "hive_get_task", "hive_next",
-    "hive_claim", "hive_submit", "hive_abort", "hive_extend_lease",
+    "hive_claim", "hive_submit", "hive_block", "hive_unblock",
+    "hive_abort", "hive_extend_lease",
     "hive_progress", "hive_result", "hive_stats", "hive_doctor",
 }
 
@@ -137,6 +138,40 @@ def test_mcp_handshake_and_tool_list(world, mcp):
                  "hive_extend_lease", "hive_result"):
         t = next(t for t in tools if t["name"] == name)
         assert "task_id" in t["inputSchema"]["required"], name
+
+
+def test_every_handler_is_advertised_in_tools_list():
+    """治本测试（T-0135）：handler 与 tools/list 广告位必须一一对应。
+
+    背景：TOOLS 列表字面量漏一个 `{`，三个 dict 被并成一个、同名 key 互相覆盖，
+    hive_block/hive_unblock 从 tools/list 消失（handler 还在，知道名字直接
+    tools/call 仍能调，所以 CLI 不坏、只有 MCP 广告位坏）。T-0123 踩过同类的坑，
+    当时只有「改完打印 len(TOOLS)」的口头纪律、没留测试，于是第二次踩到。
+    这条不变式把「口头纪律」变成机器检查：谁再漏括号，这里立刻红。
+    """
+    import mcp_server as ms
+
+    names = [t["name"] for t in ms.TOOLS]
+    # 1) 不许多个 dict 被并成一个后重名
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert not dupes, f"TOOLS 有重名（是不是又漏了括号把 dict 并掉了？）：{dupes}"
+    # 2) 每个 handler 都必须广告
+    missing = sorted(set(ms.HiveMcp.HANDLERS) - set(names))
+    assert not missing, f"这些工具有 handler 却不在 TOOLS 里（客户端看不到）：{missing}"
+    # 3) 每个广告的工具都必须有 handler
+    orphans = sorted(set(names) - set(ms.HiveMcp.HANDLERS))
+    assert not orphans, f"这些工具广告了却没有 handler：{orphans}"
+    # 4) controller 专属集必须是 TOOLS 的子集（否则 worker 视角过滤会误伤/漏拦）
+    extra_ctl = sorted(set(ms.CONTROLLER_TOOLS) - set(names))
+    assert not extra_ctl, f"CONTROLLER_TOOLS 里有不在 TOOLS 的名字：{extra_ctl}"
+    # 5) 条目结构合法
+    for t in ms.TOOLS:
+        assert set(t) == {"name", "description", "inputSchema"}, t
+        assert t["description"].strip(), t["name"]
+        assert t["inputSchema"]["type"] == "object", t["name"]
+    # 6) 点名这三个曾经出事的（防的正是它们被并成一个）
+    for n in ("hive_block", "hive_unblock", "hive_abort"):
+        assert n in names, f"{n} 不在 TOOLS 里"
 
 
 def test_mcp_unknown_tool_is_protocol_error(world, mcp):
