@@ -1,0 +1,43 @@
+{
+  "task": "T-0132",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0132",
+  "base": "main",
+  "head": "dd4b47f509737e5589e2d75bc6175ff145070dcc",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T16:42:39+00:00",
+  "finished_at": "2026-10-24T16:51:18+00:00",
+  "duration_s": 519.3,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_docs.py -q",
+      "code": 0,
+      "tail": [
+        "......                                                                   [100%]",
+        "6 passed in 0.03s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 53%]",
+        "..............................................................           [100%]",
+        "134 passed in 209.25s (0:03:29)"
+      ]
+    }
+  ],
+  "summary": "# T-0132 总结：lessons 补今晚四条教训\n\n## 背景\n\n`docs/lessons.md` 自己写着「不是流水账，是『同类坑别再踩第二次』」。今晚（T-0128 修错误信息、\nT-0129 修 Worker 裸 reset、T-0130 加重试熔断，以及 light 仓库回退那次）踩到四条非显然的坑，\n之前只记在会话记忆里，没落到项目自己的 lessons 里——换个人/换个会话就会再踩。\n\n## 改了什么\n\n只新增，不动现有条目：\n\n**「四、改 hive 自己的代码时」新增三条**\n- 「只构造对象」也可能有破坏性副作用（Worker 裸 `reset --hard` 静默抹掉未提交改动；\n  附最小实锤排查法：改脏文件 → 只触发可疑动作 → 看还在不在）。\n- 错误信息必须和实际入参一致（`hive_land` 传了 `apply=true` 仍说\"默认只预演\"，误导 LLM 总控；\n  单测只断言 status/conflicts 不够，实跑 decision-point 才暴露得了）。\n- `0` 是假值，别用 `or` 判断\"有没有设置\"（`max_retries: 0` 被误判成没设置）。\n\n**「五、hive 的用法」新增一条**\n- 代码被回退后卡片要同步「记作废」（`hive close <tid> --note \"作废…\"`，可重复调用只追加备注）。\n\n每条都按文件要求写了「→ 以后怎么做」，不是只描述现象。\n\n## 验收\n\n- 只改 `docs/lessons.md`；`tests/test_docs.py` 6 例仍绿；全量 pytest 无回归。",
+  "error": "",
+  "declared_paths": [
+    "docs/lessons.md",
+    "tests/test_docs.py"
+  ],
+  "changed_files": [
+    "docs/lessons.md"
+  ],
+  "out_of_paths": []
+}
