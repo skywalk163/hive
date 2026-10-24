@@ -39,8 +39,10 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -1065,6 +1067,20 @@ class Hive:
                 warns.append(f"{tid}: 状态 needs_review，等人确认")
             elif st == "blocked":
                 warns.append(f"{tid}: blocked（等资源/等外部条件）")
+            # 看门狗视角：in-flight 卡的死活（与 hive watchdog 同源判定）
+            if st in IN_FLIGHT_STATES:
+                if self.result_info(tid) is not None:
+                    warns.append(f"{tid}: 有结果却还停在 {st}（land_lag，该去 land 了）")
+                else:
+                    dclaim = self.claim_info(tid)
+                    if dclaim is None:
+                        if st == "running":
+                            warns.append(f"{tid}: running 但没有 claim（孤儿，watchdog 可回收）")
+                        else:
+                            warns.append(f"{tid}: assigned 但没有 claim"
+                                         f"（worker 可能还没来领，或已死）")
+                    elif (dclaim.get("agent") or "") not in agents:
+                        warns.append(f"{tid}: claim 的 agent {dclaim.get('agent')} 未登记（僵尸）")
             if st == "done" and not self.result_info(tid):
                 warns.append(f"任务 {tid} 已关闭但没有结果记录")
             res_d = self.result_info(tid)
@@ -1629,6 +1645,110 @@ class Hive:
             removed += 1
         log(f"gc 完成，回收 {removed} 个")
 
+    # -- 看门狗 ------------------------------------------------------------ #
+    @staticmethod
+    def _assigned_at(card: dict):
+        """从卡 body 里抠出 _assign_local 写的 assigned_at（没有就 None）。"""
+        body = card.get("_body") or ""
+        m = re.search(r"^assigned_at:\s*(\S+)", body, re.MULTILINE)
+        if not m:
+            return None
+        try:
+            return parse_iso(m.group(1))
+        except ValueError:
+            return None
+
+    def _reenqueue_ready(self, tid: str, reason: str) -> None:
+        """把一张 in-flight 卡退回 ready 池：删 claim 分支、清空 owner、+retries、留底备注。
+
+        与 cmd_retry 的区别：retry 回到 assigned 并保留 owner（同 agent 续跑），
+        这里回到 ready 且清空 owner（放回任务池，让 dispatch 重新分派）。
+        """
+        if rev_parse(self.dir, f"origin/claim/{tid}"):
+            git(["push", "origin", f":refs/heads/claim/{tid}"], self.dir, check=False)
+        archived = self.dir / "results" / f"{tid}.json"
+        if archived.exists():
+            archived.unlink()  # 重新入队时把归档也撤掉，否则 worker 会以为已完成
+        card = self.card(tid)
+        card["state"] = "ready"
+        card["owner"] = None
+        try:
+            card["retries"] = int(card.get("retries") or 0) + 1
+        except (TypeError, ValueError):
+            card["retries"] = 1
+        body = (card["_body"]
+                + f"\n\n---\n\n**watchdog 回收（{iso()}）**：{reason}，回到 ready\n")
+        self.save_card(card, body)
+        self.commit_and_push(f"watchdog reclaim {tid}: {reason}", self._card_paths(tid))
+        log(f"{tid} 已退回 ready（{reason}）")
+
+    def cmd_watchdog(self, minutes: int = 0, apply: bool = False,
+                     as_json: bool = False) -> int:
+        """看门狗：找出死掉 / 孤儿 / 僵尸的 in-flight 卡。
+
+        dry-run（默认）只报告、不改动；`--apply` 才把候选卡退回 ready。
+        回收的判定（都满足「卡还在 in-flight、且没有 res 结果」为前提）：
+          - orphan_running：state=running 但 claim 分支没了（崩溃 / 被 gc 清掉）
+          - orphan_assigned：state=assigned 且 assigned_at 早于 now-minutes（worker 一直没来领）
+          - zombie：claim 的 agent 没在 agents/ 登记
+          - stale：claim 的 lease_until 早于 now-minutes（心跳保证活着的 worker 不会过期）
+          - land_lag（只 warn 不回收）：已经有 res 结果却还停在 in-flight，那是 land 的活
+        返回将被/已被回收的卡数量。
+        """
+        self.fetch()
+        cards = self.cards()
+        nowdt = now()
+        grace = timedelta(minutes=minutes)
+        candidates: list[dict] = []
+        for tid, c in cards.items():
+            if c.get("state") not in IN_FLIGHT_STATES:
+                continue
+            if self.result_info(tid) is not None:
+                candidates.append({"id": tid, "reason": "land_lag", "action": "warn"})
+                continue
+            claim = self.claim_info(tid)
+            if claim is None:
+                if c.get("state") == "running":
+                    candidates.append({"id": tid, "reason": "orphan_running", "action": "reclaim"})
+                else:  # assigned 但还没 claim：可能刚分派，按 minutes 阈值判断
+                    at = self._assigned_at(c)
+                    if at and at < nowdt - grace:
+                        candidates.append({"id": tid, "reason": "orphan_assigned",
+                                          "action": "reclaim"})
+                continue
+            agent = claim.get("agent")
+            if (agent or "") not in self.agents():
+                candidates.append({"id": tid, "reason": "zombie", "action": "reclaim"})
+                continue
+            lease = claim.get("lease_until")
+            if lease:
+                try:
+                    expired = parse_iso(lease) < nowdt - grace
+                except ValueError:
+                    expired = True
+                if expired:
+                    candidates.append({"id": tid, "reason": "stale", "action": "reclaim"})
+
+        to_reclaim = [c for c in candidates if c["action"] == "reclaim"]
+        if as_json:
+            print(json.dumps({
+                "candidates": candidates,
+                "would_reclaim": len(to_reclaim) if not apply else 0,
+                "reclaimed": len(to_reclaim) if apply else 0,
+            }, ensure_ascii=False, indent=2))
+        if not apply:
+            for c in candidates:
+                tag = "回收" if c["action"] == "reclaim" else "提示"
+                log(f"[watchdog] {tag} {c['id']}：{c['reason']}")
+            log(f"[watchdog] dry-run：{len(to_reclaim)} 张将被回收"
+                f"（--apply 才动手）")
+            return len(to_reclaim)
+        for c in to_reclaim:
+            self._reenqueue_ready(c["id"], c["reason"])
+            log(f"[watchdog] 已回收 {c['id']}：{c['reason']}")
+        log(f"[watchdog] 完成，回收 {len(to_reclaim)} 张")
+        return len(to_reclaim)
+
     # -- 分支清理 ---------------------------------------------------------- #
     @staticmethod
     def _default_remote_ref(repo: Path) -> str | None:
@@ -1808,6 +1928,49 @@ class Worker:
                 log(str(e).splitlines()[0])
             return False
 
+    # -- 租约心跳 ---------------------------------------------------------- #
+    @contextmanager
+    def lease_heartbeat(self, tid: str):
+        """任务运行期间周期性刷新 claim 的 lease_until。
+
+        活着的 worker 自己续租，watchdog 才能放心把「租约过期」判成死亡
+        （否则健康的长任务会被错杀）。best-effort：刷新失败只 log，不打断任务。
+        """
+        stop = threading.Event()
+        lease = int(self.h.card(tid).get("lease_minutes") or 180)
+        interval = max(5, lease // 3) * 60  # 秒
+        t = threading.Thread(target=self._heartbeat_loop, args=(tid, interval, stop),
+                            name=f"hb-{tid}", daemon=True)
+        t.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            t.join(timeout=5)
+
+    def _heartbeat_loop(self, tid: str, interval: int, stop: threading.Event) -> None:
+        while not stop.wait(interval):
+            try:
+                self._refresh_lease(tid)
+            except Exception as e:  # noqa: BLE001  best-effort，绝不影响任务
+                log(f"{tid} 心跳刷新失败（忽略）: {e}")
+
+    def _refresh_lease(self, tid: str) -> None:
+        """续租：把 claim 的 lease_until 往前推。父提交必须是当前 claim 分支才能快进。"""
+        info = self.h.claim_info(tid)
+        if not isinstance(info, dict) or info.get("agent") != self.name:
+            return  # 没 claim 或不是自己的，no-op
+        lease = int(self.h.card(tid).get("lease_minutes") or 180)
+        payload = dict(info)
+        payload["lease_until"] = iso(now() + timedelta(minutes=lease))
+        payload["refreshed_at"] = iso()
+        self.h.fetch()
+        commit_file_to_ref(
+            self.h.dir, f"claims/{tid}.json",
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            f"claim/{tid}", f"origin/claim/{tid}",
+            f"lease {tid} by {self.name}")
+
     # -- 手工领取 / 提交（take / submit） ---------------------------------- #
     def prepare(self, tid: str) -> dict:
         """建 worktree + 写 task.md，不执行、不等待。供 `hive take` 使用。"""
@@ -1904,38 +2067,39 @@ class Worker:
         logfile = self.state / "logs" / f"{tid}.log"
         out, timed_out, code = "", False, 0
 
-        if verify_only:
-            log(f"{tid} 验证模式：只跑 verify，不调用 agent")
-        elif self.manual:
-            if os.name == "nt" and self.cfg.get("copy_prompt", True):
-                try:
-                    subprocess.run("clip", input=prompt, text=True, shell=True,
-                                   check=False, capture_output=True)
-                    log("任务提示词已复制到剪贴板")
-                except OSError:
-                    pass
-            if self.launch:
-                cmdline = (self.launch.replace("{worktree}", str(wt))
-                           .replace("{task}", tid)
-                           .replace("{prompt}", str(wt / ".hive" / "task.md")))
-                try:
-                    subprocess.Popen(cmdline, shell=True, cwd=str(wt))
-                    log(f"已启动 GUI：{cmdline}")
-                except OSError as e:
-                    log(f"启动 GUI 失败（继续手动）: {e}")
-            log(f"{tid} 手动模式：请在 {wt} 里让 GUI agent 完成，然后写 {summary_file}")
-            print(f"\n=== 任务 {tid} 已就绪 ===\n工作目录: {wt}\n任务卡:   {wt/'.hive'/'task.md'}"
-                  f"\n完成后写: {summary_file}（或在此按 Ctrl-C 放弃）\n", flush=True)
-            deadline = time.time() + int(card.get("timeout_minutes") or 120) * 60
-            while time.time() < deadline:
-                if summary_file.exists() and summary_file.stat().st_size > 0:
-                    break
-                time.sleep(5)
+        with self.lease_heartbeat(tid):
+            if verify_only:
+                log(f"{tid} 验证模式：只跑 verify，不调用 agent")
+            elif self.manual:
+                if os.name == "nt" and self.cfg.get("copy_prompt", True):
+                    try:
+                        subprocess.run("clip", input=prompt, text=True, shell=True,
+                                       check=False, capture_output=True)
+                        log("任务提示词已复制到剪贴板")
+                    except OSError:
+                        pass
+                if self.launch:
+                    cmdline = (self.launch.replace("{worktree}", str(wt))
+                               .replace("{task}", tid)
+                               .replace("{prompt}", str(wt / ".hive" / "task.md")))
+                    try:
+                        subprocess.Popen(cmdline, shell=True, cwd=str(wt))
+                        log(f"已启动 GUI：{cmdline}")
+                    except OSError as e:
+                        log(f"启动 GUI 失败（继续手动）: {e}")
+                log(f"{tid} 手动模式：请在 {wt} 里让 GUI agent 完成，然后写 {summary_file}")
+                print(f"\n=== 任务 {tid} 已就绪 ===\n工作目录: {wt}\n任务卡:   {wt/'.hive'/'task.md'}"
+                      f"\n完成后写: {summary_file}（或在此按 Ctrl-C 放弃）\n", flush=True)
+                deadline = time.time() + int(card.get("timeout_minutes") or 120) * 60
+                while time.time() < deadline:
+                    if summary_file.exists() and summary_file.stat().st_size > 0:
+                        break
+                    time.sleep(5)
+                else:
+                    timed_out = True
             else:
-                timed_out = True
-        else:
-            code, out, timed_out = self._exec(self.cmd, wt, prompt, logfile,
-                                              int(card.get("timeout_minutes") or 60) * 60, tid)
+                code, out, timed_out = self._exec(self.cmd, wt, prompt, logfile,
+                                                  int(card.get("timeout_minutes") or 60) * 60, tid)
 
         # 越界检查：自举时代码仓和协调仓库是同一个，agent 能顺手改掉自己的任务卡
         changed: list[str] = changed_files(wt)
@@ -2454,6 +2618,11 @@ def cmd_gc(args) -> None:
     Hive(args.dir).cmd_gc(args.minutes)
 
 
+def cmd_watchdog(args) -> None:
+    Hive(args.dir).cmd_watchdog(minutes=args.minutes, apply=args.apply,
+                                as_json=args.json)
+
+
 def cmd_audit(args) -> None:
     Hive(args.dir).cmd_audit(tid=args.task, all_cards=args.all, as_json=args.json)
 
@@ -2642,6 +2811,14 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("gc", help="回收过期租约")
     s.add_argument("--minutes", type=int, default=180)
     s.set_defaults(func=cmd_gc)
+
+    s = sub.add_parser("watchdog",
+                       help="看门狗：回收死掉/孤儿/僵尸的 in-flight 卡（默认 dry-run）")
+    s.add_argument("--minutes", type=int, default=0,
+                   help="租约过期/assigned 无 claim 超过这么久（分钟）才回收，默认 0（立刻）")
+    s.add_argument("--apply", action="store_true", help="真回收；默认只报告")
+    s.add_argument("--json", action="store_true", help="输出结构化 JSON")
+    s.set_defaults(func=cmd_watchdog)
 
     s = sub.add_parser("prune", help="清理代码仓里已合并的 task/verify 分支（默认 dry-run）")
     s.add_argument("--repo", help="只清这个代码仓（默认：agent 登记的所有）")

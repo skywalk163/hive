@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.5 — 2026-10-24
+
+### Added
+
+- **worker 看门狗**：自动回收「死掉 / 孤儿 / 僵尸」的 in-flight 卡，不再卡住并发额度。
+  - **worker 租约心跳**：`Worker.run_task` 期间 daemon 线程周期性刷新 `claim/<tid>` 的
+    `lease_until`（间隔 `max(5, lease_minutes//3)` 分钟，父提交必须是当前 claim 分支才能快进）。
+    活着的 worker 自己续租，看门狗才能把「租约过期」可靠地判成死亡，不会错杀健康的长任务。
+  - **`hive watchdog [--minutes M] [--apply] [--json]`**：扫描 `assigned`/`running` 的卡，
+    判定 `orphan_running`（跑着却无 claim）/ `orphan_assigned`（assigned 很久没来领）/
+    `zombie`（claim 的 agent 没登记）/ `stale`（租约过期）/ `land_lag`（有结果却没 land，只提示）。
+    回收 = 退回 `ready` 并清空 owner（放回任务池，等 dispatch 重派）。**默认 dry-run 只报告，
+    `--apply` 才动手**，与 gc/land 约定一致。
+  - **`hive doctor` 增强**：in-flight 卡的孤儿 / 僵尸 / land_lag 现在会被点名。
+  - **MCP 总控视角补 `hive_watchdog`**（controller 专属，复用 `hive_gc` 的接法）。
+- 测试 9 例（dry-run 零改动 / apply 回收 / 健康卡不误杀 / 心跳续租 / doctor 报孤儿僵尸），
+  全量 **95 passed**。
+
 ## 0.9.4 — 2026-10-24
 
 ### Added

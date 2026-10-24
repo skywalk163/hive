@@ -87,7 +87,7 @@ worker 视角只能操作自己的卡。要让 agent 当**总控**（合入、�
 python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy --role controller
 ```
 
-多出 6 个工具，全都是会改动 main 的操作：
+多出 7 个工具，全都是会改动 main 的操作：
 
 | 工具 | 作用 | 默认行为 |
 |---|---|---|
@@ -97,6 +97,7 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy --role controller
 | `hive_assign` | 指派给某个 agent | 直接执行 |
 | `hive_dispatch` | 自动分派 | **dry-run**，`apply=true` 才写 |
 | `hive_gc` | 回收过期租约 | **dry-run**，`apply=true` 才删 |
+| `hive_watchdog` | 自动回收死掉/孤儿/僵尸的 in-flight 卡 | **dry-run**，`apply=true` 才退回 ready |
 
 权限是**真的隔离**，不是靠提示词叮嘱：worker 视角的 `tools/list` 里看不到这 6 个，
 即使猜到名字去调也会被拒。

@@ -39,7 +39,7 @@ PROTOCOL_VERSION = "2024-11-05"
 # controller（总控）角色：多了 land/close/retry/assign/dispatch/gc 这些
 # 会改动 main 的工具。默认 worker 角色看不到它们。
 CONTROLLER_TOOLS = ("hive_land", "hive_close", "hive_retry", "hive_assign",
-                    "hive_dispatch", "hive_gc")
+                    "hive_dispatch", "hive_gc", "hive_watchdog")
 SERVER_INFO = {"name": "hive", "version": VERSION}
 
 # --------------------------------------------------------------------------- #
@@ -256,6 +256,20 @@ TOOLS: list[dict] = [
             "properties": {
                 "minutes": {"type": "integer", "default": 180,
                             "description": "超过多少分钟没动静算过期"},
+                "apply": {"type": "boolean", "default": False},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "hive_watchdog",
+        "description": "【总控】看门狗：回收死掉/孤儿/僵尸的 in-flight 卡。默认 dry-run 只报，"
+                       "传 apply=true 才把候选卡退回 ready（清空 owner，放回任务池）。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "minutes": {"type": "integer", "default": 0,
+                            "description": "租约过期/assigned 无 claim 超过这么久（分钟）才回收，默认 0（立刻）"},
                 "apply": {"type": "boolean", "default": False},
             },
             "required": [],
@@ -760,6 +774,19 @@ class HiveMcp:
             return err(str(e))
         return ok("过期租约回收完成", applied=bool(a.get("apply")))
 
+    def t_watchdog(self, a: dict) -> dict:
+        deny = self._need_controller()
+        if deny:
+            return deny
+        h = self.hive()
+        try:
+            n = h.cmd_watchdog(minutes=int(a.get("minutes") or 0),
+                               apply=bool(a.get("apply")))
+        except HiveError as e:
+            return err(str(e))
+        return ok("看门狗检查完成",
+                  reclaimed=n, applied=bool(a.get("apply")))
+
     def t_doctor(self, _a: dict) -> dict:
         h = self.hive()
         issues: list[str] = []
@@ -805,6 +832,7 @@ class HiveMcp:
         "hive_assign": t_assign,
         "hive_dispatch": t_dispatch,
         "hive_gc": t_gc,
+        "hive_watchdog": t_watchdog,
         "hive_doctor": t_doctor,
     }
 
