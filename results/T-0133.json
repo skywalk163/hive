@@ -1,0 +1,51 @@
+{
+  "task": "T-0133",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0133",
+  "base": "main",
+  "head": "be44dcc42c28c0e7421e1606fd30c6177c436436",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T23:17:39+00:00",
+  "finished_at": "2026-10-24T23:32:28+00:00",
+  "duration_s": 889.6,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_repo_scope.py -q",
+      "code": 0,
+      "tail": [
+        "....                                                                     [100%]",
+        "4 passed in 0.03s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 52%]",
+        "..................................................................       [100%]",
+        "138 passed in 221.53s (0:03:41)"
+      ]
+    }
+  ],
+  "summary": "# T-0133 摘要\n\n## 做了什么\n- 从 `agents/fb88-dsh.json`、`fb88-verify.json`、`raccoon.json`、`workbuddy.json`\n  四个文件删掉 `\"light\": \"/home/skywalk/src/light\"` 登记，`hive` 项保留。\n- 新增 `tests/test_repo_scope.py` 4 例静态守卫：任何 agent 的 `repos` 只允许 `hive`；\n  含 `light` 立刻红；至少一个 agent 登记 `hive`（防删过头把 dispatch 废掉）。\n  纯静态、不联网、不依赖本机是否存在 light 目录。\n\n## 效果（都由既有代码路径保证，未改任何逻辑）\n- `dispatch` / `hive next` / 领取判定：仓库不匹配直接跳过；\n- 手工 `assign` 一张 light 卡：`Worker.prepare` 报「没有配置仓库 light 的本地路径」，\n  任务记 failed，推不出去；\n- `hive land` light 卡：`code_repo` 报「没有 agent 登记代码仓 light 的本地路径」。\n\n## 验证\n- `pytest tests/test_repo_scope.py` 4 例绿；\n- 全量 `pytest tests/` **138 passed**（原 134，+4），无回归。\n\n## 遗留（重要，见 T-0134）\n- 卡片目标 4「操作手册补一句」**未做**：raccoon 正在主仓改 `docs/操作手册.md`\n  且改动未提交，用户明确要求不要冲突。若此刻 land 文档改动，raccoon 后续提交\n  自己版本时有冲掉/撞冲突的风险。已改为新卡 T-0134 跟进，等 raccoon 的文档\n  落定后再补这句。\n- `T-0001~T-0005`（repo: light）摘掉登记后变为不可执行，与「已记作废」状态一致，\n  无需处理。\n\n## 风险\n- 低。改动只是配置登记 + 静态测试；自动分派路径（T-0101 起）本来就只派 hive 卡，\n  本卡把「约定兜底」升级为「结构上推不出去」。",
+  "error": "",
+  "declared_paths": [
+    "agents/fb88-dsh.json",
+    "agents/fb88-verify.json",
+    "agents/raccoon.json",
+    "agents/workbuddy.json",
+    "tests/test_repo_scope.py",
+    "docs/操作手册.md"
+  ],
+  "changed_files": [
+    "agents/fb88-dsh.json",
+    "agents/fb88-verify.json",
+    "agents/raccoon.json",
+    "agents/workbuddy.json",
+    "tests/test_repo_scope.py"
+  ],
+  "out_of_paths": []
+}
