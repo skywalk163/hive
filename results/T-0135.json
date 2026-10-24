@@ -1,0 +1,48 @@
+{
+  "task": "T-0135",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0135",
+  "base": "main",
+  "head": "af7f7a4adbb196dc52763ee6255f94db30f9013e",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T23:38:09+00:00",
+  "finished_at": "2026-10-24T23:51:43+00:00",
+  "duration_s": 815.0,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_mcp.py -q",
+      "code": 0,
+      "tail": [
+        "......................                                                   [100%]",
+        "22 passed in 40.46s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 51%]",
+        "...................................................................      [100%]",
+        "139 passed in 219.53s (0:03:39)"
+      ]
+    }
+  ],
+  "summary": "# T-0135 摘要\n\n## 做了什么\n- `mcp_server.py`：`TOOLS` 里 `hive_block` 条目后漏了 `}, {`，block/unblock/abort\n  三个 dict 被并成一个、同名 key 互相覆盖。已拆回三个独立 dict。`TOOLS` 19 → 21，\n  worker 视角 `tools/list` 12 → 14。handler 行为零改动。\n- `tests/test_mcp.py`：`EXPECTED_TOOLS` 补 `hive_block` / `hive_unblock`\n  （旧值等于把 bug 表面固化成\"预期\"）；新增不变式测试\n  `test_every_handler_is_advertised_in_tools_list`：handler 与广告位一一对应、\n  不许重名、CONTROLLER_TOOLS ⊆ TOOLS、条目结构合法。\n- `hive.py` VERSION 0.9.10 → 0.9.11；`CHANGELOG.md` 记 0.9.11 Fixed。\n\n## 验证\n- 治本测试已验证是**真守卫**：临时把漏括号改回去 → 新测试 0.15s 立刻红；恢复后全绿。\n- MCP 相关 25 例绿；全量 pytest 见 submit 回执（预期 139 = 138 + 1 新不变式）。\n\n## 影响面\n- CLI（`hive block/unblock`）一直是好的——handler 没丢，坏的只是 MCP 广告位。\n  修后 GUI / LLM 客户端（Claude/Cursor/…）能在 tools/list 里看到这两个工具。\n\n## 遗留（重要）\n- **文档未动**（raccoon 正在主仓改、未提交）：`docs/MCP接入.md` 的工具表、\n  `README.md` 的工具表都缺 block/unblock 两行；`docs/AGENT快速上手.md:285` 把\n  本 bug 记为\"已知缺陷\"，代码修好后该记载已过时。需在 raccoon 的改动落定后补\n  （与 T-0134 同一前提：等它的文档合入再动 docs）。",
+  "error": "",
+  "declared_paths": [
+    "mcp_server.py",
+    "tests/test_mcp.py",
+    "hive.py",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_mcp.py"
+  ],
+  "out_of_paths": []
+}
