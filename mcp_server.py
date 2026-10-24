@@ -706,8 +706,13 @@ class HiveMcp:
         bad = [p for p in plans if p.get("problems") or p.get("conflicts")]
         if bad:
             conflicts = [c for p in bad for c in (p.get("conflicts") or [])]
-            return err("合入没成功（默认只预演，什么都没动）",
-                       plans=bad, conflicts=sorted(set(conflicts)),
+            # 措辞必须和实际 apply 一致：传了 apply=true 却回「默认只预演」会误导总控
+            # （LLM 总控靠读这条 message 判断自己处在什么模式）
+            msg = ("合入冲突：已传 apply=true，也未改动任何东西"
+                   "（绝不自动解冲突、绝不 force push）" if apply
+                   else "合入没成功（默认只预演，什么都没动）")
+            return err(msg, plans=bad, conflicts=sorted(set(conflicts)),
+                       applied=apply,
                        hint="看 conflicts 字段；解冲突后重试，或让人工处理")
         return ok("预演通过，加 apply=true 真的合入" if not apply
                   else f"已合入并关闭 {len(plans)} 张卡",

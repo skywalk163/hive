@@ -106,7 +106,9 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy --role controller
 
 1. 破坏性操作一律默认 dry-run，先看计划再 `apply=true`；
 2. `hive_land` 遇冲突返回 error 并把冲突文件放在 `details.conflicts` ——
-   **绝不自动解冲突、绝不 force push**；
+   **绝不自动解冲突、绝不 force push**。冲突时的 message 与实际 `apply` 一致：
+   没传 apply 说「默认只预演」，传了 `apply=true` 说「已申请真合入、因冲突未改动」；
+   另带 `details.applied` 字段，调用方不依赖自然语言也能判断自己处在什么模式；
 3. `hive_retry` 会清掉结果和归档，对已 close 的卡尤其要谨慎。
 
 `hive_whoami` 在 controller 下会多返回 `todo`：待合入、conflict、blocked、
