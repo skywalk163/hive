@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.12 — 2026-10-24
+
+### Fixed
+
+- **`land --apply` 不再被协调仓未提交改动卡死**（T-0136）：合并在临时 worktree 里
+  成功推入 origin/main 后，收尾的 `cmd_close` 跑 `sync_main()`，而主仓工作区
+  「落后 + 有未提交改动」（多 agent 共用一台机器时的日常）时守卫直接报错 →
+  **代码已合入、卡片却没关**，操作者只看到一句「不敢自动 reset」，完全看不出合并
+  已经成功。一晚被坑两次（T-0133 / T-0135），都靠人工 ff + close 补救。
+  - 新增 `Hive._sync_for_commit()`：落后就试 `merge --ff-only`。git 保证 ff 只更新
+    两个提交间真正变化的文件——未提交改动不在其中就原样保留，真在其中 git 自己会
+    拒绝，不会丢任何东西；分叉等拿不到的才报错并列脏文件。
+  - `cmd_close`（含 land 收尾、独立 `hive close`、MCP `hive_close`）换用它。
+    `sync_main` 本身不动（T-0129 的防数据丢失底线保留）。
+  - land 关卡万一仍失败，返回新状态 `merged-not-closed`：明说「合并已推入、只是
+    关卡失败」并给出 `hive close <tid>` 收尾命令，不再裸抛同步错误。
+  - 方案备查：初稿想让关卡也在 land 临时 worktree 里做，否决——那是**代码仓**的
+    worktree，非自举卡（repo≠协调仓）会把卡片文件提交进错误的仓。
+
 ## 0.9.11 — 2026-10-24
 
 ### Fixed

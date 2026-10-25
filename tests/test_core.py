@@ -406,6 +406,106 @@ def test_land_merges_and_closes(world, fake_cmd):
     assert "made by fb for T-0001" in blob
 
 
+def _push_foreign_commit_to_hive(world, filename: str, content: str) -> None:
+    """从 hive2 往协调仓 origin/main 推一个"别人"的提交，让 hive1 落后。"""
+    sh(["git", "fetch", "-q", "origin"], cwd=world.hive2, env=world.git_env)
+    sh(["git", "checkout", "-q", "main"], cwd=world.hive2, env=world.git_env)
+    # hive2 是初始化时 clone 的，之后 hive1 推了不少提交；只 fetch 不 reset 的话
+    # 本地 main 还停在旧基线上，commit 完推送必然非快进被拒
+    sh(["git", "reset", "--hard", "-q", "origin/main"], cwd=world.hive2,
+       env=world.git_env)
+    target = world.hive2 / filename
+    if target.exists():
+        target.write_text(target.read_text(encoding="utf-8") + content,
+                          encoding="utf-8")
+    else:
+        target.write_text(content, encoding="utf-8")
+    sh(["git", "add", "-A"], cwd=world.hive2, env=world.git_env)
+    sh(["git", "commit", "-q", "-m", f"foreign: {filename}"], cwd=world.hive2,
+       env=world.git_env)
+    sh(["git", "push", "-q", "origin", "main"], cwd=world.hive2, env=world.git_env)
+
+
+def test_land_survives_dirty_coordination_tree(world, fake_cmd):
+    """协调仓主工作区落后且有未提交改动时，land --apply 必须一次成功（T-0136）。
+
+    复现 T-0133/T-0135：合并在临时 worktree 里能推成，老代码却在 close 的
+    sync_main 上抛「不敢自动 reset」——代码合了、卡片没关。未提交改动还必须
+    原样保留（ff 只碰真正变化的文件）。
+    """
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
+    _fake_done_card(world, "fb", "T-0001")
+
+    # 1) 别人往协调仓推了一个提交 → hive1 落后 origin/main
+    _push_foreign_commit_to_hive(world, "FOREIGN.md", "别人推的\n")
+    # 2) 主仓工作区有未提交改动（与传入改动、与 close 的路径都不重叠）
+    dirty = world.hive1 / "agents" / "fb.json"
+    dirty.write_text(dirty.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    world.hive("land", "T-0001", "--apply")
+
+    # 合并 + 关卡都完成
+    assert world.card("T-0001")["state"] == "done"
+    assert (world.hive1 / "results" / "T-0001.json").exists()
+    blob = sh(["git", "--git-dir", world.code_origin, "show", "main:feature.txt"]).stdout
+    assert "made by fb for T-0001" in blob
+    # 别人的提交被 ff 进来；未提交改动原样还在
+    assert (world.hive1 / "FOREIGN.md").exists()
+    head_version = sh(["git", "-C", str(world.hive1), "show",
+                       "HEAD:agents/fb.json"]).stdout
+    assert dirty.read_text(encoding="utf-8") == head_version + "\n"
+    # 注意：porcelain 前导空格是语义位（未暂存），只能 rstrip，不能 strip
+    status = sh(["git", "-C", str(world.hive1), "status", "--porcelain",
+                 "--untracked-files=no"], env=world.git_env).stdout.rstrip("\n")
+    assert status == " M agents/fb.json", status
+
+
+def test_land_reports_merged_not_closed_when_sync_impossible(world, fake_cmd):
+    """未提交改动与传入改动重叠（ff 被 git 拒绝）：不崩、报清楚、不丢改动。"""
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
+    _fake_done_card(world, "fb", "T-0001")
+
+    # 别人的提交改的正是 agents/fb.json（必须保持 JSON 合法，否则 land 读 agent
+    # 配置时直接跳过，根本走不到合并那步）
+    sh(["git", "fetch", "-q", "origin"], cwd=world.hive2, env=world.git_env)
+    sh(["git", "checkout", "-q", "main"], cwd=world.hive2, env=world.git_env)
+    sh(["git", "reset", "--hard", "-q", "origin/main"], cwd=world.hive2,
+       env=world.git_env)
+    foreign_cfg = json.loads((world.hive2 / "agents" / "fb.json").read_text(encoding="utf-8"))
+    foreign_cfg["note"] = "别人加的"
+    (world.hive2 / "agents" / "fb.json").write_text(
+        json.dumps(foreign_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    sh(["git", "add", "-A"], cwd=world.hive2, env=world.git_env)
+    sh(["git", "commit", "-q", "-m", "foreign: agents/fb.json"], cwd=world.hive2,
+       env=world.git_env)
+    sh(["git", "push", "-q", "origin", "main"], cwd=world.hive2, env=world.git_env)
+    # hive1 也改了同一个文件且未提交（同样保持合法）→ ff 必然被 git 拒绝
+    dirty = world.hive1 / "agents" / "fb.json"
+    my_cfg = json.loads(dirty.read_text(encoding="utf-8"))
+    my_cfg["my_uncommitted"] = True
+    dirty.write_text(json.dumps(my_cfg, ensure_ascii=False, indent=2) + "\n",
+                     encoding="utf-8")
+
+    out = world.hive_json("land", "T-0001", "--apply")
+
+    # 不崩（JSON 正常返回），状态说清"合入了但没关成"
+    assert out["status"] == "merged-not-closed", out
+    assert out["merged"] is True and out["closed"] is False
+    assert any("合并已推入" in p and "hive close T-0001" in p
+               for p in out["problems"]), out["problems"]
+    assert any("agents/fb.json" in p for p in out["problems"]), out["problems"]
+    # 卡片确实没关；代码合并确实已在主线
+    assert world.card("T-0001")["state"] != "done"
+    blob = sh(["git", "--git-dir", world.code_origin, "show", "main:feature.txt"]).stdout
+    assert "made by fb for T-0001" in blob
+    # 我的未提交改动没被吞：还是我改的版本，别人的 note 没混进来
+    text = dirty.read_text(encoding="utf-8")
+    assert '"my_uncommitted"' in text and '"note"' not in text, text
+    status = sh(["git", "-C", str(world.hive1), "status", "--porcelain",
+                 "--untracked-files=no"], env=world.git_env).stdout.rstrip("\n")
+    assert status == " M agents/fb.json", status
+
+
 def test_land_rejects_unqualified_cards(world, fake_cmd):
     world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
 

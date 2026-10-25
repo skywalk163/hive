@@ -46,7 +46,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.11"
+VERSION = "0.9.12"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -442,6 +442,34 @@ class Hive:
                 "先处理掉这些改动（或手动 git pull）再跑：" + dirty.replace("\n", " ")[:200])
         git(["reset", "--hard", "-q", "origin/main"], self.dir)
 
+    def _sync_for_commit(self) -> None:
+        """只提交指定路径前，把协调仓对齐到 origin/main（close / land 收尾用）。
+
+        和 sync_main 的分工：sync_main 服务「要读最新卡 / 要跑任务」的场景，落后且脏时
+        宁可报错也不 reset（T-0129 立下的防数据丢失底线，不动它）；而 close 这类操作
+        **只提交 tasks/<tid>.md + results/<tid>.json 两个指定路径**，本来就不该被
+        工作区里无关的未提交改动拦住——多 agent 共用一台机器、主仓有人写到一半，那是
+        日常（T-0133/T-0135 两晚被这块石头绊倒：合并推成功了，关卡却被拦下）。
+
+        做法：落后就试 `merge --ff-only`。git 保证 ff 只更新 HEAD→origin/main 之间
+        真正变化的文件——未提交改动只要不在其中就原样保留；万一真在其中，git 自己
+        就会拒绝（"would be overwritten by merge"），不会丢任何东西。分叉等拿不到的
+        情形才报错，并把脏文件列出来让人处理。
+        """
+        self.fetch()
+        head = rev_parse(self.dir, "HEAD")
+        remote = rev_parse(self.dir, "origin/main")
+        if not remote or not head or head == remote:
+            return
+        if git(["merge", "--ff-only", "origin/main"], self.dir,
+               check=False).returncode == 0:
+            return
+        dirty = git(["status", "--porcelain", "--untracked-files=no"],
+                    self.dir, check=False).stdout.strip()
+        raise HiveError(
+            "协调仓库落后于 origin/main 且无法快进合并（未提交改动与传入改动重叠，"
+            "或本地已分叉）。先处理掉这些改动再跑：" + dirty.replace("\n", " ")[:200])
+
     def _add(self, paths: list[str]) -> None:
         """只 stage 这些路径（已删除但仍被跟踪的也算，好把删除记进去）。
 
@@ -536,7 +564,9 @@ class Hive:
         log(f"{tid} 已分派给 {agent}")
 
     def cmd_close(self, tid: str, note: str = "") -> None:
-        self.sync_main()
+        # 不是 sync_main：close 只提交 tasks/<tid>.md + results/<tid>.json 两个指定
+        # 路径，用 ff 合并对齐即可，不该被主仓里无关的未提交改动拦住（T-0136）
+        self._sync_for_commit()
         card = self.card(tid)
         res = read_ref_file(self.dir, f"origin/res/{tid}", f"results/{tid}.json")
         if res is not None:
@@ -693,7 +723,17 @@ class Hive:
             shutil.rmtree(wt, ignore_errors=True)
             git(["branch", "-D", f"land/{tid}"], repo, check=False)
 
-        self.cmd_close(tid, note=note or f"land {tid}")
+        try:
+            self.cmd_close(tid, note=note or f"land {tid}")
+        except HiveError as e:
+            # 合并已经推上去了：必须说清"代码合入了、只是卡片没关成"，并给出收尾命令，
+            # 不能裸抛同步错误让人以为整个 land 失败（T-0133/T-0135 都被这个坑过）
+            plan["merged"] = True
+            plan["status"] = "merged-not-closed"
+            plan["problems"].append(
+                f"合并已推入 {target}，但关卡失败：{e}。"
+                f"处理好协调仓的未提交改动后跑 hive close {tid} 收尾")
+            return plan
         plan["closed"] = True
         plan["status"] = "landed"
         return plan
@@ -727,6 +767,7 @@ class Hive:
     @staticmethod
     def _print_land(r: dict, apply: bool) -> None:
         tag = {"landed": "已合入并关闭", "would-merge": "可以合入（dry-run，没动）",
+               "merged-not-closed": "已合入但未关闭（需补 hive close）",
                "conflict": "合并冲突", "failed": "合并失败",
                "blocked": "不满足合入条件"}.get(r["status"], r["status"])
         extra = f" [{r['strategy']}]" if r.get("strategy") else ""
