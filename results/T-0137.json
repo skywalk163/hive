@@ -1,0 +1,51 @@
+{
+  "task": "T-0137",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0137",
+  "base": "main",
+  "head": "abf1716192bbecdfebe2ec343e80111f43b3f512",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-25T12:41:37+00:00",
+  "finished_at": "2026-10-25T12:50:49+00:00",
+  "duration_s": 553.0,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_docs.py -q",
+      "code": 0,
+      "tail": [
+        ".......                                                                  [100%]",
+        "7 passed in 0.03s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 50%]",
+        "......................................................................   [100%]",
+        "142 passed in 250.01s (0:04:10)"
+      ]
+    }
+  ],
+  "summary": "# T-0137 文档跟进批：工具表补 block/unblock、口径统一、卡模板加阅读指引\n\n## 做了什么\n\nraccoon 的 T-0139 合入后，本卡原计划三件事里第 2 件（AGENT快速上手.md 已知缺陷\n记载过时）已被它重写 §8 解决，跳过；其余全部落地，共 5 文件 +23/-2：\n\n1. **docs/MCP接入.md §4 工具表**：`hive_abort` 行后补 `hive_block`（条件没到先\n   冻卡：保留租约与进度，到期不被回收）/ `hive_unblock`（解冻）两行——raccoon 只\n   把「工具数」文字改成 14，表格本身仍是 12 行（数字与表格不一致）。\n2. **README.md**：工具表补 `hive_block` / `hive_unblock` 行；§10 小浣熊配置段\n   「12 个工具」→14；§11「暴露成 12 个工具」→14（raccoon 漏改的两处）。\n3. **docs/任务卡模板.md**：开头加「第一次接 hive 的 agent 先读 AGENT快速上手.md」\n   指引（raccoon 的建议）。\n4. **hive.py**：DRAFT_TEMPLATE 骨架 frontmatter 后加「第一次接 hive？先读\n   docs/AGENT快速上手.md」——`draft new` 出来的新卡自带这句。\n5. **tests/test_docs.py**：加静态守卫 `test_draft_template_points_agent_to_quickstart`\n   （读 hive.py 的 DRAFT_TEMPLATE，断言含 AGENT快速上手）——防以后骨架改版把\n   指引又丢了。\n\n## 验证\n\n- `python3 -m pytest tests/test_docs.py -q` → 7 passed（含新守卫）。\n- 新守卫是真守卫：临时删掉 DRAFT_TEMPLATE 里的指引，测试 0.04s 立刻红，已恢复。\n- `draft new` 实测生成的骨架含指引（验后删除临时草稿）。\n- 改动在 Gitea 故障期已于本地 clone 预演并通过全量测试；patch 存档于\n  `~/.hive/pending/T-0137.patch`，本次直接 apply、零冲突。\n\n## 没做 / 风险\n\n- 无。未碰 docs/操作手册.md（T-0134 的卡）；hive.py 只动 DRAFT_TEMPLATE 字符串，\n  未动任何逻辑。",
+  "error": "",
+  "declared_paths": [
+    "docs/MCP接入.md",
+    "README.md",
+    "docs/AGENT快速上手.md",
+    "docs/任务卡模板.md",
+    "hive.py",
+    "tests/test_docs.py"
+  ],
+  "changed_files": [
+    "README.md",
+    "docs/MCP接入.md",
+    "docs/任务卡模板.md",
+    "hive.py",
+    "tests/test_docs.py"
+  ],
+  "out_of_paths": []
+}
