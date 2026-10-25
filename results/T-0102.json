@@ -1,0 +1,35 @@
+{
+  "task": "T-0102",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0102",
+  "base": "main",
+  "head": "cb1e51e54b95aad760850a21b1ab9f0e27db3911",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-25T14:17:11+00:00",
+  "finished_at": "2026-10-25T14:26:52+00:00",
+  "duration_s": 581.4,
+  "verify": [
+    {
+      "cmd": "test -f windows/bootstrap.ps1 && grep -q hive windows/bootstrap.ps1 && grep -q bootstrap.ps1 docs/CHROOT_GUI_AGENTS.md",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0102 summary — Windows 10 VM 接入 Hive（bootstrap + 文档，目标 1/2 完成）\n\n## 改了什么（3 文件，+73/-12）\n\n### windows/bootstrap.ps1（修一个会让 light 隔离破防的真 bug）\n- `$Repos` 默认值 `@(\"light\")` → `@()`：照旧默认值跑，会 clone `C:\\src\\light`\n  并把 `--repo light=C:\\src\\light` 写进 `agents/win10.json` push 回 hive 仓，\n  直接违反 T-0133 的 light 隔离。\n- register 改为固定登记 `hive=$Root`（hive 仓本身就是 `C:\\hive`，不再 clone\n  一份到 `C:\\src`）；要登记额外代码仓才显式 `-Repos <name>`。\n- SYNOPSIS 描述同步改准。\n- 静态检查（无 pwsh 环境）：括号 {} () [] 全部配对；verify 三项过。\n\n### windows/README.md\n- §0 授权描述\"hive 和 light\" → \"hive\"；仓库存在性陈述改为现状（hive 已在\n  Gitea，且已从 light 隔离）。\n- §1 bootstrap 行为第 3 条同步（不再 clone C:\\src\\light）。\n\n### docs/CHROOT_GUI_AGENTS.md\n- 新增「Windows 真机接入（192.168.0.86）」章节：best-effort 验收机定位、\n  bootstrap.ps1 四步接入（winget → clone → dry-run → -Apply -Register）、\n  Gitea token 只授权 hive、两种用法二选一（MCP 推荐 / manual worker）、\n  验证接入成功的方法、\"第一次接先读 docs/AGENT快速上手.md\"。\n- 顺手清掉文内三处过时 light 内容（在本卡 paths 内、同一文件）：两个 agent\n  登记实录 `light=` → `hive=`、派卡示例 `--repo light` → `--repo hive`、\n  清理 worktree 示例 `cd ~/src/light` → `cd ~/dswork/hive`。\n\n## 验证\n- verify 三项：bootstrap.ps1 存在 ✓ / 含 hive ✓ / CHROOT 文档含 bootstrap.ps1 ✓\n- tests/test_docs.py：7 passed\n- 全量：见 submit 记录（预期 142 passed，无测试代码改动）\n\n## 目标 3 状态：待 Windows 真机执行（非本卡能完成）\n\n\"在 Windows 上跑通一张卡（result 落 hive）\"需要真机操作，已给用户书面步骤：\n1. Windows 装 Git + Python 3.10+（winget）\n2. `git clone http://192.168.1.5:3000/skywalk/hive.git C:\\hive`\n3. dry-run → `-Apply -Register -Mode manual -Agent win10`（不装计划任务）\n4. 把打印的 MCP 配置粘进 Windows 上 agent 的客户端\n5. Windows agent 先读 docs/AGENT快速上手.md，再 whoami → next → claim → 干活 → submit\n\n真机第一张卡提交成功即视为目标 3 达成（由 Windows agent 自己的 submit 证明）。",
+  "error": "",
+  "declared_paths": [
+    "windows/bootstrap.ps1",
+    "docs/CHROOT_GUI_AGENTS.md"
+  ],
+  "changed_files": [
+    "docs/CHROOT_GUI_AGENTS.md",
+    "windows/README.md",
+    "windows/bootstrap.ps1"
+  ],
+  "out_of_paths": [
+    "windows/README.md"
+  ]
+}
