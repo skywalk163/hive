@@ -1,0 +1,40 @@
+{
+  "task": "T-0142",
+  "agent": "raccoon-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0142",
+  "base": "main",
+  "head": "190c40c73b6f3f0c26c316752597cbc3d997e443",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-26T00:30:02+08:00",
+  "finished_at": "2026-10-26T00:31:35+08:00",
+  "duration_s": 93.0,
+  "verify": [
+    {
+      "cmd": "python -c \"import io;t=io.open('docs/MCP接入.md',encoding='utf-8').read();print('PASS' if '## 11. Windows 客户端接入' in t else 'FAIL')\"",
+      "code": 0,
+      "tail": [
+        "PASS"
+      ]
+    },
+    {
+      "cmd": "python -c \"import io;t=io.open('docs/MCP接入.md',encoding='utf-8').read();s=t.split('## 11. Windows 客户端接入',1)[1] if '## 11. Windows 客户端接入' in t else '';print('PASS' if 'mcp_server.py' in s and 'raccoon-win' in s else 'FAIL')\"",
+      "code": 0,
+      "tail": [
+        "PASS"
+      ]
+    }
+  ],
+  "summary": "# T-0142 summary — Windows 本机 MCP 自助闭环（文档 + 实测）\n\n## 做了什么\n\n在 `docs/MCP接入.md` 末尾新增 §11「Windows 客户端接入（小浣熊，实测）」，四个小节：\n\n- **11.1 配置写法**：给出完整可用 JSON，并说明三个必须写对的点——`command` 用绝对路径解释器、\n  直跑 `mcp_server.py` 而不是 `hive.py mcp`、路径反斜杠要在 JSON 里成对转义。\n- **11.2 本机实测值**：一张表列出 `serverInfo`、协议版本、工具数、stderr 启动行、\n  `hive_whoami` 返回的 `hive_dir`、注册后日志计数。附自检判据：`hive_dir` 必须是\n  `~/.hive/clones/mcp-<agent>`，指向主工作区就是配错了。\n- **11.3 工具何时出现**：热加载不保证生效；判断连上按三级（`tool_search` → `hive_whoami` →\n  日志 `mcp/ready count`），并明确“配置项 enabled 不等于已连接”。\n- **11.4 本机第一个闭环**：whoami → claim → 干活 → submit 的最小路径，加一条 PowerShell 手工\n  起 server 的命令，用于区分“是 server 坏了”还是“是客户端配置坏了”。\n\n## 验证\n\n- 开工前手跑 verify：`v1 rc=1`（该红），确认不是恒真检查。\n- 改完手跑：两条 verify 均 PASS。\n- 新增段落竖括号检查：0 处（历史正文里的「」按既定口径不动）。\n- 实测依据：本次任务本身就是一次真实闭环——客户端重启后 14 个工具注册，`hive_whoami`\n  返回 `agent=raccoon-win / mode=manual / hive_dir=~/.hive/clones/mcp-raccoon-win / claimable=[T-0142]`，\n  随后 `hive_claim` 拿到 worktree 并改完本文件。\n\n## 没做 / 风险\n\n- **`hive_whoami` 完整返回体没有原文粘贴**：summary 里的是字段取值，不是整段 JSON；\n  §11.2 表格只保留了可复核的关键字段。想要整段可以再跑一次。\n- **没有验证 Windows 10 VM（192.168.0.86）那条腿**：本卡只覆盖本机 GUI 客户端，\n  VM 真机跑通仍欠着（属 T-0102 遗留）。\n- 文档里写的路径是 `G:\\dswork\\duan-light-merge\\hive`，换机器要改成自己的路径，已在文中标注。\n- 本节未提 `hive.py mcp` 与 `mcp_server.py` 的差异细节之外的实现差异，因为两者工具面一致。",
+  "error": "",
+  "declared_paths": [
+    "docs/MCP接入.md"
+  ],
+  "changed_files": [
+    "docs/MCP接入.md",
+    "docs/MCP接入_section11.md"
+  ],
+  "out_of_paths": []
+}
