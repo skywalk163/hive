@@ -1,0 +1,42 @@
+{
+  "task": "T-0138",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0138",
+  "base": "main",
+  "head": "68b07fd1b8f2cbcd68c94c9bb1012ee7937d8e33",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-25T00:21:40+00:00",
+  "finished_at": "2026-10-25T00:26:42+00:00",
+  "duration_s": 302.2,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_docs.py -q",
+      "code": 0,
+      "tail": [
+        "......                                                                   [100%]",
+        "6 passed in 0.03s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 51%]",
+        ".....................................................................    [100%]",
+        "141 passed in 235.69s (0:03:55)"
+      ]
+    }
+  ],
+  "summary": "# T-0138 摘要\n\n## 做了什么\n往 `docs/lessons.md` 追加六条教训（全部来自今晚 T-0133~T-0136 的真实踩坑，\n格式：现象 → 原因 → 以后怎么做，归入现有章节）：\n\n- 三、并发与提交 +2：动别人脏工作区先抓指纹再 ff 同步（不是 stash 别人的改动）；\n  测试模拟\"别人推过提交\"前 scratch clone 先 `reset --hard origin/main`。\n- 四、改 hive 自己的代码时 +4：列表字面量插 dict 要配不变式测试（T-0123 口头纪律\n  → T-0135 二踩，现已机器检查）；测试里的\"期望值\"也可能是错的（EXPECTED_TOOLS\n  曾把 bug 固化成预期）；`git status --porcelain` 前导空格是语义位（strip 会吃掉，\n  害我误判改动丢失）；改 JSON 配置文件别追文本（追加 `# 注释` 变非法 JSON，\n  被测代码静默跳过，故障点跑偏）。\n- 五、hive 的用法 +1：「合并推成但关卡被拦」的半途状态——同一个绕步出现两次就该\n  开卡修机制，别第三次手工绕（已由 T-0136 / 0.9.12 修复）。\n\n## 验证\n纯文档追加：`tests/test_docs.py` 与全量 pytest 全绿（141 passed，无回归）。\n\n## 遗留\n无。`docs/操作手册.md` 等 raccoon 在改的文件本卡未碰。",
+  "error": "",
+  "declared_paths": [
+    "docs/lessons.md"
+  ],
+  "changed_files": [
+    "docs/lessons.md"
+  ],
+  "out_of_paths": []
+}
