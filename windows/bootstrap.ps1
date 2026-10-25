@@ -4,9 +4,9 @@
     Join a Windows 10 machine to the Hive multi-agent task bus.
 
 .DESCRIPTION
-    Checks python/git, clones the hive repo and the code repos, optionally
-    registers this machine as an agent, and optionally installs a logon
-    scheduled task that runs the worker.
+    Checks python/git, clones the hive repo (plus any extra code repos given
+    via -Repos), optionally registers this machine as an agent, and optionally
+    installs a logon scheduled task that runs the worker.
 
     Without -Apply it only prints what it would do (dry run).
 
@@ -27,7 +27,9 @@ param(
     [string]$Mode = "verify",
     [string]$Command = "",
     [string]$Launch = "",
-    [string[]]$Repos = @("light"),
+    # 额外代码仓（除 hive 本身外才需要）。hive 已从其它仓隔离，默认空；
+    # 要登记额外代码仓时显式传 -Repos <name>。
+    [string[]]$Repos = @(),
     [string[]]$Abilities = @(),
     [string]$Python = "python",
     [string]$Worktrees = "C:\hive-wt",
@@ -101,6 +103,10 @@ if ($Register) {
     if ($Command -ne "") { $hiveArgs += @("--command", $Command) }
     if ($Abilities.Count -gt 0) { $hiveArgs += @("--abilities") + $Abilities }
     if ($Launch -ne "") { $hiveArgs += @("--launch", $Launch) }
+    # hive 仓本身就是 $Root，直接登记它；不再 clone 一份到 $Src。
+    # （light 等仓已从 hive 隔离，见 tasks/T-0133；要登记额外代码仓才显式
+    #  传 -Repos，那些仓才会 clone 到 $Src\<name> 并登记。）
+    $hiveArgs += @("--repo", ("hive=" + $Root))
     foreach ($repo in $Repos) {
         $hiveArgs += @("--repo", ($repo + "=" + (Join-Path $Src $repo)))
     }

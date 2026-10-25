@@ -15,8 +15,8 @@ winget install --id Git.Git -e
 winget install --id Python.Python.3.12 -e
 ```
 
-- Gitea 上已经有一个 `skywalk/hive` 仓库；如果还没有，把开发机上的 `~/dswork/hive`
-  推上去即可（它自带 `hive.py`、`windows/`、`tests/`）。
+- Gitea 上已经有 `skywalk/hive` 仓库（自带 `hive.py`、`windows/`、`tests/`）。
+  注意：hive 已从 light 等仓隔离（见 tasks/T-0133），这台机器只接触 hive 仓。
 
 ## 1. 一次性接入
 
@@ -32,14 +32,14 @@ powershell -ExecutionPolicy Bypass -File C:\hive\windows\bootstrap.ps1 `
   -Apply -Register -InstallTask -Mode verify -Agent win10
 ```
 
-首次 push 会弹 Gitea 登录：用**单独账号 + access token**，只授权 `hive` 和 `light`，
+首次 push 会弹 Gitea 登录：用**单独账号 + access token**，只授权 `hive` 仓，
 不要用管理员 token。
 
 `bootstrap.ps1` 会做这些事：
 
 1. 检查 git / python；
 2. `core.autocrlf=false`、`core.longpaths=true`；
-3. clone（或 pull）`C:\hive` 和 `C:\src\light`；
+3. clone（或 pull）`C:\hive`（hive 仓；额外代码仓要用 `-Repos` 显式指定）；
 4. `hive.py agent add --mode verify`，把本机登记成 `win10`
    （`-Abilities` 会传给 `--abilities`，否则 dispatch 按能力匹配时选不中这台机器）；
 5. **打印 MCP 客户端配置**，并写成 `C:\hive\mcp-config-win10.json`（见 §2.5）；

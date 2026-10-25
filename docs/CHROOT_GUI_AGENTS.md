@@ -19,8 +19,8 @@ GUI agent 只负责在 worktree 里改文件、写 summary。
 ## 已经登记好的两个 agent
 
 ```text
-raccoon    ['gui', 'chroot', 'linux']   manual   light=/home/skywalk/src/light
-workbuddy  ['gui', 'chroot', 'linux']   manual   light=/home/skywalk/src/light
+raccoon    ['gui', 'chroot', 'linux']   manual   hive=/home/skywalk/dswork/hive
+workbuddy  ['gui', 'chroot', 'linux']   manual   hive=/home/skywalk/dswork/hive
 ```
 
 worktree 根目录：
@@ -53,7 +53,7 @@ cd ~/dswork/hive
 python3 hive.py --dir . task new \
   --id T-0100 \
   --title "补一段文档" \
-  --repo light \
+  --repo hive \
   --needs gui \
   --paths docs/ \
   --verify "grep -q '关键词' docs/xxx.md" \
@@ -108,10 +108,65 @@ summary 路径照抄绝对路径，避免它写错地方。
   4. 通过后合并、`close`。
 - 不要让 GUI agent 自己 `git push`，冲突和凭据都不好处理；统一由 worker 提交。
 
+## Windows 真机接入（192.168.0.86）
+
+Windows 10 VM 的定位是 **best-effort 验收机**：能访问 Gitea 就拉任务、跑 `verify`、
+写结果；它经常死机，所以不放在关键路径上，租约短、任务小、死了靠 `gc/retry` 回收。
+接入走 `windows/bootstrap.ps1`（自带 dry-run，重复跑不坏）：
+
+```powershell
+# 0. 前提：Git for Windows + Python 3.10+（安装时勾选 Add to PATH）
+winget install --id Git.Git -e
+winget install --id Python.Python.3.12 -e
+
+# 1. 先 clone 工具仓（里面就有 bootstrap.ps1）
+git clone http://192.168.1.5:3000/skywalk/hive.git C:\hive
+
+# 2. dry-run：只看它打算做什么，不动系统
+powershell -ExecutionPolicy Bypass -File C:\hive\windows\bootstrap.ps1
+
+# 3. 真正执行：登记 win10（manual 模式），不装计划任务
+powershell -ExecutionPolicy Bypass -File C:\hive\windows\bootstrap.ps1 `
+  -Apply -Register -Mode manual -Agent win10
+```
+
+首次 push 会弹 Gitea 登录：用**单独账号 + access token**，只授权 `hive` 仓
+（light 等仓已从 hive 隔离，这台机器不接触）。
+
+bootstrap 依次做：检查 git/python → `core.autocrlf=false`、`core.longpaths=true` →
+clone 或 pull `C:\hive` → `agent add` 登记本机（`repos` 里只有 `hive=C:\hive`，
+dispatch 才会把 hive 的卡分过来）→ **打印 MCP 客户端配置**并写入
+`C:\hive\mcp-config-win10.json`。
+
+### Windows 上的两种用法（二选一，不要同时用）
+
+| 路线 | 适合谁 | 闭环方式 |
+|---|---|---|
+| **MCP（推荐）** | Windows 上跑着支持 MCP 的 agent（Claude Desktop / Cursor / VS Code / Codex CLI） | 把 bootstrap 打印的那段 JSON 粘进该 agent 的 MCP 配置（key 名各家略异：`mcpServers` / `servers` / `mcp_servers`），重启客户端。之后 agent 依次调用 `hive_whoami` → `hive_next` → `hive_claim` → 在返回的 worktree 里干活 → `hive_submit` → `hive_result` |
+| **manual worker** | 没有 agent CLI，人在 Windows 上手工改 | 与 chroot GUI agent 完全一致：`hive take T-xxxx` → 在返回的 worktree 改文件 → 写 `.hive/summary.md` → `hive submit T-xxxx` |
+
+只有 worker 路线要常开时才加 `-InstallTask`（登录时启动 `run-worker.ps1`，
+日志 `C:\hive\logs\worker-win10.log`）；MCP 路线不需要计划任务。
+
+第一次接 hive 的 agent，先读 `docs/AGENT快速上手.md`（agent 视角的接入指南）。
+
+### 验证接入成功
+
+```powershell
+# Windows 上：本机已登记、能看到协调仓状态
+python C:\hive\hive.py --dir C:\hive status
+python C:\hive\hive.py --dir C:\hive agent list
+
+# MCP 路线：在 agent 对话里调 hive_whoami，应看到 "agent": "win10"
+```
+
+预期：`win10` 出现在 `agents/win10.json`（已 push 到 Gitea），`hive status` 里
+能看到这台机器。之后就能在总控机器上给它派卡（`needs` 写 `windows`）。
+
 ## 清理 worktree
 
 ```sh
-cd ~/src/light
+cd ~/dswork/hive
 git worktree list | grep hive
 git worktree remove --force ~/.hive/wt/raccoon/T-0100
 git worktree remove --force ~/.hive/wt/workbuddy/T-0100
