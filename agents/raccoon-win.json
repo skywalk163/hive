@@ -1,0 +1,23 @@
+{
+  "name": "raccoon-win",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify"
+  ],
+  "capabilities": [
+    "gui",
+    "windows",
+    "linux"
+  ],
+  "repos": {
+    "hive": "G:/dswork/duan-light-merge/hive"
+  },
+  "launch": "",
+  "worktrees": "C:/Users/skywalk/.hive/wt/raccoon-win",
+  "max_concurrency": 1,
+  "created": "2026-10-25T23:05:30+08:00"
+}
