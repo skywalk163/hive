@@ -146,7 +146,7 @@ python3 ~/hive/hive.py --dir ~/hive retry  T-0101      # 失败重跑（清结�
 python3 ~/hive/hive.py --dir ~/hive retry  T-0101 --fresh  # 从 main 重来
 python3 ~/hive/hive.py --dir ~/hive gc --minutes 180   # 回收跑飞的租约
 python3 ~/hive/hive.py --dir ~/hive prune              # 清代码仓里已合并的 task/verify 分支（dry-run）
-python3 ~/hive/hive.py --dir ~/hive close T-0101 --note "已合并到 integration"
+python3 ~/hive/hive.py --dir ~/hive close T-0101 --note "已 land 合入"
 
 # 不跑 worker 的人工链路（GUI agent 场景，与该 agent 的 worker 二选一）
 python3 ~/hive/hive.py --dir ~/hive take   T-0101 --agent workbuddy
