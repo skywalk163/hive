@@ -1,6 +1,11 @@
 # hive —— 多机 AI Agent 协同的任务总线
 
-一个约 1550 行的 Python 脚本 + 一个 git 仓库，把「总控 AI 拆任务」和「多台机器上的 agent 干活」连起来。
+> **状态：活跃开发中**，按任务卡迭代，变更记在 `CHANGELOG.md`。
+> hive 是自包含的工具，**没有**并入任何其它项目。「光明（LightLang）」是一门独立的
+> 中文编程语言，与本项目无关——只是早期拿它的代码仓当过登记示例。
+
+一个 Python 脚本（`hive.py`）+ 一个 git 仓库，把「总控 AI 拆任务」和「多台机器上的 agent 干活」连起来。
+MCP server 与 LLM 总控已拆成独立模块（`mcp_server.py` / `llm_controller.py`）。
 
 - **总控**只做三件事：写任务卡、分派、验收。
 - **worker** 自己拉取、原子领取、在独立 worktree 里干活、把结果推回。
@@ -53,9 +58,7 @@ python3 ~/hive/hive.py --dir ~/hive agent add \
   --name fb88-dsh \
   --command "dsh --profile headless -" \
   --capabilities freebsd python compiler pytest \
-  --repo light=/home/skywalk/src/light \
-  --repo lightmem=/home/skywalk/src/lightmem \
-  --repo lightharness=/home/skywalk/src/lightharness \
+  --repo hive=/home/skywalk/dswork/hive \
   --worktrees /home/skywalk/.hive/wt
 ```
 
@@ -64,7 +67,7 @@ Windows VM（没有 agent CLI 也能当验收机）：
 ```powershell
 python C:\hive\hive.py --dir C:\hive agent add --name win10 --mode verify `
   --capabilities windows exe powershell `
-  --repo light=C:\src\light --worktrees C:\hive-wt
+  --repo hive=C:\hive --worktrees C:\hive-wt
 ```
 
 三种模式：
@@ -84,7 +87,7 @@ python C:\hive\hive.py --dir C:\hive agent add --name win10 --mode verify `
 ```sh
 python3 ~/hive/hive.py --dir ~/hive task new \
   --title "修复 LLVM 后端 Windows 路径分隔符" \
-  --repo light \
+  --repo hive \
   --paths src/codegen/ tests/ \
   --verify "python -m pytest -q tests/test_llvm_paths.py" \
   --depends T-0100 \
@@ -169,7 +172,7 @@ python3 ~/hive/hive.py --dir ~/hive submit T-0101
 适合**没有 agent CLI** 的机器：只跑验收，不改代码。任务卡里必须至少有一条 `verify`。
 
 ```sh
-agent add --name win10 --mode verify --repo light=C:\src\light ...
+agent add --name win10 --mode verify --repo hive=C:\hive ...
 ```
 
 要验证某个修复分支，把任务卡的 `base` 写成 `task/T-0101` 即可；worker 检出那条分支跑命令，
@@ -185,7 +188,7 @@ Windows 专属 bug 的三卡闭环：诊断卡（win10/verify）→ 修复卡（
 # Windows 里的 dumate / Trae / CodeArts：直接打开工作区
 python C:\hive\hive.py --dir C:\hive agent add --name win10-gui --mode manual `
   --launch "trae {worktree}" `
-  --repo light=C:\src\light --worktrees C:\hive-wt
+  --repo hive=C:\hive --worktrees C:\hive-wt
 ```
 
 `launch` 支持 `{worktree}`、`{task}`、`{prompt}`；`trae` 不在 PATH 就写完整路径，或用 `explorer {worktree}`。

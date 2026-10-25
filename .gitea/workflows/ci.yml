@@ -25,6 +25,13 @@ jobs:
     steps:
       - name: Checkout
         # 固定走本地 actions/checkout 镜像，避免 Gitea 对裸 uses 的解析回落到 github.com。
+        #
+        # ⚠️ 换到别的 Gitea 部署时，把下面的 host 换成你自己的地址（例如
+        # http://192.168.0.10:3000）。这条写死是刻意的：本机 github.com 不可达，
+        # 改成官方 `actions/checkout@v4` 会让 Gitea 回落去拉 github.com 而挂掉；
+        # 用 ${{ vars.* }} 又未必被 runner 在 `uses:` 上求值，风险大于收益。
+        # 另外本文件在 .gitea/ 下，GitHub 与 GitCode 都不会触发它（它们只认自己的
+        # 工作流目录），所以这个地址只影响自建 Gitea 上 fork 的人。
         uses: http://192.168.1.5:3000/actions/checkout@v4
 
       - name: 安装测试依赖
