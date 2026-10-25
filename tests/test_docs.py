@@ -85,3 +85,16 @@ def test_external_referenced_sections_still_mean_the_same():
     assert "hive land" in by_num.get("5.1", ""), (
         f"§5.1 应该是 hive land，实际 {by_num.get('5.1')!r}")
     assert "gc" in by_num.get("8", ""), f"§8 应该是已知坑 gc，实际 {by_num.get('8')!r}"
+
+
+def test_draft_template_points_agent_to_quickstart():
+    """`hive draft new` 的骨架必须带「先读 AGENT快速上手.md」指引（T-0137）。
+
+    新 agent 第一次接触 hive 往往就从一张 draft 卡开始；骨架里没有这句，
+    阅读指引全靠口口相传，丢过一次（raccoon 的建议，别再丢第二次）。
+    """
+    hive_py = (ROOT / "hive.py").read_text(encoding="utf-8")
+    m = re.search(r'DRAFT_TEMPLATE\s*=\s*"""(.*?)"""', hive_py, re.DOTALL)
+    assert m, "hive.py 里找不到 DRAFT_TEMPLATE"
+    assert "AGENT快速上手" in m.group(1), (
+        "DRAFT_TEMPLATE 应提示第一次接 hive 的 agent 先读 docs/AGENT快速上手.md")

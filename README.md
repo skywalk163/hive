@@ -202,7 +202,7 @@ chroot 里的小浣熊 / WorkBuddy 的完整接法（共享 `/home`、manual wor
 - 小浣熊这种深链登录、沙箱受限的 Electron 客户端；
 - 暂时不想给 agent 配 API key 的机器。
 
-**小浣熊接 MCP 的现成配置**（已在 `~/.box-agent/config/mcp.json` 验证可用，12 个工具）：
+**小浣熊接 MCP 的现成配置**（已在 `~/.box-agent/config/mcp.json` 验证可用，14 个工具）：
 
 ```json
 {"command": "python3",
@@ -250,7 +250,7 @@ PORT=8787 INTERVAL=20 ./scripts/serve-dashboard.sh
 
 ## 11. MCP：让 agent 自己来领活
 
-`hive mcp` 起一个 MCP stdio server，把任务总线暴露成 12 个工具。接上之后 agent
+`hive mcp` 起一个 MCP stdio server，把任务总线暴露成 14 个工具。接上之后 agent
 不用等人喂卡，自助闭环：**查任务 → 领卡 → 干活 → 提交 → 干不下去还回去**。
 
 ```sh
@@ -282,6 +282,7 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy
 | `hive_claim` | 领取：指派给我 + 抢 claim 租约 + 备好 worktree 和提示词 |
 | `hive_submit` | 提交：commit + push `task/<id>` + 跑 verify + 写结果 |
 | `hive_abort` / `hive_extend_lease` / `hive_progress` | 放弃还卡 / 续租 / 中途记进度 |
+| `hive_block` / `hive_unblock` | 条件没到先冻卡 / 解冻 |
 | `hive_result` / `hive_stats` / `hive_doctor` | 查结果 / 吞吐统计 / 体检 |
 
 零第三方依赖（标准库实现的 stdio JSON-RPC 2.0）；一个 server 进程 = 一个 agent，

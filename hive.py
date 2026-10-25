@@ -2595,6 +2595,8 @@ timeout_minutes: 120
 created: {now}
 ---
 
+> 第一次接 hive？先读 `docs/AGENT快速上手.md`（agent 视角的接入指南）。
+
 ## 背景
 
 （为什么需要做这件事？现在卡在哪？引用具体现象，别写「为了更好」这种空话。）

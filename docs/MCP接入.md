@@ -91,6 +91,8 @@ python3 hive.py mcp --agent raccoon --dir /path/to/hive    # ← 正确
 | `hive_claim` | 申请并领取：指派给我 + 推 claim 租约分支抢锁 + 备好 worktree 和提示词 | 返回工作目录 |
 | `hive_submit` | 提交：commit + push `task/<id>` + 跑 verify + 写结果到 `res/<id>` | 先用 summary.md 或 `note` 说明干了什么 |
 | `hive_abort` | 终止/放弃：释放我的租约，默认把卡退回 ready 让别人能领 | 已出结果的卡不许终止 |
+| `hive_block` | 条件没到先冻卡：保留租约与进度，到期不被回收，解冻后继续 | 卡在等外部条件（真机 / 密钥 / 别人）时用 |
+| `hive_unblock` | 解冻：条件到了继续干 | |
 | `hive_extend_lease` | 给租约续期（在原到期时间上累加） | GUI agent 干活慢时用 |
 | `hive_progress` | 中途记一笔进度，写进 `<worktree>/.hive/progress.md` | 不进 git、不影响验收 |
 | `hive_result` | 查结果：状态、耗时、每条 verify 的退出码与输出尾部、agent 总结 | |
