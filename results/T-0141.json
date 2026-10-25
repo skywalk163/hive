@@ -1,0 +1,37 @@
+{
+  "task": "T-0141",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0141",
+  "base": "main",
+  "head": "5e000a3c4ab8ad1c2bfe8be2a2ab72a4e987004f",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-25T13:04:31+00:00",
+  "finished_at": "2026-10-25T13:06:02+00:00",
+  "duration_s": 91.8,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_docs.py -q",
+      "code": 0,
+      "tail": [
+        ".......                                                                  [100%]",
+        "7 passed in 0.04s"
+      ]
+    }
+  ],
+  "summary": "# T-0141 文档去掉 integration 批量模型\n\n## 做了什么\n\n`integration` 是 light 时代的批量合入层，代码里零命中（`grep integration hive.py`\n无结果），文档却还在教旧模型。3 文件 +9/-8：\n\n1. **操作手册 §5 分支图**：`task/T-010x ─▶ integration ──批量──▶ main` 改为\n   `task/T-010x ─▶ land ──▶ main（ff 优先；冲突置 conflict 交回总控）`；\n2. **§5 冲突规则**：「冲突回给 owner 作为新卡，不要在 integration 上手工解半天」→\n   land 检出冲突置 `conflict` 卡、总控解决后重跑 `land --apply`；\n3. **§4 验收**：「绿了再合 integration」→「绿了就 `hive land T-0101 --apply`（§5.1）」；\n4. **close 示例 note** 三处（§3、§4、README）：「已并入 integration」→「已 land 合入」；\n5. **§3 prune 规则**：名单式保护名单（main/integration/release/*）改为事实描述——\n   prune 只枚举 `task/*`、`verify/*` 两个前缀，结构性保护；\n6. **迁移指南**：「合并仍手工：task/T-xxxx → integration → main」→「合入已自动化：\n   `hive land T-xxxx --apply`」。\n\n## 验证\n\n- `grep -rn integration` 三个目标文件零命中。\n- `python3 -m pytest tests/test_docs.py -q` → 7 passed（标题/编号未动）。\n- `git show --stat HEAD` 只覆盖 paths 三文件。CHANGELOG 历史记载未动（档案）。\n\n## 没做 / 风险\n\n- 无。§5 其余 bullets（一卡一 worktree、共享文件总控统一改）经核对仍符合现行\n  模型，保留。",
+  "error": "",
+  "declared_paths": [
+    "docs/操作手册.md",
+    "README.md",
+    "docs/迁移指南.md"
+  ],
+  "changed_files": [
+    "README.md",
+    "docs/操作手册.md",
+    "docs/迁移指南.md"
+  ],
+  "out_of_paths": []
+}
