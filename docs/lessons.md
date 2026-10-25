@@ -47,6 +47,14 @@ digest + `hive doctor` 产出增补草稿（草稿走 `hive draft` 那套流程�
   merge 会以「请告诉我你是谁」失败，而且**不留任何冲突标记**，
   `--diff-filter=U` 查出来是空的，看起来像"合并成功"，极难查。
 - **改动清单要在提交前抓**。提交后 `git status` 是空的，再算就恒为 `[]`。
+- **动别人未提交的工作区前，先抓指纹再同步、同步后复核**。协调仓落后且脏时
+  （多 agent 共用一台机器的日常），正解是确认传入改动与脏文件无重叠后
+  `git merge --ff-only origin/main`——git 保证 ff 只碰两个提交间真正变化的文件，
+  脏文件不在其中就原样保留，真在其中 git 自己会拒绝。**不是** stash / checkout
+  别人的改动。实操：`md5sum` 四个脏文件 → ff → 再 md5sum 核对（T-0133/T-0135）。
+- **测试里模拟「别人推过提交」时，scratch clone 要先 `reset --hard origin/main`**。
+  只 fetch 不 reset，本地 main 还停在旧基线上，commit 完推送必然非快进被拒
+  （T-0136 测试里 `hive2` 是初始化时 clone 的，之后 hive1 推了不少提交）。
 
 ## 四、改 hive 自己的代码时
 
@@ -74,6 +82,22 @@ digest + `hive doctor` 产出增补草稿（草稿走 `hive draft` 那套流程�
   `int(card.get("max_retries") or DEFAULT_MAX_RETRIES)` 会把显式写的 `max_retries: 0`
   误判成"没设置"而退回默认 3，于是「一次都不许自动重派」永远不生效。
   → 判断有没有设置用 `is None`（或 `== ""`），别用 `or`。
+- **列表字面量插 dict：「打印 len 确认」的口头纪律不够，要配不变式测试**。
+  T-0123 踩过「往 TOOLS 插 dict 漏 `{`」，当时只立了"改完打印 len(TOOLS) + 工具名"
+  的口头纪律；T-0135 在 block/unblock/abort 上第二次踩（三个 dict 被并成一个、
+  同名 key 互相覆盖，两个工具从 tools/list 消失）。现已加
+  `test_every_handler_is_advertised_in_tools_list`：handler 与广告位一一对应、
+  不许重名、条目结构合法——**能被机器检查的纪律就别靠嘴**。
+- **测试里的「期望值」本身也可能是错的**。`tests/test_mcp.py` 的 `EXPECTED_TOOLS`
+  （12 个 worker 工具）把上面的 bug 表面固化成了"预期"，`assert names == EXPECTED_TOOLS`
+  让测试站在了 bug 那一边。→ 修这类 bug 时必须连测试里的期望值一起改，并想清楚
+  「正确的期望应该是什么」。
+- **`git status --porcelain` 的前导空格是语义位**（未暂存标志）。`.strip()` 会把它
+  吃掉，害我误判「改动被暂存/丢失」白查半天（T-0136 测试）。→ 只能 `rstrip("\n")`。
+- **往 JSON 配置文件追加文本前先想合法性**。测试里往 `agents/fb.json` 追加
+  `# 注释`，直接把它变成非法 JSON；被测代码读 agent 配置时静默跳过，故障点
+  （land 报「没有 agent 登记代码仓」）完全跑偏（T-0136 测试）。
+  → 改 JSON 就 load/dump，别当纯文本追加。
 
 ## 五、hive 的用法
 
@@ -85,3 +109,10 @@ digest + `hive doctor` 产出增补草稿（草稿走 `hive draft` 那套流程�
   commit 撤掉后，hive 里对应卡片仍显示 `done/closed`，会骗人以为改动还在。
   → 撤销代码后同步加备注：`hive close <tid> --note "作废（日期）：…"`
   （`cmd_close` 可重复调用，只追加备注，对已关闭的卡也不会报错）。
+- **「合并推成但关卡被拦」的半途状态：同一个绕步出现两次，就该停下来开卡修机制**。
+  T-0133/T-0135 连踩两次——`land --apply` 的合并在临时 worktree 里成功推入
+  origin/main，收尾 `cmd_close` 的 `sync_main` 却因协调仓「落后 + 有未提交改动」抛错，
+  代码合了、卡片没关，操作者只看到一句「不敢自动 reset」，完全看不出合并已成功。
+  两次都靠人工 ff + close 补救。→ 0.9.12（T-0136）已修：`_sync_for_commit`
+  （落后试 ff，git 保证不碰脏文件）+ land 关卡失败报 `merged-not-closed`
+  （明说"已合入、没关成"并给出收尾命令）。**别扭的绕步骤别手工绕第三次。**
