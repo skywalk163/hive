@@ -1,0 +1,49 @@
+{
+  "task": "T-0136",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0136",
+  "base": "main",
+  "head": "71ea11f074dc113f6412582320bb1dcff5c0c0eb",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-24T23:53:17+00:00",
+  "finished_at": "2026-10-25T00:18:14+00:00",
+  "duration_s": 1497.3,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_core.py -q",
+      "code": 0,
+      "tail": [
+        "...................................................................      [100%]",
+        "67 passed in 113.76s (0:01:53)"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 51%]",
+        ".....................................................................    [100%]",
+        "141 passed in 219.19s (0:03:39)"
+      ]
+    }
+  ],
+  "summary": "# T-0136 摘要\n\n## 做了什么\n- `hive.py` 新增 `Hive._sync_for_commit()`：落后 origin/main 时试\n  `merge --ff-only`——git 保证 ff 只更新两个提交间真正变化的文件，未提交改动\n  不在其中就原样保留，真在其中 git 自己会拒绝（不丢任何东西）；分叉等拿不到的\n  才报错并列出脏文件。\n- `cmd_close`（land 收尾、独立 `hive close`、MCP `hive_close` 三处共用）把\n  `sync_main()` 换成 `_sync_for_commit()`。`sync_main` 本身没动（T-0129 的防数据\n  丢失底线保留）。\n- `land_one`：关卡失败时不再裸抛同步错误，返回新状态 `merged-not-closed`\n  （合并已推入、卡片没关成 + 给出 `hive close <tid>` 收尾命令）；\n  `_print_land` 加对应文案。\n- VERSION 0.9.11 → 0.9.12，CHANGELOG 记 0.9.12。\n- `tests/test_core.py` 新增 2 例（协调仓落后+脏时 land 一次成功且改动保留；\n  改动重叠时报 merged-not-closed 不崩不丢）。**已验证是真守卫**：把 cmd_close\n  改回 sync_main → 第 1 例立刻红。\n\n## 方案调整（与初稿不同，理由记在卡里）\n初稿想让关卡也放进 land 的临时 worktree 做——否决：那是**代码仓**的 worktree，\n非自举卡（repo≠协调仓，如 light）会把 `tasks/<tid>.md` 提交进错误的仓。改为\n关卡仍在协调仓做、只换对齐方式，对全部卡型成立，还顺带修好独立 close 的同一卡点。\n\n## 踩的坑（都是测试自己的错，不是代码的）\n- 往 `agents/fb.json` 追加 `# 注释` 会把它变成非法 JSON → land 读 agent 配置直接\n  跳过，根本走不到合并步。改 JSON 必须 load/dump。\n- `git status --porcelain` 的**前导空格是语义位**（未暂存），`.strip()` 会把它\n  吃掉，害我误判\"改动被暂存/丢失\"排查半天。只能 rstrip。\n- hive2 是初始化时 clone 的，之后 hive1 推了不少提交；模拟\"别人推送\"前必须\n  `reset --hard origin/main`，否则非快进被拒。\n\n## 遗留\n- 无代码遗留。`docs/` 未动（raccoon 在主仓改文档未提交）。\n- 本卡修复后，今晚 T-0133/T-0135 那种\"合并推成→close 被拦→人工 ff+close\"的\n  补救舞步不再需要；`land --apply` 应该一次成功。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_core.py"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "hive.py",
+    "tasks/T-0136.md",
+    "tests/test_core.py"
+  ],
+  "out_of_paths": [
+    "CHANGELOG.md",
+    "tasks/T-0136.md"
+  ]
+}
