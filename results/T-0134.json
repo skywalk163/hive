@@ -1,0 +1,33 @@
+{
+  "task": "T-0134",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0134",
+  "base": "main",
+  "head": "9fb8098575bab8767c5959e527b57b7a9b7ee845",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-25T12:39:52+00:00",
+  "finished_at": "2026-10-25T12:41:06+00:00",
+  "duration_s": 75.0,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_docs.py -q",
+      "code": 0,
+      "tail": [
+        "......                                                                   [100%]",
+        "6 passed in 0.03s"
+      ]
+    }
+  ],
+  "summary": "# T-0134 操作手册补「现阶段只登记 hive 仓」说明\n\n## 做了什么\n\n`docs/操作手册.md` §2「第一次初始化 → 登记 agent」：\n\n1. 示例里的 `--repo light=/home/skywalk/src/light` 行**删掉**——它和本卡目标 1\n   （现阶段 repos 只登记 hive）直接矛盾，留着会误导新来的人；\n2. 代码块后补一段引用块说明：现阶段只登记 hive / light 事故后\n   `tests/test_repo_scope.py` 有静态守卫（把 light 加回 agents/*.json 测试立刻红）\n   / 以后要管别的仓时登记回 agents/*.json 并同步 ALLOWED_REPOS 白名单。\n\n顺延（本卡红线「不动手册其它内容」）：§3 的 `$H prune --repo light` 示例、\n§5 的 `git -C ~/src/light ...` 两处过时示例，待后续文档卡清理。\n\n## 验证\n\n- `python3 -m pytest tests/test_docs.py -q` → 6 passed（章节编号回归不破）。\n- 改动即 +5/-1，只覆盖 `docs/操作手册.md`，未加标题、未动编号。\n- 本改动在 Gitea 故障期（昨夜至今晨）已于本地 clone 预演并通过全量 142 passed，\n  patch 存档于 `~/.hive/pending/T-0134.patch`，本次直接 apply、零冲突。\n\n## 没做 / 风险\n\n- 无。raccoon 的 T-0139 文档改动已合入 main，本卡在其之上作业，无冲突。",
+  "error": "",
+  "declared_paths": [
+    "docs/操作手册.md"
+  ],
+  "changed_files": [
+    "docs/操作手册.md"
+  ],
+  "out_of_paths": []
+}
