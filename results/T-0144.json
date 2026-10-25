@@ -1,0 +1,43 @@
+{
+  "task": "T-0144",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0144",
+  "base": "main",
+  "head": "56a56847a335ca1631a5c8ed4a24362fc3f5abcb",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-25T23:26:46+00:00",
+  "finished_at": "2026-10-25T23:33:01+00:00",
+  "duration_s": 375.7,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 48%]",
+        "........................................................................ [ 96%]",
+        ".....                                                                    [100%]",
+        "149 passed in 232.26s (0:03:52)"
+      ]
+    },
+    {
+      "cmd": "grep -q '活跃' README.md",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0144 总结：对外可读性校准\n\n起因是一份外部评审（DeepSeek 官网 agent）给出两条错误判断，而**错因都在我们自己\n的 README 里**：\n\n1. 说 hive 是「1550 行单文件」——数字抄自 README 第 3 行。实际 `hive.py` 已 3144 行，\n   且 `mcp_server.py`(1038) / `llm_controller.py`(471) 早就拆出去了。\n2. 说「可能已停止开发，功能合并至光明（Light）项目」——光明是一门独立的中文编程语言，\n   跟 hive 毫无继承关系；hive 里的 `light` 只是**曾经登记过的代码仓**，T-0133 已隔离、\n   `agents/*.json` 现在只登记 `hive`。但 README 的示例至今写着 `--repo light=...`，\n   新读者顺着就会得出那条结论。**评审里最伤人的判断，是这份 README 自己招来的。**\n\n## 改了什么\n\n`README.md`：\n- 顶部加项目状态横幅：**活跃开发中**、没并入任何项目、点明光明与本项目无关。\n- 删掉写死的行数「约 1550 行」，改为描述实际构成（主程序 + 已拆出的两个模块）。\n  **不再留会腐烂的具体数字**——这是同一个坑第二次踩。\n- 5 处 `--repo light=...` 示例全部换成 `--repo hive=...`，与 `agents/*.json` 的真实\n  内容对齐。README 里现在一个 `light` 都不剩。\n\n`.gitea/workflows/ci.yml`：**只加注释，代码零改动**（详见下）。\n\n## ci.yml 为什么决定不改代码\n\n`uses: http://192.168.1.5:3000/actions/checkout@v4` 是硬编码，但权衡后不动它：\n\n- 它在 `.gitea/` 下，**GitHub 只认 `.github/workflows/`、GitCode 也不认这个目录**，\n  推到两个公开平台根本不触发，零影响；\n- 真正会踩的只有「自建 Gitea 上 fork」这个很窄的场景；\n- 那行注释写明它是为绕开 Gitea 裸 `uses` 回落 github.com——而本机 github.com 不可达，\n  **改成官方 `actions/checkout@v4` 反而会弄坏自己的 CI**；\n- 换 `${{ vars.xxx }}` 有风险：Gitea runner 未必在 `uses:` 上做表达式求值，\n  为一个窄场景去赌一个可能让现有 CI 挂掉的行为，不划算。\n\n所以只加醒目注释，说清「换机器改哪一行、为什么不能改成官方 action」。\n可发现性问题解决了，风险为零。\n\n## 验证\n\n- `grep light README.md` 无输出；`tests/test_docs.py` 只盯操作手册编号，改 README 安全。\n- 按 T-0140 / T-0141 的惯例，**文档类卡片不动 VERSION、不加 CHANGELOG**。\n\n## 没做 / 留给后面\n\n- `docs/` 下若还有 light 残留，本次没碰（超出本卡 paths）。\n- 评审里提到的其它项（指数退避、结构化日志/指标端点、看板写操作）**都不在本卡范围**，\n  已在开发计划里单列，等排期。",
+  "error": "",
+  "declared_paths": [
+    "README.md",
+    ".gitea/workflows/ci.yml",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    ".gitea/workflows/ci.yml",
+    "README.md"
+  ],
+  "out_of_paths": []
+}
