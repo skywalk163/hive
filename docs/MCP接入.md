@@ -1,8 +1,11 @@
 # MCP 接入：让任意 agent 自己来查任务、领任务、交任务
 
-`hive mcp` 起一个 **MCP stdio server**，把 hive 的任务总线暴露成 12 个工具。
-支持 MCP 的 agent（Claude Desktop / Cursor / Claude Code / Codex CLI / 自己写的 harness）
+`hive mcp` 起一个 **MCP stdio server**，把 hive 的任务总线暴露成 **14 个工具**
+（`--role controller` 是 21 个）。
+支持 MCP 的 agent（Claude Desktop / Cursor / Claude Code / Codex CLI / 小浣熊 / 自己写的 harness）
 接上之后就能自助：**查阅自己的任务 → 申请领取 → 在 worktree 里干活 → 提交验收 → 干不下去就还回去**。
+
+第一次接、想尽快跑通，直接看 **[AGENT 快速上手](AGENT快速上手.md)**（agent 视角，含实测输出与踩坑）。
 
 不需要 SSH，不需要共享目录，不需要中央数据库 —— 协调仍然靠 git 分支的原子性。
 
@@ -20,7 +23,8 @@ CLI 的问题是人要敲。agent 能调 MCP 之后，闭环里就少一个人�
 ## 2. 起服务
 
 ```sh
-python3 ~/dswork/hive/hive.py --dir ~/hive mcp --agent workbuddy
+python3 ~/dswork/hive/hive.py mcp --agent workbuddy
+# 要指定协调仓就写在 mcp 后面：... hive.py mcp --agent workbuddy --dir ~/hive
 ```
 
 - **必须指定 `--agent`**（或设 `HIVE_AGENT`）。一个 server 进程 = 一个 agent 的身份，
@@ -61,6 +65,21 @@ MCP 客户端里加一段：
 
 Windows 上把 `command` 换成 `python`、`args` 里的路径换成 `C:\hive\hive.py` 即可。
 
+### 3.1 `--dir` 必须写在 `mcp` 后面（否则静默失效）
+
+`hive.py` 顶层和 `mcp` 子命令各有一个 `--dir`。写成 `hive.py --dir <仓> mcp --agent x`
+（旧 README 的写法）时，`--dir` 落进**顶层**参数，子命令读自己的 `mcp_dir` 取不到，
+于是**静默回退**到默认 clone，不报错：
+
+```sh
+python3 hive.py --dir /tmp/fake-hive-dir mcp --agent raccoon
+#   → hive mcp: agent=raccoon role=worker dir=/home/skywalk/.hive/clones/mcp-raccoon
+python3 hive.py mcp --agent raccoon --dir /path/to/hive    # ← 正确
+```
+
+**推荐干脆不传 `--dir`**，用默认的独占 clone。传之前先想清楚：MCP 启动时和每次工具调用前
+都会 `reset --hard origin/main`，指向你正在改的仓会抹掉未提交改动。
+
 ## 4. 工具清单
 
 | 工具 | 作用 | 备注 |
@@ -84,10 +103,10 @@ worker 视角只能操作自己的卡。要让 agent 当**总控**（合入、�
 起 server 时加 `--role controller`：
 
 ```sh
-python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy --role controller
+python3 ~/hive/hive.py mcp --agent workbuddy --role controller
 ```
 
-多出 7 个工具，全都是会改动 main 的操作：
+工具数从 14 变 **21**（实测），多出 7 个全都是会改动 main 的操作：
 
 | 工具 | 作用 | 默认行为 |
 |---|---|---|
@@ -99,7 +118,7 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy --role controller
 | `hive_gc` | 回收过期租约 | **dry-run**，`apply=true` 才删 |
 | `hive_watchdog` | 自动回收死掉/孤儿/僵尸的 in-flight 卡 | **dry-run**，`apply=true` 才退回 ready |
 
-权限是**真的隔离**，不是靠提示词叮嘱：worker 视角的 `tools/list` 里看不到这 6 个，
+权限是**真的隔离**，不是靠提示词叮嘱：worker 视角的 `tools/list` 里看不到这 7 个，
 即使猜到名字去调也会被拒。
 
 三条硬约定：

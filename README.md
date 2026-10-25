@@ -202,6 +202,16 @@ chroot 里的小浣熊 / WorkBuddy 的完整接法（共享 `/home`、manual wor
 - 小浣熊这种深链登录、沙箱受限的 Electron 客户端；
 - 暂时不想给 agent 配 API key 的机器。
 
+**小浣熊接 MCP 的现成配置**（已在 `~/.box-agent/config/mcp.json` 验证可用，12 个工具）：
+
+```json
+{"command": "python3",
+ "args": ["/home/skywalk/dswork/hive/hive.py", "mcp", "--agent", "raccoon"]}
+```
+
+接上后它就能自己查卡/领卡/交了，不用人喂；流程见
+[AGENT 快速上手](docs/AGENT快速上手.md)。
+
 ## 8. 限制（有意为之，v0.3.0）
 
 - 一个 worker 串行跑任务；要并行就在同一台机器起多个 worker + 多个 agent 名（`max_concurrency` 只影响 dispatch 的分配）。
@@ -254,12 +264,16 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy
   "mcpServers": {
     "hive-workbuddy": {
       "command": "python3",
-      "args": ["/home/skywalk/hive/hive.py", "--dir", "/home/skywalk/hive",
-               "mcp", "--agent", "workbuddy"]
+      "args": ["/home/skywalk/hive/hive.py",
+               "mcp", "--agent", "workbuddy", "--dir", "/home/skywalk/hive"]
     }
   }
 }
 ```
+
+> `--dir` 必须写在 `mcp` **后面**。写在前面会被顶层的同名参数吃掉、子命令取不到而**静默回退**
+> 到默认 clone（`~/.hive/clones/mcp-<agent>`），不报错。不确定就看启动那行 stderr 的 `dir=`。
+> 也可以干脆不传 `--dir`，用默认独占 clone（推荐）。
 
 | 工具 | 作用 |
 |---|---|
@@ -277,6 +291,7 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy
 
 ## 12. 更多文档
 
+- **[AGENT 快速上手](docs/AGENT快速上手.md)：第一次接 hive 的 agent 从这里开始（agent 视角，含实测输出和踩坑）**
 - [操作手册](docs/操作手册.md)：每天的命令、总控流程、故障处理
 - [任务卡模板](docs/任务卡模板.md)：代码卡 / 验收卡 / 诊断卡 / 手动卡
 - [迁移指南](docs/迁移指南.md)：从聊天里手工分发迁到蜂巢
