@@ -1,0 +1,34 @@
+{
+  "task": "T-0139",
+  "agent": "raccoon",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0139",
+  "base": "main",
+  "head": "0b8a6a137a1cd766885c1b7facd30ce8c0d0b2d5",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-25T00:44:50+00:00",
+  "finished_at": "2026-10-25T00:44:50+00:00",
+  "duration_s": 0.2,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_docs.py -q",
+      "code": 0,
+      "tail": [
+        "......                                                                   [100%]",
+        "6 passed in 0.03s"
+      ]
+    }
+  ],
+  "summary": "# T-0139 AGENT 快速上手文档\n\n## 做了什么\n\n新增 `docs/AGENT快速上手.md`（317 行），作为第一次接 hive 的 agent 的单一入口，\n并同步修正三处既有文档的过时/失效内容。\n\n### 1. 新文档 `docs/AGENT快速上手.md`\n\n按 agent 视角组织，全部内容基于本轮实测，不写推测：\n\n- **§0 30 秒版**：一段 MCP 配置 + 七步闭环，先跑起来\n- **§1 hive 是什么**：任务卡/租约/结果/分派各自存在哪，以及\"你的工作目录是独立 worktree\"\n- **§2 确认身份**：`hive_whoami` 输出的逐字段解读（`mode: manual` → 别自己 commit；\n  `repos` 没登记的仓永远领不到）\n- **§3 标准闭环**：挑卡→领卡→干活→写总结→提交→收尾，附实测返回 JSON\n- **§4 硬规则**：越权拦截、verify 必须先手跑、`claimable: []` 的三种解释、别自己 commit\n- **§5 两个坑**：`--dir` 静默失效；MCP 每次调用 `reset --hard`\n- **§6 报错速查**：10 条真实报错文案 → 原因 → 处置\n- **§7 worker vs controller**：14 / 21 个工具（实测）\n- **§8 block vs abort**：两者的判据（\"条件没到\"用 block，\"我干不了\"用 abort）\n- **§9 一页速查**：全部工具 + 返回信封约定\n\n### 2. 修正的既有文档\n\n- **`README.md`**：MCP 配置示例里 `--dir` 从 `mcp` 前面移到后面（原示例会静默失效），\n  加一段说明；§7 补小浣熊的现成配置；§12 索引置顶指向新文档。\n- **`docs/MCP接入.md`**：新增 §3.1 讲 `--dir` 陷阱（附实测对照输出）；统一工具数量口径，\n  并修掉原文\"多出 7 个\"却写\"看不到这 6 个\"的自相矛盾。\n- **`docs/操作手册.md`**：开头加一句导流指向新文档，**未动任何章节编号**。\n\n## 验证\n\n```\npython3 -m pytest tests/test_docs.py -q   → 6 passed\npython3 -m pytest tests/ -q               → 141 passed\n```\n\n额外核对（脚本化，非目测）：\n\n- 文档声明的 14 / 21 与 `mcp_server.TOOLS` 实测一致；\n- 文档提到的每个 `hive_*` 工具名都在 `tools/list` 里；\n- 引用的 28 个 CLI 子命令全部存在；\n- 28 个代码围栏配对、内部链接无坏链；\n- 4 个文件搬入 worktree 前后 sha256 一致。\n\n## 过程中的两处判断\n\n1. **发现 `hive_block`/`hive_unblock` 从 `tools/list` 消失**（schema 少闭合 `}`），\n   当时记为\"已知缺陷 + CLI 绕过\"，没有擅自改代码。\n   递交前复核发现 **T-0135 已修复**（工具数 12→14），随即把 §8 改写为\n   \"block vs abort 的使用判据\"，并同步 README/MCP接入 的工具数。\n   教训：文档里的\"当前状态\"类描述，提交前必须重新对照代码复核一遍。\n\n2. **没有直接提交主工作区**，而是按 hive 流程建卡（T-0139）→ 领卡 → 搬进 worktree →\n   在 worktree 里跑 verify → submit。这样结果有 `results/T-0139.json` 留档。\n\n## 已知遗留\n\n- T-0137（原文提到\"卡模板加阅读指引 + DRAFT_TEMPLATE 加提示\"，并给 `tests/test_docs.py`\n  加一条守卫）未包含在本卡：它依赖本卡合入，且要动 `hive.py` 与 `tests/`。\n  本卡 paths 已刻意不含这两个文件，避免与 T-0137 冲突。\n- 本卡不涉及代码逻辑改动。",
+  "error": "",
+  "declared_paths": [
+    "docs/AGENT快速上手.md",
+    "docs/MCP接入.md",
+    "README.md",
+    "docs/操作手册.md"
+  ],
+  "changed_files": [],
+  "out_of_paths": []
+}
