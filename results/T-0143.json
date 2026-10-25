@@ -1,0 +1,47 @@
+{
+  "task": "T-0143",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0143",
+  "base": "main",
+  "head": "e294fc4d0a982bb612b90aede9d017b01d82da83",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-25T16:34:32+00:00",
+  "finished_at": "2026-10-25T16:48:15+00:00",
+  "duration_s": 823.6,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 48%]",
+        "........................................................................ [ 96%]",
+        ".....                                                                    [100%]",
+        "149 passed in 241.36s (0:04:01)"
+      ]
+    },
+    {
+      "cmd": "grep -q 'encoding=\"utf-8\"' hive.py",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0143 总结：run() 钉死 utf-8\n\n## 做了什么\n\n只改了 `hive.py` 里的一处：`run()`（hive 唯一的外部命令出口）在\n`subprocess.run` 上补 `encoding=\"utf-8\", errors=\"replace\"`。\n\n改动文件：\n\n- `hive.py`：`run()` 钉死编码（+12 行注释与参数）+ `VERSION` 0.9.12 → 0.9.13\n- `CHANGELOG.md`：0.9.13 条目\n- `tests/test_encoding.py`：新增 7 例回归守卫\n\n## 为什么是这一处\n\n`text=True` 的隐含语义是「stdin/stdout 用 locale 编码」。Windows 上 locale 是\ncp936，于是 `commit_file_to_ref` 用 `git hash-object -w --stdin` 送进去的结果\nJSON 按 GBK 落盘——实测 `results/T-0142.json` 里 `verify[].cmd` 和 `tail[]`\n全是 GBK 字节（`\\xbf\\xcd\\xbb\\xa7\\xb6\\xcb\\xbd\\xd3\\xc8\\xeb`）。Linux 侧 `git show`\n取回按 UTF-8 解码 → `UnicodeDecodeError` → `read_ref_file()` 抛出 →\n`status` / `doctor` 整条命令崩掉、退出码非 0。\n\n因为所有外部命令都走 `run()`，收口在最底层同时护住三条路径：结果 JSON 写入、\n卡面/文档提交（同一个 `commit_file_to_ref`）、verify 输出捕获（Windows 控制台\n也是 GBK）。\n\n## 验证\n\n- `tests/test_encoding.py` 7 passed；全量 **149 passed**（142 + 7）。\n- **守卫是真的**：临时撤掉 `encoding=\"utf-8\", errors=\"replace\"` 后 7 例中 3 例\n  立刻变红（`test_non_utf8_result_blob_is_still_readable`、\n  `test_unreadable_bytes_are_replaced_not_dropped`、\n  `test_run_pins_encoding_and_errors`），已恢复并复跑确认全绿。\n\n## 测试设计上的一个坑（已写进测试里）\n\n本机 locale 恒为 utf-8（`LC_ALL=C` 加 `PYTHONCOERCECLOCALE=0` 也还是 utf-8），\n所以**不指定 encoding 也能碰巧写出 UTF-8**——纯字节断言在这台机器上抓不到回归。\n因此写入侧改用「捕获 `subprocess.run` 的 kwargs、断言 encoding/errors 存在」的\n参数断言，读取侧才用真实的 GBK 字节做端到端断言。这条事实记在\n`test_locale_is_not_the_thing_we_rely_on` 里，换台机器时字节断言会自然生效。\n\n## 没做 / 留给后面\n\n- **没改 `commit_file_to_ref` / `read_ref_file` 的签名**，也没在别的 callsite\n  补 encoding——散落各处迟早会漏，坚持收口在最底层。\n- **Windows 侧的 stdout 打印**（`print(json.dumps(..., ensure_ascii=False))`）\n  在 cp936 控制台上的表现没动，属于另一个问题，本次不碰。\n- T-0142 的 verify 用 `grep`/`sed` 在 Windows 上不可用的问题，**raccoon-win\n  已经自己修了**（提交 `5875ca8`），本次没重复开卡。\n- lessons.md 还没记这条教训，可另开一张文档卡。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_encoding.py"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "hive.py",
+    "tasks/T-0143.md",
+    "tests/test_encoding.py"
+  ],
+  "out_of_paths": [
+    "CHANGELOG.md",
+    "tasks/T-0143.md"
+  ]
+}
