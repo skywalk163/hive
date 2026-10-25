@@ -46,7 +46,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.12"
+VERSION = "0.9.13"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -100,9 +100,21 @@ class HiveError(Exception):
 
 
 def run(cmd, cwd=None, check=True, input=None, timeout=None, shell=False, env=None):
+    # 钉死 utf-8，别让编码跟着 locale 跑（T-0143）。
+    #
+    # text=True 的隐含语义是「stdin/stdout 都用 locale 编码」。Windows 上 locale
+    # 是 cp936，于是 commit_file_to_ref 用 `git hash-object -w --stdin` 送进去的
+    # 结果 JSON 会按 GBK 落盘（实测 results/T-0142.json 全是 GBK 字节）；Linux 侧
+    # 再 `git show` 取回、按 UTF-8 解码就直接 UnicodeDecodeError，status / doctor
+    # 整条命令崩掉。
+    #
+    # 两侧一起收口：encoding 保证写进去的永远是 UTF-8（治本，跨平台同一份编码），
+    # errors 保证读进来的非法字节只替换不抛异常（兜底，最坏显示 U+FFFD，而不是
+    # 整个看板消失）。所有外部命令都走这一个出口，所以只改这里。
     p = subprocess.run(
         cmd, cwd=str(cwd) if cwd else None, text=True, input=input,
         capture_output=True, timeout=timeout, shell=shell, env=env,
+        encoding="utf-8", errors="replace",
     )
     if check and p.returncode != 0:
         raise HiveError(

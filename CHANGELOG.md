@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.9.13 — 2026-10-25
+
+### Fixed
+
+- **`run()` 钉死 utf-8：Windows 写脏的结果 JSON 不再打崩 `status` / `doctor`**（T-0143）：
+  raccoon-win 交完 T-0142 之后，本机的 `hive status` / `hive doctor` **整条命令崩掉**，
+  直接抛 `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xbf`，退出码非 0、看板全没了。
+  - 根因就一处：`run()` 写成 `subprocess.run(..., text=True)`，**没指定 encoding**。
+    `text=True` 的隐含语义是「stdin/stdout 都用 locale 编码」，Windows 上 locale 是 cp936，
+    于是 `commit_file_to_ref` 用 `git hash-object -w --stdin` 送进去的结果 JSON **按 GBK 落盘**
+    （实测 `results/T-0142.json` 的 `verify[].cmd` 与 `tail[]` 全是 GBK 字节，
+    文件开头的 `"task": "T-0142"` 因为是纯 ASCII 才看不出问题）；Linux 侧 `git show`
+    取回、按 UTF-8 解码就直接炸，而 `read_ref_file` 的调用方没有任何兜底。
+    **Windows 上写得越认真、中文越多，Linux 上越容易崩。**
+  - 修法：在 `run()` 这个唯一出口上钉死 `encoding="utf-8", errors="replace"`，两侧一起收口——
+    encoding 保证进 git 的字节永远是 UTF-8（治本：跨平台同一份编码，卡面/结果都不再分叉）；
+    errors 保证读进来的非法字节只替换成 U+FFFD 而不抛异常（兜底：最坏显示个问号，
+    不是整个看板消失）。没去一个个 callsite 补 encoding——散落各处迟早会漏。
+  - `run()` 是 hive 唯一的外部命令出口，所以这一处同时护住了结果 JSON、卡面提交
+    和 verify 输出捕获三条路径。
+  - 新增 `tests/test_encoding.py` 7 例作回归守卫：造一个 GBK 字节的 `res/<tid>` blob，
+    断言读得出来且 ASCII 骨架一字不少；并有一条**直接证明它是真守卫**——同样的字节
+    严格按 UTF-8 解码必然抛 `UnicodeDecodeError`。撤掉编码参数时 7 例中 3 例立刻变红。
+  - 一个测试设计上的坑：本机 locale 恒为 utf-8（`LC_ALL=C` + `PYTHONCOERCECLOCALE=0`
+    也还是 utf-8），**"不指定 encoding"也能碰巧写出 UTF-8**，光断言字节抓不到回归，
+    只能盯住 `run()` 的参数。这条事实写进了测试里的
+    `test_locale_is_not_the_thing_we_rely_on`，免得后来人误以为字节断言已经够。
+
 ## 0.9.12 — 2026-10-24
 
 ### Fixed
