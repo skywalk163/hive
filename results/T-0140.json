@@ -1,0 +1,33 @@
+{
+  "task": "T-0140",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0140",
+  "base": "main",
+  "head": "7d8bb4957f6cae84a1a18fd1aec0f5e7c3f3eede",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-25T12:59:59+00:00",
+  "finished_at": "2026-10-25T13:01:30+00:00",
+  "duration_s": 91.1,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_docs.py -q",
+      "code": 0,
+      "tail": [
+        ".......                                                                  [100%]",
+        "7 passed in 0.04s"
+      ]
+    }
+  ],
+  "summary": "# T-0140 操作手册清理最后两处 light 过时示例\n\n## 做了什么\n\nT-0134 顺延项的收尾，`docs/操作手册.md` 两处（共 3 行）：\n\n1. §3「分支清理」：`$H prune --repo light` → `--repo hive`（按仓清理的用法不变，\n   换成真实存在的代码仓；hive 仓自己就有 task 分支可清，示例成立）；\n2. §4「总控的一天 → 验收」：`git -C ~/src/light ...` 两行 → `~/dswork/hive`\n   （T-0101 是 hive 仓的历史卡，done 状态，示例仍成立）。\n\n## 验证\n\n- `grep -n \"src/light\\|--repo light\" docs/操作手册.md` 无输出（验收标准第 3 条）。\n- `python3 -m pytest tests/test_docs.py -q` → 7 passed（章节编号回归不破）。\n- `git show --stat HEAD` 只覆盖 `docs/操作手册.md`，3 insertions / 3 deletions。\n\n## 没做 / 风险\n\n- 无。§5 的 integration 批量模型过时（分支图、冲突规则、README close 示例）\n  是独立的语义级问题，已另开 T-0141，本卡未碰。",
+  "error": "",
+  "declared_paths": [
+    "docs/操作手册.md"
+  ],
+  "changed_files": [
+    "docs/操作手册.md"
+  ],
+  "out_of_paths": []
+}
