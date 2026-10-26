@@ -3237,7 +3237,15 @@ def cmd_result(args) -> None:
 
 def cmd_claim(args) -> None:
     w = Worker(args.dir, args.agent)
-    sys.exit(0 if w.claim(args.task) else 1)
+    okc = w.claim(args.task)
+    if okc:
+        # CLI 的 claim 只抢租约、不写卡面 owner；而 submit 要求 owner 存在。
+        # MCP 的 hive_claim 已在 T-0147 改成「先抢锁后 assign」，CLI 这条路还没跟上，
+        # 先给出明确提示，免得领完卡提交时报「没有 owner」一头雾水（T-0160 实测踩到）。
+        log(f"{args.task} 租约已到手。注意：CLI claim 只抢锁不写 owner，"
+            f"提交前需 `hive assign {args.task} --agent {args.agent}`；"
+            f"或直接用 `hive take {args.task} --agent {args.agent}`（它会顺带备好 worktree）")
+    sys.exit(0 if okc else 1)
 
 
 def cmd_work(args) -> None:
