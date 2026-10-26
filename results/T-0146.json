@@ -1,0 +1,37 @@
+{
+  "task": "T-0146",
+  "agent": "fb88-dsh",
+  "status": "done",
+  "branch": "task/T-0146",
+  "base": "main",
+  "mode": "exec",
+  "head": "24dd6229c09c9bc437a9b3228697c64ab2bbb7f2",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-26T03:00:42+00:00",
+  "finished_at": "2026-10-26T03:14:23+00:00",
+  "duration_s": 821.2,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 42%]",
+        "........................................................................ [ 85%]",
+        ".........................                                                [100%]",
+        "169 passed in 255.11s (0:04:15)"
+      ]
+    }
+  ],
+  "summary": "# T-0146 claim 退避重试\n\n## 做了什么\n- claim 抢锁失败改为带抖动的指数退避：参数集中在 CLAIM_BACKOFF_*，可用 HIVE_CLAIM_BACKOFF_BASE/MAX/JITTER、HIVE_CLAIM_MAX_RETRIES 覆盖（默认 0.5s / 8s / 0.5 / 3 次）。\n- 区分失败：fetch 后确认 claim 有主 → 不重试，立即报出持有者；stale ref / timeout / 5xx → 先 fetch 再退避重试；push 始终是普通 push，绝不 force。\n- 重试有次数上限；中断或耗尽时清理本地 .hive/claim 残留；cmd_take 改为先 claim 再 assign，避免半 assigned。\n- 新增 tests/test_claim_backoff.py 9 例：一次重试成功、确认有主不重试、耗尽报持有者、退避递增/有抖动/总耗时上限、env 覆盖、超时重试、take 失败不改卡、中断清残留。\n\n## 文件与验证\n- 修改 hive.py；新增 tests/test_claim_backoff.py（9 例）。\n- 未能跑 python3 -m pytest tests/ -q：本机 workspace-write sandbox 后端不可用，danger-full-access 也无审批通道；已人工核对语法及与 test_claim_is_atomic / test_take_and_submit_manual 的兼容性。\n\n## 风险\n- mcp_server.py 的 t_claim 仍先 assign 后 claim（本卡 paths 不允许改），抢锁失败可能留半 assigned，建议后续卡修。\n- 未实跑全量测试，退避参数与时序需 worker 在正常环境复跑确认。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_claim_backoff.py"
+  ],
+  "changed_files": [
+    "hive.py",
+    "tests/test_claim_backoff.py"
+  ],
+  "out_of_paths": []
+}
