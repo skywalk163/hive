@@ -54,6 +54,13 @@ DEFAULT_MAX_PER_REPO = 1
 # 0 = 一次都不许自动重派（首次判死即 blocked）。人工显式 `hive retry` 不受此限。
 DEFAULT_MAX_RETRIES = 3
 
+# 网络类 git 操作（fetch / push / clone / ls-remote）的默认超时（秒）。
+# subprocess.run 不传 timeout 就是无限等：2026-10-25 Gitea 约 12 小时不可达，
+# `hive land --apply` 就静默卡死在 fetch 上，只能靠杀进程才发现。
+# 可用环境变量 HIVE_NET_TIMEOUT 覆盖；<= 0 表示不限制（保留手动逃生口）。
+NET_TIMEOUT_S = 120.0
+NET_TIMEOUT_ENV = "HIVE_NET_TIMEOUT"
+
 TASK_FIELDS = [
     "id", "title", "repo", "base", "state", "owner", "agent", "fresh",
     "priority", "needs", "paths", "verify", "depends_on",
@@ -111,11 +118,24 @@ def run(cmd, cwd=None, check=True, input=None, timeout=None, shell=False, env=No
     # 两侧一起收口：encoding 保证写进去的永远是 UTF-8（治本，跨平台同一份编码），
     # errors 保证读进来的非法字节只替换不抛异常（兜底，最坏显示 U+FFFD，而不是
     # 整个看板消失）。所有外部命令都走这一个出口，所以只改这里。
-    p = subprocess.run(
-        cmd, cwd=str(cwd) if cwd else None, text=True, input=input,
-        capture_output=True, timeout=timeout, shell=shell, env=env,
-        encoding="utf-8", errors="replace",
-    )
+    try:
+        p = subprocess.run(
+            cmd, cwd=str(cwd) if cwd else None, text=True, input=input,
+            capture_output=True, timeout=timeout, shell=shell, env=env,
+            encoding="utf-8", errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        # timeout=None 永远不会走到这里；一旦设了超时，就必须把「挂住」变成
+        # 一条人能看懂、能行动的 HiveError，而不是无限等或裸 TimeoutExpired。
+        text = cmd if isinstance(cmd, str) else " ".join(str(c) for c in cmd)
+        err = HiveError(
+            f"命令超时（{timeout} 秒内未返回，已终止）: {text}\n"
+            f"如果是网络类 git 操作（fetch/push/clone/ls-remote），说明远端不可达"
+            f"或网络中断；先用 `git remote -v` 确认远端地址，再检查连通性"
+            f"（ping / curl）后重试。"
+        )
+        err.timed_out = True
+        raise err from None
     if check and p.returncode != 0:
         raise HiveError(
             f"命令失败({p.returncode}): {cmd if isinstance(cmd, str) else ' '.join(cmd)}\n"
@@ -130,6 +150,63 @@ def git(args, cwd, check=True, input=None):
 
 def git_ok(args, cwd) -> bool:
     return git(args, cwd, check=False).returncode == 0
+
+
+def net_timeout() -> float | None:
+    """网络类 git 操作的超时秒数；HIVE_NET_TIMEOUT 可覆盖，<= 0 表示不限制。"""
+    raw = (os.environ.get(NET_TIMEOUT_ENV) or "").strip()
+    if not raw:
+        return NET_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        log(f"{NET_TIMEOUT_ENV}={raw!r} 不是数字，按默认 {NET_TIMEOUT_S:g}s 处理")
+        return NET_TIMEOUT_S
+    return value if value > 0 else None
+
+
+def _net_remote(args) -> str:
+    """从 git 参数里猜远端，只用于超时提示（猜不出就按 origin 说）。"""
+    if not args:
+        return "origin"
+    sub = args[0]
+    if sub in ("fetch", "push", "ls-remote"):
+        for a in args[1:]:
+            if not a.startswith("-"):
+                return a
+    elif sub == "clone":
+        # clone 的 URL 可能排在 --depth 1 / --branch x 这类「选项+值」后面，
+        # 优先认像地址的 token，别把 1 当成远端报出去。
+        for a in args[1:]:
+            if a.startswith("-"):
+                continue
+            if ("://" in a or a.endswith(".git") or a.startswith(("/", "~"))
+                    or ("@" in a and ":" in a)):
+                return a
+    return "origin"
+
+
+def git_net(args, cwd, check=True, input=None):
+    """网络类 git 操作（fetch/push/clone/ls-remote）统一入口：必带超时。
+
+    本地 git 操作（rev-parse / show / hash-object / commit-tree / merge …）**不要**
+    走这里：慢机器上大仓的本地操作也可能很慢，误杀比不设超时更糟。
+    """
+    timeout = net_timeout()
+    try:
+        return run(["git", *args], cwd=cwd, check=check, input=input, timeout=timeout)
+    except HiveError as e:
+        if not getattr(e, "timed_out", False):
+            raise
+        remote = _net_remote(args)
+        limit = f"{timeout:g}s" if timeout else "不限"
+        err = HiveError(
+            f"{e}\n远端: {remote} 在 {limit} 内没有响应。建议先查连通性："
+            f"`git remote -v` 看地址，再 ping / curl 对应端口；确认可用后重试。"
+            f"超时阈值可用环境变量 {NET_TIMEOUT_ENV} 调整（<= 0 关闭）。"
+        )
+        err.timed_out = True
+        raise err from None
 
 
 def rev_parse(cwd, ref) -> str | None:
@@ -361,8 +438,8 @@ def commit_file_to_ref(repo: Path, path: str, content: str, ref: str,
              "-m", message or f"hive: {path}"],
             cwd=repo, env=env,
         ).stdout.strip()
-        push_cmd = ["git", "push"] + (["--force-with-lease"] if force else [])
-        run(push_cmd + ["origin", f"{commit}:refs/heads/{ref}"], cwd=repo)
+        git_net(["push", *(["--force-with-lease"] if force else []),
+                 "origin", f"{commit}:refs/heads/{ref}"], repo)
         return commit
     finally:
         try:
@@ -422,7 +499,8 @@ class Hive:
 
     # -- 基本读写 ---------------------------------------------------------- #
     def fetch(self) -> None:
-        git(["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"], self.dir)
+        git_net(["fetch", "--prune", "origin",
+                 "+refs/heads/*:refs/remotes/origin/*"], self.dir)
 
     def sync_main(self) -> None:
         """把协调仓库的本地 main 对齐到 origin/main，写操作前调用。
@@ -515,7 +593,7 @@ class Hive:
         if git(["diff", "--cached", "--quiet"], self.dir, check=False).returncode == 0:
             return False
         git([*IDENT, "commit", "-m", message], self.dir)
-        git(["push", "origin", "main"], self.dir)
+        git_net(["push", "origin", "main"], self.dir)
         return True
 
     def _card_paths(self, tid: str, owner: str | None = None) -> list[str]:
@@ -594,7 +672,14 @@ class Hive:
         # 收口：删掉 claim/res 分支，Gitea 分支列表里只剩进行中的任务
         for ref in (f"claim/{tid}", f"res/{tid}"):
             if rev_parse(self.dir, f"origin/{ref}"):
-                p = git(["push", "origin", f":refs/heads/{ref}"], self.dir, check=False)
+                try:
+                    p = git_net(["push", "origin", f":refs/heads/{ref}"],
+                                self.dir, check=False)
+                except HiveError as e:
+                    # 卡片已经 close 并推上去了，删分支只是收口；网络超时不能
+                    # 反过来把一次成功的 close 报成失败。
+                    log(f"删不掉 {ref}（{str(e).splitlines()[0]}），保留不影响结果")
+                    continue
                 if p.returncode == 0:
                     log(f"已删除分支 {ref}")
                 else:
@@ -669,7 +754,7 @@ class Hive:
             plan["problems"].append(str(e))
             return plan
 
-        git(["fetch", "--prune", "origin"], repo)
+        git_net(["fetch", "--prune", "origin"], repo)
         base, branch = f"origin/{target}", f"origin/task/{tid}"
         base_head = rev_parse(repo, base)
         task_head = rev_parse(repo, branch)
@@ -725,9 +810,16 @@ class Hive:
                 plan["status"] = "would-merge"
                 return plan
             try:
-                git(["push", "origin", f"{plan['head']}:refs/heads/{target}"], repo)
+                git_net(["push", "origin",
+                         f"{plan['head']}:refs/heads/{target}"], repo)
             except HiveError as e:
-                plan["problems"].append(f"推送 {target} 失败（可能别人刚推过）: {e}")
+                if getattr(e, "timed_out", False):
+                    # 超时和「被别人抢先推了」是两回事：别让人误以为是抢锁失败。
+                    plan["status"] = "failed"
+                    plan["problems"].append(f"推送 {target} 超时：{e}")
+                else:
+                    plan["problems"].append(
+                        f"推送 {target} 失败（可能别人刚推过）: {e}")
                 return plan
             plan["merged"] = True
         finally:
@@ -1459,7 +1551,8 @@ class Hive:
                 git([*IDENT, "commit", "-m",
                      f"hive({tid}): {card.get('title', '')} (manual submit)"], wt)
             head = rev_parse(wt, "HEAD")
-            git(["push", "--force", "origin", f"HEAD:refs/heads/task/{tid}"], wt)
+            git_net(["push", "--force", "origin",
+                     f"HEAD:refs/heads/task/{tid}"], wt)
         except HiveError as e:
             raise HiveError(f"提交/推送失败: {e}")
 
@@ -1669,7 +1762,8 @@ class Hive:
         self.fetch()
         for ref in (f"res/{tid}", f"claim/{tid}"):
             if rev_parse(self.dir, f"origin/{ref}"):
-                git(["push", "origin", f":refs/heads/{ref}"], self.dir, check=False)
+                git_net(["push", "origin", f":refs/heads/{ref}"], self.dir,
+                        check=False)
                 log(f"已删除 {ref}")
         card["state"] = "assigned"
         if agent:
@@ -1712,7 +1806,8 @@ class Hive:
             claimed = info.get("claimed_at")
             if not claimed or parse_iso(claimed) > cutoff:
                 continue
-            git(["push", "origin", f":refs/heads/claim/{tid}"], self.dir, check=False)
+            git_net(["push", "origin", f":refs/heads/claim/{tid}"], self.dir,
+                    check=False)
             log(f"回收过期租约 {tid}（{info.get('agent')} @ {claimed}）")
             removed += 1
         log(f"gc 完成，回收 {removed} 个")
@@ -1780,7 +1875,8 @@ class Hive:
         人工显式 `hive retry` 不受此限（那是人在明确要求重跑）。
         """
         if rev_parse(self.dir, f"origin/claim/{tid}"):
-            git(["push", "origin", f":refs/heads/claim/{tid}"], self.dir, check=False)
+            git_net(["push", "origin", f":refs/heads/claim/{tid}"], self.dir,
+                    check=False)
         archived = self.dir / "results" / f"{tid}.json"
         if archived.exists():
             archived.unlink()  # 重新入队时把归档也撤掉，否则 worker 会以为已完成
@@ -1988,7 +2084,7 @@ class Hive:
             if not path.is_dir():
                 log(f"{name}: 路径不存在 {path}，跳过")
                 continue
-            git(["fetch", "-q", "origin"], path, check=False)
+            git_net(["fetch", "-q", "origin"], path, check=False)
             base = self._default_remote_ref(path)
             if not base:
                 log(f"{name}: 找不到 origin/main 或 origin/master，跳过")
@@ -2012,7 +2108,8 @@ class Hive:
                     log(f"[dry-run] {name}/{br}: 已合并，将删除")
                     deleted += 1
                     continue
-                d = git(["push", "origin", f":refs/heads/{br}"], path, check=False)
+                d = git_net(["push", "origin", f":refs/heads/{br}"], path,
+                            check=False)
                 if d.returncode != 0:
                     log(f"{name}/{br}: 远端删除失败（受保护？），保留")
                     kept += 1
@@ -2124,6 +2221,9 @@ class Worker:
             log(f"{tid} 领取成功")
             return True
         except HiveError as e:
+            if getattr(e, "timed_out", False):
+                # 超时不是「被别人抢走」：再 fetch 一次只会再挂一次，直接报清楚。
+                raise
             self.h.fetch()
             info = self.h.claim_info(tid)
             if info and info.get("agent") == self.name:
@@ -2188,7 +2288,7 @@ class Worker:
         if not (repo / ".git").exists():
             raise HiveError(f"本地仓库不存在: {repo}")
 
-        git(["fetch", "--prune", "origin"], repo)
+        git_net(["fetch", "--prune", "origin"], repo)
         wt_root = Path(self.cfg.get("worktrees") or (self.state / "wt")).expanduser()
         wt_root.mkdir(parents=True, exist_ok=True)
         wt = wt_root / tid
@@ -2230,7 +2330,7 @@ class Worker:
 
         started = iso()
         t0 = time.time()
-        git(["fetch", "--prune", "origin"], repo)
+        git_net(["fetch", "--prune", "origin"], repo)
         wt_root = Path(self.cfg.get("worktrees") or (self.state / "wt")).expanduser()
         wt_root.mkdir(parents=True, exist_ok=True)
         wt = wt_root / tid
@@ -2329,7 +2429,8 @@ class Worker:
                 if git(["diff", "--cached", "--quiet"], wt, check=False).returncode != 0:
                     git([*IDENT, "commit", "-m", f"hive({tid}): {card.get('title', '')}"], wt)
                 head = rev_parse(wt, "HEAD")
-                git(["push", "--force", "origin", f"HEAD:refs/heads/task/{tid}"], wt)
+                git_net(["push", "--force", "origin",
+                         f"HEAD:refs/heads/task/{tid}"], wt)
             except HiveError as e:
                 log(f"{tid} 推送代码分支失败: {e}")
 
@@ -2516,7 +2617,7 @@ def cmd_init(args) -> None:
     if args.remote:
         if not git_ok(["remote", "get-url", "origin"], d):
             git(["remote", "add", "origin", args.remote], d)
-        git(["push", "-u", "origin", "main"], d)
+        git_net(["push", "-u", "origin", "main"], d)
     log(f"协调仓库就绪: {d}")
 
 
