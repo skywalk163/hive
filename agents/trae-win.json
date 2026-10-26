@@ -1,0 +1,24 @@
+{
+  "name": "trae-win",
+  "host": "win10",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify"
+  ],
+  "capabilities": [
+    "gui",
+    "windows",
+    "linux"
+  ],
+  "repos": {
+    "hive": "G:/dswork/duan-light-merge/hive"
+  },
+  "launch": "",
+  "worktrees": "C:/Users/skywalk/.hive/wt/trae-win",
+  "max_concurrency": 1,
+  "created": "2026-10-26T22:25:32+08:00"
+}
