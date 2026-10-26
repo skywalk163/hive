@@ -30,14 +30,19 @@ HIVE_HOME="${HIVE_HOME:-$HOME/dswork/hive}"
 if [ -d /compat/ubuntu ]; then
     SUDO_ASKPASS="${SUDO_ASKPASS:-$HIVE_HOME/scripts/sudo-askpass.sh}"
     export SUDO_ASKPASS
+    # worker 传进来的 cwd（worktree）会在 `chroot` 时被重置成新根 `/`，
+    # 这里用 PWD 记下来，进 chroot 后再 cd 回去，别让 agent 在根目录瞎搜。
+    export DSH_CWD="$(pwd -P 2>/dev/null || pwd)"
     exec sudo -A -p '' chroot /compat/ubuntu /bin/bash -c '
-      N="$1"
+      N="$1"; CWD="$2"
       if [ ! -x "$N" ]; then
         echo "dsh-exec: 找不到 linux node: $N" >&2
         exit 127
       fi
+      if [ -n "$CWD" ] && [ -d "$CWD" ]; then cd "$CWD"; else cd /; fi
+      export HOME="${HOME:-/home/skywalk}"
       exec su skywalk -c "DSH_NODE=$N exec /home/skywalk/dswork/hive/scripts/dsh-headless --profile headless -"
-    ' _ "$DSH_NODE"
+    ' _ "$DSH_NODE" "$DSH_CWD"
 fi
 
 # --- 路径 2：已经在 linuxulator 里，直接跑 ------------------------------------ #
