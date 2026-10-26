@@ -5,7 +5,116 @@
 
 > 所有脚本都是 ASCII，兼容 Windows PowerShell 5.1；路径里的中文不会影响执行。
 
+## 照做清单（Checklist）
+
+> 从零到接上，按顺序做。每步都有验收判据，卡住就看最后一节排障。
+> 全部命令在 **PowerShell** 里执行（不要用 cmd）。
+
+### A. 前提
+
+- [ ] Windows 能打开 `http://192.168.1.5:3000`（浏览器试一下）
+- [ ] 装 Git：`winget install --id Git.Git -e`
+- [ ] 装 Python 3.12：`winget install --id Python.Python.3.12 -e`
+- [ ] **开新终端**再验证（PATH 要重开才生效）：
+  ```powershell
+  git --version
+  python --version
+  ```
+  ✅ 两个都有版本号输出
+
+### B. 拿工具仓
+
+- [ ] ```powershell
+  git clone http://192.168.1.5:3000/skywalk/hive.git C:\hive
+  cd C:\hive
+  ```
+- [ ] 确认拿到的是新代码（含多机 host 支持）：
+  ```powershell
+  git log --oneline -3
+  ```
+  ✅ 能看到 `feat(host)` 或更新的提交
+
+### C. 先干跑（不动任何东西）
+
+- [ ] ```powershell
+  powershell -ExecutionPolicy Bypass -File C:\hive\windows\bootstrap.ps1 `
+    -Agent win10 -HiveHost win10
+  ```
+  ✅ 输出里会打印一段 MCP JSON，路径是 `C:\hive\hive.py`
+  ✅ 没有真的登记、没有装计划任务（没加 `-Apply`）
+
+### D. 登记 + 接入（二选一）
+
+#### D1. GUI agent → 走 MCP（推荐，不需要 worker）
+
+- [ ] ```powershell
+  powershell -ExecutionPolicy Bypass -File C:\hive\windows\bootstrap.ps1 `
+    -Apply -Register -Agent win10 -HiveHost win10 -Mode manual
+  ```
+- [ ] 把打印出来的 JSON 粘进 agent 的 MCP 配置
+      （Claude/Cursor 用 `mcpServers`，VS Code 用 `servers`，Codex 用 `mcp_servers`）
+- [ ] **重启 agent 客户端**
+- [ ] 在 agent 对话里让它调 `hive_whoami`
+      ✅ 返回里有 `"agent": "win10"` 和 `claimable` 列表
+
+#### D2. 有命令行 agent → 走 worker（全自动）
+
+- [ ] ```powershell
+  powershell -ExecutionPolicy Bypass -File C:\hive\windows\bootstrap.ps1 `
+    -Apply -Register -InstallTask -Agent win10 -HiveHost win10 -Mode verify
+  ```
+- [ ] ```powershell
+  Get-ScheduledTask -TaskName HiveWorker-win10 | Format-List State
+  ```
+  ✅ `State` 是 `Ready` 或 `Running`
+- [ ] ```powershell
+  Get-Content C:\hive\logs\worker-win10.log -Tail 20
+  ```
+  ✅ 有 `worker win10 启动`
+
+> **D1 和 D2 不要同时开**：两条路都会去领卡，会重复劳动。
+
+### E. 在 FreeBSD 侧确认
+
+- [ ] ```sh
+  python3 hive.py --dir ~/dswork/hive agent list
+  ```
+  ✅ 看到 `win10  host=win10`
+- [ ] ```sh
+  python3 hive.py --dir ~/dswork/hive dispatch --host win10
+  ```
+  ✅ 能列出卡（没有卡会提示"没有可分派的任务"，也算命令通）
+
+### F. 第一张真卡（端到端）
+
+- [ ] 在 FreeBSD 写一张**只改文档**的小卡
+- [ ] ```sh
+  python3 hive.py --dir ~/dswork/hive dispatch --host win10 --apply
+  ```
+- [ ] Windows 侧领取并完成（D1 让 agent 调 `hive_claim`，D2 等 worker 自动领）
+- [ ] ```sh
+  python3 hive.py --dir ~/dswork/hive result T-xxxx
+  ```
+  ✅ `status: done`
+- [ ] ```sh
+  python3 hive.py --dir ~/dswork/hive land T-xxxx --apply
+  ```
+
+### G. 排障速查
+
+| 现象 | 处理 |
+|---|---|
+| `禁止运行脚本` | 命令前加 `powershell -ExecutionPolicy Bypass -File` |
+| `python 不是内部或外部命令` | 重装 Python 勾 Add to PATH；或 `-Python C:\Python312\python.exe` |
+| Git 弹窗要密码 | 用 Gitea 账号 + **专门给 hive 仓的 access token** |
+| `agent list` 里没有 win10 | `-Register` 没加，或 push 失败（看 bootstrap 输出） |
+| host 显示的不是 win10 | 登记时漏了 `-HiveHost win10`，重跑一次 D 步 |
+| worker 日志 `could not read` | `git -C C:\hive pull`，再重启计划任务 |
+| 卡一直 running 但 VM 死了 | FreeBSD 上 `hive gc` 后 `hive retry T-xxxx` |
+| MCP 工具没出现 | 配置粘错位置（各客户端 key 不同）；重启客户端；看客户端日志 |
+
 ## 0. 前提
+
 
 - Windows 10（VM 或物理机都行），能打开 `http://192.168.1.5:3000`
 - 已装 **Git for Windows** 和 **Python 3.10+**（安装时勾选 Add to PATH）

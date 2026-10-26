@@ -23,6 +23,8 @@ param(
     [string]$Src = "C:\src",
     [string]$GiteaBase = "http://192.168.1.5:3000/skywalk",
     [string]$Agent = "win10",
+    # 多机路由用的机器名；留空则取本机 hostname
+    [string]$HiveHost = "",
     [ValidateSet("verify", "manual", "exec")]
     [string]$Mode = "verify",
     [string]$Command = "",
@@ -100,6 +102,7 @@ foreach ($repo in $Repos) {
 if ($Register) {
     $hivePy = Join-Path $Root "hive.py"
     $hiveArgs = @($hivePy, "--dir", $Root, "agent", "add", "--name", $Agent, "--mode", $Mode)
+    if ($HiveHost -ne "") { $hiveArgs += @("--host", $HiveHost) }
     if ($Command -ne "") { $hiveArgs += @("--command", $Command) }
     if ($Abilities.Count -gt 0) { $hiveArgs += @("--abilities") + $Abilities }
     if ($Launch -ne "") { $hiveArgs += @("--launch", $Launch) }
