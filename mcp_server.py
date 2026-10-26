@@ -433,6 +433,7 @@ class HiveMcp:
             repos=cfg.get("repos") or {},
             worktrees=str(Path(cfg.get("worktrees") or (state_root(self.agent) / "wt")).expanduser()),
             max_concurrency=cfg.get("max_concurrency") or 1,
+            host=cfg.get("host") or "",
             hive_dir=str(self.hive_dir),
             mine=mine,
             claimable=sorted(claimable),
