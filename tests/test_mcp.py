@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -296,6 +297,114 @@ def test_mcp_claim_fails_when_taken(world, mcp):
     c2.initialize()
     env = c2.fail("hive_claim", task_id="T-0100")
     assert "a1" in env["message"], "要告诉 a2 是谁抢走的"
+
+    # 卡已经被别人 claim：绝不能把 owner 改成自己（半 assigned 的根因）
+    world.sync()
+    card = world.card("T-0100")
+    assert card["owner"] == "a1", f"卡不该被 a2 写走：{card}"
+    assert card["state"] == "assigned"
+    claims = [r for r in world.refs("refs/heads/claim/*") if r.endswith("/T-0100")]
+    assert len(claims) == 1, f"只能有一份租约：{claims}"
+
+
+def test_mcp_claim_assigns_owner_state_and_branch(world, mcp):
+    """正常抢到：owner/state 写自己、claim/<tid> 分支存在、worktree 备好。"""
+    world.add_agent("a1", caps=("python",), command="true")
+    world.add_task("T-0100", title="正常领取", needs=("python",))
+
+    c = mcp("a1")
+    c.initialize()
+    claimed = c.ok("hive_claim", task_id="T-0100")["details"]
+    assert claimed["task_id"] == "T-0100"
+    assert claimed["branch"] == "task/T-0100"
+    assert (Path(claimed["worktree"]) / ".hive" / "task.md").exists()
+
+    assert f"refs/heads/claim/T-0100" in world.refs("refs/heads/claim/*")
+    world.sync()
+    card = world.card("T-0100")
+    assert card["owner"] == "a1"
+    assert card["state"] == "assigned"
+
+
+def test_mcp_claim_no_half_assigned_when_lock_lost(world, monkeypatch):
+    """回归 T-0147：抢锁失败时绝不能留下半 assigned 的卡。
+
+    旧顺序是先 `_assign_local` 写 owner/state、再 `w.claim` 抢锁 —— 抢锁失败时卡
+    已经变成「owner=A、租约却在 B 手上」的半 assigned 状态，watchdog / dispatch
+    看到 owner 有主就不再派，卡就卡死。这里模拟最坏情形：预检时还没人有租约
+    （claim_info 为 None），但抢锁的 push 被拒（w.claim 返回 False）。此时卡必须
+    原样不动，绝不能写成 owner=自己。
+    """
+    import mcp_server as ms
+    from hive import Worker
+
+    world.add_agent("a1", caps=("python",), command="true")
+    world.add_task("T-0100", title="抢锁失败", needs=("python",))
+
+    def _lose_claim(self, tid):
+        return False
+
+    monkeypatch.setattr(Worker, "claim", _lose_claim)
+
+    impl = ms.HiveMcp(world.hive2, "a1")
+    env = impl.t_claim({"task_id": "T-0100"})
+    assert env["status"] == "error", env
+    assert "抢不到" in env["message"], env
+
+    world.sync()
+    card = world.card("T-0100")
+    assert card["state"] == "ready", f"抢锁失败后卡不该被改动：{card}"
+    assert not card["owner"], "抢锁失败不能把卡写成 owner=自己（半 assigned）"
+    assert not [r for r in world.refs("refs/heads/claim/*")
+                if r.endswith("/T-0100")]
+
+
+def test_mcp_claim_race_only_one_wins_no_half_assigned(world, mcp):
+    """两个 agent 同时 claim 同一张 ready 卡：只有一方拿到租约，卡不出现半 assigned。
+
+    用 git push 的非快进拒绝做仲裁（claim 的原子性来源），两个 client 用 barrier
+    对齐后同时抢。无论谁赢，最终都必须：恰好一份租约、owner 与租约持有者一致。
+    """
+    world.add_agent("a1", caps=("python",), command="true")
+    world.add_agent("a2", caps=("python",), command="true")
+    world.add_task("T-0100", title="并发抢", needs=("python",))
+
+    # 两个 server 各自独占 clone，别在同一 worktree 上互相 reset --hard
+    b2 = world.root / "hive-b2"
+    sh(["git", "clone", "-q", world.hive_origin, b2])
+    sh(["git", "-C", str(b2), "config", "gc.auto", "0"], check=False)
+
+    c1 = mcp("a1")
+    c1.initialize()
+    c2 = mcp("a2", hive_dir=b2)
+    c2.initialize()
+
+    barrier = threading.Barrier(2)
+    results: dict[str, tuple[dict, bool]] = {}
+
+    def _claim(client, tag):
+        barrier.wait()
+        results[tag] = client.call("hive_claim", task_id="T-0100")
+
+    t1 = threading.Thread(target=_claim, args=(c1, "a1"))
+    t2 = threading.Thread(target=_claim, args=(c2, "a2"))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    winners = [t for t, (env, is_err) in results.items()
+               if env["status"] == "success"]
+    assert len(winners) == 1, f"必须恰好一方抢到：{results}"
+    winner = winners[0]
+
+    claims = [r for r in world.refs("refs/heads/claim/*") if r.endswith("/T-0100")]
+    assert len(claims) == 1, f"只能有一份租约：{claims}"
+
+    world.sync()
+    card = world.card("T-0100")
+    assert card["owner"] == winner, f"owner 必须等于租约持有者：{card}"
+    assert card["state"] == "assigned", f"卡要处于正常 assigned：{card}"
 
 
 # --------------------------------------------------------------------------- #
