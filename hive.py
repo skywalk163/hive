@@ -1026,11 +1026,24 @@ class Hive:
         return out
 
     def repos(self) -> dict[str, Path]:
-        """从 agent 配置收集代码仓 {名字: 路径}；同名保留先出现的。"""
+        """从 agent 配置收集代码仓 {名字: 路径}；同名保留先出现的。
+
+        多机协作：不同机器上的 agent 会把各自的本地路径登记成同一个仓名
+        （FreeBSD 的 /home/... 与 Windows 的 G:/... 都叫 "hive"）。这里优先挑
+        当前机器上真实存在的路径，否则 land/prune 在本机拿不到代码仓。
+        """
         out: dict[str, Path] = {}
+        fallback: dict[str, Path] = {}
         for cfg in self.agents().values():
             for name, path in (cfg.get("repos") or {}).items():
-                out.setdefault(name, Path(path))
+                if name in out:
+                    continue
+                p = Path(path)
+                fallback.setdefault(name, p)
+                if p.exists():
+                    out[name] = p
+        for name, p in fallback.items():      # 本机都没有的仓：退回首个声明，报错可读
+            out.setdefault(name, p)
         return out
 
     def _load_counts(self, cards: dict) -> dict[str, int]:
