@@ -31,8 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hive import (  # noqa: E402
     DEFAULT_STATE, HANDOFF_STATES, IDENT, PRIORITY_ORDER, VERSION, Hive,
     HiveError, Worker,
-    _verify_verdict, commit_file_to_ref, git, iso, now, parse_iso,
-    rev_parse,
+    _claim_holder, _verify_verdict, commit_file_to_ref, git, iso, now,
+    parse_iso, rev_parse,
 )
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -494,16 +494,31 @@ class HiveMcp:
         card = h.card(tid)
         if card.get("state") == "done" or h.result_info(tid):
             return err(f"{tid} 已经有结果或已关闭")
-        claim = h.claim_info(tid)
-        if claim and claim.get("agent") != self.agent:
-            return err(f"{tid} 已被 {claim.get('agent')} 领取，抢不到")
 
+        # 顺序和 Hive.cmd_take 完全一致：**先抢 claim 锁，抢到才 assign**。
+        # 旧顺序是先 `_assign_local` 写 owner/state 再 `w.claim` 抢锁 —— 但
+        # `_assign_local` 只是改卡文件 + push main，本身不是原子抢锁。两个 agent
+        # 同时 claim 同一张 ready 卡时，两边都可能通过开头的 claim_info 检查（此刻
+        # 还没人有租约），然后都去改卡、push main；即便一方 w.claim 失败，卡也已经被
+        # 写成「owner=A、租约却在 B 手上」的半 assigned 状态，watchdog / dispatch
+        # 看到 owner 有主就不会再派，卡就卡死（T-0146 遗留风险，本卡收口）。
+        claim_holder = _claim_holder(h.claim_info(tid))
+        if claim_holder and claim_holder != self.agent:
+            return err(f"{tid} 已被 {claim_holder} 领取")
+
+        w = self.worker()
+        if not claim_holder and not w.claim(tid):
+            # Worker.claim 对「确认有主」的失败不重试、只返回 False；把主人带出来，
+            # 别让调用方只看到一句「可能刚被抢走」。
+            info = h.claim_info(tid)
+            holder = _claim_holder(info) or "别人"
+            return err(f"{tid} 已被 {holder} 领取，抢不到")
+
+        # 锁到手之后才写 owner/state；抢锁失败时这里根本不会执行，
+        # 所以不可能留下半 assigned 的卡。
         h._assign_local(tid, self.agent)
         h.commit_and_push(f"take {tid} -> {self.agent} (via mcp)")
 
-        w = self.worker()
-        if not claim and not w.claim(tid):
-            return err(f"{tid} 领取失败（可能刚被别的 agent 抢走）")
         wt = self.worktree(w.cfg, tid)
         if not (wt / ".hive" / "task.md").exists():
             w.prepare(tid)
