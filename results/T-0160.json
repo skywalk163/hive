@@ -1,0 +1,30 @@
+{
+  "task": "T-0160",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0160",
+  "base": "main",
+  "head": "b02a24403b3c5fbc9ddae12948d1b5b58397468d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-26T22:35:01+08:00",
+  "finished_at": "2026-10-26T22:43:18+08:00",
+  "duration_s": 497.4,
+  "verify": [
+    {
+      "cmd": "python -c \"import pathlib; assert pathlib.Path('docs/windows-smoke.md').exists()\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0160 Windows 接入实测\n\n## 做了什么\n\n- 在本机（Windows 10 / `workbuddyai-win` / host=win10）把接入链路真跑了一遍，产出\n  `docs/windows-smoke.md`：8 项判据 + 原始输出 + 复现脚本 + 4 条坑/限制。\n- 覆盖到的：协调仓同步、CLI 领卡（`claim` 拿到租约）、租约互斥（raccoon-win 抢不到）、\n  MCP stdio 握手（`initialize`/`tools/list` 14 个工具/`hive_whoami` 带 `host=win10`）、\n  worktree 建树与 `.hive/` 不入库。\n- 顺手把接入流程里卡住的一步打通了：CLI `claim` 之后 `submit` 报「没有 owner」，\n  用 `assign` 补上 owner/state 才走通（详见文档 §5.1，建议后续单开卡修或写进文档）。\n\n## 验证\n\n- 卡面 `verify`：`python -c \"import pathlib; assert pathlib.Path('docs/windows-smoke.md').exists()\"`\n  → 退出码 0（领卡后先在 worktree 里预跑过一遍，再交给 submit）。\n- MCP 侧真跑：`initialize` 返回 `protocolVersion=2024-11-05`、`serverInfo=hive 0.9.13`；\n  `tools/list` 14 个；`hive_whoami` 返回 `agent=workbuddyai-win / host=win10 /\n  lease_until=2026-10-27T01:35:01+08:00`，与 `hive status` 的租约一致。\n- 负向：`hive claim T-0160 --agent raccoon-win` → `T-0160 已被 workbuddyai-win 领取，不重试`。\n\n## 没做 / 风险\n\n- 没在真实 GUI 客户端（Cursor/VS Code/小浣熊）里粘贴配置点一次工具调用，只证到 stdio 协议层。\n- 没跑 `hive work` 自动循环（本机 agent 是 `mode=manual`）。\n- 没实测跨机 `dispatch --host win10`（需要另一台机器派卡）。\n- 本卡 `verify` 是弱判据（只断言文件存在），文档内容的质量靠人看；若要强验收，需把\n  `paths` 扩到 `scripts/` 并加一条解析文档内 whoami JSON 的断言。\n- 仓库无 `.gitattributes`、本机 `core.autocrlf=true`，跨平台行尾不统一；本次产物是文档，\n  无断言受影响，但后续以文件内容为判据的测试必须归一化行尾再比。",
+  "error": "",
+  "declared_paths": [
+    "docs/windows-smoke.md"
+  ],
+  "changed_files": [
+    "docs/windows-smoke.md"
+  ],
+  "out_of_paths": []
+}
