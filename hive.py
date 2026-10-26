@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -60,6 +61,26 @@ DEFAULT_MAX_RETRIES = 3
 # 可用环境变量 HIVE_NET_TIMEOUT 覆盖；<= 0 表示不限制（保留手动逃生口）。
 NET_TIMEOUT_S = 120.0
 NET_TIMEOUT_ENV = "HIVE_NET_TIMEOUT"
+
+# claim 抢锁失败后的带抖动指数退避（T-0146）。
+#
+# 非快进拒绝仍是 claim 原子性的唯一来源（绝不加 --force）；这里只决定「失败之后」
+# 是立刻放弃还是退一小步再试。参数集中在这里，环境变量可覆盖：
+#   HIVE_CLAIM_BACKOFF_BASE    第一次退避的基数（秒，默认 0.5）
+#   HIVE_CLAIM_BACKOFF_MAX     单次退避上限（秒，默认 8）
+#   HIVE_CLAIM_BACKOFF_JITTER  抖动比例 0..1（默认 0.5，加在指数基数上）
+#   HIVE_CLAIM_MAX_RETRIES     最多重试几次（默认 3；总 push 次数 = 1 + 这个数）
+#
+# 上限是「次数」而不是「时长」：每次 fetch/push 自身还有 HIVE_NET_TIMEOUT 兜底，
+# 所以最坏总耗时也是有界的，不会出现无限退避。
+CLAIM_BACKOFF_BASE_S = 0.5
+CLAIM_BACKOFF_MAX_S = 8.0
+CLAIM_BACKOFF_JITTER = 0.5
+CLAIM_MAX_RETRIES = 3
+CLAIM_BACKOFF_BASE_ENV = "HIVE_CLAIM_BACKOFF_BASE"
+CLAIM_BACKOFF_MAX_ENV = "HIVE_CLAIM_BACKOFF_MAX"
+CLAIM_BACKOFF_JITTER_ENV = "HIVE_CLAIM_BACKOFF_JITTER"
+CLAIM_MAX_RETRIES_ENV = "HIVE_CLAIM_MAX_RETRIES"
 
 TASK_FIELDS = [
     "id", "title", "repo", "base", "state", "owner", "agent", "fresh",
@@ -163,6 +184,116 @@ def net_timeout() -> float | None:
         log(f"{NET_TIMEOUT_ENV}={raw!r} 不是数字，按默认 {NET_TIMEOUT_S:g}s 处理")
         return NET_TIMEOUT_S
     return value if value > 0 else None
+
+
+def _env_number(name: str, default, cast, minimum: float = 0.0):
+    """读一个非负数字环境变量；空/非法/越界都退回默认值并留一条 log。"""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = cast(raw)
+    except (TypeError, ValueError):
+        log(f"{name}={raw!r} 不是数字，按默认 {default} 处理")
+        return default
+    if value < minimum:
+        log(f"{name}={raw!r} 小于 {minimum}，按默认 {default} 处理")
+        return default
+    return value
+
+
+def claim_backoff_config() -> dict:
+    """本次 claim 的退避参数快照。
+
+    每次 claim 读一次，避免重试途中环境变量被改而出现前后不一致。
+    读取模块常量（而不是写死数字），测试可以直接 monkeypatch。
+    """
+    base = _env_number(CLAIM_BACKOFF_BASE_ENV, CLAIM_BACKOFF_BASE_S, float)
+    top = _env_number(CLAIM_BACKOFF_MAX_ENV, CLAIM_BACKOFF_MAX_S, float)
+    if top < base:
+        top = base
+    ratio = _env_number(CLAIM_BACKOFF_JITTER_ENV, CLAIM_BACKOFF_JITTER, float)
+    ratio = min(1.0, max(0.0, ratio))
+    retries = _env_number(CLAIM_MAX_RETRIES_ENV, CLAIM_MAX_RETRIES, int)
+    return {"base": base, "max": top, "jitter": ratio, "retries": int(retries)}
+
+
+def claim_backoff_delay(attempt: int, cfg: dict | None = None,
+                        rng=None) -> float:
+    """第 attempt 次重试前该睡多久（attempt 从 1 开始）。
+
+    指数增长：base * 2**(attempt-1)，再叠加一个 [0, jitter*base] 的随机量；
+    单次结果不超过 max。抖动取「只加不减」，所以只要没撞到上限，间隔就是
+    严格递增的（隐藏测试里不用靠运气）。
+    """
+    cfg = cfg or claim_backoff_config()
+    attempt = max(1, int(attempt))
+    # 防止 attempts 极大时 2**n 把 float 撑爆；反正最后都会被 max 截断
+    nominal = cfg["base"] * (2 ** min(attempt - 1, 60))
+    jitter = (rng or random).uniform(0.0, cfg["jitter"] * nominal)
+    return min(cfg["max"], nominal + jitter)
+
+
+def _claim_sleep(seconds: float) -> None:
+    """独立一层是为了测试能替换掉真实等待；KeyboardInterrupt 会原样向上冒。"""
+    time.sleep(seconds)
+
+
+# git push 失败的文本里，哪些属于「值得再试一次」的暂时性错误。
+# 注意 non-fast-forward 也在里面：它可能是真的被抢，也可能是本地 origin/claim
+# 引用陈旧 —— 到底哪种，要 fetch 之后看 claim 分支有没有主（见 Worker.claim）。
+CLAIM_TRANSIENT_TOKENS = (
+    "non-fast-forward", "fetch first", "stale info", "rejected",
+    "timed out", "timeout", "deadline exceeded",
+    "could not resolve", "temporary failure in name resolution",
+    "connection refused", "connection reset", "connection timed out",
+    "network is unreachable", "no route to host",
+    "remote end hung up", "the remote end hung up unexpectedly",
+    "unexpected disconnect", "early eof", "rpc failed",
+    "cannot lock ref", "failed to update ref",
+    "ssl", "tls", "http 500", "http 502", "http 503", "http 504",
+    "service unavailable", "temporarily unavailable",
+)
+
+
+def _claim_error_is_retryable(err: Exception) -> bool:
+    if getattr(err, "timed_out", False):
+        return True
+    text = str(err).lower()
+    return any(tok in text for tok in CLAIM_TRANSIENT_TOKENS)
+
+
+def _claim_error_summary(err: Exception | None) -> str:
+    if err is None:
+        return "未知错误"
+    text = str(err).strip()
+    first = text.splitlines()[0] if text else err.__class__.__name__
+    return first[:200]
+
+
+def _claim_holder(info) -> str:
+    """claim_info 可能返回 dict、旧格式字符串或 None；统一取 agent 名。"""
+    if isinstance(info, dict):
+        return str(info.get("agent") or "")
+    return ""
+
+
+def _cleanup_claim_artifacts(hive_dir, tid: str) -> None:
+    """清掉一次失败 claim 可能留下的本地半成品（best-effort，绝不抛）。"""
+    root = Path(hive_dir).expanduser() / ".hive" / "claim"
+    for name in (f"{tid}.json", tid):
+        p = root / name
+        try:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p, ignore_errors=True)
+            elif p.is_file() or p.is_symlink():
+                p.unlink()
+        except OSError:
+            pass
+    try:
+        root.rmdir()  # 只在空目录时成功；还有别的卡的状态就不动
+    except OSError:
+        pass
 
 
 def _net_remote(args) -> str:
@@ -1488,22 +1619,33 @@ class Hive:
 
     # -- 手工领取 / 提交 ---------------------------------------------------- #
     def cmd_take(self, tid: str, agent: str) -> None:
-        """人工领取：assign + claim + 准备 worktree，不启动 worker。"""
+        """人工领取：claim + assign + 准备 worktree，不启动 worker。
+
+        顺序很关键：**先抢 claim 锁，抢到才 assign**。旧顺序是先写 assign 再 claim，
+        抢锁失败时卡已经变成「owner=A、租约却在 B 手上」的半 assigned 状态。claim
+        现在带退避重试，失败路径更长了，更不能在重试之前改卡（T-0146）。
+        """
         self.fetch()
         card = self.card(tid)
         if card.get("state") == "done" or self.result_info(tid):
             raise HiveError(f"{tid} 已经有结果或已关闭")
-        claim = self.claim_info(tid)
-        if claim and claim.get("agent") != agent:
-            raise HiveError(f"{tid} 已被 {claim.get('agent')} 领取")
-
-        self._assign_local(tid, agent)
-        self.commit_and_push(f"take {tid} -> {agent}", self._card_paths(tid, agent))
+        claim_holder = _claim_holder(self.claim_info(tid))
+        if claim_holder and claim_holder != agent:
+            raise HiveError(f"{tid} 已被 {claim_holder} 领取")
 
         w = Worker(self.dir, agent)
         wt = Path(w.cfg.get("worktrees") or (w.state / "wt")).expanduser() / tid
-        if not claim and not w.claim(tid):
-            raise HiveError(f"{tid} 领取失败（可能刚被抢走）")
+        if not claim_holder and not w.claim(tid):
+            # Worker.claim 对「确认有主」的失败不重试、只返回 False；把主人带出来，
+            # 别让调用方只看到一句「可能刚被抢走」。
+            info = self.claim_info(tid)
+            holder = _claim_holder(info) or "别人"
+            raise HiveError(f"{tid} 已被 {holder} 领取，抢不到")
+
+        # 锁到手之后才写入 assigned/owner 和 inbox；claim 失败时这里根本不会执行。
+        self._assign_local(tid, agent)
+        self.commit_and_push(f"take {tid} -> {agent}", self._card_paths(tid, agent))
+
         if not (wt / ".hive" / "task.md").exists():
             w.prepare(tid)
 
@@ -2204,8 +2346,20 @@ class Worker:
 
     # -- 领取 -------------------------------------------------------------- #
     def claim(self, tid: str) -> bool:
+        """抢 claim/<tid> 锁：失败后带抖动指数退避，区分「被抢」和「暂时失败」。
+
+        * 已被别人领取（fetch 后能确认 claim 有主）：不重试，立即把持有者
+          报给调用方（预检到返回 False，抢锁过程中确认则抛 HiveError）；
+        * stale ref / timeout / 5xx：先 fetch 刷新引用，再退避重试。总次数由
+          HIVE_CLAIM_MAX_RETRIES 控制，超了抛 HiveError（绝不无限退避）；
+        * push 的原子性完全不动：仍然是普通 push，非快进拒绝就是拒绝，绝不 force。
+        """
+        cfg = claim_backoff_config()
         info = self.h.claim_info(tid)
-        if info and info.get("agent") != self.name:
+        holder = _claim_holder(info)
+        if holder and holder != self.name:
+            log(f"{tid} 已被 {holder} 领取，不重试")
+            _cleanup_claim_artifacts(self.dir, tid)
             return False
         lease = int(self.h.card(tid).get("lease_minutes") or 180)
         payload = json.dumps({
@@ -2214,24 +2368,78 @@ class Worker:
             "lease_until": iso(now() + timedelta(minutes=lease)),
             "host": os.uname().nodename if hasattr(os, "uname") else os.environ.get("COMPUTERNAME", ""),
         }, ensure_ascii=False, indent=2)
+
+        last_err: Exception | None = None
+        succeeded = False
+        refreshed = True
+        holder = ""
         try:
-            commit_file_to_ref(self.dir, f"claims/{tid}.json", payload,
-                               f"claim/{tid}", "origin/main",
-                               f"claim {tid} by {self.name}")
-            log(f"{tid} 领取成功")
-            return True
-        except HiveError as e:
-            if getattr(e, "timed_out", False):
-                # 超时不是「被别人抢走」：再 fetch 一次只会再挂一次，直接报清楚。
-                raise
-            self.h.fetch()
-            info = self.h.claim_info(tid)
-            if info and info.get("agent") == self.name:
+            for attempt in range(cfg["retries"] + 1):
+                try:
+                    commit_file_to_ref(self.dir, f"claims/{tid}.json", payload,
+                                       f"claim/{tid}", "origin/main",
+                                       f"claim {tid} by {self.name}")
+                except HiveError as e:
+                    last_err = e
+                    if not _claim_error_is_retryable(e):
+                        raise
+                    # 先刷新引用再判断：本地 origin/claim/<tid> 可能还是旧快照。
+                    # fetch 自己也可能超时/抖动，不能因此把已经决定的重试直接掐掉；
+                    # 但 fetch 没成功时也别拿旧快照断言「卡有主」。
+                    refreshed = True
+                    try:
+                        self.h.fetch()
+                    except HiveError as fe:
+                        if not _claim_error_is_retryable(fe):
+                            raise
+                        refreshed = False
+                        log(f"{tid} 重试前 fetch 失败（继续退避）: {_claim_error_summary(fe)}")
+                    info = self.h.claim_info(tid)
+                    holder = _claim_holder(info)
+                    if holder and refreshed:
+                        if holder == self.name:
+                            # push 报错但远端已经是我的 claim：上一次其实成功了
+                            # （典型是响应丢了/超时后才落地），别再从头抢。
+                            log(f"{tid} 领取成功（远端已有我的 claim）")
+                            succeeded = True
+                            return True
+                        # 能确认有主：正常的竞争失败，不进退避。
+                        raise HiveError(
+                            f"{tid} 已被 {holder} 领取（抢锁失败，不重试；"
+                            f"push: {_claim_error_summary(e)}）")
+                    if holder and not refreshed:
+                        log(f"{tid} 本地引用显示 {holder} 持有，但刷新失败，先不据此放弃")
+                    if attempt >= cfg["retries"]:
+                        break
+                    delay = claim_backoff_delay(attempt + 1, cfg)
+                    log(f"{tid} 领取失败（{_claim_error_summary(e)}），"
+                        f"{delay:.2f}s 后重试（{attempt + 1}/{cfg['retries']}）")
+                    _claim_sleep(delay)
+                else:
+                    log(f"{tid} 领取成功")
+                    succeeded = True
+                    return True
+            # 次数用尽：把「谁拿了」写进错误里，别只报 push 失败。
+            if refreshed and holder == self.name:
+                succeeded = True
                 return True
-            log(f"{tid} 领取失败（{info.get('agent') if info else '未知'} 抢先）")
-            if "non-fast-forward" not in str(e) and "rejected" not in str(e):
-                log(str(e).splitlines()[0])
-            return False
+            if refreshed and holder:
+                raise HiveError(
+                    f"{tid} 领取失败：已重试 {cfg['retries']} 次仍未抢到，"
+                    f"当前持有者 {holder}")
+            if holder:
+                raise HiveError(
+                    f"{tid} 领取失败：已重试 {cfg['retries']} 次仍未成功，"
+                    f"本地引用显示 {holder} 持有但刷新失败，无法确认；"
+                    f"最后错误：{_claim_error_summary(last_err)}")
+            raise HiveError(
+                f"{tid} 领取失败：已重试 {cfg['retries']} 次仍未成功"
+                f"（可能引用陈旧或网络不稳；最后错误：{_claim_error_summary(last_err)}）")
+        finally:
+            if not succeeded:
+                # 中断（KeyboardInterrupt）或重试用尽：清掉本地可能留下的 claim
+                # 半成品；远端失败 push 本身不会改任何引用。
+                _cleanup_claim_artifacts(self.dir, tid)
 
     # -- 租约心跳 ---------------------------------------------------------- #
     @contextmanager
