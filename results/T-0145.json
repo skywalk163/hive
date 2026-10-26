@@ -1,0 +1,37 @@
+{
+  "task": "T-0145",
+  "agent": "fb88-dsh",
+  "status": "done",
+  "branch": "task/T-0145",
+  "base": "main",
+  "mode": "exec",
+  "head": "63ca8fe4703c0451f37299a807586ce22c4e4265",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-26T02:45:45+00:00",
+  "finished_at": "2026-10-26T02:54:14+00:00",
+  "duration_s": 509.0,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/ -q",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 45%]",
+        "........................................................................ [ 90%]",
+        "................                                                         [100%]",
+        "160 passed in 239.15s (0:03:59)"
+      ]
+    }
+  ],
+  "summary": "# T-0145 工作总结\n\n- 新增 `NET_TIMEOUT_S = 120.0` 与 `HIVE_NET_TIMEOUT` 覆盖（`net_timeout()`，<=0 = 不限制），所有网络类 git 操作统一走 `git_net()`。\n- `run()` 捕获 `subprocess.TimeoutExpired` 后抛 `HiveError`（含「超时」、超时秒数、命令、远端与查连通性建议），并保留 T-0143 的 `encoding=\"utf-8\", errors=\"replace\"`；`timeout=None` 语义不变。\n- 已把 `hive.py` 中全部 fetch / push 调用点改为 `git_net`：`commit_file_to_ref`、`Hive.fetch`、`commit_and_push`、close/retry/gc/reenqueue/prune 的删分支、land 的 fetch/push、take/prepare/run_task 的 fetch、submit/run_task 的 force push、init 的首次 push；未发现 clone / ls-remote 调用点。\n- 本地 git 操作（rev-parse/show/hash-object/commit-tree/merge/worktree 等）保持原样，没有引入超时。\n- 超时路径保持原有清理：land 的临时 worktree 仍走 `finally`；close 删分支超时只记日志、不把已成功的 close 报成失败；land push 超时单独标记为「超时」，不与「被别人抢先推」混淆。\n- 新增 `tests/test_git_timeout.py`：永不返回命令的小超时行为测试、`timeout=None`/UTF-8 守护、网络调用点必须走 `git_net` 的 AST 参数级守卫、默认值与环境变量覆盖测试、fetch 超时提示含远端与连通性建议。\n- 验证受阻：本机 workspace-write 沙箱后端不可用（无 bubblewrap/Landlock），bash/glob/grep 均无法启动，故未能实际执行 `python3 -m pytest tests/ -q`；仅做了逐段静态走查。\n- 遗留风险：测试未实跑，需 worker 在可用环境跑全量 pytest；若有旧测试通过 monkeypatch `hive.git` 拦截网络调用，改走 `git_net` 后可能需要适配（正常本地裸仓测试不受影响）。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_git_timeout.py"
+  ],
+  "changed_files": [
+    "hive.py",
+    "tests/test_git_timeout.py"
+  ],
+  "out_of_paths": []
+}
