@@ -123,6 +123,21 @@ def log(msg: str) -> None:
     print(f"[hive {now():%H:%M:%S}] {msg}", file=sys.stderr, flush=True)
 
 
+def current_host() -> str:
+    """当前机器名（小写）。多机协作时用它区分 agent 归属哪台机器。"""
+    for name in (os.uname().nodename if hasattr(os, "uname") else "",
+                 os.environ.get("COMPUTERNAME", ""),
+                 os.environ.get("HOSTNAME", "")):
+        if name:
+            return str(name).strip().lower()
+    return ""
+
+
+def agent_host(cfg: dict) -> str:
+    """agent 配置里声明的机器名（小写）；没写返回空串。"""
+    return str((cfg or {}).get("host") or "").strip().lower()
+
+
 class HiveError(Exception):
     pass
 
@@ -1026,15 +1041,21 @@ class Hive:
         return out
 
     def repos(self) -> dict[str, Path]:
-        """从 agent 配置收集代码仓 {名字: 路径}；同名保留先出现的。
+        """从 agent 配置收集代码仓 {名字: 路径}。
 
-        多机协作：不同机器上的 agent 会把各自的本地路径登记成同一个仓名
-        （FreeBSD 的 /home/... 与 Windows 的 G:/... 都叫 "hive"）。这里优先挑
-        当前机器上真实存在的路径，否则 land/prune 在本机拿不到代码仓。
+        多机协作：不同机器的 agent 会把各自的本地路径登记成同一个仓名
+        （FreeBSD 的 /home/... 与 Windows 的 G:/... 都叫 "hive"）。解析优先级：
+        1) 本机 agent（host 匹配）声明且路径存在；
+        2) 任意 agent 声明且路径存在；
+        3) 都没有 → 退回首个声明，让报错信息能带出路径。
         """
+        here = current_host()
+        agents = self.agents()
+        ordered = sorted(agents.items(),
+                         key=lambda kv: 0 if agent_host(kv[1]) == here else 1)
         out: dict[str, Path] = {}
         fallback: dict[str, Path] = {}
-        for cfg in self.agents().values():
+        for _name, cfg in ordered:
             for name, path in (cfg.get("repos") or {}).items():
                 if name in out:
                     continue
@@ -1042,7 +1063,7 @@ class Hive:
                 fallback.setdefault(name, p)
                 if p.exists():
                     out[name] = p
-        for name, p in fallback.items():      # 本机都没有的仓：退回首个声明，报错可读
+        for name, p in fallback.items():      # 本机都没有的仓：退回首个声明
             out.setdefault(name, p)
         return out
 
@@ -1120,7 +1141,8 @@ class Hive:
     def cmd_dispatch(self, apply: bool = False, limit: int | None = None,
                      only_agent: str | None = None, as_json: bool = False,
                      max_per_repo: int | None = None,
-                     dry_run: bool = False) -> None:
+                     dry_run: bool = False,
+                     only_host: str | None = None) -> None:
         # --dry-run 与默认行为一致；即使同时给了 --apply，也以 dry-run 为准
         apply = bool(apply) and not bool(dry_run)
         self.fetch()
@@ -1166,6 +1188,10 @@ class Hive:
             blocked: list[str] = []
             for name, a in agents.items():
                 if only_agent and name != only_agent:
+                    continue
+                if only_host and agent_host(a) != only_host.strip().lower():
+                    blocked.append(
+                        f"机器不匹配（{name} 在 {agent_host(a) or '未标注'}，要 {only_host}）")
                     continue
                 if c.get("agent") and name != c.get("agent"):
                     continue
@@ -2847,7 +2873,8 @@ def cmd_agent(args) -> None:
     if args.action == "list":
         for p in sorted((h.dir / "agents").glob("*.json")):
             cfg = json.loads(p.read_text(encoding="utf-8"))
-            print(f"{cfg.get('name'):<12} abilities={cfg.get('abilities', [])} "
+            print(f"{cfg.get('name'):<16} host={cfg.get('host') or '-':<8} "
+                  f"abilities={cfg.get('abilities', [])} "
                   f"caps={cfg.get('capabilities', [])} "
                   f"{'manual' if cfg.get('manual') else cfg.get('command', '')[:60]}")
         return
@@ -2862,6 +2889,7 @@ def cmd_agent(args) -> None:
     mode = args.mode or ("manual" if args.manual else "exec")
     cfg = {
         "name": args.name,
+        "host": (args.host or current_host()).strip().lower(),
         "command": args.command or "",
         "mode": mode,
         "manual": mode == "manual",
@@ -3097,7 +3125,7 @@ def cmd_dispatch(args) -> None:
     Hive(args.dir).cmd_dispatch(
         apply=args.apply, limit=args.limit, only_agent=args.agent,
         as_json=args.json, max_per_repo=args.max_per_repo,
-        dry_run=args.dry_run)
+        dry_run=args.dry_run, only_host=args.host)
 
 
 def cmd_mcp(args) -> int:
@@ -3242,6 +3270,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--worktrees", help="worktree 根目录")
     s.add_argument("--launch", help="manual 模式下打开 GUI 的命令，支持 {worktree}/{task}/{prompt}")
     s.add_argument("--max-concurrency", type=int, default=1)
+    s.add_argument("--host",
+                   help="agent 所在机器名（多机协作用来路由；默认取当前 hostname）")
     s.set_defaults(func=cmd_agent)
 
     s = sub.add_parser("draft", help="任务卡草稿：agent 出题、人确认后转正")
@@ -3289,6 +3319,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="只输出派/不派原因（默认行为）")
     s.add_argument("--limit", type=int, help="最多分派几张")
     s.add_argument("--agent", help="只分派给这个 agent")
+    s.add_argument("--host", help="只分派给这台机器上的 agent（按 agent 配置的 host 字段）")
     s.add_argument("--max-per-repo", "--same-repo-limit", dest="max_per_repo",
                    type=int, default=None,
                    help="同一 repo 里 paths 互相冲突的卡同时在飞的上限"

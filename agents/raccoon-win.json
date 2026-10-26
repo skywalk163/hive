@@ -1,5 +1,6 @@
 {
   "name": "raccoon-win",
+  "host": "win10",
   "command": "",
   "mode": "manual",
   "manual": true,

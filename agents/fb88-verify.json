@@ -1,5 +1,6 @@
 {
   "name": "fb88-verify",
+  "host": "fb98",
   "command": "",
   "mode": "verify",
   "manual": false,
