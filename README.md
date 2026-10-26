@@ -299,6 +299,7 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy
 - [操作手册](docs/操作手册.md)：每天的命令、总控流程、故障处理
 - [任务卡模板](docs/任务卡模板.md)：代码卡 / 验收卡 / 诊断卡 / 手动卡
 - [迁移指南](docs/迁移指南.md)：从聊天里手工分发迁到蜂巢
+- [多机并行开发](docs/多机并行开发.md)：多台机器 + 多个 agent 并行的部署、host 路由、防冲突、合流
 - [Windows 接入](windows/README.md)：bootstrap.ps1 + 计划任务
 - [Gitea 接入](docs/Gitea接入.md)：私有仓、host-scoped 凭据 helper、T-0001 冒烟记录
 - [chroot GUI agent](docs/CHROOT_GUI_AGENTS.md)：小浣熊 / WorkBuddy 的完整接法
