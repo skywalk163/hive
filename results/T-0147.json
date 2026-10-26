@@ -1,0 +1,35 @@
+{
+  "task": "T-0147",
+  "agent": "fb88-dsh",
+  "status": "done",
+  "branch": "task/T-0147",
+  "base": "main",
+  "mode": "exec",
+  "head": "19f3e46018d1ae8a648e913c19d6a67fc1273d99",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-26T18:09:55+08:00",
+  "finished_at": "2026-10-26T18:54:54+08:00",
+  "duration_s": 2698.7,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_mcp.py -q",
+      "code": 0,
+      "tail": [
+        ".........................                                                [100%]",
+        "25 passed in 33.74s"
+      ]
+    }
+  ],
+  "summary": "```\n\nNote: world.refs returns refnames like \"refs/heads/claim/T-0100\". endswith(\"/T-0100\") works.\n\nBut will the loser definitely return error? The loser: its hive() reads card, claim_info. Timing: if loser's claim_info read happens after winner pushed claim, loser returns early error \"已被 X 领取\". If before, loser tries w.claim, push fails → retry backoff with sleeps (0.5s+), then fetches, sees holder, raises HiveError → caught by _call_tool → err. Either way error. But the backoff retries with jitter up to 8s could be slow. In the claim, non-fast-forward is retryable → it goes into retry loop with fetch. After fetch it sees holder and raises HiveError immediately (holder and refreshed → raise, no backoff). Actually in `claim`, on HiveError e: `if not _claim_error_is_retryable(e): raise` — non-fast-forward IS retryable, so it goes to fetch branch. Then `holder = _claim_holder(info)`; if holder and refreshed → raise HiveError. So no sleep. Good, fast.\n\nBut if both threads read claim_info None and both push... one wins, other non-fast-forward → fetch → sees winner → raise. Good.\n\nConcern: the test's world.hive2 is the mcp hive_dir for both. c1 uses world.hive2 (default), c2 also world.hive2 (default). Wait, mcp fixture: `McpClient(agent, hive_dir or world.hive2, ...)`. Both default to hive2 — same clone! That's the existing behavior (all clients share hive2). Two server processes sharing the same worktree could conflict on reset --hard. Hmm. Existing tests use one client mostly. test_mcp_claim_fails_when_taken uses c1 and c2 both on hive2 and works (c1 claims, c2 fails). But two simultaneous writes to the same worktree could be racy (reset --hard while another process is mid-push). \n\nTo be safe, I should give the two clients different hive dirs. The fixture allows `mcp(\"a1\", hive_dir=world.hive1)`? No, hive1 is the main working clone used by world.hive() commands — don't want to reset it. Better: pass a separate clone. I can create one: `world.hive2` is a clone of hive_origin. I could clone another. But simpler: pass hive_dir explicitly to at least one so they don't share. Let me create a third clone in the test.\n\nActually, can I just pass `world.hive2` for one and create a new clone for the other? Let me do that inline:\n\n```python\nsh([\"git\", \"clone\", \"-q\", world.hive_origin, world.root / \"hive-b2\"])\n```\nNeed to import sh — it's imported at top from conftest. And `_tune_worktree`? Not necessary; but gc auto might cause issues. Let me just clone and set gc.auto=0 via sh. Actually _tune_worktree isn't exported from conftest. I can do `sh([\"git\", \"-C\", dst, \"config\", \"gc.auto\", \"0\"], check=False)`.\n\nLet me use that approach: c1 on hive2, c2 on a fresh clone. Reduces contention. Though git handles concurrent fetch/reset on separate worktrees fine.\n\nActually even simpler and more deterministic for \"no half-assigned\": the ordering test (monkeypatch) already proves the core fix deterministically. The concurrency test is a belt-and-braces integration test. I'll make it robust with separate clones.\n\nLet me write the tests now. Insert after test_mcp_claim_fails_when_taken (after line ~299).\ndsh: reasoning:\nLet me review the modified t_claim to make sure logic is consistent. Also check the claim_holder == self.agent case: if claim_holder == self.agent (already mine), we skip w.claim and go straight to _assign_local. That matches cmd_take.\n\nOne concern: in the \"already mine\" case, `w.claim(tid)` is skipped. But worker() is still created. Fine.\n\nNow let me verify the final t_claim code.",
+  "error": "",
+  "declared_paths": [
+    "mcp_server.py",
+    "tests/test_mcp.py"
+  ],
+  "changed_files": [
+    "mcp_server.py",
+    "tests/test_mcp.py"
+  ],
+  "out_of_paths": []
+}
