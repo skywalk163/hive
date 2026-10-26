@@ -47,15 +47,21 @@
 
 #### D1. GUI agent → 走 MCP（推荐，不需要 worker）
 
-- [ ] ```powershell
-  powershell -ExecutionPolicy Bypass -File C:\hive\windows\bootstrap.ps1 `
-    -Apply -Register -Agent win10 -HiveHost win10 -Mode manual
+> 一台机器开 N 个 agent，就登记 N 个名字，**每个 chat 窗口一个**。
+> 本文示例用 `raccoon-win` / `doubao-win` / `dumate-win` / `workbuddyai-win`。
+
+- [ ] 逐个登记（每个名字跑一次）：
+  ```powershell
+  foreach ($a in "raccoon-win","doubao-win","dumate-win","workbuddyai-win") {
+      powershell -ExecutionPolicy Bypass -File C:\hive\windows\bootstrap.ps1 `
+          -Apply -Register -Agent $a -HiveHost win10 -Mode manual
+  }
   ```
-- [ ] 把打印出来的 JSON 粘进 agent 的 MCP 配置
-      （Claude/Cursor 用 `mcpServers`，VS Code 用 `servers`，Codex 用 `mcp_servers`）
-- [ ] **重启 agent 客户端**
-- [ ] 在 agent 对话里让它调 `hive_whoami`
-      ✅ 返回里有 `"agent": "win10"` 和 `claimable` 列表
+- [ ] **每个 agent 用自己那份配置**（`--agent` 必须不同，四份现成的见 §2.5）
+- [ ] **重启各客户端**
+- [ ] 每个 agent 各调一次 `hive_whoami`
+      ✅ `agent` 是它自己、`host` 是 `win10`、`hive_dir` 是 `...\clones\mcp-<它自己>`
+      ❌ 四个都返回 `raccoon-win` → 贴错配置了，回 §2.5 换
 
 #### D2. 有命令行 agent → 走 worker（全自动）
 
@@ -173,21 +179,89 @@ powershell -ExecutionPolicy Bypass -File C:\hive\windows\bootstrap.ps1 `
 ## 2.5 用 MCP 接入（推荐，不需要 worker）
 
 Windows 上的 agent（Claude Desktop / Cursor / VS Code / Codex CLI / 任何支持 MCP 的）
-**不需要命令行入口**，走 MCP 就能自助闭环。跑完 bootstrap 后它会打印这样一段：
+**不需要命令行入口**，走 MCP 就能自助闭环。跑完 bootstrap 后它会打印一段配置：
 
 ```json
 {
   "mcpServers": {
     "hive-win10": {
       "command": "python",
-      "args": ["C:\\hive\\hive.py", "--dir", "C:\\hive", "mcp", "--agent", "win10"]
+      "args": ["C:\\hive\\mcp_server.py", "--agent", "win10"],
+      "env": {
+        "PYTHONPATH": "C:\\hive",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONIOENCODING": "utf-8"
+      }
     }
   }
 }
 ```
 
-把它粘进 agent 的 MCP 配置（各家的 key 名略有差异：Claude/Cursor 用 `mcpServers`，
-VS Code 用 `servers`，Codex 用 `mcp_servers`），重启客户端。之后那个 agent 依次调用：
+> **注意：不要加 `--dir`。** 不传时 server 会自动用
+> `~/.hive/clones/mcp-<agent>` 建**独占 clone**。传 `--dir <主工作区>` 会让多个
+> agent 共用同一个 checkout，抢 git 索引、互相 `reset --hard`，隔离就没了。
+> （`bootstrap.ps1` 早期版本生成过带 `--dir` 的配置，已修。）
+
+### 多 agent：每个 chat 窗口一个名字
+
+**最容易踩的坑**：把同一份配置原样贴给所有 agent，它们就都成了同一个身份。
+
+`mcp_server.py` 只校验「这个 agent 名登记过」，**不会发现重名**，所以不报错、
+静默出错。后果是几个 agent 抢同一张卡、共用同一个 worktree。
+
+已登记的 Windows agent 用 `python hive.py agent list` 查（本文以
+`raccoon-win` / `doubao-win` / `dumate-win` / `workbuddyai-win` 为例；你机器上
+可能还有 `trae-win` / `codearts-win` 等）。每份配置只改 **key 名** 和
+**`--agent` 值**：
+
+**小浣熊**
+```json
+{"mcpServers":{"hive-raccoon-win":{"command":"C:\\Users\\skywalk\\.box-agent\\box-agent-runtime\\runtime\\python\\python.exe","args":["G:\\dswork\\duan-light-merge\\hive\\mcp_server.py","--agent","raccoon-win"],"env":{"PYTHONPATH":"G:\\dswork\\duan-light-merge\\hive","PYTHONUNBUFFERED":"1","PYTHONIOENCODING":"utf-8"}}}}
+```
+
+**豆包**
+```json
+{"mcpServers":{"hive-doubao-win":{"command":"C:\\Users\\skywalk\\.box-agent\\box-agent-runtime\\runtime\\python\\python.exe","args":["G:\\dswork\\duan-light-merge\\hive\\mcp_server.py","--agent","doubao-win"],"env":{"PYTHONPATH":"G:\\dswork\\duan-light-merge\\hive","PYTHONUNBUFFERED":"1","PYTHONIOENCODING":"utf-8"}}}}
+```
+
+**dumate**
+```json
+{"mcpServers":{"hive-dumate-win":{"command":"C:\\Users\\skywalk\\.box-agent\\box-agent-runtime\\runtime\\python\\python.exe","args":["G:\\dswork\\duan-light-merge\\hive\\mcp_server.py","--agent","dumate-win"],"env":{"PYTHONPATH":"G:\\dswork\\duan-light-merge\\hive","PYTHONUNBUFFERED":"1","PYTHONIOENCODING":"utf-8"}}}}
+```
+
+**WorkBuddy AI**
+```json
+{"mcpServers":{"hive-workbuddyai-win":{"command":"C:\\Users\\skywalk\\.box-agent\\box-agent-runtime\\runtime\\python\\python.exe","args":["G:\\dswork\\duan-light-merge\\hive\\mcp_server.py","--agent","workbuddyai-win"],"env":{"PYTHONPATH":"G:\\dswork\\duan-light-merge\\hive","PYTHONUNBUFFERED":"1","PYTHONIOENCODING":"utf-8"}}}}
+```
+
+> 路径按你自己机器改：`command` 是任意 3.10+ 的 python，
+> `mcp_server.py` / `PYTHONPATH` 指向你的 hive 仓。上面用的是 box-agent 自带
+> python + `G:\dswork\duan-light-merge\hive`。
+
+### 自检：`hive_whoami` 看四个字段
+
+每个 agent 连上后，先让它调一次 `hive_whoami`，返回里必须对得上：
+
+| 字段 | 应该是什么 | 不对意味着 |
+|---|---|---|
+| `agent` | 它自己的名字（如 `doubao-win`） | 贴了别人的配置 → 4 个 agent 变同一个人 |
+| `host` | 本机标签（如 `win10`） | agent 配置缺 `host`，或仓库没 pull 到最新 |
+| `hive_dir` | `...\.hive\clones\mcp-<agent>` | 误传了 `--dir` 或设了 `HIVE_DIR` |
+| `repos.hive` | 你的 hive 仓路径 | `repos` 登记错了 |
+
+```jsonc
+{
+  "agent": "doubao-win",
+  "host": "win10",
+  "hive_dir": "C:\\Users\\skywalk\\.hive\\clones\\mcp-doubao-win",
+  "mode": "manual",
+  "repos": { "hive": "G:\\dswork\\duan-light-merge\\hive" }
+}
+```
+
+> `host` 字段是后来加的（commit `8043474`），老仓库先 `git pull` 再重启客户端。
+
+之后那个 agent 依次调用：
 
 | 调用 | 作用 |
 |---|---|

@@ -126,8 +126,15 @@ $mcp = [ordered]@{
     mcpServers = [ordered]@{
         ("hive-" + $Agent) = [ordered]@{
             command = $Python
-            args = @((Join-Path $Root "hive.py"), "--dir", $Root,
-                     "mcp", "--agent", $Agent)
+            # 故意不传 --dir：让每个 agent 各自用 ~/.hive/clones/mcp-<agent>
+            # 独占 clone。传 --dir $Root 会让多个 agent 共用同一个工作区，
+            # 抢 git 索引、互相 reset --hard，等于把隔离拆了。
+            args = @((Join-Path $Root "mcp_server.py"), "--agent", $Agent)
+            env = [ordered]@{
+                PYTHONPATH = $Root
+                PYTHONUNBUFFERED = "1"
+                PYTHONIOENCODING = "utf-8"
+            }
         }
     }
 }
