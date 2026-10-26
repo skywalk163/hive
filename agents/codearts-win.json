@@ -1,0 +1,24 @@
+{
+  "name": "codearts-win",
+  "host": "win10",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify"
+  ],
+  "capabilities": [
+    "windows",
+    "gui",
+    "linux"
+  ],
+  "repos": {
+    "hive": "G:/dswork/duan-light-merge/hive"
+  },
+  "launch": "",
+  "worktrees": "C:/Users/skywalk/.hive/wt/codearts-win",
+  "max_concurrency": 1,
+  "created": "2026-10-26T22:28:02+08:00"
+}
