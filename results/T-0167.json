@@ -1,0 +1,47 @@
+{
+  "task": "T-0167",
+  "agent": "fb88-dsh",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0167",
+  "base": "main",
+  "head": "ae76bcf378aa68e6417a4ac1d27f6177c330e89d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-27T04:00:00+00:00",
+  "finished_at": "2026-10-27T04:45:00+00:00",
+  "duration_s": 2700.0,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_docs_worker_parallel.py tests/test_docs_lock_model.py tests/test_docs_architecture.py tests/test_docs_handbook.py -q",
+      "code": 0,
+      "tail": [
+        ".....................................                                    [100%]",
+        "37 passed in 0.11s"
+      ]
+    }
+  ],
+  "summary": "人工接手修复 T-0167：原交付的 4 个强验收测试有两类 bug——2 处断言消息嵌 ASCII 双引号致 SyntaxError，且 extract_section 被 ### 子标题截断、最后一节因无后继 ## 标题匹配失败。已重写切分逻辑（只按行首 ^## 切分、以文末 \\Z 兜底）、改正引号、移除误判占位符。修复后 37 个断言全绿。",
+  "error": "",
+  "declared_paths": [
+    "tests/test_docs_worker_parallel.py",
+    "tests/test_docs_lock_model.py",
+    "tests/test_docs_architecture.py",
+    "tests/test_docs_handbook.py",
+    "results/T-0161.json",
+    "results/T-0164.json",
+    "results/T-0165.json",
+    "results/T-0166.json",
+    "tasks/T-0161.md",
+    "tasks/T-0164.md",
+    "tasks/T-0165.md",
+    "tasks/T-0166.md"
+  ],
+  "changed_files": [
+    "tests/test_docs_worker_parallel.py",
+    "tests/test_docs_lock_model.py",
+    "tests/test_docs_architecture.py",
+    "tests/test_docs_handbook.py"
+  ],
+  "out_of_paths": []
+}
