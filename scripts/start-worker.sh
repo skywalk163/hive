@@ -3,6 +3,10 @@
 #
 #   ./scripts/start-worker.sh fb88-dsh
 #   HIVE_DIR=~/.hive/clones/fb88-dsh ./scripts/start-worker.sh fb88-dsh --once
+#   ./scripts/start-worker.sh fb88-dsh --max-concurrency 3   # worker 内并发跑卡上限
+#
+# 除 agent 名之外的参数原样透传给 `hive.py work`；`--max-concurrency N` 覆盖 agent
+# 配置里的 max_concurrency（不传就用配置值，默认 1=串行）。
 #
 # 工具从本仓库取，工作目录默认也是本仓库；多 worker 时请给每个 worker 单独 clone，
 # 用 HIVE_DIR 指过去，避免和总控/其它 worker 抢同一个 git index。
