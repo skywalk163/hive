@@ -1,25 +1,26 @@
-{
-  "name": "dumate-win",
-  "host": "win10",
-  "command": "",
-  "mode": "manual",
-  "manual": true,
-  "abilities": [
-    "code",
-    "docs",
-    "verify"
-  ],
-  "capabilities": [
-    "windows",
-    "gui",
-    "linux"
-  ],
-  "repos": {
-    "hive": "G:/dswork/duan-light-merge/hive",
-    "lightharness": "G:/dswork/duan-light-merge/lightharness"
-  },
-  "launch": "",
-  "worktrees": "C:/Users/skywalk/.hive/wt/dumate-win",
-  "max_concurrency": 1,
-  "created": "2026-10-26T11:51:32+08:00"
+﻿{
+    "name":  "dumate-win",
+    "host":  "win10",
+    "command":  "",
+    "mode":  "manual",
+    "manual":  true,
+    "abilities":  [
+                      "code",
+                      "docs",
+                      "verify"
+                  ],
+    "capabilities":  [
+                         "windows",
+                         "gui",
+                         "linux"
+                     ],
+    "repos":  {
+                  "hive":  "G:/dswork/duan-light-merge/hive",
+                  "lightharness":  "G:/dswork/duan-light-merge/lightharness",
+                  "light":  "G:/dswork/duan-light-merge/light-merge"
+              },
+    "launch":  "",
+    "worktrees":  "C:/Users/skywalk/.hive/wt/dumate-win",
+    "max_concurrency":  1,
+    "created":  "2026-10-26T11:51:32+08:00"
 }

@@ -1,29 +1,30 @@
-{
-  "name": "fb88-dsh",
-  "host": "fb98",
-  "command": "/home/skywalk/dswork/hive/scripts/dsh-exec",
-  "mode": "exec",
-  "manual": false,
-  "abilities": [
-    "code",
-    "ci",
-    "docs",
-    "verify",
-    "python",
-    "pytest"
-  ],
-  "capabilities": [
-    "freebsd",
-    "python",
-    "compiler",
-    "pytest"
-  ],
-  "repos": {
-    "hive": "/home/skywalk/dswork/hive",
-    "lightharness": "/home/skywalk/dswork/lightharness"
-  },
-  "launch": "",
-  "worktrees": "/home/skywalk/.hive/wt",
-  "max_concurrency": 1,
-  "created": "2026-10-23T11:06:26+08:00"
+﻿{
+    "name":  "fb88-dsh",
+    "host":  "fb98",
+    "command":  "/home/skywalk/dswork/hive/scripts/dsh-exec",
+    "mode":  "exec",
+    "manual":  false,
+    "abilities":  [
+                      "code",
+                      "ci",
+                      "docs",
+                      "verify",
+                      "python",
+                      "pytest"
+                  ],
+    "capabilities":  [
+                         "freebsd",
+                         "python",
+                         "compiler",
+                         "pytest"
+                     ],
+    "repos":  {
+                  "hive":  "/home/skywalk/dswork/hive",
+                  "lightharness":  "/home/skywalk/dswork/lightharness",
+                  "light":  "/home/skywalk/dswork/light"
+              },
+    "launch":  "",
+    "worktrees":  "/home/skywalk/.hive/wt",
+    "max_concurrency":  1,
+    "created":  "2026-10-23T11:06:26+08:00"
 }
