@@ -1,0 +1,32 @@
+{
+  "task": "T-0166",
+  "agent": "codearts-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0166",
+  "base": "main",
+  "head": "f82d1112fb351bd642dabbf64742b489ece798f5",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-27T08:34:36+08:00",
+  "finished_at": "2026-10-27T08:47:13+08:00",
+  "duration_s": 757.3,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import pathlib; a=pathlib.Path('docs/AGENT快速上手.md').read_text(encoding='utf-8'); b=pathlib.Path('docs/操作手册.md').read_text(encoding='utf-8'); assert '## FAQ' in a and '## 术语表' in a, 'AGENT快速上手 缺 FAQ/术语表'; assert '## FAQ' in b, '操作手册 缺 FAQ'\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0166 文档：补全 AGENT 快速上手与操作手册（FAQ + 术语表 + 已知坑汇总）\n\n## 做了什么\n\n只在两篇既有文档**末尾追加**内容，未改动任何既有小节、未新建文件、未动 `.py`：\n\n- `docs/AGENT快速上手.md`：追加 `## FAQ`（7 条）与 `## 术语表`。\n  - FAQ 覆盖任务卡点名的全部项：`claimable: []` 的三种含义（真没卡 / 能力不匹配 / 被领走）、\n    verify 必须先手跑、别自己 `git commit`、`--dir` 写在 `mcp` 后、`block` vs `abort`、`paths` 越界，\n    另补一条「租约快到期怎么办」。\n  - 术语表按出现频率排：task 卡、inbox、claim 租约、worktree、lease、dispatch、land、watchdog、gc、res/结果。\n- `docs/操作手册.md`：追加 `## FAQ`（4 条，面向人/总控视角）。\n  - 怎么写卡不踩反模式、并行度怎么定（「并行度 = 你能审得过来的 diff 数」）、\n    `land` 撞冲突怎么办、卡卡在 `assigned`/`running` 怎么回收（watchdog + 重试熔断）。\n- 每条 FAQ 都以「详见 §x」或「详见 `docs/lessons.md`」收尾，并适度引用 `lessons.md` 真实案例\n  （T-0114 验收命令写错、T-0112 paths 越界、T-0102 僵尸卡、83 分钟文档卡），不整段搬运。\n\n## 验证\n\n手跑卡面 verify（cwd = worktree）：\n\n```\npython3 -c \"import pathlib; a=pathlib.Path('docs/AGENT快速上手.md').read_text(encoding='utf-8'); b=pathlib.Path('docs/操作手册.md').read_text(encoding='utf-8'); assert '## FAQ' in a and '## 术语表' in a, 'AGENT快速上手 缺 FAQ/术语表'; assert '## FAQ' in b, '操作手册 缺 FAQ'\"\n```\n\n→ 退出码 0（VERIFY_PASS）。`git status` 只显示这两篇文档被修改，无越界文件。\n\n## 没做 / 风险\n\n- 未改动既有章节的编号与内容，只做末尾追加，原文档结构保持不变。\n- 未触碰 `docs/锁与冲突模型.md`（T-0164）与 `docs/架构与排障全景.md`（T-0165）。\n- 未改任何 `.py`。\n- 已知：worktree 相对 origin/main 落后 3 个提交（别人已推的卡），不影响本卡分支与验收；\n  `land` 阶段若有冲突由总控按 §5.1 处理。",
+  "error": "",
+  "declared_paths": [
+    "docs/AGENT快速上手.md",
+    "docs/操作手册.md"
+  ],
+  "changed_files": [
+    "docs/AGENT快速上手.md",
+    "docs/操作手册.md"
+  ],
+  "out_of_paths": []
+}
