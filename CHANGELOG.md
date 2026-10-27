@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.9.14 — 2026-10-27
+
+### Added
+
+- **`hive dash`（别名 `dashboard`）：看板服务的统一入口**。`ensure`（默认，没起就起）/
+  `start` / `stop` / `restart` / `status` / `url`。命令行走 `scripts/dashboard-service.sh`，
+  与应用内拉起共用一套 PID 与日志，不搞第二套实现。
+- **按需自愈：任何 `hive` 命令都顺手把看板兜住**。入口处做一次 TCP 探活（0.25s），
+  不通就在后台脱离会话拉起服务；`HIVE_DASH_AUTOSTART=0` 关闭，`HIVE_DASH_AUTOSTART_TTL`
+  控制重试节流（默认 300s，避免服务真起不来时被反复 spawn）。失败一律静默，
+  绝不让兜底逻辑把正常命令带崩；测试环境（`PYTEST_CURRENT_TEST`）自动跳过。
+
+### Fixed
+
+- **`install-autostart.sh` 不再在"没有 init 的环境"里假装成功**。背景：本机 2026-10-27
+  实测，写进 crontab 的 `@reboot` 行**一次都没触发**——探针任务等 2.5 分钟零执行、
+  `~/.hive/logs/dashboard-cron.log` 从未生成。根因是 hive 跑在 `chroot /compat/ubuntu`
+  的 linuxulator 兼容层里：`uname` 报 Linux，PID 1 却是宿主的 FreeBSD init，
+  本层内 systemd 是 offline、也没有服务于我们 crontab 的 cron。
+  - 新增 `in_freebsd_linux_compat()`：`uname=Linux` 但 `/proc/version` 含 FreeBSD 字样即判定为兼容层。
+  - 新增 `cron_serves_us()`：比对 `/proc/<pid>/root` 而不是只 `pgrep cron`——FreeBSD 各 jail
+    共享 PID 空间，11 个 `/usr/sbin/cron` 里 10 个属于 `/usr/jails/lims-*`，剩下 root=`/`
+    的那个是宿主自己的 cron，从 chroot 里根本分不清。因此兼容层一律不走 cron 分支。
+  - 检测不到服务管理器时 **exit 3** 并打印两条真正可行的路径（按需自愈 / 宿主 rc.d），
+    不再静默写一张没人执行的 crontab；`--force-cron` 保留强行安装的旁路。
+
+### Added（宿主侧）
+
+- `scripts/freebsd-host/hive_dashboard`：FreeBSD 宿主 rc.d 服务，开机经
+  `chroot /compat/ubuntu` + `su <user>` 调 `dashboard-service.sh start`。不套 `daemon(8)`
+  ——服务脚本自己会 setsid/nohup 脱离会话，再套一层会在脚本退出时误判服务已死。
+- `scripts/freebsd-host/install-host-autostart.sh`：在宿主机以 root 运行，装 rc 脚本、
+  `sysrc` 写开关、启动并用 `fetch` 探活；`--dry-run` / `--uninstall` 齐备。
+  在非 FreeBSD 上直接拒绝执行（防止在兼容层里误跑）。
+
 ## 0.9.13 — 2026-10-25
 
 ### Fixed

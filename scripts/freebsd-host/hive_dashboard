@@ -1,0 +1,82 @@
+#!/bin/sh
+#
+# 蜂巢 Hive 看板 —— FreeBSD 宿主侧 rc.d 服务（开机自启的真正落点）
+#
+# 为什么需要它：hive 跑在 /compat/ubuntu 这种 Linux 兼容层里时，那一层**没有 init**
+# （systemd 是 offline、cron 守护进程不跑），在层内装 @reboot 是无效的。真正的
+# 开机动作只能由宿主 FreeBSD 的 rc 发起 —— 就是本脚本。
+#
+# 用法（全部在宿主上、以 root 执行）：
+#   sudo sh scripts/freebsd-host/install-host-autostart.sh
+#
+# 手工安装三步：
+#   sudo install -m 755 scripts/freebsd-host/hive_dashboard /usr/local/etc/rc.d/hive_dashboard
+#   sudo sysrc hive_dashboard_enable=YES
+#   sudo service hive_dashboard start
+#
+# 可调 rc.conf 变量：
+#   hive_dashboard_enable    YES/NO（默认 NO）
+#   hive_dashboard_chroot    兼容层根目录（默认 /compat/ubuntu）
+#   hive_dashboard_dir       看板脚本所在仓库路径（默认 /home/skywalk/dswork/hive）
+#   hive_dashboard_user      以哪个用户跑（默认 skywalk）
+#   hive_dashboard_port      监听端口（默认 8791）
+#   hive_dashboard_interval  状态刷新间隔秒数（默认 20）
+#
+# 说明：这里不接 daemon(8) —— dashboard-service.sh 自己会 setsid/nohup 脱离会话，
+#       再套一层 daemon 反而会在脚本退出时误判服务已死。启停交给服务脚本的
+#       start/stop/status 三个动作做，rc.d 只负责在对的时机以对的用户调用它。
+
+# PROVIDE: hive_dashboard
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="hive_dashboard"
+rcvar="hive_dashboard_enable"
+desc="蜂巢 Hive 任务看板（跑在 Linux 兼容层里）"
+
+load_rc_config $name
+
+: ${hive_dashboard_enable:="NO"}
+: ${hive_dashboard_chroot:="/compat/ubuntu"}
+: ${hive_dashboard_dir:="/home/skywalk/dswork/hive"}
+: ${hive_dashboard_user:="skywalk"}
+: ${hive_dashboard_port:="8791"}
+: ${hive_dashboard_interval:="20"}
+
+start_cmd="hive_dashboard_start"
+stop_cmd="hive_dashboard_stop"
+status_cmd="hive_dashboard_status"
+extra_commands="status"
+
+# 兼容层里跑命令的统一入口：chroot 进去，切到目标用户，带好端口/间隔。
+hive_dashboard_do()
+{
+    /usr/sbin/chroot "${hive_dashboard_chroot}" /bin/sh -c \
+        "exec /usr/bin/su ${hive_dashboard_user} -c 'PORT=${hive_dashboard_port} INTERVAL=${hive_dashboard_interval} ${hive_dashboard_dir}/scripts/dashboard-service.sh $1'"
+}
+
+hive_dashboard_start()
+{
+    if [ ! -x "${hive_dashboard_chroot}${hive_dashboard_dir}/scripts/dashboard-service.sh" ]; then
+        echo "${name}: 找不到 ${hive_dashboard_chroot}${hive_dashboard_dir}/scripts/dashboard-service.sh" >&2
+        echo "${name}: 请在 rc.conf 里把 hive_dashboard_dir / hive_dashboard_chroot 指对" >&2
+        return 1
+    fi
+    echo "Starting ${name}."
+    hive_dashboard_do start
+}
+
+hive_dashboard_stop()
+{
+    echo "Stopping ${name}."
+    hive_dashboard_do stop
+}
+
+hive_dashboard_status()
+{
+    hive_dashboard_do status
+}
+
+run_rc_command "$1"

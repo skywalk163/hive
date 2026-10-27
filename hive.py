@@ -48,7 +48,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.13"
+VERSION = "0.9.14"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -3480,6 +3480,185 @@ def cmd_work(args) -> None:
     w.loop(once=args.once, interval=args.interval)
 
 
+# --------------------------------------------------------------------------- #
+# 看板服务的「按需自愈」
+#
+# 背景（2026-10-27 实测）：本项目常年跑在 `chroot /compat/ubuntu` 这类没有 init
+# 的 Linux 兼容层里，systemd --user 是 offline、cron 守护进程根本不跑、
+# `crontab @reboot` 写进去也是一张废纸（日志文件从未生成）。所以「开机自启」在
+# 这种环境里没有落点。
+#
+# 换个思路：不追求「开机就在」，而是「用的时候就一定在」——每次跑 hive 命令
+# 顺手探一下端口，不通就幂等拉起 dashboard-service.sh。三个平台同一套逻辑，
+# 不依赖 init/cron/launchd。
+#
+# 想关掉：HIVE_DASH_AUTOSTART=0
+# 想调探测频率（秒）：HIVE_DASH_AUTOSTART_TTL（默认 300，避免反复 spawn）
+# 想换端口：HIVE_DASHBOARD_PORT（默认 8791）
+# --------------------------------------------------------------------------- #
+DASH_DEFAULT_PORT = 8791
+DASH_AUTOSTART_SKIP = {"dash", "dashboard", "init"}
+
+
+def dashboard_port() -> int:
+    try:
+        return int(os.environ.get("HIVE_DASHBOARD_PORT") or DASH_DEFAULT_PORT)
+    except (TypeError, ValueError):
+        return DASH_DEFAULT_PORT
+
+
+def dashboard_url(port: int | None = None) -> str:
+    return f"http://127.0.0.1:{port or dashboard_port()}/"
+
+
+def dashboard_probe(port: int | None = None, timeout: float = 0.25) -> bool:
+    """纯 TCP 探活：连得上就当在跑。不走 HTTP 是为了不去碰 /healthz 那种不存在的路由。"""
+    import socket
+    try:
+        sock = socket.socket()
+        sock.settimeout(timeout)
+        try:
+            return sock.connect_ex(("127.0.0.1", port or dashboard_port())) == 0
+        finally:
+            sock.close()
+    except OSError:
+        return False
+
+
+def dashboard_script() -> Path | None:
+    root = Path(__file__).resolve().parent / "scripts"
+    for name in ("dashboard-service.sh", "dashboard-service.cmd"):
+        cand = root / name
+        if cand.exists():
+            return cand
+    return None
+
+
+def _dashboard_run_script(action: str, port: int | None = None,
+                          interval: int | None = None) -> int:
+    """调用服务脚本（PID/日志/幂等都在脚本里，命令行走同一条路，避免两套实现打架）。"""
+    script = dashboard_script()
+    if script is None:
+        print("找不到 scripts/dashboard-service.sh（或 .cmd）", file=sys.stderr)
+        return 1
+    env = dict(os.environ)
+    env["PORT"] = str(port or dashboard_port())
+    if interval:
+        env["INTERVAL"] = str(interval)
+    if script.suffix == ".cmd":
+        cmd = ["cmd", "/c", str(script), action]
+    else:
+        cmd = ["/bin/sh", str(script), action]
+    try:
+        return subprocess.run(cmd, env=env, timeout=120).returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"执行 {script.name} {action} 失败：{exc}", file=sys.stderr)
+        return 1
+
+
+def _dashboard_spawn(port: int | None = None, interval: int | None = None) -> bool:
+    """脱离当前会话后台拉起，绝不阻塞调用方（dashboard 起来可能要 1~2 秒）。"""
+    script = dashboard_script()
+    if script is None:
+        return False
+    env = dict(os.environ)
+    env["PORT"] = str(port or dashboard_port())
+    if interval:
+        env["INTERVAL"] = str(interval)
+    if script.suffix == ".cmd":
+        cmd = ["cmd", "/c", str(script), "start"]
+    else:
+        cmd = ["/bin/sh", str(script), "start"]
+    kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+              "stderr": subprocess.DEVNULL, "env": env, "cwd": str(Path(__file__).resolve().parent)}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | \
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen(cmd, **kwargs)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def dashboard_ensure(port: int | None = None, wait: float = 0.0,
+                     force: bool = False) -> bool:
+    """确保看板在跑。已在跑→秒返回；刚试过→按 TTL 节流；其余→后台拉起后可选等待就绪。"""
+    port = port or dashboard_port()
+    if dashboard_probe(port):
+        return True
+    stamp_dir = DEFAULT_STATE / "run"
+    stamp = stamp_dir / "dash-ensure.stamp"
+    try:
+        ttl = float(os.environ.get("HIVE_DASH_AUTOSTART_TTL") or 300)
+    except ValueError:
+        ttl = 300.0
+    if not force and ttl > 0:
+        try:
+            if time.time() - stamp.stat().st_mtime < ttl:
+                return False   # 刚拉过还没起来，别在几秒内狂 spawn
+        except OSError:
+            pass
+    try:
+        stamp_dir.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    except OSError:
+        pass
+    _dashboard_spawn(port)
+    deadline = time.time() + max(0.0, wait)
+    while time.time() < deadline:
+        if dashboard_probe(port, timeout=0.1):
+            return True
+        time.sleep(0.2)
+    return dashboard_probe(port)
+
+
+def _dashboard_autostart(args) -> None:
+    """挂在 main() 入口：任何子命令都顺手把看板兜住，失败绝不影响主流程。"""
+    if os.environ.get("HIVE_DASH_AUTOSTART", "1").lower() in ("0", "false", "no", "off"):
+        return
+    # 测试期间不要偷偷拉起后台服务：既污染环境，也可能占住 8791 端口。
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("HIVE_TESTING"):
+        return
+    name = getattr(getattr(args, "func", None), "__name__", "")
+    name = name[4:] if name.startswith("cmd_") else ""
+    if name in DASH_AUTOSTART_SKIP:
+        return
+    try:
+        dashboard_ensure()
+    except Exception:      # noqa: BLE001 —— 兜底自愈绝不能把正常命令带崩
+        pass
+
+
+def cmd_dash(args) -> int:
+    action = getattr(args, "action", "ensure") or "ensure"
+    port = args.port or dashboard_port()
+    if action == "url":
+        print(dashboard_url(port))
+        return 0
+    if action == "status":
+        return _dashboard_run_script("status", port)
+    if action == "stop":
+        return _dashboard_run_script("stop", port)
+    if action == "restart":
+        _dashboard_run_script("stop", port)
+        return _dashboard_run_script("start", port, args.interval)
+    # ensure / start
+    if dashboard_probe(port):
+        print(f"看板已在运行：{dashboard_url(port)}")
+        return 0
+    if action == "ensure":
+        ok = dashboard_ensure(port, wait=max(1.0, float(args.wait)), force=True)
+        if ok:
+            print(f"看板已就绪：{dashboard_url(port)}")
+            return 0
+        print(f"看板未能起来，看日志：{DEFAULT_STATE / 'logs' / 'dashboard.log'}", file=sys.stderr)
+        return 1
+    return _dashboard_run_script("start", port, args.interval)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="hive", description="多机 AI Agent 协同任务总线")
     p.add_argument("--dir", default=os.environ.get("HIVE_DIR", "."),
@@ -3616,6 +3795,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_status)
 
+    s = sub.add_parser("dash", aliases=["dashboard"],
+                       help="看板服务：ensure=没起就起（默认）/ start / stop / restart / status / url")
+    s.add_argument("action", nargs="?", default="ensure",
+                   choices=["ensure", "start", "stop", "restart", "status", "url"])
+    s.add_argument("--port", type=int, default=None, help="覆盖端口（默认 $HIVE_DASHBOARD_PORT 或 8791）")
+    s.add_argument("--interval", type=int, default=None, help="状态刷新间隔秒数")
+    s.add_argument("--wait", type=float, default=5.0, help="ensure 时最多等多久就绪（秒）")
+    s.set_defaults(func=cmd_dash)
+
     s = sub.add_parser("retry", help="重试任务（清掉结果与租约）")
     s.add_argument("task")
     s.add_argument("--agent")
@@ -3720,6 +3908,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    _dashboard_autostart(args)
     try:
         rc = args.func(args)
         # mcp 这类长驻子命令会自己返回退出码，其余子命令返回 None 当 0
