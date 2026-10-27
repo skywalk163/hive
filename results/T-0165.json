@@ -1,0 +1,30 @@
+{
+  "task": "T-0165",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0165",
+  "base": "main",
+  "head": "7b8246761946fdbf05e209fd86738453dd6b6b9d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-27T08:34:22+08:00",
+  "finished_at": "2026-10-27T08:39:10+08:00",
+  "duration_s": 288.6,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import pathlib; t=pathlib.Path('docs/架构与排障全景.md').read_text(encoding='utf-8'); need=['## 架构总览','## dispatch','## worker','## claim 与租约','## land 与合流','## watchdog 与 gc','## 排障表']; missing=[s for s in need if s not in t]; assert not missing, f'缺少必备小节: {missing}'\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0165 文档：hive 全链路架构与排障全景\n\n## 做了什么\n\n- 新增 `docs/架构与排障全景.md`（463 行，8 节），把散在四篇文档里的概念串成一条链：\n  写卡 → dispatch → worker → claim 租约 → land 合流 → watchdog/gc。\n- 内容依据是**通读 `hive.py` 现行实现**（`cmd_dispatch` / `Worker.loop|pending|claim|run_task` /\n  `land_one` / `cmd_watchdog` / `cmd_gc` / `commit_file_to_ref`），不是从旧文档转抄，因此纠正/补充了几处：\n  - 三套 git ref（`claim/<tid>`、`res/<tid>`、`task/<tid>`）各自装什么、谁写、何时删；\n  - dispatch 的**八道闸**逐条列判据与提示原文（repo 只派 hive、needs、depends_on、repos 登记、\n    manual/verify 模式、`max_concurrency` 负载、`paths` 冲突 vs `HIVE_MAX_PER_REPO`）；\n  - claim 的三个入口（`assign`/`take`/`claim`）与「先抢锁后 assign」铁律，附 T-0146/T-0147/T-0160\n    三次踩坑的来龙去脉；\n  - `gc` 与 `watchdog` 的分工：**gc 按 `claimed_at` 判龄、不看心跳**（长任务用默认 180 分钟会被\n    误删 claim，已在排障表里给出 `--minutes 1440` 的规避）；\n  - land 的输出状态表（含 `merged-not-closed` 的正确收尾动作）。\n- 排障表 22 行，覆盖卡面点名的六类（dispatch 不派、land 报本地仓不可用、卡一直 assigned、\n  验收恒过、两台机改同文件、中心仓不可达），另补 claim 抢不到、submit 无 owner、worktree 残留、\n  paths 越界、`unable to read sha1 file`、MCP `--dir`/`reset --hard` 两坑等。\n\n## 与既有文档的分工（避免重复）\n\n| 文档 | 职责 | 本篇怎么处理 |\n|---|---|---|\n| `多机并行开发.md` | 多机部署、host/repos、为什么文件不打架 | 只引用（§1 四根支柱、§2 host/repos、§4.2 dispatch、§4.4 land），不复述部署步骤 |\n| `操作手册.md` | 人视角的命令全集、初始化、land/audit、状态机、安全 | 只引用（§5.1–5.3、§8），本篇只讲\"为什么\"和\"链路上在哪一环\" |\n| `AGENT快速上手.md` | agent 视角的领卡/交活/MCP 工具表 | 只引用（§8 block vs abort） |\n| `锁与冲突模型.md`（T-0164） | paths / 目录前缀 / 文件级 locks 的细则 | 只做前向引用，不写细则 |\n| **本篇** | **全局图 + 一条卡的一生 + 各组件职责 + 排障总表** | 新增，作为\"第一读\"与排障入口 |\n\n## 验证\n\n- 卡面 verify 原样跑过：`python -c \"...need=[...]; assert not missing\"` → **VERIFY OK**\n  （七个必备小节全在；`grep '^## '` 确认章节顺序为 0/架构总览/dispatch/worker/claim 与租约/\n  land 与合流/watchdog 与 gc/排障表/一页自检）。\n- 只改了 `docs/架构与排障全景.md` 一个文件（`git status` 确认，未越界到 `.py`/`scripts/`/别的文档）。\n\n## 没做 / 风险\n\n- **发现一处文档与代码不一致，已在文内标注但未改**：`操作手册.md` §5.1 写「`--all` 遇到冲突就\n  停下」，而 `cmd_land()` 是 `[land_one(t) for t in targets]` 逐张尝试、没有 `break`。本篇按代码\n  描述并加了一行「口径差异」提示；统一这处措辞属于改 `操作手册.md`，不在本卡 paths 内。\n- `docs/design-worker-parallel.md`（T-0161）与 `docs/锁与冲突模型.md`（T-0164）尚未入库，\n  本篇对它们的引用是前向引用，若那两张卡失败，需回来调整链接。\n- worker 内部并发落地（T-0162）后，§worker「内部并发」小节需要更新：`max_concurrency` 的语义会\n  从\"分派侧上限\"变成\"worker 自身上限\"。",
+  "error": "",
+  "declared_paths": [
+    "docs/架构与排障全景.md"
+  ],
+  "changed_files": [
+    "docs/架构与排障全景.md"
+  ],
+  "out_of_paths": []
+}
