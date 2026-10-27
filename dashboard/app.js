@@ -9,14 +9,18 @@
   var TICK_MS = 30000;      // 相对时间（已领取 / 租约剩余）的自行重算间隔
   var STORE_THEME = 'hive.theme';
   var STORE_AUTO = 'hive.autoRefresh';
+  var RECENT_WINDOW_MS = 14 * 24 * 3600 * 1000;  // 「最近完成」窗口：完成于近 14 天
+  var MAX_RECENT = 15;                            // 「最近完成」最多展示条数，超出留在「已关闭」
 
-  // 五列，从左到右；判定顺序：已关闭 → 异常 → 待合并 → 进行中 → 待领取
+  // 六列，从左到右；判定顺序：已关闭 → 异常 → 待合并 → 进行中 → 待领取
+  // recent（最近完成）从 closed 里捞出「近 14 天完成」的卡，默认展开，不用翻归档
   var COLUMNS = [
     { key: 'ready', title: '待领取', hint: 'state = ready 且无人抢锁' },
     { key: 'running', title: '进行中', hint: '已抢锁 / assigned / running，暂无结果' },
     { key: 'merging', title: '待合并', hint: 'result_status = done，state 还不是 done' },
     { key: 'abnormal', title: '异常', hint: 'failed / blocked / 租约过期' },
-    { key: 'closed', title: '已关闭', hint: 'state = done（默认折叠）', collapsible: true }
+    { key: 'recent', title: '最近完成', hint: 'state = done 且完成于近 14 天（按完成时间倒序）' },
+    { key: 'closed', title: '已关闭', hint: 'state = done 且完成超过 14 天（默认折叠）', collapsible: true }
   ];
   var COL_TITLE = {};
   COLUMNS.forEach(function (c) { COL_TITLE[c.key] = c.title; });
@@ -105,6 +109,7 @@
       stale: !!t.stale,
       depends_on: Array.isArray(t.depends_on) ? t.depends_on.slice() : [],
       result_status: t.result_status || '',
+      finished_at: t.finished_at || '',
       duration_s: Number(t.duration_s) || 0,
       head: t.head || '',
       verify: Array.isArray(t.verify) ? t.verify.slice() : [],
@@ -125,11 +130,25 @@
 
   /** 列的单向判定，一张卡只落一列 */
   function classify(t) {
-    if (t.state === 'done') return 'closed';
+    if (t.state === 'done') {
+      // 近 14 天完成的归「最近完成」，更早的落到「已关闭」归档；无完成时间一律进归档
+      var fin = parseTime(t.finished_at);
+      if (fin !== null && (Date.now() - fin) <= RECENT_WINDOW_MS) return 'recent';
+      return 'closed';
+    }
     if (t.result_status === 'failed' || t.state === 'blocked' || isStale(t)) return 'abnormal';
     if (t.result_status === 'done') return 'merging';
     if (t.claim_agent || t.state === 'assigned' || t.state === 'running') return 'running';
     return 'ready';
+  }
+
+  /** 「最近完成」列排序：按完成时间倒序（最近的在前），无完成时间沉底，再按 id */
+  function sortRecent(a, b) {
+    var ta = parseTime(a.finished_at), tb = parseTime(b.finished_at);
+    if (ta === null && tb === null) return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);
+    if (ta === null) return 1;
+    if (tb === null) return -1;
+    return tb - ta;
   }
 
   /** P1 优先，其次按 id */
@@ -176,6 +195,7 @@
       var count = root.querySelector('.count');
       var empty = root.querySelector('.col-empty');
       var toggle = null;
+      var more = null;
 
       if (col.collapsible) {
         toggle = document.createElement('button');
@@ -189,7 +209,14 @@
         root.querySelector('.col-head').appendChild(toggle);
       }
 
-      cols[col.key] = { root: root, body: body, count: count, empty: empty, toggle: toggle };
+      if (col.key === 'recent') {
+        more = document.createElement('div');
+        more.className = 'col-more';
+        more.hidden = true;
+        body.appendChild(more);
+      }
+
+      cols[col.key] = { root: root, body: body, count: count, empty: empty, toggle: toggle, more: more, overflow: 0 };
       el.columns.appendChild(root);
     });
   }
@@ -258,8 +285,13 @@
     h += '<span class="chip">' + (ownerOf(t) ? esc(ownerOf(t)) : '未分派') + '</span>';
     h += '</div>';
 
-    var tt = (t.claimed_at || t.lease_until) ? timeLine(t) : '';
-    if (tt) h += '<div class="card-time">' + tt + '</div>';
+    if (t.state === 'done' && t.finished_at) {
+      var fin = parseTime(t.finished_at);
+      if (fin !== null) h += '<div class="card-time">完成于 ' + relTime(fin) + '</div>';
+    } else {
+      var tt = (t.claimed_at || t.lease_until) ? timeLine(t) : '';
+      if (tt) h += '<div class="card-time">' + tt + '</div>';
+    }
 
     if (col === 'merging' || col === 'abnormal' || t.result_status) {
       var rl = resultLine(t);
@@ -426,10 +458,19 @@
 
     var counts = {};
     COLUMNS.forEach(function (c) {
-      var list = groups[c.key].sort(sortTasks);
-      counts[c.key] = list.length;
-      cols[c.key].count.textContent = list.length;
+      var list = groups[c.key];
+      var overflow = 0;
+      if (c.key === 'recent') {
+        list = list.slice().sort(sortRecent);
+        if (list.length > MAX_RECENT) { overflow = list.length - MAX_RECENT; list = list.slice(0, MAX_RECENT); }
+      } else {
+        list = list.sort(sortTasks);
+      }
+      // 统计与角标按「完整归属」计（含被截断的近期完成），避免数字对不上
+      counts[c.key] = groups[c.key].length;
+      cols[c.key].count.textContent = groups[c.key].length;
       cols[c.key].list = list;
+      cols[c.key].overflow = overflow;
 
       if (cols[c.key].toggle) {
         cols[c.key].toggle.textContent = state.closedOpen
@@ -438,7 +479,15 @@
         cols[c.key].toggle.setAttribute('aria-expanded', String(state.closedOpen));
         cols[c.key].body.hidden = !state.closedOpen;
       }
-      if (!cols[c.key].body.hidden) syncList(cols[c.key]);
+      if (!cols[c.key].body.hidden) {
+        syncList(cols[c.key]);
+        var m = cols[c.key].more;
+        if (m) {
+          m.hidden = overflow <= 0;
+          if (overflow > 0) m.textContent = '还有 ' + overflow + ' 条更早的近期完成（本列仅展示最近 ' + MAX_RECENT + ' 条）';
+          cols[c.key].body.appendChild(m);  // 移到末尾，避免压在卡片前
+        }
+      }
     });
 
     renderStats(counts);
@@ -574,11 +623,16 @@
     var leaseText = t.lease_until
       ? dtf.format(new Date(t.lease_until)) + (stale ? '（已过期 ' + humanDuration(Date.now() - parseTime(t.lease_until)) + '）' : '（有效）')
       : '';
-    h += kvBlock('时间线', [
+    var timeRows = [
       ['抢锁时间', t.claimed_at ? dtf.format(new Date(t.claimed_at)) : ''],
       ['租约到期', leaseText],
       ['租约状态', t.lease_until ? (stale ? '已过期' : '有效') : '无租约']
-    ]);
+    ];
+    if (t.state === 'done' && t.finished_at) {
+      var finMs = parseTime(t.finished_at);
+      timeRows.unshift(['完成时间', finMs ? dtf.format(new Date(finMs)) : '']);
+    }
+    h += kvBlock('时间线', timeRows);
 
     h += '</div>';
     return h;

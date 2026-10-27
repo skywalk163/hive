@@ -195,7 +195,7 @@ body {
 /* ---------------- 看板 ---------------- */
 .columns {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px;
   align-items: start;
 }
@@ -230,6 +230,8 @@ body {
 .column[data-key="running"] .dot { background: var(--accent); }
 .column[data-key="merging"] .dot { background: var(--ok); }
 .column[data-key="abnormal"] .dot { background: var(--danger); }
+.column[data-key="recent"] .dot { background: var(--warn); }
+.column[data-key="recent"] .col-head { background: var(--warn-bg); }
 .column[data-key="closed"] .dot { background: #6f7b8a; }
 
 .col-toggle {
@@ -247,6 +249,11 @@ body {
 
 .col-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; min-height: 44px; }
 .col-empty { font-size: 12px; color: var(--muted); text-align: center; padding: 6px 0; }
+.col-more {
+  font-size: 11px; color: var(--muted); text-align: center;
+  padding: 6px 4px 2px; margin-top: 2px;
+  border-top: 1px dashed var(--border);
+}
 
 /* ---------------- 卡片 ---------------- */
 .card {

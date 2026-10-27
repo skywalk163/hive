@@ -1921,6 +1921,7 @@ class Hive:
                 "stale": stale,
                 "result": res.get("status", ""),
                 "result_status": res.get("status", ""),
+                "finished_at": res.get("finished_at") or "",
                 "duration_s": res.get("duration_s", 0),
                 "head": res.get("head") or "",
                 "verify": res.get("verify") or [],
