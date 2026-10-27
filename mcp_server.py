@@ -23,6 +23,7 @@ import contextlib
 import json
 import os
 import sys
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -325,6 +326,7 @@ class HiveMcp:
         self.hive_dir = hive_dir
         self.agent = agent
         self.role = role if role in ("worker", "controller") else "worker"
+        self._last_sync = 0.0   # 上次 fetch+reset 的时间（见 hive() 的 TTL 说明）
 
     @property
     def is_controller(self) -> bool:
@@ -332,14 +334,22 @@ class HiveMcp:
 
     # -- 底层 -------------------------------------------------------------- #
     def hive(self) -> Hive:
-        """每次调用都拉最新的 main。
+        """拿最新的 main。
 
         卡片和 agent 配置是工作区文件，光 fetch 只更新远端引用 —— 必须 reset 才能真正看到
         别人刚推的卡。这个 clone 是 MCP 独占的，reset 不会冲掉任何人的东西。
+
+        但每次工具调用都拉一次太贵（远端慢时 30~60s，客户端会误判成死锁），
+        所以加了 TTL：距上次同步不足 sync_ttl() 秒就跳过。设 HIVE_MCP_SYNC_TTL=0
+        可回到「每次都拉」的旧行为。
         """
         h = Hive(self.hive_dir)
-        h.fetch()
-        git(["reset", "--hard", "-q", "origin/main"], h.dir)
+        ttl = sync_ttl()
+        now_s = time.time()
+        if ttl <= 0 or now_s - self._last_sync >= ttl:
+            h.fetch()
+            git(["reset", "--hard", "-q", "origin/main"], h.dir)
+            self._last_sync = now_s
         return h
 
     def worker(self) -> Worker:
@@ -954,6 +964,39 @@ class McpServer:
         })
 
 
+def sync_ttl() -> float:
+    """MCP 每次工具调用前要不要重新 fetch + reset。
+
+    默认 10 秒：连续调用不必每次都等一次网络往返（实测远端慢时 fetch 要 30~60s，
+    客户端会把「长时间没响应」当成死锁/超时）。设 0 回到「每次都拉」的旧行为
+    —— 最实时，但每次工具调用都要付一次网络往返。
+    """
+    raw = (os.environ.get("HIVE_MCP_SYNC_TTL") or "").strip()
+    if not raw:
+        return 10.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 10.0
+
+
+def force_utf8() -> None:
+    """把 stdout/stderr 强制成 UTF-8。
+
+    Windows 控制台默认是 cp936/GBK：任何非 ASCII 经 print 写出都会被编成 GBK 字节，
+    MCP 客户端按 UTF-8 读就成了乱码（实测表现为记忆里中文全变成 `?`）。
+    协议报文另有 ensure_ascii=True 兜底，这里是第二道保险。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def serve(impl: HiveMcp) -> int:
     server = McpServer(impl)
     for line in sys.stdin:
@@ -967,7 +1010,8 @@ def serve(impl: HiveMcp) -> int:
             continue
         resp = server.handle(msg if isinstance(msg, dict) else {})
         if resp is not None:
-            print(json.dumps(resp, ensure_ascii=False), flush=True)
+            # ensure_ascii=True：报文保持纯 ASCII，彻底不受本地控制台编码影响
+            print(json.dumps(resp, ensure_ascii=True), flush=True)
     return 0
 
 
@@ -1014,6 +1058,8 @@ def main(argv=None) -> int:
     p.add_argument("--source", default=None,
                    help="自动建 clone 时从哪拷（默认同目录下的 hive 仓）")
     args = p.parse_args(argv)
+
+    force_utf8()   # Windows 默认 cp936 会把中文写成 GBK，客户端按 UTF-8 读就乱码
 
     if not args.agent:
         print("hive mcp: 必须指定 --agent（或设 HIVE_AGENT）——server 以某个 agent 的身份运行",
