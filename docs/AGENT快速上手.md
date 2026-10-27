@@ -324,3 +324,74 @@ hive_abort(task_id="T-0131", reason="...") 还回去：让别人能接
 ```
 
 失败先读 `details.hint`，它通常直接告诉你该调哪个工具。
+
+## FAQ
+
+> 面向 agent 的高频疑问，每条给一句「详见」，深挖看对应章节或 `docs/lessons.md`。
+
+**Q1. `claimable: []` / `hive_next` 说没卡，是不是坏了？**
+
+不一定是故障，先分清三种情况（详见 §4.3）：
+
+1. **真没卡** —— 全总线没有 `ready` 的卡，正常。
+2. **能力不匹配** —— 卡的 `needs` 你覆盖不了（例：卡要 `windows`，你只有 `gui/linux`）。
+3. **已被别人领走** —— 卡被人持有租约，看 `hive_list_tasks` 的 `claim_agent` 字段。
+
+排查顺序：`hive_list_tasks` 看全貌 → `hive_stats` 看总体 → `hive_doctor` 看体检。
+
+**Q2. 为什么领卡后要先把 `verify` 命令手跑一遍？**
+
+`lessons.md` 第一条：T-0114 的验收命令**本身写错了**（用了 `sys.exit` 却没 `import sys`），
+`submit` 判 `failed`，代码其实全对。领卡后先手动跑一遍 `verify` 里的每条命令，区分
+「代码没改对」还是「验收命令本身写错」。详见 §4.2。
+
+**Q3. 我能自己 `git commit` 吗？**
+
+别。`hive_submit` 会替你 `commit + push + 跑 verify + 写结果`。自己 `git commit` 会让改动清单和
+summary 对不上，`hive audit` 会标风险。详见 §4.4。
+
+**Q4. `--dir` 到底写在哪？**
+
+**必须写在 `mcp` 子命令后面**：
+
+```sh
+python3 hive.py mcp --agent <名字> --dir /path/to/hive
+```
+
+写在 `mcp` 前面会落进顶层参数、被静默忽略并回退默认 clone，不报错。不确定就看启动那行
+stderr 的 `dir=`。详见 §5.1。
+
+**Q5. 干不下去：`hive_block` 还是 `hive_abort`？**
+
+- `hive_block`：**等外部资源**（真机没装好、依赖卡没完成）。卡变 `blocked`，不会被重派。
+- `hive_abort`：**这活我干不了 / 不该我干**。卡退回 `ready`，别人立刻能接。
+
+判据一句话：**"不是这活的问题，是条件还没到" → block；"这活我干不了" → abort。** 详见 §8。
+
+**Q6. `paths` 越界会怎样？**
+
+只改卡面 `paths` 声明的范围。越界改动会被 worker 提交前的越界检测抓出来；`lessons.md` 里有
+真实案例（T-0112 顺手改 README 但没声明，只能回退重写）。默认只警告（写进结果 `out_of_paths`），
+`HIVE_STRICT_PATHS=1` 或 agent 配 `strict_paths` 时判失败。详见操作手册 §5.3。
+
+**Q7. 租约快到了 / 已经过期怎么办？**
+
+用 `hive_extend_lease(task_id, minutes=60)` 续租，别等过期被 `gc` 回收——回收后你的 worktree 白干。
+详见 §3.2。
+
+## 术语表
+
+新人看的一屏黑话，按出现频率排。
+
+| 术语 | 一句话 |
+|---|---|
+| **task 卡** | `tasks/T-<id>.md`，一张「谁该干什么」的任务单：frontmatter（`paths`/`verify`/`needs`/`depends_on`）+ 正文 |
+| **inbox** | `inbox/<agent>/T-<id>.md`，总控给某台机器的分派信号；worker 扫它发现自己该干的卡 |
+| **claim 租约** | `claim/T-<id>` 分支存在 = 有人正持有这张卡；抢锁靠 `git push` 同一分支的原子性，只有一个成功 |
+| **worktree** | 领卡后你的独立工作目录（`~/.hive/wt/<agent>/<tid>`），不是协调仓本身，改它不影响别人 |
+| **lease（租期）** | 从领卡起计的时限（默认 180 分钟）；到期没续会被 `gc` 回收，可用 `hive_extend_lease` 续 |
+| **dispatch** | 总控的自动分派：按 `needs`/`repo`/`depends_on`/`paths` 冲突把 `ready` 卡派给空闲且能力匹配的 agent |
+| **land** | 把 `done` 的卡合入 `main` 并 close；在临时 worktree 里真跑一遍 merge，冲突不自动解、不 force push |
+| **watchdog** | 自动回收死卡的看门狗：把 orphan / zombie / stale 的孤儿卡退回 `ready` 重派 |
+| **gc** | 回收过期租约（等价清理遗留的 `claim/<tid>` 分支），让卡重新可领 |
+| **res / 结果** | `res/T-<id>` 分支上的 `results/T-<id>.json`：commit 分支、各条 verify 退出码、耗时、summary |
