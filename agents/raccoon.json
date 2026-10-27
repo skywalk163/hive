@@ -10,7 +10,8 @@
     "linux"
   ],
   "repos": {
-    "hive": "/home/skywalk/dswork/hive"
+    "hive": "/home/skywalk/dswork/hive",
+    "lightharness": "/home/skywalk/dswork/lightharness"
   },
   "launch": "",
   "worktrees": "/home/skywalk/.hive/wt/raccoon",
