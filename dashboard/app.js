@@ -83,9 +83,12 @@
     return r ? m + ' 分 ' + r + ' 秒' : m + ' 分';
   }
 
-  /** 相对时间：「刚刚」/「3 分钟前」 */
+  /** 相对时间：「刚刚」/「3 分钟前」；兼容 Date 对象或数字时间戳（毫秒） */
   function relTime(date) {
-    var diff = (date.getTime() - Date.now()) / 1000;
+    if (date == null) return '';
+    var ms = (date instanceof Date) ? date.getTime() : Number(date);
+    if (!isFinite(ms)) return '';
+    var diff = (ms - Date.now()) / 1000;
     var abs = Math.abs(diff);
     if (abs < 45) return rtf.format(Math.round(diff), 'second');
     if (abs < 3600) return rtf.format(Math.round(diff / 60), 'minute');
