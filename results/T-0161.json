@@ -1,0 +1,30 @@
+{
+  "task": "T-0161",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0161",
+  "base": "main",
+  "head": "22edf8f3d6e98c68a483afa2c47fcac97a712faa",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-26T23:40:50+00:00",
+  "finished_at": "2026-10-26T23:51:41+00:00",
+  "duration_s": 651.1,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import pathlib; t=pathlib.Path('docs/design-worker-parallel.md').read_text(encoding='utf-8'); need=['## 模型','## 租约与心跳','## 隔离保证','## 错误隔离','## 与 dispatch 的关系','## 落地建议']; missing=[s for s in need if s not in t]; assert not missing, f'缺少必备小节: {missing}'\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0161 worker 内并行执行多张 exec 卡 —— 设计文档\n\n## 做了什么\n\n- 新增 `docs/design-worker-parallel.md`（约 16k 字符），纯文档，未改任何 `.py` / `scripts/`。\n- 六个必备小节全部齐备：`## 模型` / `## 租约与心跳` / `## 隔离保证` / `## 错误隔离` /\n  `## 与 dispatch 的关系` / `## 落地建议`，另加「一句话结论」和「附录：verify」。\n- 内容基于实际代码写作，不是空谈：核对了 `Worker`(`hive.py:2328`)、`loop`(2804)、\n  `run_task`(2567)、`lease_heartbeat`(2485)、`_heartbeat_loop`(2503)、`_exec`(2749)、\n  `_write_result`(2795)、`cmd_dispatch`(1141)、`max_concurrency` 三处读取(1216/1240/1263)、\n  以及 `多机并行开发.md` §5 的三层保障表。\n\n## 推荐方案（明确结论，不停留在罗列选项）\n\n> **线程池 + 每任务一条心跳线程 + 一把 worker 级 git 串行锁，并发上限取 `max_concurrency`（默认仍为 1）。**\n\n三条硬约束：\n\n1. **有槽位才 claim**：用 `Semaphore(n)` 卡住 claim，绝不一气把 inbox 占光再排队——\n   那会占住别的 agent 也能干的卡、白白烧租约（这是全文最容易被写错的一处，§5.3 单列）。\n2. **并行的是 agent 子进程，不是 git**：把 `sync_main` / `fetch` / `commit_file_to_ref` /\n   worktree add·remove·prune 全部收进一把 `RLock`，并把 `run_task` 里每任务一次的\n   `fetch --prune`(2580) 提到每轮一次按 repo 去重。\n3. **默认 1**：不配置时行为与今天逐字节一致，`max_concurrency` 是显式阀门。\n\n关键取舍记录：进程池被否（exec 是 `subprocess.Popen` + `communicate()`，真并行在 OS 层、\nGIL 不在关键路径；进程池还要序列化 `Worker`/`Hive`，Windows spawn 语义另算）；\n「单条 refresher 线程 multiplex 所有 tid」也被否（节奏被最慢的卡绑死、异常要收口到每卡粒度、\n排查时看不出谁没续上），但保留了它的 fetch 合并技巧作为后续优化项。\n\n结论之一对 T-0162 很省事：**并行后 `dispatch` 一行代码都不用改**，\n`max_concurrency` 从「分派侧上限」自然收敛为「worker 自身上限」，两端共用同一个数、不重复限流。\n\n## 核心风险（写进 risk 登记表的）\n\n- **git index/lock 竞争**（同一协调仓被 N 条心跳同时 fetch/commit）——最容易先炸，靠全局锁兜。\n- **worker 抢占过多卡**导致别的 agent 无卡可干，全局吞吐反降。\n- **worktree 隔离不了仓库外**：`/tmp` 固定名、`~/.cache`、固定端口会让并行任务互踩——\n  约定 agent 只写 `$HIVE_WORKTREE` 内相对路径，可选每任务私有 `TMPDIR`。\n- **kill -9 后租约已被推远**：卡要等 lease 到期才被回收，故建议并行下 `lease_minutes` 放 60–90。\n- 手工 `assign` 可绕过 dispatch 的 paths 检查 → worker 端加软检查兜底，精度问题留给 T-0163。\n\n## 验证\n\n- `verify` 自带命令（校验六个小节齐全）已手动预跑：通过。\n- 未改动任何 `.py` / `scripts/`，未动 `tasks/` 里其它卡；改动仅 `docs/design-worker-parallel.md` 一个文件。\n\n## 没做 / 留给 T-0162\n\n- 没写代码，实现按 `## 落地建议` 的 10 步清单走（含 `tests/test_worker_parallel.py` 的 8 条断言）。\n- `多机并行开发.md` / `AGENT快速上手.md` 的文档同步属于第 10 步，本卡 paths 不含。",
+  "error": "",
+  "declared_paths": [
+    "docs/design-worker-parallel.md"
+  ],
+  "changed_files": [
+    "docs/design-worker-parallel.md"
+  ],
+  "out_of_paths": []
+}
