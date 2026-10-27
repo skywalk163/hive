@@ -1,0 +1,16 @@
+{
+  "task": "T-0182",
+  "agent": "fb88-dsh",
+  "status": "failed",
+  "branch": "task/T-0182",
+  "base": "main",
+  "head": null,
+  "exit_code": 1,
+  "timed_out": false,
+  "started_at": "2026-10-27T22:25:20+08:00",
+  "finished_at": "2026-10-27T22:25:20+08:00",
+  "duration_s": 0,
+  "verify": [],
+  "summary": "agent fb88-dsh 没有配置仓库 'light' 的本地路径",
+  "error": "agent fb88-dsh 没有配置仓库 'light' 的本地路径"
+}
