@@ -43,6 +43,7 @@ import tempfile
 import threading
 import time
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -188,8 +189,16 @@ def run(cmd, cwd=None, check=True, input=None, timeout=None, shell=False, env=No
     return p
 
 
+# 进程内 git 互斥锁：worker 并发跑多张卡时，多个任务线程会同时 fetch / 建 worktree /
+# commit **同一个**代码仓，而 git 对这些是竞争写（实测并发 `git worktree add` 会以
+# 退出码 255 互踩，导致某张卡「创建 worktree 失败」）。用一把全局锁把它们串起来；
+# 只锁 git 通道，不锁 run()：agent 调用（Popen）与 verify 命令仍并行，不影响吞吐。
+_GIT_LOCK = threading.RLock()
+
+
 def git(args, cwd, check=True, input=None):
-    return run(["git", *args], cwd=cwd, check=check, input=input)
+    with _GIT_LOCK:
+        return run(["git", *args], cwd=cwd, check=check, input=input)
 
 
 def git_ok(args, cwd) -> bool:
@@ -347,20 +356,21 @@ def git_net(args, cwd, check=True, input=None):
     走这里：慢机器上大仓的本地操作也可能很慢，误杀比不设超时更糟。
     """
     timeout = net_timeout()
-    try:
-        return run(["git", *args], cwd=cwd, check=check, input=input, timeout=timeout)
-    except HiveError as e:
-        if not getattr(e, "timed_out", False):
-            raise
-        remote = _net_remote(args)
-        limit = f"{timeout:g}s" if timeout else "不限"
-        err = HiveError(
-            f"{e}\n远端: {remote} 在 {limit} 内没有响应。建议先查连通性："
-            f"`git remote -v` 看地址，再 ping / curl 对应端口；确认可用后重试。"
-            f"超时阈值可用环境变量 {NET_TIMEOUT_ENV} 调整（<= 0 关闭）。"
-        )
-        err.timed_out = True
-        raise err from None
+    with _GIT_LOCK:
+        try:
+            return run(["git", *args], cwd=cwd, check=check, input=input, timeout=timeout)
+        except HiveError as e:
+            if not getattr(e, "timed_out", False):
+                raise
+            remote = _net_remote(args)
+            limit = f"{timeout:g}s" if timeout else "不限"
+            err = HiveError(
+                f"{e}\n远端: {remote} 在 {limit} 内没有响应。建议先查连通性："
+                f"`git remote -v` 看地址，再 ping / curl 对应端口；确认可用后重试。"
+                f"超时阈值可用环境变量 {NET_TIMEOUT_ENV} 调整（<= 0 关闭）。"
+            )
+            err.timed_out = True
+            raise err from None
 
 
 def rev_parse(cwd, ref) -> str | None:
@@ -2356,7 +2366,7 @@ class Hive:
 
 class Worker:
     def __init__(self, hive_dir: str, agent_name: str, keep_worktree=False,
-                 hive_state: str | None = None):
+                 hive_state: str | None = None, max_concurrency: int | None = None):
         self.h = Hive(hive_dir)
         self.dir = self.h.dir
         self.name = agent_name
@@ -2376,6 +2386,9 @@ class Worker:
         self.launch = self.cfg.get("launch") or ""
         self.mode = self.cfg.get("mode") or ("manual" if self.cfg.get("manual") else "exec")
         self.manual = self.mode == "manual"
+        # 并发上限：显式参数优先（start-worker.sh --max-concurrency），否则用 agent
+        # 配置的 max_concurrency；1 表示串行（与旧行为逐字一致）。
+        self.max_workers = max(1, int(max_concurrency or self.cfg.get("max_concurrency") or 1))
         if self.mode == "exec" and not self.cmd:
             raise HiveError(f"agent {agent_name} 没配置 command（或设 mode: verify / manual）")
 
@@ -2593,6 +2606,45 @@ class Worker:
                 "summary_file": wt / ".hive" / "summary.md"}
 
     # -- 执行 -------------------------------------------------------------- #
+    def run_tasks(self, tids, max_workers: int | None = None) -> dict:
+        """并发跑多张**已领取**的卡：每张一个任务线程，各自独占自己的 worktree。
+
+        * 并发上限取显式 `max_workers`，否则用 `self.max_workers`
+          （构造时的 `--max-concurrency` 或 agent 配置，默认 1）。
+        * 上限为 1 或只有一张卡时退化回串行 `run_task`，单卡路径与旧行为逐字一致
+          （`hive take` / `hive work` 的单卡语义不变）。
+        * 单任务线程崩溃/超时**只判本卡失败**，就地转成 failed 结果，不拖垮池里其他
+          任务（错误隔离）；每张卡的日志本来就写各自的 `state/logs/<tid>.log`。
+        * 返回 `{tid: result}`，与 `run_task` 的单卡结果同构，便于收集与断言。
+        """
+        tids = list(tids)
+        if not tids:
+            return {}
+        if max_workers is None:
+            max_workers = self.max_workers
+        max_workers = max(1, int(max_workers))
+        if len(tids) == 1 or max_workers == 1:
+            return {tid: self.run_task(tid) for tid in tids}
+
+        results: dict[str, dict] = {}
+        with ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix=f"hive-{self.name}") as pool:
+            futures = {pool.submit(self.run_task, tid): tid for tid in tids}
+            for fut in as_completed(futures):
+                tid = futures[fut]
+                try:
+                    results[tid] = fut.result()
+                except Exception as e:  # noqa: BLE001  错误隔离：只算本卡失败
+                    log(f"{tid} 并发执行异常（不拖垮其他任务）: {e!r}")
+                    try:
+                        card = self.h.card(tid)
+                    except Exception:  # noqa: BLE001  取不到卡也要能落一条失败
+                        card = {}
+                    results[tid] = self._fail(
+                        tid, card, None, f"并发执行异常: {e!r}")
+        return results
+
     def run_task(self, tid: str) -> dict:
         card = self.h.card(tid)
         repo_name = card.get("repo") or ""
@@ -2839,9 +2891,14 @@ class Worker:
                 # 下面本来就 catch 住并继续下一轮，不会崩。
                 self.h.sync_main()
                 pending = self.pending()
+                claimed: list[str] = []
                 for tid, _card in pending:
                     if self.claim(tid):
-                        self.run_task(tid)
+                        claimed.append(tid)
+                if claimed:
+                    # 一轮里可领的卡一次性丢进池子，按 max_concurrency 并发跑；
+                    # 上限为 1 时 run_tasks 退化回逐张串行，行为与旧循环一致。
+                    self.run_tasks(claimed)
                 if once:
                     if not pending:
                         log("没有待办任务")
@@ -3278,7 +3335,8 @@ def cmd_claim(args) -> None:
 
 
 def cmd_work(args) -> None:
-    w = Worker(args.dir, args.agent, keep_worktree=args.keep, hive_state=args.state_dir)
+    w = Worker(args.dir, args.agent, keep_worktree=args.keep, hive_state=args.state_dir,
+               max_concurrency=args.max_concurrency)
     w.loop(once=args.once, interval=args.interval)
 
 
@@ -3508,6 +3566,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--interval", type=int, default=30)
     s.add_argument("--keep", action="store_true", help="保留 worktree 便于排查")
     s.add_argument("--state-dir")
+    s.add_argument("--max-concurrency", type=int, default=None,
+                   help="worker 内并行跑卡的上限（默认取 agent 配置 max_concurrency）")
     s.set_defaults(func=cmd_work)
     return p
 
