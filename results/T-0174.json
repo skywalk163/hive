@@ -1,0 +1,41 @@
+{
+  "task": "T-0174",
+  "agent": "raccoon-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0174",
+  "base": "main",
+  "head": "904994850d025b2847ee2bda5892a90ae64c6971",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-27T14:44:03+08:00",
+  "finished_at": "2026-10-27T15:10:10+08:00",
+  "duration_s": 1567.1,
+  "verify": [
+    {
+      "cmd": "python 运行.py examples/test_智能体指令_0.2.1增量.light",
+      "code": 0,
+      "tail": [
+        "--- 智能体指令 0.2.1-rc.3 增量测试通过 ---"
+      ]
+    },
+    {
+      "cmd": "python 运行.py examples/test_智能体指令.light",
+      "code": 0,
+      "tail": [
+        "--- 智能体指令子系统（模块32）测试通过 ---"
+      ]
+    }
+  ],
+  "summary": "# T-0174 交付说明（B2 路：agent-instructions 指令发现与渲染）\n\n## 结论\n\n按 T-0170 增量清单（已 land）§3.1 / §6-5，B2 实际只承接 **1 个移植项、5 个上游文件**：`context/agent-instructions`。卡面原写的\"七包\"是按包名预切的草案，经 A 路逐包甄别后：skill / compaction / workflow / preset 四项判\"登记（不移植）\"，goal / schedule 两项判给 **B3（T-0175）**。本卡严格按清单执行，未触碰 B1/B3/B4 范围。\n\n## 移植文件清单\n\n| 文件 | 变更 |\n|---|---|\n| `src/智能体指令.light` | +160 / −13（442 → 589 行） |\n| `examples/test_智能体指令_0.2.1增量.light` | 新增 204 行 / 19 组用例 |\n| `docs/功能对标/对标清单.json` | 新增 #328 |\n\n## 复刻的五条增量规则\n\n1. **双用户全局根 + 候选组去重**：`user-global`（harness home）与 `agents-global`（共享 agents 根）构成**同一候选组**，内容相同只渲染一次；去重单位由「目录」升为「候选组」（对应上游 `dedupInstructionFilesByCandidateGroup`）。不同组即使内容相同也不折叠。\n2. **dshHome 不可由配置覆盖**：上游把 `dshHome` 从 Config schema 移除（\"Undeclared row fields cannot override the process home\"），改由进程环境解析后入参注入；新增 `agentsHome`。\n3. **项目路径作用域转义**（`escapeProjectDisplayPath`）：项目显示路径首段若与保留作用域目录同名（`user-global` / `agents-global`），加 `./` 前缀转义，否则会被误读为全局根（探测错位 + 并入全局候选组）。同时认 `/` 与 `\\` 分隔符。\n4. **全局作用域不进模型可见文案**：附加段落对用户全局作用域改用 `These user-global instructions apply to all work.`，避免内部对账键 `user-global` 作为目录名出现在提示词里。\n5. **`RenderedInstructionSet.deduped`**：记下因内容重复被折叠的候选。被预算保留项的重复者仍保留探测资格（删除或改动被保留项会使其重新可见）。另新增 `基线作用域键集合`，两个全局根都进基线作用域集合。\n\n宿主面剥离沿用既有登记：fs stat/read、AbortSignal 取消、WeakMap 缓存、cordis 钩子均未移植。\n\n## 验证\n\n- `examples/test_智能体指令_0.2.1增量.light`：**19 组全绿**（verify 第 1 条）\n- `examples/test_智能体指令.light`：模块 32 既有用例**零回归**（verify 第 2 条）\n\n### 关于不跑全量 pytest 的取证\n\n卡面红线本就有\"⛔ 不跑全量回归\"，全量归 E 路（T-0177）。初版 verify 写成 `pytest tests/` 与之矛盾，且在本运行环境跑不动，已改正为定向两条。取证过程：\n\n| 观测 | 结果 |\n|---|---|\n| 全量 pytest（本改动） | `597 passed / 3 skipped / 1 error`，error 为 `test_R21_词法确定性_超集.py` 在 `finally: shutil.rmtree(tmp)` 抛 `PermissionError: CHAT_REFERENCE_PROTECTED: retention scan incomplete` |\n| 加 `--deselect` 后重跑 | 又暴露 `test_L177_括号式参数注解` 4 项（子进程 25s 超时）与 `test_回归`/`test_R57` 3 项（同 `CHAT_REFERENCE_PROTECTED`） |\n| `test_L177` 单独复跑 2 次 | **15 passed**（两次全绿）→ 环境波动，非代码缺陷 |\n| 改 `TMPDIR` 到非受限盘 | xdist 节点 `OSError: [Errno 22] Invalid argument` 直接崩，更差 |\n| **回退到基线 `b39d588` 版本跑全量** | **同样崩溃（exit 124，node down）** → 证实为环境限制，非本卡引入 |\n\n结论：`src/智能体指令.light` 无任何外部模块导入（全仓 `grep \"从 智能体指令 导入\"` 仅命中两个 example），改动天然隔离；定向判据足以覆盖本卡风险面，全量门禁留给 E 路在具备条件的机器上跑。\n\n## 反跑（单点破坏-还原，四点均实测 RED）\n\n| 破坏点 | 观测到的红 | 断言命中 |\n|---|---|---|\n| `指令候选组` 取消并入 | 红 | `agents-global 并入 user-global 组` 实际=agents-global 期望=user-global |\n| `转义项目显示路径` 取消转义 | 红 | `user-global 首段转义` 实际=user-global/AGENTS.md 期望=./user-global/AGENTS.md |\n| 恢复 dshHome 可被配置覆盖 | 红 | `配置里的 dshHome 被忽略，退回进程环境` 实际=/攻击者可控 期望=$DSH_HOME |\n| `deduped` 恒为空（典型假绿陷阱） | 红 | `deduped 记下被折叠者` 实际=0 期望=1 |\n\n每点破坏后均 `diff` 确认还原一致，再复跑转绿。\n\n## 对标清单新增编号\n\n**#328**（续 #327）：agent-instructions 0.2.1-rc.3 增量，状态 done。\n\n## 语言缺陷\n\n无新增。本轮所用语法（段落默认参数、字典、列表、字符串操作）均为既有能力，未触及语言核心。\n\n## 遗留\n\n`_qa_tmp/` 空目录（用于试探 TMPDIR 方案，已弃用）被本运行环境的 `CHAT_REFERENCE_PROTECTED` 保护机制锁定，无法删除。该目录未被任何文件引用，不影响构建，E 路或 M 路收口时可清理。",
+  "error": "",
+  "declared_paths": [
+    "src/工具/",
+    "智能体指令.light",
+    "工具集/",
+    "tests/",
+    "examples/"
+  ],
+  "changed_files": [],
+  "out_of_paths": []
+}
