@@ -1,0 +1,30 @@
+{
+  "task": "T-0164",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0164",
+  "base": "main",
+  "head": "fcdd61a7699ce622cc3cc81251ea8a6c799ca30c",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-27T00:31:59+00:00",
+  "finished_at": "2026-10-27T00:33:27+00:00",
+  "duration_s": 88.1,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import pathlib; t=pathlib.Path('docs/锁与冲突模型.md').read_text(encoding='utf-8'); need=['## 当前模型','## paths 字段','## 目录前缀匹配','## 文件级锁 locks（规划）','## 与 land 的关系','## 填写建议']; missing=[s for s in need if s not in t]; assert not missing, f'缺少必备小节: {missing}'\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "新增 `docs/锁与冲突模型.md`，把散落在 `hive.py:1089/1099` 与《多机并行开发》§4.1/§5 的防冲突机制收敛成一篇专文。重点补齐了旧文档没讲清的三点：目录前缀匹配的精确判定规则与\"任一方未声明 paths = 保守冲突\"的坑、`locks` 文件级锁的规划状态（明确标注尚未合入，并给出 T-0163 目标行为示例）、以及\"分支隔离只保干活不冲突、不保合流不冲突\"下 `paths` 写准 + `depends_on` 串行仍是合流不翻车关键。verify 全绿（六必备小节齐全）。",
+  "error": "",
+  "declared_paths": [
+    "docs/锁与冲突模型.md"
+  ],
+  "changed_files": [
+    "docs/锁与冲突模型.md"
+  ],
+  "out_of_paths": []
+}
