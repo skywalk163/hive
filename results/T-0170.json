@@ -1,0 +1,30 @@
+{
+  "task": "T-0170",
+  "agent": "raccoon-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0170",
+  "base": "main",
+  "head": "b39d588a95467417cfac46c7aaf45565327bb938",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-27T11:57:40+08:00",
+  "finished_at": "2026-10-27T12:31:36+08:00",
+  "duration_s": 2036.1,
+  "verify": [
+    {
+      "cmd": "python -c \"import pathlib; p=pathlib.Path('docs/功能对标/0.2.1-rc.3增量清单.md'); assert p.exists() and p.stat().st_size>5000, '清单不存在或过小'; t=p.read_text(encoding='utf-8'); assert '纯逻辑' in t and '宿主' in t and '架构' in t, '缺分类列'\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0170 交付说明（A 路：上游 0.2.0-rc.2→0.2.1-rc.3 增量甄别）\n\n## 产物\n\n- `docs/功能对标/0.2.1-rc.3增量清单.md`（407 行 / 45 KB / 234 行表格）\n- 唯一改动：上述一个新文件。未改任何代码，未联网（全部以上游本地 git 对象 diff 为准）。\n\n## 核心结论\n\n| 项 | 数值 |\n|---|---|\n| 上游区间 | `dsh-v0.2.0-rc.2` = `639ed01539` → `dsh-v0.2.1-rc.3` = `1f81c047fc`，merge-base = rc.2 本体 |\n| commit | 1931 总 / **1487 非 merge** / 444 merge |\n| 变更 | 8583 files, +325356 / −84992 |\n| packages/src 非测试代码 | **1047 文件**（.ts 841 / .tsx 124 / .css 59 / 图 23），+50788 / −15773 |\n| **纯逻辑文件总数** | **47**（14 项待移植） |\n| **宿主面文件总数** | **约 640** |\n| **架构面条数** | **23 条**（决策 4 + 跟进 9 + 登记 5 + 拒绝 5） |\n\n## B 路分到的文件数\n\n| B 路 | 方向 | 文件数 | 移植项 |\n|---|---|---|---|\n| B1 | 模型与 LLM 面 | **8** | 模型列表解码、列表缓存、令牌计量折叠 |\n| B2 | 会话与存储面 | **5** | 指令发现与渲染（双根/去重/字节预算/增量渲染） |\n| B3 | 工具与调度面 | **18** | hook 协议、preset 选择、子代理准入结算规则、目标轮驱动、schedule 提醒链、PTC 参数序 |\n| B4 | 协议与安全面 | **16** | 远程访问控制、浏览器信任栅栏、凭据优先级、CUA 坐标协议 |\n\n合计 47，与纯逻辑文件总数一致。\n\n## 量化判读\n\n1. **\"32 万行\"是假象**：真正代码只有 1047 个 src 文件 / +50788 行，其余约 7500 文件是 README、locale、catalog 再生成、`.agents` 笔记（2007）与快照（799）。\n2. **本轮是架构收敛不是功能扩张**：`fix` 569 + `test` 412，`feat` 仅 146；subagent 包 +7691/−7415 净行数近零（两个管理器合并成 `manager.ts`）。\n3. **真正的新功能只有四块**：CUA（106 条 commit 全仓最高）、llm-deepseek `/models` 列表发现、api/remote-access 主体化访问控制、experimental/hook-protocol。\n4. **CUI 全部拒绝**：119 个 client tsx + 5 个 experimental tsx，属宿主面。\n5. **`cua-win` 不存在**：全历史无该路径，README 仅写\"计划用 C# helper 另开 provider\"。CUA 的可移植部分是 `protocol.ts`(126) + `coordinates.ts`(77)，平台无关。\n\n## 与 R126（对齐 alpha.1）的差异\n\n- `schedule` 迁包后仍在演进（标题简化、拒绝链加固），R126 §5 规则表需更新。\n- `client/file-upload` receipts 隔离已并入主体化改造，改判为随主体模型决策。\n- `util/values/partial-json.ts`（666 行）在 alpha.1 区间已计入，本轮不重复计。\n- 新增面：CUA、模型列表、remote-access、hook-protocol。\n\n## 需要人拍板的决策（3 条）\n\n1. **是否引入主体（Principal）与远程访问模型**：不引入则 §5-4 的规则层无处接线，后续所有权限规则可能返工。\n2. **工作目录是否集中化**：上游把 cwd 解析收进会话模块、子代理只收已校验值 + 独立 `originCwd`；光明侧目前分散在 `工作区路径` / `工具_路径安全` / 子代理三处。\n3. **子代理 one-shot/continuable 是否合一**：上游已整包删除 `subagent-in-process-driver`。\n\n## 执行过程记录\n\n- Hive MCP 工具（`hive_get_task`/`hive_list_tasks`/`hive_whoami`）返回空错误，改用本地 `python hive.py` CLI 领卡。\n- `hive take` 首次失败（agent 未配置 lightharness 本地路径），补齐 agent 登记后成功。\n- 文档写作中途发生两次分块覆盖（后一块覆盖前一块），最终用\"分块写临时文件 + cat 拼接 + mv 原子替换\"一次修复，已重跑 verify 通过。\n- 任务卡 verify（three assertions）退出码 0。",
+  "error": "",
+  "declared_paths": [
+    "docs/功能对标/0.2.1-rc.3增量清单.md"
+  ],
+  "changed_files": [
+    "docs/功能对标/0.2.1-rc.3增量清单.md"
+  ],
+  "out_of_paths": []
+}
