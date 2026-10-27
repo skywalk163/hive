@@ -11,12 +11,37 @@
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
+import threading
+import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
 BASE_DIR = Path(__file__).resolve().parent
+HIVE_ROOT = BASE_DIR.parent  # dashboard 的上一级就是 hive 仓库根
+
+# 系统级核心配置：Hub 地址 + 集中式仓库列表，与 agents/<name>.json 共同构成 hive 配置
+HIVE_CONFIG_PATH = HIVE_ROOT / "hive-config.json"
+
+AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+AGENT_MODES = ("exec", "verify", "manual")
+
+
+def _as_str_list(v):
+    """abilities / capabilities：列表或逗号字符串 → 去空白字符串数组。"""
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    if isinstance(v, str):
+        return [x.strip() for x in v.split(",") if x.strip()]
+    return []
+
+
+def _iso_now():
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 # 静态文件白名单：路径 -> (文件名, MIME)。不在白名单里的一律 404，天然防目录穿越。
 STATIC_FILES = {
@@ -30,8 +55,63 @@ STATIC_FILES = {
 
 API_PATH = "/api/status"
 API_CONFIG = "/api/config"
+API_TASK = "/api/task"
+API_PUSH = "/api/push"
 CONFIG_PATH = BASE_DIR / "settings.json"
 NO_STORE = "no-store, no-cache, must-revalidate, max-age=0"
+
+# 任务操作代理：后端调用 hive CLI 真正执行（前端按钮 -> 这里 -> python3 hive.py）
+HIVE_PY = HIVE_ROOT / "hive.py"
+HIVE_OP_TIMEOUT = 120  # 单条操作超时（秒），hive 命令涉及 git push，给足余量
+TASK_ACTIONS = ("close", "retry", "unassign")  # 看板按钮暴露的三种操作
+TID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")  # 任务号允许字符
+
+# agent 主动上报：HTTP 直推（加速通道）落到这个文件，/api/status 取快照时合并进去
+PUSHED_STATUS_PATH = BASE_DIR / "pushed-status.json"
+
+
+def load_pushed():
+    try:
+        return json.loads(PUSHED_STATUS_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def save_pushed(data):
+    try:
+        PUSHED_STATUS_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _ts(s):
+    """ISO 字符串 -> epoch 毫秒。跨时区比较必须转时间戳，否则字符串比较会错序。"""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s)).timestamp() * 1000.0
+    except ValueError:
+        return None
+
+
+def refresh_loop(status_path, interval):
+    """「辅」通道：定期跑 `hive status --json` 重生成状态文件。
+
+    agent 主动推送是主通道，但只有 git 通道的 agent 推送要等 hive 重新拉一次
+    才会出现在快照里；这个循环就是兜底——长时间没推送的卡也由它刷新出真实状态
+    （租约过期 → stale，交给 watchdog 回收）。
+    """
+    argv = ["python3", str(HIVE_PY), "--dir", str(HIVE_ROOT), "status", "--json"]
+    while True:
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=HIVE_OP_TIMEOUT)
+            if proc.returncode == 0 and proc.stdout.strip():
+                Path(status_path).write_text(proc.stdout, encoding="utf-8")
+        except Exception:
+            pass  # 刷新失败不影响服务，下一轮再试
+        time.sleep(max(5, int(interval)))
 
 
 def build_handler(status_path):
@@ -91,16 +171,32 @@ def build_handler(status_path):
             if path == API_CONFIG:
                 self.serve_config_post()
                 return
+            if path == API_TASK:
+                self.serve_task_post()
+                return
+            if path == API_PUSH:
+                self.serve_push()
+                return
             self._send_json(404, {"error": "未找到资源: %s" % path})
 
         # ---- /api/config：系统只读信息 + 服务端共享看板默认（GET/POST） ----
         def system_info(self):
-            agents_dir = BASE_DIR.parent / "agents"
-            agents = sorted(p.stem for p in agents_dir.glob("*.json")) if agents_dir.is_dir() else []
+            hc = self.load_hive_config()
+            agents_dir = HIVE_ROOT / "agents"
+            agents = []
+            if agents_dir.is_dir():
+                for p in sorted(agents_dir.glob("*.json")):
+                    if p.name == ".gitkeep":
+                        continue
+                    try:
+                        agents.append(json.loads(p.read_text(encoding="utf-8")))
+                    except ValueError:
+                        pass
             return {
                 "status_file": status_path,
                 "dashboard_dir": str(BASE_DIR),
-                "hub": os.environ.get("HIVE_HUB", ""),
+                "hub": hc.get("hub", os.environ.get("HIVE_HUB", "")),
+                "repos": hc.get("repos", {}) or {},
                 "agents": agents,
             }
 
@@ -111,6 +207,95 @@ def build_handler(status_path):
                 return {}
             except ValueError:
                 return {}
+
+        def load_hive_config(self):
+            try:
+                return json.loads(HIVE_CONFIG_PATH.read_text(encoding="utf-8"))
+            except (FileNotFoundError, ValueError):
+                return {}
+
+        def save_hive_config(self, cfg):
+            HIVE_CONFIG_PATH.write_text(
+                json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        def apply_system_config(self, system):
+            """把前端提交的系统核心属性落到本地文件。
+
+            - hub / repos → hive-config.json
+            - agents      → 与 agents/ 目录对账：写/更新提交的，删掉未提交但已存在的
+            不自动 git 提交，避免意料之外的推送。
+            """
+            hc = self.load_hive_config()
+            if "hub" in system:
+                hc["hub"] = "" if system.get("hub") is None else str(system.get("hub"))
+            if "repos" in system and isinstance(system.get("repos"), dict):
+                repos = {}
+                for k, v in system["repos"].items():
+                    if not k:
+                        continue
+                    repos[str(k)] = str(v)
+                hc["repos"] = repos
+            if "agents" in system and isinstance(system.get("agents"), list):
+                self._reconcile_agents(system["agents"])
+            self.save_hive_config(hc)
+
+        def _reconcile_agents(self, agents):
+            agents_dir = HIVE_ROOT / "agents"
+            agents_dir.mkdir(parents=True, exist_ok=True)
+            seen = set()
+            for a in agents:
+                if not isinstance(a, dict):
+                    raise ValueError("agent 必须是对象")
+                name = (a.get("name") or "").strip()
+                if not name:
+                    raise ValueError("agent 缺少 name")
+                if not AGENT_NAME_RE.match(name):
+                    raise ValueError("agent name 不合法（只允许字母数字 . _ -，且不能以 . 开头）: %s" % name)
+                mode = a.get("mode") or "exec"
+                if mode not in AGENT_MODES:
+                    raise ValueError("agent %s 的 mode 不合法: %s" % (name, mode))
+                try:
+                    mc = int(a.get("max_concurrency") or 1)
+                except (TypeError, ValueError):
+                    mc = 1
+                if mc < 1:
+                    mc = 1
+                repos = {}
+                raw = a.get("repos") or {}
+                if isinstance(raw, dict):
+                    for k, v in raw.items():
+                        if k:
+                            repos[str(k)] = str(v)
+                # 已存在的 agent 保留 created 时间戳
+                created = ""
+                existing = agents_dir / ("%s.json" % name)
+                if existing.exists():
+                    try:
+                        created = json.loads(existing.read_text(encoding="utf-8")).get("created", "")
+                    except ValueError:
+                        created = ""
+                cfg = {
+                    "name": name,
+                    "host": (a.get("host") or "").strip().lower(),
+                    "command": a.get("command") or "",
+                    "mode": mode,
+                    "manual": mode == "manual",
+                    "abilities": _as_str_list(a.get("abilities")),
+                    "capabilities": _as_str_list(a.get("capabilities")),
+                    "repos": repos,
+                    "launch": a.get("launch") or "",
+                    "worktrees": a.get("worktrees") or "",
+                    "max_concurrency": mc,
+                    "created": created or _iso_now(),
+                }
+                existing.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+                seen.add(name)
+            # 删除不在提交集合里的 agent（保留 .gitkeep）
+            for p in agents_dir.glob("*.json"):
+                if p.name == ".gitkeep":
+                    continue
+                if p.stem not in seen:
+                    p.unlink()
 
         def serve_config_get(self):
             self._send_json(200, {
@@ -129,18 +314,31 @@ def build_handler(status_path):
             except ValueError as exc:
                 self._send_json(400, {"error": "请求体不是合法 JSON: %s" % exc})
                 return
-            incoming = body.get("dashboard") if isinstance(body, dict) else None
-            if not isinstance(incoming, dict):
-                self._send_json(400, {"error": "dashboard 必须是对象"})
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "顶层必须是对象"})
                 return
-            cur = self.load_dashboard_config()
-            cur.update(incoming)   # 合并后持久化到服务端共享默认
-            try:
-                CONFIG_PATH.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
-            except OSError as exc:
-                self._send_json(500, {"error": "配置写入失败: %s" % exc})
-                return
-            self._send_json(200, {"system": self.system_info(), "dashboard": cur})
+
+            incoming_system = body.get("system")
+            if isinstance(incoming_system, dict):
+                try:
+                    self.apply_system_config(incoming_system)
+                except ValueError as exc:
+                    self._send_json(400, {"error": "系统配置写入失败: %s" % exc})
+                    return
+
+            incoming = body.get("dashboard")
+            if isinstance(incoming, dict):
+                cur = self.load_dashboard_config()
+                cur.update(incoming)   # 合并后持久化到服务端共享默认
+                try:
+                    CONFIG_PATH.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+                except OSError as exc:
+                    self._send_json(500, {"error": "配置写入失败: %s" % exc})
+                    return
+                dashboard = cur
+            else:
+                dashboard = self.load_dashboard_config()
+            self._send_json(200, {"system": self.system_info(), "dashboard": dashboard})
 
         # ---- /api/status：每次请求都重新读盘 ----
         def serve_status(self):
@@ -160,7 +358,157 @@ def build_handler(status_path):
             if not isinstance(data, list):
                 self._send_json(500, {"error": "状态文件根节点应为数组"})
                 return
+            self._merge_pushed(data)
             self._send_json(200, data)
+
+        def _merge_pushed(self, rows):
+            """把 agent HTTP 直推的进度覆盖到快照行上（HTTP 比 git 通道更快）。
+
+            只有 HTTP 的 updated_at 不早于 git 通道的 pushed_at 时才覆盖，
+            免得一份旧快照把新进度顶掉。
+            """
+            pushed = load_pushed()
+            if not pushed:
+                return
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                p = pushed.get(row.get("id"))
+                if not isinstance(p, dict):
+                    continue
+                if (_ts(p.get("updated_at")) is not None
+                        and _ts(row.get("pushed_at")) is not None
+                        and _ts(p["updated_at"]) < _ts(row["pushed_at"])):
+                    continue
+                for src, dst in (("progress", "progress"), ("state", "push_state"),
+                                 ("step", "push_step"), ("message", "push_message")):
+                    if src in p:
+                        row[dst] = p[src]
+                if p.get("updated_at"):
+                    row["pushed_at"] = p["updated_at"]
+                row["push_source"] = "http"
+
+        # ---- /api/push：agent 主动上报进度（HTTP 加速通道）----
+        def serve_push(self):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": "请求体不是合法 JSON: %s" % exc})
+                return
+            if not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "error": "顶层必须是对象"})
+                return
+            tid = (body.get("task") or body.get("tid") or "").strip()
+            if not TID_RE.match(tid):
+                self._send_json(400, {"ok": False, "error": "task 不合法: %s" % tid})
+                return
+            agent = (body.get("agent") or "").strip()
+            if agent and not AGENT_NAME_RE.match(agent):
+                self._send_json(400, {"ok": False, "error": "agent 不合法: %s" % agent})
+                return
+            prog = body.get("progress")
+            try:
+                prog = None if prog is None else max(0, min(100, int(prog)))
+            except (TypeError, ValueError):
+                prog = None
+            data = load_pushed()
+            cur = data[tid] if isinstance(data.get(tid), dict) else {}
+            cur["task"] = tid
+            if agent:
+                cur["agent"] = agent
+            if body.get("state"):
+                cur["state"] = str(body["state"])
+            if prog is not None:
+                cur["progress"] = prog
+            if body.get("step"):
+                cur["step"] = str(body["step"])
+            if body.get("message"):
+                cur["message"] = str(body["message"])
+            cur["updated_at"] = body.get("updated_at") or _iso_now()
+            data[tid] = cur
+            save_pushed(data)
+            self._send_json(200, {"ok": True, "pushed": cur})
+
+            # ---- /api/task：看板按钮 -> 调用 hive CLI 真正执行任务操作 ----
+        def serve_task_post(self):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": "请求体不是合法 JSON: %s" % exc})
+                return
+            if not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "error": "顶层必须是对象"})
+                return
+
+            action = body.get("action")
+            tid = (body.get("tid") or "").strip()
+            if action not in TASK_ACTIONS:
+                self._send_json(400, {"ok": False, "error": "不支持的操作: %s" % action})
+                return
+            if not TID_RE.match(tid):
+                self._send_json(400, {"ok": False, "error": "任务号不合法: %s" % tid})
+                return
+
+            note = str(body.get("note") or body.get("reason") or "看板操作")
+            argv = ["python3", str(HIVE_PY), "--dir", str(HIVE_ROOT)]
+            if action == "close":
+                argv += ["close", tid, "--note", note]
+            elif action == "retry":
+                # agent 可选：不传就是「原 agent 用原分支重跑」（hive retry 保留 owner）
+                agent = (body.get("agent") or "").strip()
+                if agent and not AGENT_NAME_RE.match(agent):
+                    self._send_json(400, {"ok": False,
+                                          "error": "agent 不合法: %s" % agent})
+                    return
+                argv += ["retry", tid]
+                if agent:
+                    argv += ["--agent", agent]
+                if body.get("fresh") is True:
+                    argv += ["--fresh"]
+            else:  # unassign
+                argv += ["unassign", tid, "--reason", note]
+
+            try:
+                proc = subprocess.run(argv, capture_output=True, text=True,
+                                     timeout=HIVE_OP_TIMEOUT)
+            except FileNotFoundError:
+                self._send_json(500, {"ok": False, "error": "找不到 hive.py: %s" % HIVE_PY})
+                return
+            except subprocess.TimeoutExpired:
+                self._send_json(504, {"ok": False,
+                                      "error": "操作超时（%d 秒）" % HIVE_OP_TIMEOUT})
+                return
+
+            out = (proc.stdout or "").strip()
+            err = (proc.stderr or "").strip()
+            if proc.returncode != 0:
+                self._send_json(200, {"ok": False, "code": proc.returncode,
+                                      "error": (err or out or "命令执行失败")[-600:]})
+                return
+            # 成功：重新生成状态文件，让看板即时反映变化
+            self._refresh_status()
+            self._send_json(200, {"ok": True, "output": out[-600:]})
+
+        def _refresh_status(self):
+            """操作成功后重跑 `hive status --json` 覆盖状态文件，使看板即时更新。"""
+            try:
+                proc = subprocess.run(
+                    ["python3", str(HIVE_PY), "--dir", str(HIVE_ROOT), "status", "--json"],
+                    capture_output=True, text=True, timeout=HIVE_OP_TIMEOUT)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    Path(status_path).write_text(proc.stdout, encoding="utf-8")
+            except Exception:
+                pass  # 刷新失败不影响主操作结果
 
         # ---- 日志：静音常规访问，只保留 4xx/5xx ----
         def log_message(self, fmt, *args):
@@ -176,9 +524,17 @@ def main(argv=None):
                         help="hive status --json 导出的状态文件路径（默认 sample-status.json）")
     parser.add_argument("--port", type=int, default=8787, help="监听端口（默认 8787）")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
+    parser.add_argument("--auto-refresh", dest="auto_refresh", action="store_true",
+                        help="后台定期跑 hive status --json 重生成状态文件（辅通道）")
+    parser.add_argument("--refresh-interval", dest="refresh_interval", type=int, default=30,
+                        help="--auto-refresh 的间隔秒数（默认 30，最小 5）")
     args = parser.parse_args(argv)
 
     status_path = str(Path(args.status).expanduser())
+    if args.auto_refresh:
+        threading.Thread(target=refresh_loop,
+                         args=(status_path, args.refresh_interval), daemon=True).start()
+        print("自动刷新: 每 %d 秒重生成状态文件" % max(5, args.refresh_interval))
     handler = build_handler(status_path)
     ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((args.host, args.port), handler)

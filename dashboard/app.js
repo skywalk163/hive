@@ -109,6 +109,9 @@
     settingsOpen: false,
     repo: '',
     owner: '',
+    prio: '',         // 优先级筛选（P1/P2/P3）
+    unowned: false,   // 仅看无主（未分派）任务
+    col: '',          // 顶部统计点击后的「只看该列」筛选，空表示全部
     query: '',
     autoRefresh: true,
     closedOpen: false,
@@ -192,7 +195,15 @@
       head: t.head || '',
       verify: Array.isArray(t.verify) ? t.verify.slice() : [],
       result_summary: t.result_summary || '',
-      summary: t.summary || ''
+      summary: t.summary || '',
+      // —— agent 主动上报的进度（status/<tid> git 主通道 + HTTP 加速通道）——
+      progress: (t.progress === null || t.progress === undefined || t.progress === '')
+        ? null : (Number(t.progress) || 0),
+      push_state: t.push_state || '',
+      push_step: t.push_step || '',
+      push_message: t.push_message || '',
+      pushed_at: t.pushed_at || '',
+      push_source: t.push_source || ''
     };
   }
 
@@ -244,6 +255,8 @@
     el.columns = document.getElementById('columns');
     el.repo = document.getElementById('repo-filter');
     el.owner = document.getElementById('owner-filter');
+    el.prio = document.getElementById('prio-filter');
+    el.unowned = document.getElementById('unowned-filter');
     el.search = document.getElementById('search');
     el.auto = document.getElementById('auto-refresh');
     el.refresh = document.getElementById('refresh-now');
@@ -337,29 +350,63 @@
       var cls = pass === all ? 'ok-text' : 'danger-text';
       parts.push('<span class="' + cls + '">通过 ' + pass + '/' + all + '</span>');
     }
-    var d = formatDuration(t.duration_s);
-    if (d) parts.push('耗时 ' + d);
+    if (t.duration_s) {
+      // 耗时分级着色：秒级=快(绿)，超过 1 小时=慢(琥珀/红)，中间正常
+      var dcls = t.duration_s < 60 ? 'dur-fast'
+               : (t.duration_s > 3600 ? 'dur-slow' : 'dur-mid');
+      parts.push('耗时 <span class="' + dcls + '">' + formatDuration(t.duration_s) + '</span>');
+    }
     return parts.join(' · ');
+  }
+
+  // ---------- 卡片辅助判定 ----------
+  var LEASE_URGENT_MS = 10 * 60 * 1000;   // 租约剩余低于这个阈值就告警
+
+  /** 租约快到期（还没过期、也还没结果）：让运维一眼看出这里要超时了 */
+  function isLeaseUrgent(t) {
+    if (isStale(t) || t.result_status) return false;
+    var lease = parseTime(t.lease_until);
+    if (lease === null) return false;
+    var left = lease - Date.now();
+    return left > 0 && left < LEASE_URGENT_MS;
+  }
+
+  /** 执行模式：按 owner 查 agent 登记（exec / verify / manual），用于卡片左侧色点 */
+  function modeOf(t) {
+    var owner = ownerOf(t);
+    var agents = (state.system && state.system.agents) || [];
+    if (!owner || !agents.length) return '';
+    for (var i = 0; i < agents.length; i++) {
+      var a = agents[i];
+      if (a && a.name === owner) return a.mode || (a.manual ? 'manual' : '') || '';
+    }
+    return '';
+  }
+
+  function actBtn(action, tid, label, cls) {
+    return '<button type="button" class="act ' + cls + '" data-action="' + action +
+      '" data-tid="' + esc(tid) + '">' + esc(label) + '</button>';
   }
 
   function cardInner(t) {
     var stale = isStale(t);
     var col = classify(t);
     var h = '';
+    var mode = modeOf(t);
 
-    h += '<div class="card-row">';
-    h += '<span class="tid">' + esc(t.id) + '</span>';
+    h += '<div class="card-row card-head-row">';
+    if (mode) {
+      h += '<span class="mode-dot" data-mode="' + esc(mode) +
+           '" title="执行模式：' + esc(mode) + '"></span>';
+    }
+    h += '<span class="tid strong">' + esc(t.id) + '</span>';
     h += prioBadge(t);
     if (stale) h += '<span class="badge danger">租约过期</span>';
+    else if (isLeaseUrgent(t)) h += '<span class="badge warn">租约将到期</span>';
     h += resultBadge(t);
     h += '</div>';
 
     h += '<h3 class="card-title">' + esc(t.title) + '</h3>';
-
-    h += '<div class="card-row">';
-    h += '<span class="chip">' + esc(t.repo || '—') + '</span>';
-    h += '<span class="chip">' + (ownerOf(t) ? esc(ownerOf(t)) : '未分派') + '</span>';
-    h += '</div>';
 
     if (t.state === 'done' && t.finished_at) {
       var fin = parseTime(t.finished_at);
@@ -374,10 +421,55 @@
       if (rl) h += '<div class="card-meta">' + rl + '</div>';
     }
 
-    if (t.depends_on.length) {
-      h += '<div class="dep">依赖 ' + t.depends_on.map(function (d) {
-        return '<span class="chip">' + esc(d) + '</span>';
-      }).join(' ') + '</div>';
+    // —— agent 主动上报的进度：进度条 + 当前阶段 + 一句话状态 + 最后通信时间 ——
+    if (t.push_step || t.push_message || typeof t.progress === 'number') {
+      h += '<div class="card-progress">';
+      if (typeof t.progress === 'number') {
+        var pc = Math.max(0, Math.min(100, Math.round(t.progress)));
+        h += '<div class="bar"><i style="width:' + pc + '%"></i></div>' +
+             '<span class="pct">' + pc + '%</span>';
+      }
+      if (t.push_step) h += '<span class="chip">' + esc(t.push_step) + '</span>';
+      h += '</div>';
+      if (t.push_message) h += '<div class="card-msg">' + esc(t.push_message) + '</div>';
+    }
+    if (t.pushed_at) {
+      var seen = parseTime(t.pushed_at);
+      if (seen !== null) {
+        // 超过 10 分钟没上报就标红：这是「长时间没有通信」的直观信号
+        var quiet = (Date.now() - seen) > 10 * 60 * 1000;
+        h += '<div class="card-time">上报 ' +
+             '<span class="' + (quiet ? 'over' : '') + '">' + relTime(seen) + '</span>' +
+             (t.push_source ? ' · ' + esc(t.push_source) : '') + '</div>';
+      }
+    }
+
+    // 底部标签区：repo / owner / 依赖——不跟标题抢视觉；依赖可点击定位到被依赖的卡
+    h += '<div class="card-tags">';
+    h += '<span class="pill pill-repo">' + esc(t.repo || '—') + '</span>';
+    h += '<span class="pill' + (ownerOf(t) ? '' : ' pill-empty') + '">' +
+         (ownerOf(t) ? esc(ownerOf(t)) : '未分派') + '</span>';
+    t.depends_on.forEach(function (d) {
+      h += '<button type="button" class="pill pill-dep" data-dep="' + esc(d) +
+           '" title="点击定位到 ' + esc(d) + '">依赖 ' + esc(d) + '</button>';
+    });
+    h += '</div>';
+
+    // 操作按钮：异常（终止/改派/重试/退回未分配）、进行中（重试/强制收回）、待领取（派给…）
+    if (col === 'abnormal' || col === 'running' || col === 'ready') {
+      h += '<div class="card-actions">';
+      if (col === 'abnormal') {
+        h += actBtn('close', t.id, '终止', 'act-close');
+        h += actBtn('reassign-open', t.id, '改派', 'act-reassign');
+        h += actBtn('retry', t.id, '重试', 'act-retry');
+        h += actBtn('unassign', t.id, '退回未分配', 'act-unassign');
+      } else if (col === 'running') {
+        h += actBtn('retry', t.id, '重试', 'act-retry');
+        h += actBtn('unassign', t.id, '强制收回', 'act-unassign');
+      } else {
+        h += actBtn('reassign-open', t.id, '派给…', 'act-reassign');
+      }
+      h += '</div>';
     }
     return h;
   }
@@ -404,6 +496,9 @@
   function fillCard(card, t) {
     var stale = isStale(t);
     card.classList.toggle('is-stale', stale);
+    card.classList.toggle('is-urgent', isLeaseUrgent(t));   // 租约临期：呼吸灯告警
+    var mode = modeOf(t);
+    if (mode) card.dataset.mode = mode;
     card.dataset.col = classify(t);
     card.innerHTML = cardInner(t);
     card.setAttribute('aria-label', t.id + '：' + t.title + '（' + COL_TITLE[classify(t)] + '）');
@@ -430,12 +525,27 @@
   }
 
   // ---------- 顶部统计 / 元信息 ----------
+  // 各列的空状态文案：说清楚「什么时候这里会有东西」，比干巴巴的「暂无任务」有用
+  var COL_EMPTY = {
+    ready: '没有待领取的任务卡。',
+    running: '没有进行中的任务。',
+    merging: '当 Worker 完成并推送 res/ 分支后，这里会自动出现任务卡；请用 CLI 运行 hive land 合并。',
+    abnormal: '没有异常任务。',
+    recent: '最近还没有完成的任务。',
+    closed: '暂无已关闭任务（点上方「展开」查看）'
+  };
+
   function renderStats(counts) {
-    var html = '<span class="stat">共 <b>' + state.filtered.length + '</b> 个任务</span>';
+    // 统计条既是仪表盘也是快捷筛选器：点某列只看该列，再点「共 N 个」恢复全部
+    var html = '<button type="button" class="stat stat-total' + (state.col ? '' : ' active') +
+      '" data-col="" title="显示全部列">共 <b>' + state.filtered.length + '</b> 个任务</button>';
     COLUMNS.forEach(function (c) {
       if (!settings.columns[c.key]) return;   // 隐藏的面板不计入统计条
-      html += '<span class="stat' + (c.key === 'abnormal' ? ' is-abnormal' : '') + '">' +
-        esc(c.title) + ' <b>' + (counts[c.key] || 0) + '</b></span>';
+      html += '<button type="button" class="stat' +
+        (c.key === 'abnormal' ? ' is-abnormal' : '') +
+        (state.col === c.key ? ' active' : '') +
+        '" data-col="' + esc(c.key) + '" title="只看「' + esc(c.title) + '」">' +
+        esc(c.title) + ' <b>' + (counts[c.key] || 0) + '</b></button>';
     });
     el.stats.innerHTML = html;
   }
@@ -513,6 +623,8 @@
     state.filtered = state.tasks.filter(function (t) {
       if (state.repo && t.repo !== state.repo) return false;
       if (state.owner && ownerOf(t) !== state.owner) return false;
+      if (state.prio && (t.priority || '').toUpperCase() !== state.prio) return false;
+      if (state.unowned && ownerOf(t)) return false;   // 仅看无主
       if (!q) return true;
       var hay = (t.id + ' ' + t.title + ' ' + t.summary + ' ' + t.result_summary).toLowerCase();
       return hay.indexOf(q) !== -1;
@@ -547,8 +659,11 @@
         : groups[c.key].slice().sort(sortTasks);
       counts[c.key] = list.length;
       cols[c.key].count.textContent = list.length;
+      cols[c.key].empty.textContent = COL_EMPTY[c.key] || '暂无任务';
       cols[c.key].list = list;
-      cols[c.key].root.hidden = !settings.columns[c.key];   // 面板可见性
+      // 面板可见性：设置里关掉的，或被「只看该列」筛选排除的
+      cols[c.key].root.hidden = !settings.columns[c.key] ||
+                               (!!state.col && state.col !== c.key);
 
       if (cols[c.key].toggle) {
         cols[c.key].toggle.textContent = state.closedOpen
@@ -777,6 +892,17 @@
   function bindEvents() {
     el.repo.addEventListener('change', function () { state.repo = el.repo.value; render(); });
     el.owner.addEventListener('change', function () { state.owner = el.owner.value; render(); });
+    if (el.prio) el.prio.addEventListener('change', function () { state.prio = el.prio.value; render(); });
+    if (el.unowned) el.unowned.addEventListener('change', function () {
+      state.unowned = el.unowned.checked; render();
+    });
+    // 顶部统计条 = 快捷列筛选器：点某列只看该列，点「共 N 个」恢复
+    if (el.stats) el.stats.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-col]');
+      if (!b) return;
+      state.col = b.getAttribute('data-col') || '';
+      render();
+    });
     el.search.addEventListener('input', function () { state.query = el.search.value; render(); });
     el.refresh.addEventListener('click', function () { loadStatus(); });
 
@@ -893,6 +1019,7 @@
   // ---------- 设置弹窗 ----------
   function openSettings() {
     state.settingsOpen = true;
+    initEditModel();   // 每次打开都用服务端最新系统配置初始化可编辑模型
     renderSettings();
     var m = document.getElementById('settings-modal');
     m.hidden = false;
@@ -914,6 +1041,200 @@
     }).join('');
   }
 
+  function optsMode(cur) {
+    return ['exec', 'verify', 'manual'].map(function (m) {
+      return '<option value="' + m + '"' + (m === cur ? ' selected' : '') + '>' + m + '</option>';
+    }).join('');
+  }
+
+  function fieldRow(label, control) {
+    return '<div class="setting-row"><div class="setting-label">' + esc(label) + '</div>' + control + '</div>';
+  }
+
+  /** 把服务端系统配置复制成可编辑模型（repos / agent.repos 由对象转成 [name,path] 数组） */
+  function initEditModel() {
+    var s = state.system || {};
+    state.edit = {
+      hub: s.hub || '',
+      repos: Object.keys(s.repos || {}).map(function (k) { return { name: k, path: s.repos[k] }; }),
+      agents: (s.agents || []).map(function (a) {
+        return {
+          name: a.name || '',
+          host: a.host || '',
+          mode: a.mode || 'exec',
+          command: a.command || '',
+          launch: a.launch || '',
+          worktrees: a.worktrees || '',
+          max_concurrency: a.max_concurrency || 1,
+          abilities: (a.abilities || []).slice(),
+          capabilities: (a.capabilities || []).slice(),
+          repos: Object.keys(a.repos || {}).map(function (k) { return { name: k, path: a.repos[k] }; })
+        };
+      })
+    };
+  }
+
+  function blankAgent() {
+    return { name: '', host: '', mode: 'exec', command: '', launch: '', worktrees: '',
+      max_concurrency: 1, abilities: [], capabilities: [], repos: [] };
+  }
+
+  /** 把可编辑模型序列化回服务端期望的对象结构（repos 数组 → 对象） */
+  function serializeEdit() {
+    var reposObj = {};
+    (state.edit.repos || []).forEach(function (r) { if (r.name) reposObj[r.name] = r.path; });
+    var agents = (state.edit.agents || []).map(function (a) {
+      var ra = {};
+      (a.repos || []).forEach(function (r) { if (r.name) ra[r.name] = r.path; });
+      return {
+        name: a.name, host: a.host, mode: a.mode, command: a.command || '',
+        manual: a.mode === 'manual',
+        abilities: (a.abilities || []).slice(), capabilities: (a.capabilities || []).slice(),
+        repos: ra, launch: a.launch || '', worktrees: a.worktrees || '',
+        max_concurrency: Number(a.max_concurrency) || 1
+      };
+    });
+    return { hub: state.edit.hub || '', repos: reposObj, agents: agents };
+  }
+
+  /** 系统设置 tab：Hub 地址 + 仓库列表 + Agent 注册 + 团队看板默认 */
+  function systemTabHTML() {
+    var s = state.system || {};
+    var reposHTML = (state.edit.repos || []).map(function (r, i) {
+      return '<div class="kv-row">' +
+        '<input class="sys-input" data-f="name" data-ridx="' + i + '" placeholder="仓库名" value="' + esc(r.name) + '" />' +
+        '<input class="sys-input" data-f="path" data-ridx="' + i + '" placeholder="/本地/绝对路径" value="' + esc(r.path) + '" />' +
+        '<button type="button" class="btn mini danger" data-rm-repo data-ridx="' + i + '" aria-label="删除仓库">✕</button>' +
+      '</div>';
+    }).join('');
+
+    var agentsHTML = (state.edit.agents || []).map(function (a, i) {
+      var arepos = (a.repos || []).map(function (r, j) {
+        return '<div class="kv-row">' +
+          '<input class="sys-input" data-f="name" data-agen="' + i + '" data-ridx="' + j + '" placeholder="仓库名" value="' + esc(r.name) + '" />' +
+          '<input class="sys-input" data-f="path" data-agen="' + i + '" data-ridx="' + j + '" placeholder="/本地/绝对路径" value="' + esc(r.path) + '" />' +
+          '<button type="button" class="btn mini danger" data-rm-repo data-agen="' + i + '" data-ridx="' + j + '" aria-label="删除仓库">✕</button>' +
+        '</div>';
+      }).join('');
+      return '<div class="agent-card">' +
+        '<div class="agent-head"><b>' + esc(a.name || ('agent ' + (i + 1))) + '</b>' +
+          '<button type="button" class="btn mini danger" data-rm-agent="' + i + '">移除</button></div>' +
+        fieldRow('名称', '<input class="sys-input" data-f="name" data-agen="' + i + '" value="' + esc(a.name) + '" />') +
+        fieldRow('Host', '<input class="sys-input" data-f="host" data-agen="' + i + '" value="' + esc(a.host) + '" />') +
+        fieldRow('模式', '<select class="sys-input" data-f="mode" data-agen="' + i + '">' + optsMode(a.mode) + '</select>') +
+        fieldRow('启动命令', '<input class="sys-input" data-f="command" data-agen="' + i + '" value="' + esc(a.command) + '" />') +
+        fieldRow('launch(GUI)', '<input class="sys-input" data-f="launch" data-agen="' + i + '" value="' + esc(a.launch) + '" />') +
+        fieldRow('worktrees', '<input class="sys-input" data-f="worktrees" data-agen="' + i + '" value="' + esc(a.worktrees) + '" />') +
+        fieldRow('并发数', '<input class="sys-input" type="number" min="1" data-f="max_concurrency" data-agen="' + i + '" value="' + esc(String(a.max_concurrency)) + '" />') +
+        fieldRow('能力 abilities', '<input class="sys-input" data-f="abilities" data-agen="' + i + '" value="' + esc((a.abilities || []).join(', ')) + '" />') +
+        fieldRow('平台 capabilities', '<input class="sys-input" data-f="capabilities" data-agen="' + i + '" value="' + esc((a.capabilities || []).join(', ')) + '" />') +
+        '<div class="setting-label sub">repos</div>' +
+        '<div class="kvlist">' + arepos +
+          '<button type="button" class="btn mini" data-add-repo data-agen="' + i + '">+ 仓库</button></div>' +
+      '</div>';
+    }).join('');
+
+    return '' +
+      '<p class="muted">hive 核心属性。保存后写入本地 hive-config.json 与各 agent 配置文件（不自动 git 提交，需要同步时自行 push）。</p>' +
+      '<div class="sys-section"><h3 class="sys-h">系统信息（只读）</h3>' +
+        '<dl class="kv"><dt>状态文件</dt><dd>' + esc(s.status_file || '—') + '</dd>' +
+        '<dt>看板目录</dt><dd>' + esc(s.dashboard_dir || '—') + '</dd>' +
+        '<dt>Agent 数</dt><dd>' + (state.edit.agents || []).length + '</dd></dl></div>' +
+      '<div class="sys-section"><h3 class="sys-h">Hub 地址</h3>' +
+        '<input class="sys-input wide" id="sys-hub" data-f="hub" placeholder="例如 http://hub-host:8080（可留空）" value="' + esc(state.edit.hub || '') + '" />' +
+        '<div class="hint">总控 / 协调中心地址，持久化到 hive-config.json 的 hub 字段。</div></div>' +
+      '<div class="sys-section"><h3 class="sys-h">仓库列表（集中登记）</h3>' +
+        '<div class="kvlist">' + reposHTML + '</div>' +
+        '<button type="button" class="btn mini" id="sys-repo-add">+ 新增仓库</button>' +
+        '<div class="hint">name = 本地绝对路径；任务按 repo 字段匹配这里的 name。</div></div>' +
+      '<div class="sys-section"><h3 class="sys-h">Agent 注册</h3>' +
+        (agentsHTML || '<p class="muted">（暂无已注册 agent）</p>') +
+        '<button type="button" class="btn mini" id="sys-agent-add">+ 注册新 Agent</button></div>' +
+      '<hr class="sep" />' +
+      '<h3 class="sys-h">团队看板默认（服务端共享）</h3>' +
+      teamDefaultsHTML();
+  }
+
+  /** 团队看板默认（服务端共享）区块，含保存按钮 */
+  function teamDefaultsHTML() {
+    var sv = (server && typeof server === 'object') ? server : {};
+    function sval(k, dflt) { return (k in sv) ? sv[k] : (k in settings ? settings[k] : dflt); }
+    return '' +
+      fieldRow('默认刷新间隔', '<select id="sys-refresh">' + opts([5, 10, 15, 30, 60].map(function (s) { return s * 1000; }), sval('refreshMs', REFRESH_MS)) + '</select>') +
+      fieldRow('默认紧凑模式', '<label class="switch"><input type="checkbox" id="sys-compact"' + (sval('compact', false) ? ' checked' : '') + ' /><span>新成员默认紧凑</span></label>') +
+      fieldRow('默认显示 CI 条', '<label class="switch"><input type="checkbox" id="sys-ci"' + (sval('showCI', true) ? ' checked' : '') + ' /><span>新成员默认显示</span></label>') +
+      fieldRow('默认显示验收输出', '<label class="switch"><input type="checkbox" id="sys-verify"' + (sval('showVerify', true) ? ' checked' : '') + ' /><span>新成员默认显示</span></label>') +
+      fieldRow('最近完成默认数量', '<select id="sys-recent">' + opts([5, 8, 10, 15, 20], sval('recentCount', DEFAULT_RECENT_COUNT)) + '</select>') +
+      '<div class="setting-row"><button type="button" class="btn primary" id="sys-save">保存系统设置</button>' +
+        '<span class="hint" id="sys-msg"></span></div>';
+  }
+
+  /** 绑定系统设置 tab 内的动态行（增删 + 字段输入），避免逐键重渲染丢焦点 */
+  function bindSystemTab(m) {
+    Array.prototype.forEach.call(m.querySelectorAll('[data-f]'), function (inp) {
+      var f = inp.getAttribute('data-f');
+      var agen = inp.getAttribute('data-agen');
+      var ridx = inp.getAttribute('data-ridx');
+      function onInput() {
+        var val = (inp.type === 'checkbox') ? inp.checked : inp.value;
+        if (agen !== null) {
+          var ag = state.edit.agents[Number(agen)];
+          if (!ag) return;
+          if (ridx !== null) {
+            var rr = ag.repos[Number(ridx)];
+            if (rr) rr[f] = val;
+          } else {
+            if (f === 'abilities' || f === 'capabilities') val = val.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+            else if (f === 'max_concurrency') val = Number(val) || 1;
+            ag[f] = val;
+          }
+        } else if (ridx !== null) {
+          var r0 = state.edit.repos[Number(ridx)];
+          if (r0) r0[f] = val;
+        } else if (f === 'hub') {
+          state.edit.hub = val;
+        }
+      }
+      inp.addEventListener('input', onInput);
+      inp.addEventListener('change', onInput);
+    });
+
+    var ra = m.querySelector('#sys-repo-add');
+    if (ra) ra.addEventListener('click', function () { state.edit.repos.push({ name: '', path: '' }); renderSettings(); });
+    var aa = m.querySelector('#sys-agent-add');
+    if (aa) aa.addEventListener('click', function () { state.edit.agents.push(blankAgent()); renderSettings(); });
+
+    Array.prototype.forEach.call(m.querySelectorAll('[data-rm-repo]'), function (btn) {
+      btn.addEventListener('click', function () {
+        var agen = btn.getAttribute('data-agen');
+        var ridx = Number(btn.getAttribute('data-ridx'));
+        if (agen !== null) {
+          if (state.edit.agents[Number(agen)]) state.edit.agents[Number(agen)].repos.splice(ridx, 1);
+        } else {
+          state.edit.repos.splice(ridx, 1);
+        }
+        renderSettings();
+      });
+    });
+    Array.prototype.forEach.call(m.querySelectorAll('[data-add-repo]'), function (btn) {
+      btn.addEventListener('click', function () {
+        var agen = Number(btn.getAttribute('data-agen'));
+        if (state.edit.agents[agen]) state.edit.agents[agen].repos.push({ name: '', path: '' });
+        renderSettings();
+      });
+    });
+    Array.prototype.forEach.call(m.querySelectorAll('[data-rm-agent]'), function (btn) {
+      btn.addEventListener('click', function () {
+        var i = Number(btn.getAttribute('data-rm-agent'));
+        var nm = (state.edit.agents[i] && state.edit.agents[i].name) || ('第 ' + (i + 1) + ' 个');
+        if (window.confirm('确定移除 agent「' + nm + '」？该 agent 的配置文件将被删除。')) {
+          state.edit.agents.splice(i, 1);
+          renderSettings();
+        }
+      });
+    });
+  }
+
   function renderSettings() {
     var m = document.getElementById('settings-modal');
     var colChecks = COLUMNS.map(function (c) {
@@ -921,18 +1242,7 @@
         (settings.columns[c.key] ? ' checked' : '') + ' /><span>' + esc(c.title) + '</span></label>';
     }).join('');
 
-    var sysRows = state.system
-      ? '<dl class="kv">' +
-          '<dt>状态文件</dt><dd>' + esc(state.system.status_file || '—') + '</dd>' +
-          '<dt>看板目录</dt><dd>' + esc(state.system.dashboard_dir || '—') + '</dd>' +
-          '<dt>Hub 地址</dt><dd>' + (state.system.hub ? esc(state.system.hub) : '（未配置）') + '</dd>' +
-          '<dt>已注册 Agent</dt><dd>' + ((state.system.agents && state.system.agents.length) ? esc(state.system.agents.join('、')) : '（无）') + '</dd>' +
-        '</dl>'
-      : '<p class="muted">（未能读取系统配置，可稍后重试）</p>';
-
-    // 系统设置 tab 的当前值：优先服务端默认，回落到生效值
-    var sv = server && typeof server === 'object' ? server : {};
-    function sval(k, dflt) { return (k in sv) ? sv[k] : (k in settings ? settings[k] : dflt); }
+    // 系统设置 tab（Hub / 仓库列表 / Agent 注册 / 团队默认）由 systemTabHTML() 构建
 
     m.innerHTML =
       '<div class="modal-card">' +
@@ -965,21 +1275,7 @@
 
         // —— 系统设置（服务端共享）——
         '<div class="tab-body" data-tab-body="system" hidden>' +
-          '<p class="muted">系统信息（只读）：</p>' + sysRows +
-          '<hr class="sep" />' +
-          '<p class="muted">团队默认（服务端共享，未在本浏览器覆盖该项的成员沿用）：</p>' +
-          '<div class="setting-row"><div class="setting-label">默认刷新间隔</div>' +
-            '<select id="sys-refresh">' + opts([5, 10, 15, 30, 60].map(function (s) { return s * 1000; }), sval('refreshMs', REFRESH_MS)) + '</select></div>' +
-          '<div class="setting-row"><div class="setting-label">默认紧凑模式</div>' +
-            '<label class="switch"><input type="checkbox" id="sys-compact"' + (sval('compact', false) ? ' checked' : '') + ' /><span>新成员默认紧凑</span></label></div>' +
-          '<div class="setting-row"><div class="setting-label">默认显示 CI 条</div>' +
-            '<label class="switch"><input type="checkbox" id="sys-ci"' + (sval('showCI', true) ? ' checked' : '') + ' /><span>新成员默认显示</span></label></div>' +
-          '<div class="setting-row"><div class="setting-label">默认显示验收输出</div>' +
-            '<label class="switch"><input type="checkbox" id="sys-verify"' + (sval('showVerify', true) ? ' checked' : '') + ' /><span>新成员默认显示</span></label></div>' +
-          '<div class="setting-row"><div class="setting-label">最近完成默认数量</div>' +
-            '<select id="sys-recent">' + opts([5, 8, 10, 15, 20], sval('recentCount', DEFAULT_RECENT_COUNT)) + '</select></div>' +
-          '<div class="setting-row"><button type="button" class="btn primary" id="sys-save">保存到服务端</button>' +
-            '<span class="hint" id="sys-msg"></span></div>' +
+          systemTabHTML() +
         '</div>' +
       '</div>';
 
@@ -1008,6 +1304,9 @@
       });
     });
 
+    // —— 绑定：系统设置 tab 动态行（Hub / 仓库 / Agent 增删与字段）——
+    bindSystemTab(m);
+
     // —— 绑定：标签页切换 ——
     Array.prototype.forEach.call(m.querySelectorAll('.tab'), function (t) {
       t.addEventListener('click', function () {
@@ -1020,16 +1319,19 @@
       });
     });
 
-    // —— 绑定：系统设置保存 ——
+    // —— 绑定：系统设置保存（hive 核心属性 + 团队看板默认）——
     var sysSave = m.querySelector('#sys-save');
     if (sysSave) sysSave.addEventListener('click', function () {
-      var d = { dashboard: {
-        refreshMs: Number(m.querySelector('#sys-refresh').value),
-        compact: m.querySelector('#sys-compact').checked,
-        showCI: m.querySelector('#sys-ci').checked,
-        showVerify: m.querySelector('#sys-verify').checked,
-        recentCount: Number(m.querySelector('#sys-recent').value)
-      } };
+      var d = {
+        system: serializeEdit(),
+        dashboard: {
+          refreshMs: Number(m.querySelector('#sys-refresh').value),
+          compact: m.querySelector('#sys-compact').checked,
+          showCI: m.querySelector('#sys-ci').checked,
+          showVerify: m.querySelector('#sys-verify').checked,
+          recentCount: Number(m.querySelector('#sys-recent').value)
+        }
+      };
       fetch('/api/config', {
         method: 'POST', cache: 'no-store',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(d)
@@ -1037,10 +1339,14 @@
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (resp) {
           var msg = m.querySelector('#sys-msg');
-          if (resp && resp.dashboard) {
-            server = resp.dashboard || {}; settings = computeEffective(); applyEffective(); render();
+          if (resp && resp.system) {
+            server = resp.dashboard || {};
+            state.system = resp.system || state.system;
+            initEditModel();              // 用服务端归一化后的值刷新可编辑模型
+            settings = computeEffective(); applyEffective(); render();
             if (state.settingsOpen) renderSettings();
-            if (msg) msg.textContent = '已保存到服务端';
+            var m2 = document.getElementById('sys-msg');
+            if (m2) m2.textContent = '已保存到服务端';
           } else if (msg) {
             msg.textContent = '保存失败';
           }
@@ -1049,12 +1355,106 @@
     });
   }
 
+  // ---------- 异常卡操作按钮（终止 / 改派 / 退回未分配）----------
+  var TOAST_TIMER = null;
+  function flash(msg, isError) {
+    var t = document.getElementById('toast');
+    if (!t) return;
+    t.textContent = msg;
+    t.className = 'toast' + (isError ? ' is-error' : '');
+    t.hidden = false;
+    if (TOAST_TIMER) clearTimeout(TOAST_TIMER);
+    TOAST_TIMER = setTimeout(function () { t.hidden = true; }, isError ? 5000 : 2500);
+  }
+
+  function _verb(action, override) {
+    return override ||
+      ({ close: '终止', retry: '重试', unassign: '退回未分配' })[action] || action;
+  }
+
+  // 调用后端 /api/task（后端再调用 hive CLI 真正执行）
+  function callTaskAction(action, tid, agent, label) {
+    var body = { action: action, tid: tid };
+    if (agent) body.agent = agent;
+    flash('正在' + _verb(action, label) + ' ' + tid + ' …');
+    fetch('/api/task', {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body)
+    })
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, j: j }; }); })
+      .then(function (res) {
+        if (res.j && res.j.ok) {
+          flash('操作成功：' + tid + ' 已' + _verb(action, label), false);
+          loadStatus();
+        } else {
+          flash('操作失败：' + ((res.j && res.j.error) || ('HTTP ' + res.status)), true);
+        }
+      })
+      .catch(function (e) { flash('请求失败：' + e.message, true); });
+  }
+
+  // 改派：把按钮区替换成 agent 下拉 + 确认/取消
+  function openReassign(btn) {
+    var tid = btn.getAttribute('data-tid');
+    var agents = (state.system && state.system.agents) || [];
+    var wrap = btn.parentNode;
+    var opts = agents.map(function (a) {
+      var nm = (a && a.name) || '';
+      return '<option value="' + esc(nm) + '">' + esc(nm) + '</option>';
+    }).join('');
+    if (!opts) opts = '<option value="">（无可用 agent）</option>';
+    wrap.innerHTML =
+      '<select class="agent-pick">' + opts + '</select>' +
+      '<button type="button" class="act act-ok" data-action="reassign-confirm" data-tid="' + esc(tid) + '">确认</button>' +
+      '<button type="button" class="act act-cancel" data-action="reassign-cancel" data-tid="' + esc(tid) + '">取消</button>';
+  }
+
+  // 事件委托：捕获阶段处理，命中操作按钮时阻止冒泡，避免触发卡片打开抽屉
+  function bindTaskActions() {
+    el.columns.addEventListener('click', function (e) {
+      // 依赖胶囊：点击直接定位到被依赖的任务（把搜索框填成那个 id）
+      var dep = e.target.closest('[data-dep]');
+      if (dep) {
+        e.stopPropagation();
+        e.preventDefault();
+        state.query = dep.getAttribute('data-dep') || '';
+        el.search.value = state.query;
+        state.col = '';
+        render();
+        flash('已定位到 ' + state.query, false);
+        return;
+      }
+      var btn = e.target.closest('[data-action]');
+      if (!btn) return;            // 非操作按钮，照常打开抽屉
+      e.stopPropagation();
+      e.preventDefault();
+      var action = btn.getAttribute('data-action');
+      var tid = btn.getAttribute('data-tid');
+      if (action === 'close' || action === 'unassign' || action === 'retry') {
+        // retry 不带 agent：保留原 owner、复用原分支重跑
+        if (!window.confirm(_verb(action) + '任务 ' + tid + ' ？')) return;
+        callTaskAction(action, tid);
+      } else if (action === 'reassign-open') {
+        openReassign(btn);
+      } else if (action === 'reassign-confirm') {
+        var sel = btn.parentNode.querySelector('select.agent-pick');
+        var agent = sel ? sel.value : '';
+        if (!agent) { flash('请选择目标 agent', true); return; }
+        callTaskAction('retry', tid, agent, '改派');
+      } else if (action === 'reassign-cancel') {
+        render();
+      }
+    }, true);
+  }
+
   // ---------- 启动 ----------
   function init() {
     cacheEls();
     buildColumns();
     initTheme();
     bindEvents();
+    bindTaskActions();         // 异常卡操作按钮：终止 / 改派 / 退回未分配
     applyEffective();          // 落地主题/紧凑/CI/刷新间隔等生效设置
 
     state.autoRefresh = storeGet(STORE_AUTO) !== 'off';

@@ -234,6 +234,15 @@ def _env_number(name: str, default, cast, minimum: float = 0.0):
     return value
 
 
+def status_push_interval() -> int:
+    """agent 主动上报进度的间隔（秒）；HIVE_STATUS_PUSH_S 可覆盖，默认 60。
+
+    比租用心跳（lease//3 分钟，默认 60 分钟）快得多：心跳只用来判死活，
+    这个决定看板多久能看到一次进度。设 0 表示关闭周期上报（只留里程碑）。
+    """
+    return int(_env_number("HIVE_STATUS_PUSH_S", 60, int, minimum=0))
+
+
 def claim_backoff_config() -> dict:
     """本次 claim 的退避参数快照。
 
@@ -796,6 +805,10 @@ class Hive:
 
     def claim_info(self, tid: str):
         return read_ref_file(self.dir, f"origin/claim/{tid}", f"claims/{tid}.json")
+
+    def status_info(self, tid: str):
+        """agent 主动推送的任务进度（status/<tid> 分支）；没推过则 None。"""
+        return read_ref_file(self.dir, f"origin/status/{tid}", f"status/{tid}.json")
 
     def result_info(self, tid: str):
         # 先看进行中的 res 分支，再看 close 后归档到 main 的 results/
@@ -1905,6 +1918,7 @@ class Hive:
                 state = "running"  # 看板推导，不写回任务卡
             lease_until = claim.get("lease_until")
             stale = bool(lease_until and not res and parse_iso(lease_until) < now())
+            st = self.status_info(tid) or {}   # agent 主动上报的进度（status/<tid>）
             rows.append({
                 "id": tid,
                 "state": state,
@@ -1927,6 +1941,13 @@ class Hive:
                 "verify": res.get("verify") or [],
                 "summary": ((res.get("summary") or "").splitlines() or [""])[0][:60] if res else "",
                 "result_summary": res.get("summary") or "",
+                # —— agent 主动上报的进度（主通道 status/<tid>，HTTP 推送在服务端合并）——
+                "progress": st.get("progress"),
+                "push_state": st.get("state") or "",
+                "push_step": st.get("step") or "",
+                "push_message": st.get("message") or "",
+                "pushed_at": st.get("updated_at") or "",
+                "push_source": "git" if st else "",
             })
         if as_json:
             print(json.dumps(rows, ensure_ascii=False, indent=2))
@@ -2013,6 +2034,41 @@ class Hive:
             archived.unlink()  # 重新入队时把归档也撤掉，否则 worker 会以为已完成
         self.commit_and_push(f"retry {tid}", self._card_paths(tid, target))
         log(f"{tid} 已重新入队 -> {target}")
+
+    def cmd_unassign(self, tid: str, reason: str = "", who: str = "controller") -> None:
+        """把任意 in-flight 卡强制退回 ready 池并清空 owner（人工显式版，不受熔断限制）。
+
+        与 cmd_retry 的区别：retry 回到 assigned 并保留 owner（同 agent 续跑）；
+        这里回到 ready 且清空 owner（放回任务池，等 dispatch 重新分派给别人）。
+
+        与 watchdog._reenqueue_ready 的区别：watchdog 只在「死掉/孤儿/僵尸/租约过期」
+        且熔断额度未用时才回收；这里由人工显式调用，无条件执行——用于「这张卡没死，
+        但我想把它拿回来重新分派」的场景（例如自动分配给了一个不合适的 agent）。
+        已在 done/closed 的卡是终态，不能退回。
+        """
+        self.fetch()
+        card = self.card(tid)
+        old_owner = card.get("owner") or ""
+        if card.get("state") in ("done", "closed"):
+            raise HiveError(f"{tid} 已是 {card.get('state')}，无法退回未分配")
+        # 清掉 claim / res 分支，让原 agent 失去租约，否则它还会续跑
+        for ref in (f"res/{tid}", f"claim/{tid}"):
+            if rev_parse(self.dir, f"origin/{ref}"):
+                git_net(["push", "origin", f":refs/heads/{ref}"], self.dir, check=False)
+                log(f"已删除 {ref}")
+        archived = self.dir / "results" / f"{tid}.json"
+        if archived.exists():
+            archived.unlink()  # 重新入队时把归档也撤掉，否则 worker 会以为已完成
+        card["state"] = "ready"
+        card["owner"] = None
+        body = (card["_body"]
+                + f"\n\n---\n\n**unassign（{iso()}，by {who}）**："
+                + (f"{reason}，" if reason else "")
+                + f"从 {old_owner or '（无主）'} 退回未分配（ready）\n")
+        self.save_card(card, body)
+        self.commit_and_push(f"unassign {tid}" + (f": {reason}" if reason else ""),
+                             self._card_paths(tid))
+        log(f"{tid} 已退回 ready 并未分配（原 owner={old_owner or '无'}）")
 
     def cmd_gc(self, minutes: int) -> None:
         self.fetch()
@@ -2392,6 +2448,8 @@ class Worker:
         self.max_workers = max(1, int(max_concurrency or self.cfg.get("max_concurrency") or 1))
         if self.mode == "exec" and not self.cmd:
             raise HiveError(f"agent {agent_name} 没配置 command（或设 mode: verify / manual）")
+        # 本机各任务的进度缓存，供心跳重推与里程碑更新（不上报就没人知道在干什么）
+        self._status: dict[str, dict] = {}
 
     # -- 队列 -------------------------------------------------------------- #
     def pending(self) -> list[tuple[str, dict]]:
@@ -2537,11 +2595,17 @@ class Worker:
         t = threading.Thread(target=self._heartbeat_loop, args=(tid, interval, stop),
                             name=f"hb-{tid}", daemon=True)
         t.start()
+        # 状态推送比租约心跳快得多（默认 60s）：租约只用来判死活，进度要给看板看
+        sp = threading.Thread(
+            target=self._status_loop,
+            args=(tid, status_push_interval(), stop), name=f"st-{tid}", daemon=True)
+        sp.start()
         try:
             yield
         finally:
             stop.set()
             t.join(timeout=5)
+            sp.join(timeout=5)
 
     def _heartbeat_loop(self, tid: str, interval: int, stop: threading.Event) -> None:
         while not stop.wait(interval):
@@ -2565,6 +2629,69 @@ class Worker:
             json.dumps(payload, ensure_ascii=False, indent=2),
             f"claim/{tid}", f"origin/claim/{tid}",
             f"lease {tid} by {self.name}")
+
+    # -- 任务进度主动上报（agent -> hive）-------------------------------- #
+    def set_status(self, tid: str, state: str = "", progress=None,
+                   step: str = "", message: str = "") -> None:
+        """里程碑：更新本机进度缓存并立刻推一次。"""
+        cur = self._status.setdefault(tid, {})
+        for k, v in (("state", state), ("progress", progress),
+                     ("step", step), ("message", message)):
+            if v not in (None, ""):
+                cur[k] = v
+        self.push_status(tid, **cur)
+
+    def push_status(self, tid: str, **fields) -> None:
+        """把进度推到 status/<tid> 分支 —— agent 主动上报的主通道。
+
+        同一张卡多次推送按字段合并（只覆盖本次给了的），所以心跳可以只刷新时间、
+        里程碑只更新进度。best-effort：失败只 log，绝不打断正在跑的任务
+        （与租用心跳同一原则）。
+        """
+        try:
+            prev = self.h.status_info(tid)
+            payload = dict(prev) if isinstance(prev, dict) else {}
+            payload.update({k: v for k, v in fields.items() if v is not None})
+            payload["task"] = tid
+            payload["agent"] = self.name
+            payload["updated_at"] = iso()
+            parent = (f"origin/status/{tid}"
+                      if rev_parse(self.dir, f"origin/status/{tid}") else "origin/main")
+            self.h.fetch()
+            commit_file_to_ref(
+                self.h.dir, f"status/{tid}.json",
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                f"status/{tid}", parent,
+                f"status {tid} by {self.name}", force=True)
+            self._push_http(payload)
+        except Exception as e:  # noqa: BLE001  best-effort，绝不影响任务本身
+            log(f"{tid} 状态推送失败（忽略）: {e}")
+
+    def _push_http(self, payload: dict) -> None:
+        """HTTP 加速通道：仅当配了 HIVE_PUSH_URL 才推（如 http://host:8791/api/push）。
+
+        跨机 agent 未必能访问看板主机，所以这是「能连就更快」的补充通道；
+        失败完全不影响 git 主通道的结果。
+        """
+        url = (os.environ.get("HIVE_PUSH_URL") or "").strip()
+        if not url:
+            return
+        try:
+            from urllib import request  # 延迟导入：没配 URL 时零开销
+            req = request.Request(
+                url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST")
+            request.urlopen(req, timeout=5).read()
+        except Exception as e:  # noqa: BLE001
+            log(f"HTTP 状态推送失败（忽略，git 通道仍在）: {e}")
+
+    def _status_loop(self, tid: str, interval: int, stop: threading.Event) -> None:
+        """周期上报：刷新 updated_at 并重推当前进度 —— 长时间没推就是失联信号。"""
+        while not stop.wait(interval):
+            try:
+                self.push_status(tid, **self._status.get(tid, {}))
+            except Exception:  # noqa: BLE001
+                pass
 
     # -- 手工领取 / 提交（take / submit） ---------------------------------- #
     def prepare(self, tid: str) -> dict:
@@ -2702,6 +2829,9 @@ class Worker:
         out, timed_out, code = "", False, 0
 
         with self.lease_heartbeat(tid):
+            self.set_status(tid, state="running", progress=5, step="启动",
+                            message=("只跑验收，不调用 agent" if verify_only else
+                                     ("等待人工完成" if self.manual else "agent 执行中")))
             if verify_only:
                 log(f"{tid} 验证模式：只跑 verify，不调用 agent")
             elif self.manual:
@@ -2764,6 +2894,9 @@ class Worker:
                 log(f"{tid} 推送代码分支失败: {e}")
 
         verify = []
+        self.set_status(tid, state="verifying", progress=70, step="验收",
+                        message=(f"越界改动，跳过验收" if blocked else
+                                 f"{len(card.get('verify') or [])} 条验收命令"))
         if not blocked:
             for cmd in (card.get("verify") or []):
                 p = run(cmd, cwd=wt, check=False, shell=True, timeout=1800)
@@ -2806,6 +2939,8 @@ class Worker:
             "changed_files": changed, "out_of_paths": oop,
         }
         self._write_result(tid, result)
+        self.set_status(tid, state=result["status"], progress=100, step="完成",
+                        message=(result.get("error") or result["status"]))
 
         if not self.keep:
             git(["worktree", "remove", "--force", str(wt)], repo, check=False)
@@ -3299,6 +3434,10 @@ def cmd_retry(args) -> None:
     Hive(args.dir).cmd_retry(args.task, args.agent, args.fresh)
 
 
+def cmd_unassign(args) -> None:
+    Hive(args.dir).cmd_unassign(args.task, args.reason or "", who="controller")
+
+
 def cmd_result(args) -> None:
     h = Hive(args.dir)
     h.fetch()
@@ -3482,6 +3621,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--agent")
     s.add_argument("--fresh", action="store_true", help="从 main 重来，不续用 task 分支")
     s.set_defaults(func=cmd_retry)
+
+    s = sub.add_parser("unassign", aliases=["requeue"],
+                       help="把任务强制退回未分配（ready 池，清空 owner；不受熔断限制）")
+    s.add_argument("task")
+    s.add_argument("--reason", default="", help="为什么退回（写进卡面备注）")
+    s.set_defaults(func=cmd_unassign)
 
     s = sub.add_parser("result", help="查看任务结果")
     s.add_argument("task")

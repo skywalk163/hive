@@ -43,6 +43,15 @@
     <div class="controls">
       <label class="field"><span>仓库</span><select id="repo-filter"></select></label>
       <label class="field"><span>Owner</span><select id="owner-filter"></select></label>
+      <label class="field"><span>优先级</span>
+        <select id="prio-filter">
+          <option value="">全部优先级</option>
+          <option value="P1">P1</option>
+          <option value="P2">P2</option>
+          <option value="P3">P3</option>
+        </select>
+      </label>
+      <label class="switch"><input type="checkbox" id="unowned-filter" /><span>仅看无主</span></label>
       <label class="field grow"><span>搜索</span>
         <input id="search" type="search" placeholder="id / 标题 / 摘要" autocomplete="off" />
       </label>
@@ -84,6 +93,7 @@
 <div class="overlay" id="settings-overlay" aria-hidden="true"></div>
 <div class="modal" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-hidden="true" hidden></div>
 <div class="drop-hint" id="drop-hint" aria-hidden="true">松开鼠标即载入 status.json</div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <script src="app.js" defer></script>
 </body>
