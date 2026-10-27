@@ -15,10 +15,11 @@
     "linux"
   ],
   "repos": {
-    "hive": "G:/dswork/duan-light-merge/hive"
+    "hive": "G:/dswork/duan-light-merge/hive",
+    "lightharness": "G:/dswork/duan-light-merge/lightharness"
   },
   "launch": "",
   "worktrees": "C:/Users/skywalk/.hive/wt/raccoon-win",
   "max_concurrency": 1,
-  "created": "2026-10-25T23:05:30+08:00"
+  "created": "2026-10-27T12:01:24+08:00"
 }
