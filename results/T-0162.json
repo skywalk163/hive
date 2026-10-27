@@ -1,0 +1,40 @@
+{
+  "task": "T-0162",
+  "agent": "codearts-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0162",
+  "base": "main",
+  "head": "33114cf85843881947cc58af6e2b0e11ca0a54a9",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-27T07:41:56+08:00",
+  "finished_at": "2026-10-27T10:35:02+08:00",
+  "duration_s": 10387.0,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_worker_parallel.py -q",
+      "code": 0,
+      "tail": [
+        "  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.",
+        "    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))",
+        "",
+        "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+        "6 passed, 12 warnings in 140.64s (0:02:20)"
+      ]
+    }
+  ],
+  "summary": "# T-0162 worker 轻量线程池：按 max_concurrency 并发跑多张 exec 卡\n\n## 做了什么\n\n- 新增 `Worker.run_tasks(tids, max_workers=None)`：用 `concurrent.futures.ThreadPoolExecutor`\n  （上限取 `max_workers` → 否则构造时的 `self.max_workers` → 否则 agent 配置\n  `max_concurrency`）提交每张卡的 `run_task`，`as_completed` 收集 `{tid: result}`。\n  上限为 1 或只有一张卡时**退化回逐张串行 `run_task`**，单卡路径与旧行为逐字一致\n  （`hive take` / `hive work` 的单卡语义不变）。\n- `Worker.loop()`：一轮里把 claim 到的卡一次性交给 `run_tasks`（旧循环本就是「一轮跑完\n  所有 pending 卡」，只是把串行换成并发）；`max_concurrency=1` 时行为与旧循环一致。\n- 错误隔离：某任务线程抛异常只判本卡 failed（`_fail` 落一条 `results/<tid>.json`），\n  不拖垮池里其他任务。\n- 并发安全：新增进程内 `_GIT_LOCK`（`threading.RLock`），只锁 `git()` / `git_net()`\n  两个 git 通道。实测并发 `git worktree add` **同一个代码仓**会以退出码 255 互踩，\n  导致某张卡「创建 worktree 失败」；加锁后 4 连跑稳定。`run()` 不锁：agent 调用\n  （Popen）与 verify 命令仍并行，不影响吞吐。\n- 心跳 / 日志隔离：确认 `lease_heartbeat` **本就是 per-call 的上下文管理器**——每次\n  `with` 起一条独立 `hb-<tid>` 心跳线程、退出即停，并发多任务各自续租互不干扰；日志\n  本就写 `state/logs/<tid>.log`。两点均已满足，无需改动。\n- `work` 子命令新增 `--max-concurrency N`（默认 None = 取 agent 配置），`cmd_work`\n  透传给 `Worker`。\n- `scripts/start-worker.sh`：文档化并透传 `--max-concurrency N`（`\"$@\"` 转发）。\n- 新增 `tests/test_worker_parallel.py`（6 个用例）。\n\n## 验证\n\n- `python3 -m pytest tests/test_worker_parallel.py -q` → **6 passed**（本机 Windows，\n  未设 PYTHONUTF8 亦通过）。\n- 端到端（假 agent 事件流还原峰值并发）：3 张卡 + `--max-concurrency 2` → 峰值并发 = 2，\n  3 张全部 `status=done` 且各写 `res/<tid>`；`--max-concurrency 1` → 峰值 = 1 且 3 张全完成。\n- 回归：`test_worker_guard.py` / `test_claim_backoff.py` / `test_retry_cap.py` /\n  `test_repo_scope.py` / `test_host_routing.py` → **29 passed, 1 failed**，唯一失败\n  `test_host_routing::test_repos_falls_back_when_no_path_exists` 在**干净 main 基线**上\n  同样失败（Windows 路径分隔符 `\\` vs `/`），与本卡无关。\n- 全量 `tests/test_core.py` → 53 passed / 14 failed；在干净 main 基线复跑代表性子集\n  （land/doctor/digest/manual 等）失败集合完全一致 → 均为本机 Windows 既有失败\n  （`true` / `test -f` 命令不存在、中文输出被 conftest 以 gbk 解码），非本卡引入。\n\n## 没做 / 风险\n\n- 未改 `Hive._paths_conflict` / `conflict.py`（T-0163 地盘）。\n- `dispatch` 侧的上限语义不变；本卡只把 `max_concurrency` 落到 **worker 内部**执行\n  链路，与 dispatch 的职责边界收敛留给后续设计卡。\n- 既有测试基建 `tests/conftest.py` 用 `text=True`（本机 locale=gbk）解码子进程输出，\n  Windows 下中文输出会触发 `UnicodeDecodeError` 警告（个别用例 stdout=None）。这是\n  **既有环境问题**，本卡未动 conftest（不在 paths 内）；设 `PYTHONUTF8=1` 可消除。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "scripts/start-worker.sh",
+    "tests/test_worker_parallel.py"
+  ],
+  "changed_files": [
+    "hive.py",
+    "scripts/start-worker.sh",
+    "tests/test_worker_parallel.py"
+  ],
+  "out_of_paths": []
+}
