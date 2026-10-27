@@ -15,7 +15,8 @@
     "linux"
   ],
   "repos": {
-    "hive": "G:/dswork/duan-light-merge/hive"
+    "hive": "G:/dswork/duan-light-merge/hive",
+    "lightharness": "G:/dswork/duan-light-merge/lightharness"
   },
   "launch": "",
   "worktrees": "C:/Users/skywalk/.hive/wt/trae-win",
