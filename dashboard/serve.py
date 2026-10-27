@@ -10,6 +10,7 @@
 
 import argparse
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,6 +29,8 @@ STATIC_FILES = {
 }
 
 API_PATH = "/api/status"
+API_CONFIG = "/api/config"
+CONFIG_PATH = BASE_DIR / "settings.json"
 NO_STORE = "no-store, no-cache, must-revalidate, max-age=0"
 
 
@@ -71,6 +74,9 @@ def build_handler(status_path):
             if path == API_PATH:
                 self.serve_status()
                 return
+            if path == API_CONFIG:
+                self.serve_config_get()
+                return
             entry = STATIC_FILES.get(path)
             if entry is None:
                 self._send_json(404, {"error": "未找到资源: %s" % path})
@@ -79,6 +85,62 @@ def build_handler(status_path):
 
         def do_HEAD(self):  # noqa: N802
             self.do_GET()
+
+        def do_POST(self):  # noqa: N802
+            path = urlparse(self.path).path
+            if path == API_CONFIG:
+                self.serve_config_post()
+                return
+            self._send_json(404, {"error": "未找到资源: %s" % path})
+
+        # ---- /api/config：系统只读信息 + 服务端共享看板默认（GET/POST） ----
+        def system_info(self):
+            agents_dir = BASE_DIR.parent / "agents"
+            agents = sorted(p.stem for p in agents_dir.glob("*.json")) if agents_dir.is_dir() else []
+            return {
+                "status_file": status_path,
+                "dashboard_dir": str(BASE_DIR),
+                "hub": os.environ.get("HIVE_HUB", ""),
+                "agents": agents,
+            }
+
+        def load_dashboard_config(self):
+            try:
+                return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return {}
+            except ValueError:
+                return {}
+
+        def serve_config_get(self):
+            self._send_json(200, {
+                "system": self.system_info(),
+                "dashboard": self.load_dashboard_config(),
+            })
+
+        def serve_config_post(self):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except ValueError as exc:
+                self._send_json(400, {"error": "请求体不是合法 JSON: %s" % exc})
+                return
+            incoming = body.get("dashboard") if isinstance(body, dict) else None
+            if not isinstance(incoming, dict):
+                self._send_json(400, {"error": "dashboard 必须是对象"})
+                return
+            cur = self.load_dashboard_config()
+            cur.update(incoming)   # 合并后持久化到服务端共享默认
+            try:
+                CONFIG_PATH.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+            except OSError as exc:
+                self._send_json(500, {"error": "配置写入失败: %s" % exc})
+                return
+            self._send_json(200, {"system": self.system_info(), "dashboard": cur})
 
         # ---- /api/status：每次请求都重新读盘 ----
         def serve_status(self):

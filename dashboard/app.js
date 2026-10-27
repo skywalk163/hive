@@ -9,21 +9,93 @@
   var TICK_MS = 30000;      // 相对时间（已领取 / 租约剩余）的自行重算间隔
   var STORE_THEME = 'hive.theme';
   var STORE_AUTO = 'hive.autoRefresh';
-  var RECENT_WINDOW_MS = 14 * 24 * 3600 * 1000;  // 「最近完成」窗口：完成于近 14 天
-  var MAX_RECENT = 15;                            // 「最近完成」最多展示条数，超出留在「已关闭」
+  var MAX_RECENT = 50;                              // 「最近完成」硬上限，防止误设过大
+  var DEFAULT_RECENT_COUNT = 8;                     // 「最近完成」默认展示条数
+  var STORE_SETTINGS = 'hive.settings';             // 个人设置（稀疏对象，仅存用户改过的项）
 
-  // 六列，从左到右；判定顺序：已关闭 → 异常 → 待合并 → 进行中 → 待领取
-  // recent（最近完成）从 closed 里捞出「近 14 天完成」的卡，默认展开，不用翻归档
+  // 六列，从左到右
+  // recent（最近完成）= 已完成任务里按 finished_at 倒序的前 N 个（默认 8，可在设置里改）；
+  // 其余已完成任务留在 closed（已关闭）归档。done 任务各归一列，不会重复。
   var COLUMNS = [
     { key: 'ready', title: '待领取', hint: 'state = ready 且无人抢锁' },
     { key: 'running', title: '进行中', hint: '已抢锁 / assigned / running，暂无结果' },
     { key: 'merging', title: '待合并', hint: 'result_status = done，state 还不是 done' },
     { key: 'abnormal', title: '异常', hint: 'failed / blocked / 租约过期' },
-    { key: 'recent', title: '最近完成', hint: 'state = done 且完成于近 14 天（按完成时间倒序）' },
-    { key: 'closed', title: '已关闭', hint: 'state = done 且完成超过 14 天（默认折叠）', collapsible: true }
+    { key: 'recent', title: '最近完成', hint: '已完成中按完成时间倒序的前 N 个（数量可在设置里改）' },
+    { key: 'closed', title: '已关闭', hint: '其余已完成的任务（默认折叠）', collapsible: true }
   ];
   var COL_TITLE = {};
   COLUMNS.forEach(function (c) { COL_TITLE[c.key] = c.title; });
+
+  // ---------- 设置：个人 local（稀疏，仅存改过的项）＋ 服务端共享默认（个人优先） ----------
+  function loadPersonalRaw() {
+    try {
+      var o = JSON.parse(storeGet(STORE_SETTINGS) || '{}');
+      return (o && typeof o === 'object') ? o : {};
+    } catch (e) { return {}; }
+  }
+  function savePersonal() { storeSet(STORE_SETTINGS, JSON.stringify(personal)); }
+
+  /** 合并优先级：个人覆盖（personal）> 服务端默认（server）> 内置默认 */
+  function computeEffective() {
+    function pick(k, dflt) { return (k in personal) ? personal[k] : ((k in server) ? server[k] : dflt); }
+    function pickCol(k) {
+      var p = personal.columns, s = server.columns;
+      if (p && (k in p)) return !!p[k];
+      if (s && (k in s)) return !!s[k];
+      return true;
+    }
+    function clampInt(v, lo, hi, dflt) {
+      v = Number(v);
+      return (isFinite(v) && v >= lo && v <= hi) ? Math.round(v) : dflt;
+    }
+    var s = {
+      recentCount: clampInt(pick('recentCount', DEFAULT_RECENT_COUNT), 1, MAX_RECENT, DEFAULT_RECENT_COUNT),
+      refreshMs: clampInt(pick('refreshMs', REFRESH_MS), 5000, 600000, REFRESH_MS),
+      compact: !!pick('compact', false),
+      showCI: pick('showCI', true),
+      showVerify: pick('showVerify', true),
+      columns: {}
+    };
+    COLUMNS.forEach(function (c) { s.columns[c.key] = pickCol(c.key); });
+    return s;
+  }
+
+  var personal = loadPersonalRaw();   // 个人覆盖（稀疏）
+  var server = {};                    // 服务端共享默认（GET /api/config 拉取）
+  var settings = computeEffective();  // 生效设置
+  var refreshTimer = null;
+
+  /** 把生效设置落到 DOM（主题/紧凑/CI/验收/自动刷新间隔） */
+  function applyEffective() {
+    document.body.classList.toggle('compact', !!settings.compact);
+    document.body.classList.toggle('no-verify', !settings.showVerify);
+    var ci = document.getElementById('ci-strip');
+    if (ci) ci.hidden = !settings.showCI;
+    startAutoRefresh();
+  }
+
+  function startAutoRefresh() {
+    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+    refreshTimer = setInterval(function () {
+      if (state.autoRefresh && !state.inflight && document.visibilityState === 'visible') loadStatus();
+    }, settings.refreshMs);
+  }
+
+  /** 拉取服务端共享设置与系统只读信息 */
+  function loadServerConfig() {
+    try {
+      fetch('/api/config', { cache: 'no-store', headers: { Accept: 'application/json' } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d) return;
+          if (d.dashboard) { server = d.dashboard || {}; settings = computeEffective(); applyEffective(); render(); }
+          if (d.system) state.system = d.system;
+          if (state.settingsOpen) renderSettings();
+        })
+        .catch(function () {});
+    } catch (e) {}
+  }
 
   var dtf = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'medium', hour12: false });
   var rtf = new Intl.RelativeTimeFormat('zh-CN', { numeric: 'auto' });
@@ -32,6 +104,9 @@
   var state = {
     tasks: [],        // 归一化后的全量任务
     filtered: [],     // 经过筛选后的任务
+    recentIds: {},    // 当前「最近完成」集合（id -> true），每轮 render 重算
+    system: null,     // 服务端系统只读信息（GET /api/config 填充）
+    settingsOpen: false,
     repo: '',
     owner: '',
     query: '',
@@ -134,10 +209,8 @@
   /** 列的单向判定，一张卡只落一列 */
   function classify(t) {
     if (t.state === 'done') {
-      // 近 14 天完成的归「最近完成」，更早的落到「已关闭」归档；无完成时间一律进归档
-      var fin = parseTime(t.finished_at);
-      if (fin !== null && (Date.now() - fin) <= RECENT_WINDOW_MS) return 'recent';
-      return 'closed';
+      // 已完成：落在「最近完成」集合里的归 recent，其余归档到 closed（不会重复）
+      return (state.recentIds && state.recentIds[t.id]) ? 'recent' : 'closed';
     }
     if (t.result_status === 'failed' || t.state === 'blocked' || isStale(t)) return 'abnormal';
     if (t.result_status === 'done') return 'merging';
@@ -360,6 +433,7 @@
   function renderStats(counts) {
     var html = '<span class="stat">共 <b>' + state.filtered.length + '</b> 个任务</span>';
     COLUMNS.forEach(function (c) {
+      if (!settings.columns[c.key]) return;   // 隐藏的面板不计入统计条
       html += '<span class="stat' + (c.key === 'abnormal' ? ' is-abnormal' : '') + '">' +
         esc(c.title) + ' <b>' + (counts[c.key] || 0) + '</b></span>';
     });
@@ -455,25 +529,26 @@
     if (!state.tasks.length) { showPanel('empty'); renderStats({}); return; }
     hidePanel();
 
+    // 计算「最近完成」集合：已完成任务按 finished_at 倒序取前 N 个，其余留在「已关闭」
+    var doneSorted = state.filtered.filter(function (t) { return t.state === 'done'; })
+      .slice().sort(sortRecent);
+    state.recentIds = {};
+    var n = Math.min(settings.recentCount, doneSorted.length);
+    for (var i = 0; i < n; i++) state.recentIds[doneSorted[i].id] = true;
+
     var groups = {};
     COLUMNS.forEach(function (c) { groups[c.key] = []; });
     state.filtered.forEach(function (t) { groups[classify(t)].push(t); });
 
     var counts = {};
     COLUMNS.forEach(function (c) {
-      var list = groups[c.key];
-      var overflow = 0;
-      if (c.key === 'recent') {
-        list = list.slice().sort(sortRecent);
-        if (list.length > MAX_RECENT) { overflow = list.length - MAX_RECENT; list = list.slice(0, MAX_RECENT); }
-      } else {
-        list = list.sort(sortTasks);
-      }
-      // 统计与角标按「完整归属」计（含被截断的近期完成），避免数字对不上
-      counts[c.key] = groups[c.key].length;
-      cols[c.key].count.textContent = groups[c.key].length;
+      var list = (c.key === 'recent')
+        ? groups[c.key].slice().sort(sortRecent)
+        : groups[c.key].slice().sort(sortTasks);
+      counts[c.key] = list.length;
+      cols[c.key].count.textContent = list.length;
       cols[c.key].list = list;
-      cols[c.key].overflow = overflow;
+      cols[c.key].root.hidden = !settings.columns[c.key];   // 面板可见性
 
       if (cols[c.key].toggle) {
         cols[c.key].toggle.textContent = state.closedOpen
@@ -482,15 +557,7 @@
         cols[c.key].toggle.setAttribute('aria-expanded', String(state.closedOpen));
         cols[c.key].body.hidden = !state.closedOpen;
       }
-      if (!cols[c.key].body.hidden) {
-        syncList(cols[c.key]);
-        var m = cols[c.key].more;
-        if (m) {
-          m.hidden = overflow <= 0;
-          if (overflow > 0) m.textContent = '还有 ' + overflow + ' 条更早的近期完成（本列仅展示最近 ' + MAX_RECENT + ' 条）';
-          cols[c.key].body.appendChild(m);  // 移到末尾，避免压在卡片前
-        }
-      }
+      if (!cols[c.key].body.hidden) syncList(cols[c.key]);
     });
 
     renderStats(counts);
@@ -725,8 +792,16 @@
     });
 
     el.overlay.addEventListener('click', closeDrawer);
+
+    // 设置弹窗：齿轮按钮 + 遮罩点击关闭 + Esc 关闭
+    var settingsBtn = document.getElementById('settings-btn');
+    if (settingsBtn) settingsBtn.addEventListener('click', openSettings);
+    var settingsOverlay = document.getElementById('settings-overlay');
+    if (settingsOverlay) settingsOverlay.addEventListener('click', closeSettings);
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' || e.key === 'Esc') closeDrawer();
+      if (e.key === 'Escape' || e.key === 'Esc') {
+        if (state.settingsOpen) closeSettings(); else closeDrawer();
+      }
     });
 
     // 文件拖拽降级通道
@@ -747,10 +822,7 @@
       if (dt && dt.files && dt.files.length) readFile(dt.files[0]);
     });
 
-    // 自动刷新：页面不可见时不打扰
-    setInterval(function () {
-      if (state.autoRefresh && !state.inflight && document.visibilityState === 'visible') loadStatus();
-    }, REFRESH_MS);
+    // 自动刷新已由 startAutoRefresh()（applyEffective 内）按 settings.refreshMs 管理，这里不再单独建定时器
 
     // 相对时间自行重算（不重新请求网络）
     setInterval(function () { if (!state.inflight) render(); }, TICK_MS);
@@ -818,18 +890,179 @@
     }
   }
 
+  // ---------- 设置弹窗 ----------
+  function openSettings() {
+    state.settingsOpen = true;
+    renderSettings();
+    var m = document.getElementById('settings-modal');
+    m.hidden = false;
+    m.setAttribute('aria-hidden', 'false');
+    document.getElementById('settings-overlay').classList.add('open');
+  }
+  function closeSettings() {
+    state.settingsOpen = false;
+    var m = document.getElementById('settings-modal');
+    m.hidden = true;
+    m.setAttribute('aria-hidden', 'true');
+    document.getElementById('settings-overlay').classList.remove('open');
+  }
+
+  /** 生成一个下拉选项串 */
+  function opts(values, current) {
+    return values.map(function (v) {
+      return '<option value="' + v + '"' + (Number(current) === Number(v) ? ' selected' : '') + '>' + esc(String(v)) + '</option>';
+    }).join('');
+  }
+
+  function renderSettings() {
+    var m = document.getElementById('settings-modal');
+    var colChecks = COLUMNS.map(function (c) {
+      return '<label class="switch"><input type="checkbox" data-col="' + c.key + '"' +
+        (settings.columns[c.key] ? ' checked' : '') + ' /><span>' + esc(c.title) + '</span></label>';
+    }).join('');
+
+    var sysRows = state.system
+      ? '<dl class="kv">' +
+          '<dt>状态文件</dt><dd>' + esc(state.system.status_file || '—') + '</dd>' +
+          '<dt>看板目录</dt><dd>' + esc(state.system.dashboard_dir || '—') + '</dd>' +
+          '<dt>Hub 地址</dt><dd>' + (state.system.hub ? esc(state.system.hub) : '（未配置）') + '</dd>' +
+          '<dt>已注册 Agent</dt><dd>' + ((state.system.agents && state.system.agents.length) ? esc(state.system.agents.join('、')) : '（无）') + '</dd>' +
+        '</dl>'
+      : '<p class="muted">（未能读取系统配置，可稍后重试）</p>';
+
+    // 系统设置 tab 的当前值：优先服务端默认，回落到生效值
+    var sv = server && typeof server === 'object' ? server : {};
+    function sval(k, dflt) { return (k in sv) ? sv[k] : (k in settings ? settings[k] : dflt); }
+
+    m.innerHTML =
+      '<div class="modal-card">' +
+        '<div class="modal-head"><h2>设置</h2>' +
+          '<button type="button" class="btn icon" id="settings-close" aria-label="关闭">✕</button></div>' +
+        '<div class="tabs">' +
+          '<button type="button" class="tab active" data-tab="board">看板展示</button>' +
+          '<button type="button" class="tab" data-tab="system">系统设置</button>' +
+        '</div>' +
+
+        // —— 看板展示（个人）——
+        '<div class="tab-body" data-tab-body="board">' +
+          '<div class="setting-row"><div class="setting-label">最近完成显示数量</div>' +
+            '<select id="set-recent">' + opts([5, 8, 10, 15, 20], settings.recentCount) + '</select>' +
+            '<div class="hint">取「已关闭」里离当前时间最近的 N 个；其余留在「已关闭」。</div></div>' +
+          '<div class="setting-row"><div class="setting-label">面板可见性</div>' +
+            '<div class="checks">' + colChecks + '</div>' +
+            '<div class="hint">取消勾选即隐藏该面板（数据仍保留）。</div></div>' +
+          '<div class="setting-row"><div class="setting-label">自动刷新间隔</div>' +
+            '<select id="set-refresh">' + opts([5, 10, 15, 30, 60].map(function (s) { return s * 1000; }), settings.refreshMs) + '</select>' +
+            '<div class="hint">单位秒；页面不可见时暂停刷新。</div></div>' +
+          '<div class="setting-row"><div class="setting-label">紧凑模式</div>' +
+            '<label class="switch"><input type="checkbox" id="set-compact"' + (settings.compact ? ' checked' : '') + ' /><span>更紧凑的卡片间距</span></label></div>' +
+          '<div class="setting-row"><div class="setting-label">显示 CI 状态条</div>' +
+            '<label class="switch"><input type="checkbox" id="set-ci"' + (settings.showCI ? ' checked' : '') + ' /><span>顶部显示 Runner / CI 状态</span></label></div>' +
+          '<div class="setting-row"><div class="setting-label">显示验收输出</div>' +
+            '<label class="switch"><input type="checkbox" id="set-verify"' + (settings.showVerify ? ' checked' : '') + ' /><span>任务详情里展示验收命令输出</span></label></div>' +
+          '<p class="muted">以上为「个人设置」，仅保存在本浏览器；团队共享默认值在「系统设置」里配置。</p>' +
+        '</div>' +
+
+        // —— 系统设置（服务端共享）——
+        '<div class="tab-body" data-tab-body="system" hidden>' +
+          '<p class="muted">系统信息（只读）：</p>' + sysRows +
+          '<hr class="sep" />' +
+          '<p class="muted">团队默认（服务端共享，未在本浏览器覆盖该项的成员沿用）：</p>' +
+          '<div class="setting-row"><div class="setting-label">默认刷新间隔</div>' +
+            '<select id="sys-refresh">' + opts([5, 10, 15, 30, 60].map(function (s) { return s * 1000; }), sval('refreshMs', REFRESH_MS)) + '</select></div>' +
+          '<div class="setting-row"><div class="setting-label">默认紧凑模式</div>' +
+            '<label class="switch"><input type="checkbox" id="sys-compact"' + (sval('compact', false) ? ' checked' : '') + ' /><span>新成员默认紧凑</span></label></div>' +
+          '<div class="setting-row"><div class="setting-label">默认显示 CI 条</div>' +
+            '<label class="switch"><input type="checkbox" id="sys-ci"' + (sval('showCI', true) ? ' checked' : '') + ' /><span>新成员默认显示</span></label></div>' +
+          '<div class="setting-row"><div class="setting-label">默认显示验收输出</div>' +
+            '<label class="switch"><input type="checkbox" id="sys-verify"' + (sval('showVerify', true) ? ' checked' : '') + ' /><span>新成员默认显示</span></label></div>' +
+          '<div class="setting-row"><div class="setting-label">最近完成默认数量</div>' +
+            '<select id="sys-recent">' + opts([5, 8, 10, 15, 20], sval('recentCount', DEFAULT_RECENT_COUNT)) + '</select></div>' +
+          '<div class="setting-row"><button type="button" class="btn primary" id="sys-save">保存到服务端</button>' +
+            '<span class="hint" id="sys-msg"></span></div>' +
+        '</div>' +
+      '</div>';
+
+    // —— 绑定：看板展示（个人）——
+    m.querySelector('#settings-close').addEventListener('click', closeSettings);
+    m.querySelector('#set-recent').addEventListener('change', function (e) {
+      personal.recentCount = Number(e.target.value); savePersonal(); settings = computeEffective(); render();
+    });
+    m.querySelector('#set-refresh').addEventListener('change', function (e) {
+      personal.refreshMs = Number(e.target.value); savePersonal(); settings = computeEffective(); applyEffective();
+    });
+    m.querySelector('#set-compact').addEventListener('change', function (e) {
+      personal.compact = e.target.checked; savePersonal(); settings = computeEffective(); applyEffective();
+    });
+    m.querySelector('#set-ci').addEventListener('change', function (e) {
+      personal.showCI = e.target.checked; savePersonal(); settings = computeEffective(); applyEffective();
+    });
+    m.querySelector('#set-verify').addEventListener('change', function (e) {
+      personal.showVerify = e.target.checked; savePersonal(); settings = computeEffective(); applyEffective();
+    });
+    Array.prototype.forEach.call(m.querySelectorAll('[data-col]'), function (cb) {
+      cb.addEventListener('change', function () {
+        personal.columns = personal.columns || {};
+        personal.columns[cb.getAttribute('data-col')] = cb.checked;
+        savePersonal(); settings = computeEffective(); render();
+      });
+    });
+
+    // —— 绑定：标签页切换 ——
+    Array.prototype.forEach.call(m.querySelectorAll('.tab'), function (t) {
+      t.addEventListener('click', function () {
+        Array.prototype.forEach.call(m.querySelectorAll('.tab'), function (x) { x.classList.remove('active'); });
+        t.classList.add('active');
+        var name = t.getAttribute('data-tab');
+        Array.prototype.forEach.call(m.querySelectorAll('[data-tab-body]'), function (b) {
+          b.hidden = b.getAttribute('data-tab-body') !== name;
+        });
+      });
+    });
+
+    // —— 绑定：系统设置保存 ——
+    var sysSave = m.querySelector('#sys-save');
+    if (sysSave) sysSave.addEventListener('click', function () {
+      var d = { dashboard: {
+        refreshMs: Number(m.querySelector('#sys-refresh').value),
+        compact: m.querySelector('#sys-compact').checked,
+        showCI: m.querySelector('#sys-ci').checked,
+        showVerify: m.querySelector('#sys-verify').checked,
+        recentCount: Number(m.querySelector('#sys-recent').value)
+      } };
+      fetch('/api/config', {
+        method: 'POST', cache: 'no-store',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(d)
+      })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (resp) {
+          var msg = m.querySelector('#sys-msg');
+          if (resp && resp.dashboard) {
+            server = resp.dashboard || {}; settings = computeEffective(); applyEffective(); render();
+            if (state.settingsOpen) renderSettings();
+            if (msg) msg.textContent = '已保存到服务端';
+          } else if (msg) {
+            msg.textContent = '保存失败';
+          }
+        })
+        .catch(function () { var msg = m.querySelector('#sys-msg'); if (msg) msg.textContent = '保存失败（网络）'; });
+    });
+  }
+
   // ---------- 启动 ----------
   function init() {
     cacheEls();
     buildColumns();
     initTheme();
     bindEvents();
+    applyEffective();          // 落地主题/紧凑/CI/刷新间隔等生效设置
 
     state.autoRefresh = storeGet(STORE_AUTO) !== 'off';
     el.auto.checked = state.autoRefresh;
 
     loadStatus();
     loadCI();
+    loadServerConfig();        // 拉取服务端共享默认与系统只读信息
   }
 
   init();

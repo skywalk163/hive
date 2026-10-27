@@ -465,3 +465,61 @@ body.dropping .drop-hint { opacity: 1; visibility: visible; }
 .ci-unknown { background: #8b949e; }
 .ci-time { margin-left: auto; color: var(--text-3, #6b7488); }
 @keyframes ci-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* ---------- 设置弹窗 ---------- */
+.modal {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(680px, 94vw);
+  height: min(78vh, 720px);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  z-index: 32;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.modal[hidden] { display: none; }
+.modal-card { display: flex; flex-direction: column; height: 100%; }
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+}
+.modal-head h2 { margin: 0; font-size: 16px; }
+.tabs { display: flex; gap: 4px; padding: 8px 12px 0; border-bottom: 1px solid var(--border); }
+.tab {
+  appearance: none; background: transparent; border: 0; cursor: pointer;
+  padding: 8px 14px; font-size: 13px; color: var(--muted);
+  border-bottom: 2px solid transparent;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.tab-body { padding: 14px 16px 8px; overflow: auto; }
+.tab-body[hidden] { display: none; }
+
+.setting-row {
+  display: grid; grid-template-columns: 132px 1fr; align-items: center; gap: 10px;
+  padding: 10px 0; border-bottom: 1px solid var(--border);
+}
+.setting-row .setting-label { font-size: 13px; color: var(--text); }
+.setting-row .checks { display: flex; flex-wrap: wrap; gap: 10px 16px; }
+.setting-row .hint { grid-column: 2; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.setting-row select {
+  font-size: 13px; padding: 5px 8px; border-radius: 6px;
+  border: 1px solid var(--border-strong); background: var(--panel); color: var(--text);
+}
+.sep { border: 0; border-top: 1px dashed var(--border-strong); margin: 12px 0; }
+.modal .kv { display: grid; grid-template-columns: 110px 1fr; gap: 4px 12px; margin: 8px 0; font-size: 13px; }
+.modal .kv dt { color: var(--muted); }
+.modal .kv dd { margin: 0; word-break: break-all; }
+
+/* 紧凑模式：压缩卡片间距 */
+body.compact .col-body { padding: 6px; gap: 6px; }
+body.compact .card { padding: 8px 10px; }
+body.compact .columns { gap: 8px; }
+
+/* 隐藏验收输出 */
+body.no-verify .verify { display: none; }
