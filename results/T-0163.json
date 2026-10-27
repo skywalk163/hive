@@ -1,0 +1,37 @@
+{
+  "task": "T-0163",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0163",
+  "base": "main",
+  "head": "c187fe37b82202ff3288cabe189f1a2ea9e7f1de",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-27T07:42:20+08:00",
+  "finished_at": "2026-10-27T08:27:18+08:00",
+  "duration_s": 2698.5,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest tests/test_conflict.py -q",
+      "code": 0,
+      "tail": [
+        "...................                                                      [100%]",
+        "19 passed in 336.45s (0:05:36)"
+      ]
+    }
+  ],
+  "summary": "# T-0163 完成摘要：文件级锁声明（`locks`）\n\n## 做了什么\n\n1. 新增 `conflict.py`：文件级锁判定。`_lock_matches(lock, other)` 双向比较，支持三种写法 ——\n   目录锁 `src/`（覆盖其下所有）、文件锁 `src/a.py`（只此一个）、通配 `src/*.py` /\n   `**/test_*.py`（`fnmatch`，`*` 跨 `/`）；`_locks_conflict(a, b)` 任一对命中即冲突，\n   **任一方为空保守判冲突**（没写锁 = 可能改任何地方，与旧 `paths` 默认一致）。\n2. 改造 `Hive._paths_conflict(a, b, a_locks=None, b_locks=None)`：双方都有非空 `locks`\n   → 走 `conflict._locks_conflict` 精确判；否则**原样回退**旧 `paths` 目录前缀逻辑。\n   `_path_overlap` 一字未动，旧签名调用（`h._paths_conflict(x, y)`）仍然合法。\n3. `cmd_dispatch` 把两张卡的 `locks` 传进去，冲突提示措辞改成 `paths/locks 冲突`。\n4. **顺手修了个会静默丢字段的坑**：`write_card` 只按 `TASK_FIELDS` 落盘，`locks` 没登记\n   进去，卡被 assign/close 重写一次字段就消失 —— 已把 `locks` 加进 `TASK_FIELDS`。\n\n## 改了哪些文件\n\n- `conflict.py`（新增）：模块 docstring 写了字段语义、判定规则和两个刻意取舍。\n- `hive.py`：`TASK_FIELDS` +1、`conflict` 延迟导入（缺模块时只有真用到 `locks` 才报错）、\n  `_paths_conflict` 双分支、dispatch 传参与措辞。\n- `tests/test_conflict.py`（新增 19 用例）：单元 12（三种写法 + 对称性 + 规整 + 五条判据）、\n  接线 3（有/无 locks 两条分支 + 旧行为不变）、卡面 1（`locks` 经 `write_card` 重写不丢）、\n  端到端 3（文件不重叠的两张卡能同时派出、真重叠仍拦、一方没写 locks 仍保守冲突）。\n\n## 验证\n\n- `python -m pytest tests/test_conflict.py -q` → **19 passed**（Windows / Python 3.14.7）。\n- `python -m pytest tests/test_core.py -k \"paths_conflict or paths_overlap or empty_paths\"` →\n  **3 passed**（含卡面点名的 `test_paths_conflict_rules`、`test_dispatch_paths_overlap_blocked`）。\n- 整仓 `pytest tests/` 没在本机跑完：Windows 上每个 world 夹具建仓约 80s，150+ 用例要数小时，\n  全量交给 CI（FreeBSD）；上面两组已覆盖本卡改动面。\n\n## 遗留 / 风险\n\n1. `task new` 还没有 `--locks` 参数，写锁目前得手改 frontmatter（`mcp_server.py` 的 task_new\n   同理）。本卡刻意不扩，避免和 T-0162 在 `hive.py` 抢更大范围。\n2. `locks` **不参与** `out_of_paths` / `audit`：写锁不等于允许改 `paths` 之外的文件，\n   越界检测仍只看 `paths`。要不要统一建议单开一张卡。\n3. `conflict.py` 是 `hive.py` 的兄弟模块，而 `hive init` 只拷 `hive.py`：缺模块时只在真用到\n   `locks` 时抛明确错误（不会静默降级），但 `init` 是否要一并拷 `conflict.py` 需总控定。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "conflict.py",
+    "tests/test_conflict.py"
+  ],
+  "changed_files": [
+    "hive.py",
+    "conflict.py",
+    "tests/test_conflict.py"
+  ],
+  "out_of_paths": []
+}
