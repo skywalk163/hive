@@ -1,0 +1,30 @@
+{
+  "task": "T-0171",
+  "agent": "codearts-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0171",
+  "base": "main",
+  "head": "a835558a3ad7b4b4ce15179c166332a1f532e7c6",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-27T12:01:15+08:00",
+  "finished_at": "2026-10-27T13:04:54+08:00",
+  "duration_s": 3819.4,
+  "verify": [
+    {
+      "cmd": "python -c \"import pathlib; t=pathlib.Path('docs/宿主面登记清单.md').read_text(encoding='utf-8'); assert '0.2.1-rc.3' in t, '缺 0.2.1-rc.3 增量段'; assert 'client' in t.lower() or 'React' in t, '缺 client UI 登记'\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0171 C路｜宿主面登记扩容（0.2.1 增量 append 进宿主面登记清单）\n\n## 做了什么\n- 在 `lightharness/docs/宿主面登记清单.md` **末尾 append** §9「0.2.1-rc.3 增量宿主面登记（2026-10-27）」，未改动任何既有章节（§1–§8.1 逐字保留）。\n- 按任务卡 6 大块逐条登记，共新增 **27 条**（每条一行：宿主能力 / 上游实现面 / lightharness 现状 / 三平台可行性(Win/Linux/FreeBSD) / 状态=登记）：\n  - §9.1 **client React/Electron UI**：3 条（client 渲染层 1211 文件、Electron 桌面宿主、web 组合层）→ 明确\"不移植\"。\n  - §9.2 **experimental**：1 条粗登记（816 文件，待 A 路精修）。\n  - §9.3 **shell / terminal / subprocess**：2 条（shell 75 + terminal 30、subprocess 23）。\n  - §9.4 **ssh / sandbox / host**：3 条（ssh 42、sandbox 28 + native 3、host 65）。\n  - §9.5 **native / installer / Cordis**：3 条（native 原生层、bundle/apps installer、boot/Cordis 装配 104）。\n  - §9.6 **telemetry / webhook / computer-use / browser-use**：4 条（12 / 30 / 4 / 4）。\n  - §9.7 **.github / scripts / snapshots / benchmarks / python / vendor / .agents**：7 条（工程基建）。\n  - §9.8 **fs / web / lsp**：3 条（混合与宿主面补充）。\n- 上游口径实机复核（`git diff --shortstat dsh-v0.2.0-rc.2..dsh-v0.2.1-rc.3`，锚点 `dsh-v0.2.1-rc.3`=`1f81c047fc`）：1931 commit（`--no-merges` 1476）/ 8583 文件 / +325356 -84992；逐包文件数已写进各条\"上游实现面\"列（client 1211、experimental 816、shell 75、terminal 30、subprocess 23、ssh 42、sandbox 28、host 65、boot 104、telemetry 12、webhook 30、computer-use 4、browser-use 4、apps 522、.github 30、scripts 223、snapshots 799、benchmarks 36、python 35、vendor 15、.agents 2005、fs 60、web 58、lsp 18）。\n- 段落末尾给出**统计更新**：登记 86 → **113**（+27）。\n\n## 验证\n- `python -c \"import pathlib; t=pathlib.Path('docs/宿主面登记清单.md').read_text(encoding='utf-8'); assert '0.2.1-rc.3' in t; assert 'client' in t.lower() or 'React' in t\"` → **退出码 0**（新增段含 \"0.2.1-rc.3\" 与 client UI 登记）。\n\n## 没做 / 风险\n- ⛔ 未重写既有章节，仅 append；未移植任何宿主面代码；未改 `.light` 源码。\n- **A 路 T-0170 尚在飞**（assigned/running，`docs/功能对标/0.2.1-rc.3增量清单.md` 未产出），故 §9.2 experimental、§9.7 .agents 为\"粗\"登记；A 完成后按其 §3 新判宿主面零散项补登 §9.9（已在段内\"跟进\"行写明）。\n- 本卡 `paths` 仅 `docs/宿主面登记清单.md`，实际改动仅该文件，无越界。",
+  "error": "",
+  "declared_paths": [
+    "docs/宿主面登记清单.md"
+  ],
+  "changed_files": [
+    "docs/宿主面登记清单.md"
+  ],
+  "out_of_paths": []
+}
