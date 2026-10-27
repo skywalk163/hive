@@ -10,3 +10,4 @@ dashboard/status.err
 dashboard/ci.json
 dashboard/ci.json.tmp
 dashboard/pushed-status.json
+temp/
