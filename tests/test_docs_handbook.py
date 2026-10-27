@@ -16,18 +16,16 @@ MANUAL_DOC = ROOT / "docs" / "操作手册.md"
 AGENT_REQUIRED_SECTIONS = ["## FAQ", "## 术语表"]
 MANUAL_REQUIRED_SECTIONS = ["## FAQ"]
 
-# AGENT 文档 FAQ 必须覆盖的高频疑问（卡面点名的项）。
 AGENT_FAQ_TOPICS = [
-    "claimable",          # Q1 三种含义
-    "verify",             # Q2 verify 必须先手跑
-    "git commit",         # Q3 别自己 commit
-    "--dir",              # Q4 --dir 写在 mcp 后
-    "block",              # Q5 block vs abort
+    "claimable",
+    "verify",
+    "git commit",
+    "--dir",
+    "block",
     "abort",
-    "paths",              # Q6 paths 越界
+    "paths",
 ]
 
-# AGENT 术语表必须覆盖的核心术语。
 GLOSSARY_TERMS = [
     "task",
     "inbox",
@@ -39,12 +37,11 @@ GLOSSARY_TERMS = [
     "watchdog",
 ]
 
-# 操作手册 FAQ 必须覆盖的关键点（面向人/总控视角）。
 MANUAL_FAQ_TOPICS = [
-    "verify",             # Q1 verify 反模式
-    "并行度",              # Q2 并行度 = 你能审得过来的 diff 数
-    "land",               # Q3 land 撞冲突
-    "watchdog",           # Q4 卡卡在 assigned/running
+    "verify",
+    "并行度",
+    "land",
+    "watchdog",
 ]
 
 PLACEHOLDERS = ("TODO", "待补", "占位")
@@ -60,6 +57,13 @@ def _agent_text() -> str:
 def _manual_text() -> str:
     assert MANUAL_DOC.exists(), MANUAL_DOC
     return MANUAL_DOC.read_text(encoding="utf-8")
+
+
+def extract_section(text: str, name: str) -> str:
+    """提取 `## name` 小节正文，直到下一个 `## ` 标题（忽略 `### ` 子标题）。"""
+    m = re.search(r"^## " + re.escape(name) + r"\s*$(.*?)(?=^## |\Z)",
+                  text, re.MULTILINE | re.DOTALL)
+    return m.group(1) if m else ""
 
 
 # -- AGENT 快速上手 ----------------------------------------------------------- #
@@ -96,7 +100,7 @@ def test_agent_doc_code_fences_balanced():
 def test_agent_faq_covers_required_topics():
     """FAQ 必须覆盖卡面点名的每一个高频疑问。"""
     text = _agent_text()
-    faq = text.split("## FAQ", 1)[1].split("## ", 1)[0]
+    faq = extract_section(text, "FAQ")
     for topic in AGENT_FAQ_TOPICS:
         assert topic in faq, (
             f"AGENT FAQ 未覆盖高频疑问：{topic}"
@@ -106,7 +110,7 @@ def test_agent_faq_covers_required_topics():
 def test_agent_glossary_has_core_terms():
     """术语表要覆盖核心术语，不能只有几个字。"""
     text = _agent_text()
-    glossary = text.split("## 术语表", 1)[1]
+    glossary = extract_section(text, "术语表")
     for term in GLOSSARY_TERMS:
         assert term in glossary, f"术语表缺核心术语：{term}"
 
@@ -137,7 +141,7 @@ def test_manual_doc_code_fences_balanced():
 def test_manual_faq_covers_required_topics():
     """操作手册 FAQ 面向人视角，必须覆盖卡面点名的每一项。"""
     text = _manual_text()
-    faq = text.split("## FAQ", 1)[1]
+    faq = extract_section(text, "FAQ")
     for topic in MANUAL_FAQ_TOPICS:
         assert topic in faq, f"操作手册 FAQ 未覆盖：{topic}"
 
@@ -145,7 +149,7 @@ def test_manual_faq_covers_required_topics():
 def test_manual_faq_uses_qn_format():
     """FAQ 每条应以 Q1/Q2 或 Q1/Q2. 编号开头，方便跳转。"""
     text = _manual_text()
-    faq = text.split("## FAQ", 1)[1]
+    faq = extract_section(text, "FAQ")
     qs = re.findall(r"Q\d", faq)
     assert len(qs) >= 4, (
         f"操作手册 FAQ 只解析到 {len(qs)} 个 Q，应有至少 4 条"

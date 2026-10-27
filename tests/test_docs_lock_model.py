@@ -2,8 +2,8 @@
 
 T-0164 原本只用 `python3 -c` 检查小节存在。这里升级为 pytest，除必备小节之外
 还校验：小节顺序、代码围栏配对、无占位标记、以及关键概念的落地——
-"分支隔离/claim/paths/locks/land" 五件套都要出现，且 `locks` 必须明确标注
-为"规划中、尚未合入"（T-0164 卡面明确要求，避免读者误以为已上线）。
+“分支隔离/claim/paths/locks/land” 五件套都要出现，且 `locks` 必须明确标注
+为“规划中、尚未合入”（T-0164 卡面明确要求，避免读者误以为已上线）。
 """
 from __future__ import annotations
 
@@ -22,10 +22,8 @@ REQUIRED_SECTIONS = [
     "## 填写建议",
 ]
 
-# 四层保障：分支隔离 + claim 租约 + paths 互斥 + land 串行。
 LAYER_KEYWORDS = ["分支隔离", "租约", "paths", "land"]
 
-# locks 必须显式标注为规划中，避免读者以为已上线。
 LOCK_NOT_SHIPPED_MARKERS = ["规划中", "尚未合入"]
 
 PLACEHOLDERS = ("TODO", "待补", "占位")
@@ -36,6 +34,13 @@ FENCE_RE = re.compile(r"^\s*>?\s*```", re.MULTILINE)
 def _text() -> str:
     assert DOC.exists(), DOC
     return DOC.read_text(encoding="utf-8")
+
+
+def extract_section(text: str, name: str) -> str:
+    """提取 `## name` 小节正文，直到下一个 `## ` 标题（忽略 `### ` 子标题）。"""
+    m = re.search(r"^## " + re.escape(name) + r"\s*$(.*?)(?=^## |\Z)",
+                  text, re.MULTILINE | re.DOTALL)
+    return m.group(1) if m else ""
 
 
 def test_doc_exists_and_nontrivial():
@@ -80,33 +85,31 @@ def test_four_layer_model_covered():
 
 
 def test_locks_field_marked_as_planned():
-    """locks 字段必须显式标注为"规划中/尚未合入"，不能假装已上线。"""
+    """locks 字段必须显式标注为“规划中/尚未合入”，不能假装已上线。"""
     text = _text()
-    section = text.split("## 文件级锁 locks（规划）", 1)[1].split("## ", 1)[0]
-    # 至少一个规划标记必须出现在 locks 小节里，而不是散落全文。
-    assert any(m in section for m in LOCK_NOT_SHIPPED_MARKERS), (
-        "locks 小节未标注"规划中/尚未合入"，读者会误以为已上线"
+    sec = extract_section(text, "文件级锁 locks（规划）")
+    assert any(m in sec for m in LOCK_NOT_SHIPPED_MARKERS), (
+        "locks 小节未标注“规划中/尚未合入”，读者会误以为已上线"
     )
-    assert "T-0163" in section, "locks 小节应引用 T-0163 作为来源"
+    assert "T-0163" in sec, "locks 小节应引用 T-0163 作为来源"
 
 
 def test_paths_overlap_example_present():
     """目录前缀匹配节应给出可核对的例子（src/ vs src/a.py 冲突）。"""
     text = _text()
-    section = text.split("## 目录前缀匹配", 1)[1].split("## ", 1)[0]
-    assert "src/" in section and "src/a.py" in section, (
+    sec = extract_section(text, "目录前缀匹配")
+    assert "src/" in sec and "src/a.py" in sec, (
         "目录前缀匹配节缺具体路径示例，无法核对算法"
     )
-    assert "_path_overlap" in section or "_paths_conflict" in section, (
+    assert "_path_overlap" in sec or "_paths_conflict" in sec, (
         "目录前缀匹配节未引用实际实现函数名"
     )
 
 
 def test_land_relationship_callout():
-    """与 land 一节必须强调"干活不冲突 ≠ 合流不冲突"这条铁律。"""
+    """与 land 一节必须强调“干活不冲突 ≠ 合流不冲突”这条铁律。"""
     text = _text()
-    section = text.split("## 与 land 的关系", 1)[1]
-    # 用 "依赖 depends_on" 兜住这个观点：真要改同一文件就靠 depends_on 串行。
-    assert "depends_on" in section, (
+    sec = extract_section(text, "与 land 的关系")
+    assert "depends_on" in sec, (
         "与 land 一节未强调 depends_on 串行，读者会误以为 paths 能解决合流冲突"
     )

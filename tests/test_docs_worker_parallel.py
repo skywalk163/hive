@@ -31,7 +31,7 @@ KEY_PHRASES = [
     "worktree",                # 物理隔离的载体
 ]
 
-PLACEHOLDERS = ("TODO", "待补", "占位")
+PLACEHOLDERS = ("TODO", "待补")
 
 # 代码围栏：一行以（可选空白 + 可选引用前缀 >）开头紧跟三个反引号。
 # 兼容 blockquote 内的 ```sh / ``` 块（AGENT 文档里见过这种）。

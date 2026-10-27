@@ -1,8 +1,8 @@
 """docs/架构与排障全景.md 结构验收（升级 T-0165 强验收）。
 
 T-0165 原本只用 `python3 -c` 检查小节存在。这里升级为 pytest，除必备小节之外
-还校验：小节顺序、代码围栏配对、无占位标记，以及"排障表"里真的落了
-可检索的条目（不能只有表头），"四根支柱"关键词齐全。
+还校验：小节顺序、代码围栏配对、无占位标记，以及“排障表”里真的落了
+可检索的条目（不能只有表头），“四根支柱”关键词齐全。
 """
 from __future__ import annotations
 
@@ -22,16 +22,14 @@ REQUIRED_SECTIONS = [
     "## 排障表",
 ]
 
-# 架构总览里明确点名的四根支柱。
 PILLARS = ["中心仓", "claim", "worktree", "land"]
 
-# 排障表必须覆盖的典型现象（卡面点名的六类）。
 TROUBLESHOOTING_TOPICS = [
-    "dispatch",          # 不派
-    "land",              # land 相关故障
-    "assigned",          # 卡一直 assigned
-    "verify",            # 验收恒过
-    "paths",             # 两台机改同文件 / paths 越界
+    "dispatch",
+    "land",
+    "assigned",
+    "verify",
+    "paths",
 ]
 
 PLACEHOLDERS = ("TODO", "待补", "占位")
@@ -42,6 +40,13 @@ FENCE_RE = re.compile(r"^\s*>?\s*```", re.MULTILINE)
 def _text() -> str:
     assert DOC.exists(), DOC
     return DOC.read_text(encoding="utf-8")
+
+
+def extract_section(text: str, name: str) -> str:
+    """提取 `## name` 小节正文，直到下一个 `## ` 标题（忽略 `### ` 子标题）。"""
+    m = re.search(r"^## " + re.escape(name) + r"\s*$(.*?)(?=^## |\Z)",
+                  text, re.MULTILINE | re.DOTALL)
+    return m.group(1) if m else ""
 
 
 def test_doc_exists_and_nontrivial():
@@ -81,7 +86,7 @@ def test_no_placeholder_markers_in_body():
 def test_four_pillars_all_mentioned():
     """架构总览必须点名四根支柱。"""
     text = _text()
-    overview = text.split("## 架构总览", 1)[1].split("## ", 1)[0]
+    overview = extract_section(text, "架构总览")
     for pillar in PILLARS:
         assert pillar in overview, f"架构总览缺支柱：{pillar}"
 
@@ -89,12 +94,11 @@ def test_four_pillars_all_mentioned():
 def test_troubleshooting_table_has_content():
     """排障表不能只有表头——至少要覆盖 dispatch / land / verify 等典型现象。"""
     text = _text()
-    tail = text.split("## 排障表", 1)[1]
+    tail = extract_section(text, "排障表")
     for topic in TROUBLESHOOTING_TOPICS:
         assert topic in tail, (
             f"排障表未覆盖关键现象：{topic}（卡面点名要覆盖）"
         )
-    # 表格至少要有几行数据，不能只有一个空表头。
     rows = [ln for ln in tail.splitlines() if ln.strip().startswith("|")]
     assert len(rows) >= 8, (
         f"排障表只有 {len(rows)} 行，覆盖不足（应至少 8 行）"
@@ -109,9 +113,9 @@ def test_three_git_refs_distinguished():
 
 
 def test_land_never_force_push():
-    """合流章节必须明确"不自动解冲突、不 force push"这条红线。"""
+    """合流章节必须明确“不自动解冲突、不 force push”这条红线。"""
     text = _text()
-    land_section = text.split("## land 与合流", 1)[1].split("## ", 1)[0]
+    land_section = extract_section(text, "land 与合流")
     assert "不 force push" in land_section or "不自动解" in land_section, (
-        "land 节未强调"不自动解冲突、不 force push"的红线"
+        "land 节未强调“不自动解冲突、不 force push”的红线"
     )
