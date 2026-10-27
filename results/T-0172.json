@@ -1,0 +1,30 @@
+{
+  "task": "T-0172",
+  "agent": "trae-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0172",
+  "base": "main",
+  "head": "14986be7896558ce2295076d0a79412af8dd3134",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-27T11:59:36+08:00",
+  "finished_at": "2026-10-27T12:09:16+08:00",
+  "duration_s": 580.5,
+  "verify": [
+    {
+      "cmd": "python -c \"import pathlib, subprocess; d=pathlib.Path('freebsd'); assert d.exists(), 'freebsd/ 目录不存在'; files=list(d.glob('*')); assert len(files)>=6, f'文件数过少: {len(files)}'\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0172 D 路 · FreeBSD fork 脚本同步（对账 rc.3）\n\n## 结论：零同步（可同步 0 / 待移植 0 / 需重编 setuid 0）\n\n基线：上游 `dsh-v0.2.1-rc.3` = `1f81c047fc`，fork 合流 `caef03ee57`，fork HEAD `45285f4aad`。\n自上次合流（`36ec2a4157` = alpha.1）以来 fork `freebsd/` 只动了 3 处：`audit-merge.sh` 1 行、`dsh-web-run.sh` 1 行（pnpm 注释）、新增 `install-service.sh` 374 行；上游 rc.3 树内无 `freebsd/` 目录。\n\n## 16 文件逐一对账\n\n同步（0）：无。\n\n无需同步（3，逐字节一致，blob 校验）：\n- `dsh-jail-run.c` = `66c20b13…`（与 fork 一致；无 C 改动 → 已部署 setuid 二进制无需重编）\n- `dsh_web.rcd` = `a2ad1238…`\n- `verify-sandbox.mjs` = `56ff9a8e…`\n\n不同步（13，均为 fork 专属流程工具，lightharness 有等价自有脚本）：\n- `audit-merge.sh`：fork pnpm 适配面审计（本轮仅 glibc→wasm32 断言）\n- `build-lib.sh` / `build-new.sh` / `stage-build.sh` / `sync-build-verify.sh`：pnpm/tsc/tsdown 构建链（本地由 `编译安装.sh` 覆盖）\n- `commit.msg`：fork 提交说明文本\n- `dsh-web-run.sh`（pnpm 注释 11.7.0→11.28.5）/ `dsh-web-restart.sh`：`pnpm dsh:freebsd web` 启动器与按进程名 `pkill` 重启器（与本地「按自身 PID/进程组」红线冲突）\n- `probe-binary.sh` / `run-e2e.sh` / `run-verify.sh`：写死 `/var/dsh-jail-run` 与 fork vitest（本地由 `远程回归.sh` 覆盖）\n- `push.sh`：内网 gitea 地址 + token（红线：不搬）\n- `install-service.sh`：**新增文件，判定不同步**。前置校验写死 `pnpm-workspace.yaml`、拉起链路 `pnpm dsh:freebsd web` + `node_modules`，且模板 rcd 依赖 fork 的 `freebsd/dsh-web-run.sh`（本地无启动器）；lightharness 树的等价能力已由 `编译安装.sh` + `初始化.sh` 覆盖。需要装 `dsh_web` 服务时直接用 fork 仓脚本（`DSH_REPO=` 指路）。\n\n## 落地物\n\n- `freebsd/对账记录_rc3.md`：完整核查命令、16 文件表、install-service.sh 处置、setuid/初始化.sh 结论。\n- `初始化.sh` 无需联动（rc.3 未改 jail helper 接口、nullfs、python 垫片链路）。\n\n## 校验\n\n- task verify：`python -c \"...freebsd/ 存在且文件数>=6...\"` → `OK files=7`（退出码 0）。\n- 3 个重叠文件 `git hash-object` 与 `origin/master:freebsd/<f>` 逐一比对 → 3/3 一致。\n- 未覆盖用户私有配置；未在 FreeBSD 实机复跑（本轮零代码改动，无需）。",
+  "error": "",
+  "declared_paths": [
+    "freebsd/"
+  ],
+  "changed_files": [
+    "freebsd/对账记录_rc3.md"
+  ],
+  "out_of_paths": []
+}
