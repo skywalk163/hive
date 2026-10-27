@@ -1,26 +1,26 @@
 {
-    "name":  "codearts-win",
-    "host":  "win10",
-    "command":  "",
-    "mode":  "manual",
-    "manual":  true,
-    "abilities":  [
-                      "code",
-                      "docs",
-                      "verify"
-                  ],
-    "capabilities":  [
-                         "windows",
-                         "gui",
-                         "linux"
-                     ],
-    "repos":  {
-                  "hive":  "G:/dswork/duan-light-merge/hive",
-                  "lightharness":  "G:/dswork/duan-light-merge/lightharness",
-                  "light":  "G:/dswork/duan-light-merge/light-merge"
-              },
-    "launch":  "",
-    "worktrees":  "C:/Users/skywalk/.hive/wt/codearts-win",
-    "max_concurrency":  1,
-    "created":  "2026-10-27T11:59:54+08:00"
+  "name": "codearts-win",
+  "host": "win10",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify"
+  ],
+  "capabilities": [
+    "windows",
+    "gui",
+    "linux"
+  ],
+  "repos": {
+    "hive": "G:/dswork/duan-light-merge/hive",
+    "lightharness": "G:/dswork/duan-light-merge/lightharness",
+    "light": "G:/dswork/duan-light-merge/light-merge"
+  },
+  "launch": "",
+  "worktrees": "G:/dswork/duan-light-merge/.worktrees/codearts-win",
+  "max_concurrency": 1,
+  "created": "2026-10-27T11:59:54+08:00"
 }
