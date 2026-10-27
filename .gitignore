@@ -9,3 +9,4 @@ dashboard/status.json.tmp
 dashboard/status.err
 dashboard/ci.json
 dashboard/ci.json.tmp
+dashboard/pushed-status.json
