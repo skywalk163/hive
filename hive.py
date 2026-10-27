@@ -84,9 +84,17 @@ CLAIM_MAX_RETRIES_ENV = "HIVE_CLAIM_MAX_RETRIES"
 
 TASK_FIELDS = [
     "id", "title", "repo", "base", "state", "owner", "agent", "fresh",
-    "priority", "needs", "paths", "verify", "depends_on",
+    "priority", "needs", "paths", "locks", "verify", "depends_on",
     "lease_minutes", "timeout_minutes", "created", "retries", "max_retries",
 ]
+
+# 文件级锁（任务卡 `locks` 字段）的判定在 conflict.py。放 try 里是因为 hive.py 允许被
+# 单独拷进协调仓（`init` 只拷 hive.py）：缺模块时不该连 `status` 都起不来，
+# 只有真用到 `locks` 才报错（见 Hive._paths_conflict）。
+try:
+    import conflict
+except ImportError:  # pragma: no cover - 只在缺 conflict.py 的残缺部署上走到
+    conflict = None
 
 PROMPT_HEADER = """\
 你是「蜂巢（Hive）」的一名任务执行者。你只负责下面这一张任务卡，不要越界。
@@ -1096,12 +1104,30 @@ class Hive:
             return True
         return nx.startswith(ny + "/") or ny.startswith(nx + "/")
 
-    def _paths_conflict(self, a, b) -> bool:
-        """两张卡声明的 paths 会不会打架。
+    def _paths_conflict(self, a, b, a_locks=None, b_locks=None) -> bool:
+        """两张卡声明的 paths / locks 会不会打架。
 
-        保守优先：任一方没声明 paths 就算冲突（未声明 = 可能改任何地方）。
-        两张卡都只碰互不相干的子目录时返回 False —— 这样它们就能并行。
+        判定顺序：
+
+        1. **双方都声明了非空 `locks`**（文件级锁）→ 交给 `conflict._locks_conflict`
+           按精确文件集合判：`src/a.py` 与 `src/b.py` 不冲突，`src/` 与 `src/a.py` 冲突。
+        2. **否则回退旧规则**（向后兼容，旧卡行为一字不变）：任一方没声明 paths 就算
+           冲突（未声明 = 可能改任何地方）；都声明了就按目录前缀重叠判（`_path_overlap`）。
+
+        注意「保守优先」没被削弱：只有**两张卡都主动写了 `locks`** 才走精确逻辑，
+        少写一方仍然是保守冲突 —— 否则少写个字段就能绕过并发保护。
         """
+        if conflict is None:
+            if a_locks or b_locks:
+                raise HiveError(
+                    "任务卡用了 locks 字段，但 hive.py 同目录下没有 conflict.py；"
+                    "把 conflict.py 一起拷过来（或删掉卡上的 locks 改回 paths）")
+            la, lb = [], []
+        else:
+            la = conflict.normalize_locks(a_locks)
+            lb = conflict.normalize_locks(b_locks)
+        if la and lb:
+            return conflict._locks_conflict(la, lb)
         pa = [p for p in (a or []) if str(p).strip()]
         pb = [p for p in (b or []) if str(p).strip()]
         if not pa or not pb:
@@ -1218,12 +1244,15 @@ class Hive:
                     blocked.append(
                         f"负载已满（{name} {planned.get(name, 0)}/{max_agent}）")
                     continue
+                # 两张卡都写了 locks 就按文件级锁精确判（见 conflict.py），
+                # 否则仍按 paths 目录前缀判 —— 旧卡行为不变。
                 clash = [t for t, bc in occupied
                          if (bc.get("repo") or "") == repo
-                         and self._paths_conflict(c.get("paths"), bc.get("paths"))]
+                         and self._paths_conflict(c.get("paths"), bc.get("paths"),
+                                                  c.get("locks"), bc.get("locks"))]
                 if len(clash) >= max_per_repo:
                     blocked.append(
-                        f"paths 冲突：与在飞的 {clash[0]} 抢同一片文件"
+                        f"paths/locks 冲突：与在飞的 {clash[0]} 抢同一片文件"
                         f"（{repo} 同组上限 {max_per_repo}）")
                     continue
                 cands.append(name)
@@ -1240,7 +1269,7 @@ class Hive:
             max_agent = int(agents[name].get("max_concurrency") or 1)
             reason = (f"能力匹配；仓匹配（{repo}）；"
                       f"负载 {planned.get(name, 0)}/{max_agent}；"
-                      f"paths 与在飞的卡不冲突（同组上限 {max_per_repo}）；依赖就绪")
+                      f"paths/locks 与在飞的卡不冲突（同组上限 {max_per_repo}）；依赖就绪")
             plan.append((c, name, reason))
             planned[name] = planned.get(name, 0) + 1
             occupied.append((c["id"], c))  # 后续候选要躲开它占的 paths
