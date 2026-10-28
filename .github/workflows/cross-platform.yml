@@ -27,8 +27,8 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
-  statuses: write     # 失败时把原因写进 commit status，免 admin 权限也能排障
+  contents: write     # 失败时把日志推到 ci-log 分支（排障用）
+  statuses: write     # 同时把一句话原因写进 commit status
 
 jobs:
   # --------------------------------------------------------------------------
@@ -103,6 +103,25 @@ jobs:
           post macos-diag  "$(tail -c 200 /tmp/smoke.log 2>/dev/null | clean)"
           post macos-start "$(tail -c 200 /tmp/smoke.start 2>/dev/null | clean)"
           post macos-svc   "$(tail -c 200 "${HIVE_STATE:-/tmp}/logs/dashboard.log" 2>/dev/null | clean)"
+
+      # 140 字的 status 装不下 trace。失败时把完整日志推到 ci-log 分支，
+      # 本地 `git fetch github ci-log` 就能整份读——不需要仓库 admin 权限。
+      - name: 失败时把完整日志推到 ci-log 分支
+        if: failure()
+        run: |
+          rm -rf /tmp/ciout && mkdir -p /tmp/ciout
+          cp /tmp/smoke.log /tmp/ciout/macos-smoke.log 2>/dev/null || true
+          cp /tmp/smoke.start /tmp/ciout/macos-start.log 2>/dev/null || true
+          cp /tmp/smoke.status /tmp/ciout/macos-status.log 2>/dev/null || true
+          cd /tmp/ciout
+          git init -q .
+          git config user.email ci@hive.local
+          git config user.name "hive ci"
+          git add -A
+          git commit -qm "ci log ${GITHUB_SHA} $(date -u +%FT%TZ)" || true
+          git push -f -q \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+            HEAD:refs/heads/ci-log
 
   # --------------------------------------------------------------------------
   smoke-freebsd:
