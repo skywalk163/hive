@@ -31,6 +31,8 @@ def hive(root, *args, **kw):
 
 
 def main() -> int:
+    # 自测不拉起常驻集群：避免在开发者机器上留后台进程、占 8788 端口。
+    os.environ.setdefault("HIVE_CLUSTER_AUTOSTART", "0")
     tmp = Path(tempfile.mkdtemp(prefix="hive-selftest-"))
     print(f"临时目录: {tmp}")
     git_env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",

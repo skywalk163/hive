@@ -34,19 +34,40 @@ python3 ~/hive/hive.py --dir ~/hive init
 也可以从空仓库开始（`init --remote ...` 会建目录并推第一版），但那样就没有现成的
 `windows/` 和 `docs/`，需要自己拷。
 
-`init` 会把 `hive.py` 一起放进仓库，之后每台机器 clone 下来就能直接跑，不用另外装。
+`init` 会把 `hive.py`（以及可选的 `hive_cluster.py` / `conflict.py` / `dispatch_prompt.py`）
+一起放进仓库，之后每台机器 clone 下来就能直接跑，不用另外装。
 
 目录：
 
 ```
 hive/
 ├── hive.py              # 工具本体（随仓库走）
+├── hive_cluster.py      # 常驻集群（可选：发现/注册/选主/实时进度）
 ├── tasks/T-*.md         # 任务卡（总控写）
 ├── inbox/<agent>/       # 分派信号（总控写）
 ├── results/T-*.json     # 结果（worker 写，在 res/<task> 分支）
 ├── claims/T-*.json      # 租约（worker 写，在 claim/<task> 分支）
 └── agents/<agent>.json  # 每台机器的配置
 ```
+
+## 1.5 常驻集群（可选，但强烈建议）
+
+每台跑 agent 的机器都可以起一个常驻集群进程：自动发现同网段的其他 hive、向主节点注册、
+实时同步进度和租约；主节点退出后自动重选。**git 仍是唯一真相**，集群只是把「等下一
+次 git push 才能看到进度」变成秒级。
+
+```sh
+python3 ~/hive/hive.py --dir ~/hive cluster start     # 后台常驻
+python3 ~/hive/hive.py --dir ~/hive cluster status    # 谁是主节点 / 谁在线
+python3 ~/hive/hive.py --dir ~/hive cluster peers
+python3 ~/hive/hive.py --dir ~/hive cluster watch     # 事件流
+```
+
+- 默认 HTTP `8788`、UDP 发现 `8789`；跨网段用 `--seed 192.168.1.5:8788`。
+- 跨机建议设置同一个 `HIVE_CLUSTER_TOKEN`。
+- `hive work` / `hive orchestrate` 会自动拉起本机集群（`HIVE_CLUSTER_AUTOSTART=0` 关闭）。
+- 新机器在同网段启动即可自动注册；主节点停掉后 1~8 秒内自动出新主。
+- 细节、API、选主/任期/化身号/宽限期的取舍：见 [docs/集群服务.md](docs/集群服务.md)。
 
 ## 2. 登记机器
 

@@ -153,6 +153,10 @@ body {
 
 .meta { font-size: 12px; color: var(--muted); gap: 4px 14px; }
 .source { color: var(--muted); }
+.cluster { color: var(--muted); white-space: nowrap; }
+.cluster.ok { color: var(--ok, #1f9d55); }
+.cluster.warn { color: var(--warn, #b7791f); }
+.cluster.off { color: var(--muted); opacity: .8; }
 
 .banner {
   background: var(--danger-bg);
