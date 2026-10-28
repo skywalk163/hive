@@ -1,0 +1,35 @@
+{
+  "task": "T-0185",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0185",
+  "base": "main",
+  "head": "11c6316ce41a42050ccd0d6648a4b18253524740",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-28T15:49:00+08:00",
+  "finished_at": "2026-10-28T16:15:00+08:00",
+  "duration_s": 1560,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_dispatch_tracking.py",
+      "code": 0,
+      "tail": [
+        ".............................                                            [100%]",
+        "29 passed in 0.40s"
+      ]
+    }
+  ],
+  "summary": "# T-0185 完成摘要\n\n## 交付物\n\n- `dispatch_tracking.py` — 纯标准库模块，实现 dispatched_to 状态机内核\n- `tests/test_dispatch_tracking.py` — 29 个测试用例\n\n## 实现接口\n\n| 函数 | 说明 |\n|---|---|\n| `board_stage(card)` | 按 9 条规则先命中先返回，未知 state 兜底 pending |\n| `mark_dispatched(card, agent_name, *, when=None)` | deepcopy 语义，写 dispatched_to / dispatched_at |\n| `clear_dispatched(card)` | 两字段置 None（不删键），返回新 dict |\n| `is_dispatch_candidate(card, *, ttl=60, now=None)` | ready+无owner+过TTL 才返回 True |\n| `summarize_board(cards)` | 支持 {tid: card} 和 {\"tasks\": [...]} 两种输入 |\n\n## 关键设计点\n\n- 纯函数，不 import hive.py，无副作用\n- mark_dispatched 对已 claimed 卡保留 owner，只补 dispatched_to（历史事实）\n- clear_dispatched 置 None 而非删键，保证 write_card 序列化稳定\n- summarize_board 的 counts 只含非零阶段，零值不出现\n- by_agent 按 agent 名排序，tid 列表按号排序\n\n## 验证结果\n\n```\n$ python -m pytest -q tests/test_dispatch_tracking.py\n.............................                                            [100%]\n29 passed in 0.40s\n```\n\n## summarize_board 对当前 tasks/ 全量卡的真实输出\n\n```json\n{\n  \"total\": 70,\n  \"counts\": {\"done\": 61, \"claimed\": 9},\n  \"done\": [\"T-0001\", ..., \"T-0182\"],\n  \"claimed\": [\"T-0183\", \"T-0184\", \"T-0185\", \"T-0186\", \"T-0187\", \"T-0188\", \"T-0189\", \"T-0190\", \"T-0191\"],\n  \"by_agent\": {\n    \"codearts-win\": [\"T-0162\", \"T-0166\", \"T-0171\", \"T-0175\"],\n    \"doubao-win\": [\"T-0178\", \"T-0182\", \"T-0185\"],\n    \"fb88-dsh\": [\"T-0002\", \"T-0005\", \"T-0100\", \"T-0101\", \"T-0145\", \"T-0146\", \"T-0147\", \"T-0167\"],\n    \"fb88-verify\": [\"T-0001\"],\n    \"raccoon\": [\"T-0003\", \"T-0139\"],\n    \"raccoon-win\": [\"T-0142\", \"T-0170\", \"T-0174\", \"T-0181\", \"T-0183\"],\n    \"trae-win\": [\"T-0172\"],\n    \"workbuddy\": [\"T-0004\", ..., \"T-0179\"],\n    \"workbuddyai-win\": [\"T-0160\", \"T-0163\", \"T-0165\", \"T-0176\", \"T-0177\"]\n  }\n}\n```\n\n## 未触碰的范围（按任务卡要求）\n\n- 未修改 hive.py / mcp_server.py / dashboard/\n- 未引入新依赖（纯标准库 datetime / copy）\n- 未改变现有 state 语义，dispatched 只是派生阶段",
+  "error": "",
+  "declared_paths": [
+    "dispatch_tracking.py",
+    "tests/test_dispatch_tracking.py"
+  ],
+  "changed_files": [
+    "dispatch_tracking.py",
+    "tests/test_dispatch_tracking.py"
+  ],
+  "out_of_paths": []
+}
