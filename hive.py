@@ -24,6 +24,7 @@
   claim       手工领取（调试用）
   gc          回收过期租约
   cluster     常驻集群：自动发现/注册/选主，实时同步进度与租约
+  ports       端口规划：默认值/当前生效值/占用体检
 
 只用 Python 标准库 + git，Windows / FreeBSD / Linux 同一份代码。
 """
@@ -49,9 +50,24 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.10.0"
+VERSION = "0.10.1"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
+
+# 端口默认值的唯一来源是 hive_ports.py。缺这个模块（例如老协调仓只拷了
+# hive.py）时退回内置默认，不能让所有命令都起不来。
+try:
+    from hive_ports import (
+        DASHBOARD_PORT as _PORT_DASHBOARD,
+        CLUSTER_HTTP_PORT as _PORT_CLUSTER,
+        CLUSTER_HTTP_ENV as _CLUSTER_PORT_ENV,
+        CLUSTER_DISCOVERY_PORT as _PORT_CLUSTER_DISCOVERY,
+    )
+except ImportError:  # pragma: no cover - 只在残缺部署上走到
+    _PORT_DASHBOARD = 8787
+    _PORT_CLUSTER = 8788
+    _CLUSTER_PORT_ENV = "HIVE_CLUSTER_PORT"
+    _PORT_CLUSTER_DISCOVERY = 8789
 DEFAULT_MAX_PER_REPO = 1
 # 一张卡最多被看门狗**自动**回收几次；超了就转 blocked 退出流水线，不再无限重派。
 # 0 = 一次都不许自动重派（首次判死即 blocked）。人工显式 `hive retry` 不受此限。
@@ -288,8 +304,9 @@ def _claim_sleep(seconds: float) -> None:
 # 版本不匹配都只影响「别人多快看到进度」，绝不影响任务本身。所以这里所有函数
 # 都是 best-effort、短超时、不抛异常。
 # --------------------------------------------------------------------------- #
-CLUSTER_DEFAULT_PORT = 8788
-CLUSTER_PORT_ENV = "HIVE_CLUSTER_PORT"
+CLUSTER_DEFAULT_PORT = _PORT_CLUSTER
+CLUSTER_PORT_ENV = _CLUSTER_PORT_ENV
+CLUSTER_DISCOVERY_DEFAULT_PORT = _PORT_CLUSTER_DISCOVERY
 CLUSTER_STATE_ENV = "HIVE_CLUSTER_STATE"
 
 
@@ -3283,7 +3300,8 @@ def cmd_init(args) -> None:
     # 工具随仓库走：每台机器 clone 下来就能 python3 hive.py
     # 伴侣模块（集群、冲突判定、派发渲染）有就一起带上；缺了也不影响主流程。
     here = Path(__file__).resolve().parent
-    for name in ("hive.py", "hive_cluster.py", "conflict.py", "dispatch_prompt.py"):
+    for name in ("hive.py", "hive_ports.py", "hive_cluster.py",
+                 "conflict.py", "dispatch_prompt.py"):
         src = here / name
         dst = d / name
         if src.exists() and not dst.exists():
@@ -3718,6 +3736,32 @@ def cmd_work(args) -> None:
     w.loop(once=args.once, interval=args.interval)
 
 
+def cmd_ports(args) -> int:
+    """显示/体检 hive 的端口规划（默认值只在 hive_ports.py 定义一次）。"""
+    try:
+        import hive_ports
+    except ImportError as exc:
+        raise HiveError(
+            "找不到 hive_ports.py；它是端口默认值的唯一来源，"
+            "请确认它和 hive.py 在同一目录") from exc
+    plan = hive_ports.port_plan()
+    if getattr(args, "json", False):
+        payload = {"plan": plan, "external": hive_ports.external_ports()}
+        if getattr(args, "check", False):
+            payload["check"] = hive_ports.check_ports(
+                getattr(args, "host", None) or "127.0.0.1")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    print(hive_ports.format_plan(plan))
+    if getattr(args, "check", False):
+        print("\n本地占用检查：")
+        for row in hive_ports.check_ports(getattr(args, "host", None) or "127.0.0.1"):
+            tag = "空闲" if row["free"] else "被占用"
+            print(f"  {row['key']:<11} {row['port']:<6} {row['protocol']:<4} {tag}"
+                  + (f"（{row['error']}）" if row["error"] else ""))
+    return 0
+
+
 def cmd_cluster(args) -> int:
     """常驻集群入口：实现在 hive_cluster.py，缺模块时给出可操作的错误。"""
     try:
@@ -3748,8 +3792,8 @@ def cmd_cluster(args) -> int:
 # 想调探测频率（秒）：HIVE_DASH_AUTOSTART_TTL（默认 300，避免反复 spawn）
 # 想换端口：HIVE_DASHBOARD_PORT（默认 8787，与 scripts/ 各脚本、serve.py 同一来源）
 # --------------------------------------------------------------------------- #
-DASH_DEFAULT_PORT = 8787
-DASH_AUTOSTART_SKIP = {"dash", "dashboard", "init", "cluster"}
+DASH_DEFAULT_PORT = _PORT_DASHBOARD
+DASH_AUTOSTART_SKIP = {"dash", "dashboard", "init", "cluster", "ports"}
 
 
 def dashboard_port() -> int:
@@ -4068,6 +4112,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--wait", type=float, default=5.0, help="ensure 时最多等多久就绪（秒）")
     s.set_defaults(func=cmd_dash)
 
+    s = sub.add_parser("ports", help="端口规划：查看默认/当前生效端口并可选体检占用")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--check", action="store_true", help="尝试绑定本机端口，检查占用")
+    s.add_argument("--host", default="127.0.0.1", help="体检绑定地址（默认 127.0.0.1）")
+    s.set_defaults(func=cmd_ports)
+
     s = sub.add_parser("retry", help="重试任务（清掉结果与租约）")
     s.add_argument("task")
     s.add_argument("--agent")
@@ -4174,7 +4224,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seed", action="append", default=None,
                    help="静态种子节点，可重复；HOST:PORT 或 URL")
     s.add_argument("--discovery-port", type=int, default=None,
-                   help="UDP 发现端口（默认 8789）")
+                   help=f"UDP 发现端口（默认 {CLUSTER_DISCOVERY_DEFAULT_PORT}）")
     s.add_argument("--no-discover", action="store_true", help="关闭 UDP 广播发现")
     s.add_argument("--state-dir", default=None,
                    help="集群状态目录（默认 ~/.hive/cluster 或 $HIVE_CLUSTER_STATE）")

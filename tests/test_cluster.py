@@ -375,3 +375,39 @@ def test_three_node_crash_elects_exactly_one_leader(cluster_factory):
     winner = leaders[0]
     loser = c if winner is b else b
     assert wait_until(lambda: loser.leader_id == winner.node_id, timeout=4)
+
+
+def test_udp_discovery_roundtrip(tmp_path):
+    """UDP 发现真实往返：一个节点起 listener，另一个 Discovery 发 discover 收 announce。
+
+    不依赖两台机器/两个 listener 绑同一端口，避免 CI 上的 UDP 行为差异。
+    """
+    import socket
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.bind(("127.0.0.1", 0))
+    udp_port = probe.getsockname()[1]
+    probe.close()
+
+    cfg = hc.Config(state_dir=tmp_path / "udp-node", name="udp-node",
+                    host="127.0.0.1", port=0, advertise="127.0.0.1",
+                    discover=True, discovery_port=udp_port, seeds=[],
+                    heartbeat_interval=0.1, peer_timeout=0.6,
+                    election_min=0.3, leader_lease=0.7)
+    c = hc.Cluster(cfg)
+    try:
+        c.start()
+        wait_until(lambda: c.role == "leader", timeout=4)
+        # 用一个独立身份的 Discovery 发包；c 的 listener 会忽略自己的 node_id。
+        sender_cfg = hc.Config(state_dir=tmp_path / "udp-sender", name="udp-sender",
+                               host="127.0.0.1", port=0, advertise="127.0.0.1",
+                               discover=True, discovery_port=udp_port, seeds=[])
+        sender = hc.Cluster(sender_cfg)
+        d = hc.Discovery(sender)
+        replies = d.discover(timeout=1.5)
+        assert any((r.get("node") or {}).get("id") == c.node_id for r in replies), \
+            f"没有收到本节点的 announce：{replies}"
+        reply = next(r for r in replies if (r.get("node") or {}).get("id") == c.node_id)
+        assert reply["leader"]["id"] == c.node_id
+        assert reply["port"] == c.port
+    finally:
+        c.stop()

@@ -15,7 +15,8 @@
 #   INTERVAL=20      状态刷新间隔秒数（默认 20，交给 serve-dashboard.sh 的循环）
 #   HIVE_STATE=~/.hive   PID 与日志目录（默认 ~/.hive）
 #
-# 端口只有一个来源：HIVE_DASHBOARD_PORT（hive.py 的 DASH_DEFAULT_PORT 也是 8787）。
+# 端口只有一个来源：HIVE_DASHBOARD_PORT（hive.py 的 DASH_DEFAULT_PORT 由
+# hive_ports.py 提供，默认 8787；完整规划见 docs/端口与服务规划.md）。
 # 历史上这里默认 8791、而 serve.py/serve-dashboard.sh 默认 8787，导致「手动跑在
 # 8787、服务起在 8791」，文档全写 8787，看起来很像是端口被谁改了。现已统一。
 #

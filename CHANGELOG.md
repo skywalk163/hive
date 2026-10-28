@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.10.1 — 2026-10-28
+
+### Added
+
+- **端口规划单一来源 `hive_ports.py`**：看板 8787 TCP、集群 HTTP 8788 TCP、集群发现
+  8789 UDP、测试/冒烟 8799 TCP、8790–8798 预留；`hive.py` / `hive_cluster.py` /
+  `dashboard/serve.py` 的默认值全部改为从这里读取，杜绝「手动 8787、服务 8791」和
+  「8789 被看板/集群混用」这类错位。
+- **`hive ports [--check] [--json]`**：打印默认值/当前环境变量生效值/外部依赖端口，
+  `--check` 尝试绑定本机端口标出占用；`hive ports` 不触发看板自启。
+- **`docs/端口与服务规划.md`**：完整分配表、防火墙矩阵、多实例改端口步骤、冲突排查、
+  外部依赖（Gitea 3000 / DSH 3080 / LightMem 18443/18444）与历史 8791 备注。
+
+### Changed
+
+- **集群文档明确「建议每台都跑，但不是必须」**：不跑仍可纯 git 工作；分布式消除单点，
+  但不宣称物理意义上的「永不宕机」（全节点断电/全网断开仍会降级）。
+- `README` / `操作手册`（新增 §12 常驻集群与端口 + FAQ Q5）/ `架构与排障全景` /
+  `dashboard/README` / `dashboard/VERIFICATION`（历史 8789 改 8799 并注明）/
+  `scripts/serve-dashboard.sh` / `scripts/dashboard-service.sh` 的端口与集群说明同步更新。
+- `init` 一并复制 `hive_ports.py`；`check.sh` 编译新增模块；新增 `tests/test_ports.py`
+  9 个用例（唯一来源、预留段、环境变量、CLI、init 拷贝）。
+
 ## 0.10.0 — 2026-10-28
 
 ### Added

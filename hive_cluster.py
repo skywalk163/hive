@@ -62,8 +62,21 @@ from urllib.parse import parse_qs, urlparse
 
 PROTOCOL = 1
 CLUSTER_VERSION = "1.0"
-DEFAULT_PORT = 8788
-DEFAULT_DISCOVERY_PORT = 8789
+
+# 端口默认值只在 hive_ports.py 定义一次；缺模块时退回内置值。
+try:
+    from hive_ports import (
+        CLUSTER_HTTP_PORT as DEFAULT_PORT,
+        CLUSTER_HTTP_ENV as CLUSTER_PORT_ENV,
+        CLUSTER_DISCOVERY_PORT as DEFAULT_DISCOVERY_PORT,
+        CLUSTER_DISCOVERY_ENV as CLUSTER_DISCOVERY_ENV,
+    )
+except ImportError:  # pragma: no cover
+    DEFAULT_PORT = 8788
+    CLUSTER_PORT_ENV = "HIVE_CLUSTER_PORT"
+    DEFAULT_DISCOVERY_PORT = 8789
+    CLUSTER_DISCOVERY_ENV = "HIVE_CLUSTER_DISCOVERY_PORT"
+
 DEFAULT_CLUSTER_ID = "hive"
 EVENT_LIMIT = 500
 MAX_BODY = 2 * 1024 * 1024
@@ -261,7 +274,7 @@ class Config:
             kw.get("advertise") or os.environ.get("HIVE_CLUSTER_ADVERTISE")
             or saved.get("advertise") or "")
         self.discovery_port = int(
-            kw.get("discovery_port") or os.environ.get("HIVE_CLUSTER_DISCOVERY_PORT")
+            kw.get("discovery_port") or os.environ.get(CLUSTER_DISCOVERY_ENV)
             or saved.get("discovery_port") or DEFAULT_DISCOVERY_PORT)
         if kw.get("discover") is None:
             self.discover = _env_bool("HIVE_CLUSTER_DISCOVER", bool(saved.get("discover", True)))
@@ -2509,14 +2522,15 @@ def add_parser(sub) -> None:
                             "status", "peers", "events", "join", "leave",
                             "discover", "watch"])
     p.add_argument("seed_url", nargs="?", help="join 的目标（HOST:PORT 或 URL）")
-    p.add_argument("--port", type=int, default=None, help="HTTP 端口（默认 8788）")
+    p.add_argument("--port", type=int, default=None,
+                   help=f"HTTP 端口（默认 {DEFAULT_PORT}）")
     p.add_argument("--host", default=None, help="HTTP 绑定地址（默认 0.0.0.0）")
     p.add_argument("--advertise", default=None, help="对外公布地址（默认自动猜局域网 IP）")
     p.add_argument("--name", default=None, help="节点名（默认 hostname）")
     p.add_argument("--seed", action="append", default=None,
                    help="静态种子节点，可重复；HOST:PORT 或 URL")
     p.add_argument("--discovery-port", type=int, default=None,
-                   help="UDP 发现端口（默认 8789）")
+                   help=f"UDP 发现端口（默认 {DEFAULT_DISCOVERY_PORT}）")
     p.add_argument("--no-discover", action="store_true", help="关闭 UDP 广播发现")
     p.add_argument("--state-dir", default=None,
                    help="集群状态目录（默认 ~/.hive/cluster 或 $HIVE_CLUSTER_STATE）")

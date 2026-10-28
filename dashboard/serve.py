@@ -24,6 +24,20 @@ from urllib.parse import urlparse
 BASE_DIR = Path(__file__).resolve().parent
 HIVE_ROOT = BASE_DIR.parent  # dashboard 的上一级就是 hive 仓库根
 
+# 端口默认值的唯一来源（与 hive.py / hive_cluster.py 共用同一份）。
+if str(HIVE_ROOT) not in sys.path:
+    sys.path.insert(0, str(HIVE_ROOT))
+try:
+    from hive_ports import (
+        DASHBOARD_PORT as DEFAULT_DASHBOARD_PORT,
+        CLUSTER_HTTP_PORT as CLUSTER_DEFAULT_PORT,
+        CLUSTER_HTTP_ENV as CLUSTER_PORT_ENV,
+    )
+except ImportError:  # pragma: no cover - 单独拷走 dashboard 时的兜底
+    DEFAULT_DASHBOARD_PORT = 8787
+    CLUSTER_DEFAULT_PORT = 8788
+    CLUSTER_PORT_ENV = "HIVE_CLUSTER_PORT"
+
 # 系统级核心配置：Hub 地址 + 集中式仓库列表，与 agents/<name>.json 共同构成 hive 配置
 HIVE_CONFIG_PATH = HIVE_ROOT / "hive-config.json"
 
@@ -110,9 +124,7 @@ def _ts(s):
 
 
 # ---- 集群（hive_cluster.py）只读桥接 ----------------------------------- #
-CLUSTER_DEFAULT_PORT = 8788
 CLUSTER_STATE_ENV = "HIVE_CLUSTER_STATE"
-CLUSTER_PORT_ENV = "HIVE_CLUSTER_PORT"
 
 
 def cluster_state_dir():
@@ -724,7 +736,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="蜂巢 Hive 看板静态服务器（零依赖）")
     parser.add_argument("--status", default="sample-status.json",
                         help="hive status --json 导出的状态文件路径（默认 sample-status.json）")
-    parser.add_argument("--port", type=int, default=8787, help="监听端口（默认 8787）")
+    parser.add_argument("--port", type=int, default=DEFAULT_DASHBOARD_PORT,
+                        help=f"监听端口（默认 {DEFAULT_DASHBOARD_PORT}）")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     parser.add_argument("--auto-refresh", dest="auto_refresh", action="store_true",
                         help="后台定期跑 hive status --json 重生成状态文件（辅通道）")
