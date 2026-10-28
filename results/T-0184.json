@@ -1,0 +1,35 @@
+{
+  "task": "T-0184",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0184",
+  "base": "main",
+  "head": "531804a19300e3b16f720bbf71afe312a9aba884",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-28T15:49:15+08:00",
+  "finished_at": "2026-10-28T16:34:15+08:00",
+  "duration_s": 2700.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_dispatch_prompt.py",
+      "code": 0,
+      "tail": [
+        "......................                                                   [100%]",
+        "22 passed in 0.53s"
+      ]
+    }
+  ],
+  "summary": "# T-0184 完成报告：dispatch_prompt（派发指令渲染内核）\n\n## 结论\n\n新建 `dispatch_prompt.py`（纯标准库、无副作用、不 import `hive.py`）与\n`tests/test_dispatch_prompt.py`（22 用例）。两平台 verify 全绿：\n\n| 环境 | 命令 | 结果 |\n|---|---|---|\n| Windows 10 / CPython 3.14.7 | `python -m pytest -q tests/test_dispatch_prompt.py` | **22 passed**（0.78s） |\n| FreeBSD 15.1（0.88）/ CPython 3.12.13 | 同上 | **22 passed**（0.24s） |\n\n本机 `python` 落到 managed 3.13（无 pytest），实际用 `C:\\Python314\\python.exe` 跑；\n0.88 用原生 `python3`，与卡面命令等价。`needs: freebsd` 已满足（见「验证记录」）。\n\n## 交付物\n\n- `dispatch_prompt.py` — 四个对外函数，签名与卡面逐字一致：\n  `extract_task_summary` / `build_dispatch_contract` / `render_dispatch_prompt` / `render_dispatch_payload`\n- `tests/test_dispatch_prompt.py` — 22 用例，分五层：逐字格式 / 回退容错 / 摘要截断 /\n  粘贴硬约束 / 真卡回归（拿仓里真实的 `tasks/T-0184.md` 跑一遍）。\n\n## 真实卡渲染输出（`agent=workbuddyai-win`）\n\n```text\n请领取任务 T-0184。\n任务摘要：派发流水线｜dispatch_prompt 模块：从任务卡渲染标准化派发指令。现在的派发是人肉搬运：看板看卡 → 记在脑子里 → 切到 agent APP → 手打 prompt 让 agent 领任务。手打有三类稳定损耗：任务号抄错、契约漏讲、工具名说错。\n执行契约：\n- 允许修改路径：dispatch_prompt.py、tests/test_dispatch_prompt.py\n- 预期输出：python -m pytest -q tests/test_dispatch_prompt.py\n- 失败策略：90 分钟内未完成即放弃；失败时把卡住的位置写进 .hive/summary.md 并回 hive_submit，不要硬凑\n- 禁止行为：不修改 hive.py、mcp_server.py、dashboard/（接线卡 T-0188 / T-0189 负责）；不读 git、不读文件系统、不发网络请求：模块只接受入参。读 body 由调用方完成（render_dispatch_prompt(..., body=...)）；不加 CLI 参数、不引入第三方依赖、不写 print；不动既有测试与 conflict.py\n领取方式：调用 MCP 工具 hive_claim，参数 task_id=T-0184\n领取身份：workbuddyai-win\n完成后调用 hive_submit 提交。\n```\n\n最长行 **197** 字符（贴 `LINE_LIMIT=200` 的线，没超）；9 行；`\\n` 行尾；无 ANSI。\n\n## 六个关键取舍（都是可争论的，先写清理由）\n\n1. **`contract` 只报「卡上写了什么」，回退文案在渲染层**。所以空卡的 `contract` 四段全空\n   （与卡面 JSON 示例一致），而 markdown 仍显示「（验收卡，不改代码）」等默认文案。\n   把措辞塞进 contract 会让「卡上到底写了什么」变得不可分辨。\n2. **`timeout_minutes` 缺失不编数字**。策略句降级成「未完成即放弃；…」而不是随手写个 90 分钟；\n   有测试 `test_timeout_missing_does_not_invent_number` 钉住。\n3. **单行超 200 就换缩进子项**，不硬挤长句。单条命令本身超长时**不再切**——\n   把一条命令切两行，粘出去就不是同一条命令了。\n4. **条目末尾句读在抽取时剥掉**（`。；，、`）。不剥会出现「…负责。；不加…」双标点。\n5. **摘要按字符截断**：`str` 是码点序列，`text[:n]` 天然不切坏 UTF-8，不需要手工处理代理对；\n   截断后长度恰好 `max_chars`、以 `…` 结尾（测试断言了长度与 UTF-8 往返）。\n6. **折行还原按 CJK/ASCII 分**：两侧都是非 ASCII 直接拼（中文折行不留空格），\n   只要有一侧是 ASCII 就补空格 —— `…让 agent` + `领任务…` 拼成 `让 agent 领任务`。\n\n## 验证记录\n\n```text\n# 本机（Windows 10）\n$ python -m pytest -q tests/test_dispatch_prompt.py\n22 passed in 0.78s\n\n# FreeBSD 0.88（scp 后用 tr -d '\\r' 归一化行尾，避免 CRLF 假红）\n$ cd ~/t0184 && python3 -m pytest -q tests/test_dispatch_prompt.py\n22 passed in 0.24s\n```\n\n全量 hive 套件（FreeBSD 0.88，仓树整体送过去跑，排除 `.git`）：\n\n```text\n$ python3 -m pytest -q -p no:cacheprovider\n269 passed in 241.03s (0:04:01)\n```\n\nWindows 侧只跑了本卡的目标文件（全量在 Windows 上要 40 分钟以上，world 夹具建仓慢，\n与本次改动无关，中途停掉）；跨平台一致性由「目标文件在两平台都 22 passed」保证。\n\n## 边界（严格按卡的「不要做什么」）\n\n- 未碰 `hive.py` / `mcp_server.py` / `dashboard/`（接线归 T-0188 / T-0189）。\n- 未改既有测试与 `conflict.py`；`git status` 只有两个新增文件。\n- 模块不读 git、不读文件系统、不发网络请求：`body` 由调用方读好后传入。\n- 无 `print`、无 CLI 参数、无第三方依赖。\n\n## 给后续卡的接口备忘\n\n- **T-0187 脚本**：`prompt --format json` 的 stdout 是**单行** JSON（`render_dispatch_prompt(..., output_format=\"json\")`），\n  `payload[\"text\"]` 就是要粘进 chat 的正文；`payload` 键序固定为\n  `task_id / agent / summary / contract / claim_tool / submit_tool / text`。\n- **T-0189 看板**：直接 `import dispatch_prompt` + `parse_card` 即可；\n  非法 `output_format` 抛 `ValueError`（接口层该转 400，不是 500）。\n- `payload[\"text\"]` 与 `render_dispatch_prompt(output_format=\"markdown\")` **逐字相等**，已用测试锁住，\n  下游不必再自己拼文本。",
+  "error": "",
+  "declared_paths": [
+    "dispatch_prompt.py",
+    "tests/test_dispatch_prompt.py"
+  ],
+  "changed_files": [
+    "dispatch_prompt.py",
+    "tests/test_dispatch_prompt.py"
+  ],
+  "out_of_paths": []
+}
