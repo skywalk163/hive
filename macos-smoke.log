@@ -1,0 +1,19 @@
+== 语法检查（sh -n）==
+  ok   12 个脚本语法通过
+== 看板服务起停（端口 8799）==
+  FAIL start 失败：看板已起进程但 8799 未就绪，看日志：/var/folders/n6/hn37q6pj7sj_9dmqqc2113800000gn/T/tmp.4Pu84LMmt2/logs/dashboard.log
+      --- dashboard.log ---
+      http://127.0.0.1:8799
+      状态文件: /Users/runner/work/hive/hive/dashboard/status.json
+      状态文件: /Users/runner/work/hive/hive/dashboard/status.json
+      --- status.err ---
+== 自启安装器（dry-run，不改系统）==
+  ok   选定了安装方式（rc=0）
+  ok   环境判定有明确输出
+      系统：Darwin    端口：8799    刷新间隔：5s
+      → 方式：launchd LaunchAgent
+      [dry-run] 写入 /Users/runner/Library/LaunchAgents/com.hive.dashboard.plist
+      [dry-run] launchctl load /Users/runner/Library/LaunchAgents/com.hive.dashboard.plist
+      已安装并加载：http://127.0.0.1:8799/（KeepAlive=true，挂了会自动拉起）
+
+✗ 1 项未通过
