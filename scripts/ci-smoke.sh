@@ -39,7 +39,7 @@ do_syntax() {
 
 # --------------------------------------------------------------------------- #
 do_service() {
-    say "== 看板服务起停（端口 $PORT）=="
+    say "== 看板服务起停（端口 ${PORT}）=="
     SVC="$DIR/scripts/dashboard-service.sh"
     if [ ! -x "$SVC" ]; then
         bad "dashboard-service.sh 不可执行"
@@ -99,7 +99,7 @@ do_autostart() {
     case "$rc" in
         0) ok "选定了安装方式（rc=0）" ;;
         3) ok "环境无服务管理器，按设计拒绝（rc=3）" ;;
-        *) bad "install-autostart.sh --dry-run 退出码 $rc：$(tail -3 /tmp/smoke.auto)" ;;
+        *) bad "install-autostart.sh --dry-run 退出码 ${rc}：$(tail -3 /tmp/smoke.auto)" ;;
     esac
 
     # 输出里必须能看出它到底判断成了什么环境，否则等于没测

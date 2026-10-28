@@ -41,7 +41,7 @@ for arg in "$@"; do
         --uninstall|-u) UNINSTALL=1 ;;
         --force-cron)   FORCE_CRON=1 ;;
         -h|--help)      awk '/^set -u/{exit} NR>1 && /^#/{sub(/^# \{0,1\}/,""); print}' "$0"; exit 0 ;;
-        *) echo "未知参数：$arg（用 -h 看用法）" >&2; exit 2 ;;
+        *) echo "未知参数：${arg}（用 -h 看用法）" >&2; exit 2 ;;
     esac
 done
 
@@ -237,7 +237,7 @@ EOF
         || sed -i -e "s|__DIR__|$DIR|g" -e "s|__USER__|$USER|g" "$TMP"
 
     if [ "$DRY" -eq 1 ]; then
-        say "[dry-run] 安装 $RCD_FILE（需 root）"
+        say "[dry-run] 安装 ${RCD_FILE}（需 root）"
         say "[dry-run] 在 $RC_CONF 追加 hive_dashboard_enable=\"YES\""
         rm -f "$TMP"
         return 0
@@ -251,7 +251,7 @@ EOF
             return 1
         }
     else
-        say "需要 root 才能写 $RCD_FILE，且本机没有 sudo。手动步骤：" >&2
+        say "需要 root 才能写 ${RCD_FILE}，且本机没有 sudo。手动步骤：" >&2
         say "  sudo install -m 755 $TMP $RCD_FILE" >&2
         return 1
     fi

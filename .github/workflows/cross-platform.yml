@@ -80,7 +80,7 @@ jobs:
           python-version: '3.12'
       - name: 冒烟
         run: |
-          CI_SMOKE_DEBUG=1 sh -x scripts/ci-smoke.sh all 2>&1 | tee /tmp/smoke.log
+          sh scripts/ci-smoke.sh all 2>&1 | tee /tmp/smoke.log
           exit "${PIPESTATUS[0]}"
 
       # 作业日志接口要仓库 admin 权限，我们没有；commit status 是公网可读的，

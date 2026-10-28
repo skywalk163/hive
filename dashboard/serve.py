@@ -63,7 +63,7 @@ NO_STORE = "no-store, no-cache, must-revalidate, max-age=0"
 # 任务操作代理：后端调用 hive CLI 真正执行（前端按钮 -> 这里 -> python3 hive.py）
 HIVE_PY = HIVE_ROOT / "hive.py"
 HIVE_OP_TIMEOUT = 120  # 单条操作超时（秒），hive 命令涉及 git push，给足余量
-TASK_ACTIONS = ("close", "retry", "unassign")  # 看板按钮暴露的三种操作
+TASK_ACTIONS = ("close", "retry", "unassign", "reopen")  # 看板按钮暴露的操作
 TID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")  # 任务号允许字符
 
 # agent 主动上报：HTTP 直推（加速通道）落到这个文件，/api/status 取快照时合并进去
@@ -462,7 +462,14 @@ def build_handler(status_path):
             note = str(body.get("note") or body.get("reason") or "看板操作")
             argv = ["python3", str(HIVE_PY), "--dir", str(HIVE_ROOT)]
             if action == "close":
+                # 有 result 记 done、没有记 closed（作废）由 hive 自己判定；
+                # 前端要"强制完成/强制作废"时显式传 done=true/false。
                 argv += ["close", tid, "--note", note]
+                forced = body.get("done")
+                if forced is True:
+                    argv += ["--as-done"]
+                elif forced is False:
+                    argv += ["--as-cancelled"]
             elif action == "retry":
                 # agent 可选：不传就是「原 agent 用原分支重跑」（hive retry 保留 owner）
                 agent = (body.get("agent") or "").strip()
@@ -475,6 +482,8 @@ def build_handler(status_path):
                     argv += ["--agent", agent]
                 if body.get("fresh") is True:
                     argv += ["--fresh"]
+            elif action == "reopen":
+                argv += ["reopen", tid, "--reason", note]
             else:  # unassign
                 argv += ["unassign", tid, "--reason", note]
 

@@ -46,7 +46,7 @@ pid_of() {
 
 do_start() {
     if pid="$(pid_of)"; then
-        echo "看板已在运行（pid=$pid），端口 $PORT"
+        echo "看板已在运行（pid=${pid}），端口 $PORT"
         echo "访问：http://127.0.0.1:$PORT/"
         return 0
     fi
@@ -131,7 +131,7 @@ do_stop() {
 
 do_status() {
     if pid="$(pid_of)"; then
-        echo "运行中（pid=$pid）"
+        echo "运行中（pid=${pid}）"
         echo "端口：$PORT"
         echo "地址：http://127.0.0.1:$PORT/"
         if command -v curl >/dev/null 2>&1; then

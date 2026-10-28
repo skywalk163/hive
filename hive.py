@@ -48,7 +48,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.15"
+VERSION = "0.9.16"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -830,21 +830,50 @@ class Hive:
                              self._card_paths(tid, agent))
         log(f"{tid} 已分派给 {agent}")
 
-    def cmd_close(self, tid: str, note: str = "") -> None:
+    def cmd_close(self, tid: str, note: str = "", done: bool | None = None) -> None:
+        """关闭任务：**有结果才算完成，没结果只算作废**。
+
+        为什么分两种（T-0181 踩出来的）：看板「终止」按钮以前直接调 close，一张没跑完、
+        没有任何 result 的卡也被标成 done —— 看板上和"真的做完了"长得一模一样，
+        谁也分不清它是完成还是被掐掉了，而且备注只有两个字"看板操作"。
+        现在：
+          * 有 res/<tid> 结果 → state=done（真完成）
+          * 没有结果（中途终止/放弃）→ state=closed（作废），备注强制带上现场
+          * done= 显式指定可覆盖自动判定（给"没交 result 但人工认定完成"的特例）
+        备注里一律记录：原状态、原 owner、有无结果、失败原因（若有），
+        这样半年后回看也知道这张卡为什么停在这里。
+        """
         # 不是 sync_main：close 只提交 tasks/<tid>.md + results/<tid>.json 两个指定
         # 路径，用 ff 合并对齐即可，不该被主仓里无关的未提交改动拦住（T-0136）
         self._sync_for_commit()
         card = self.card(tid)
+        old_state = card.get("state") or "?"
+        old_owner = card.get("owner") or ""
         res = read_ref_file(self.dir, f"origin/res/{tid}", f"results/{tid}.json")
         if res is not None:
             # 归档到 main：分支可以删，审计不会丢
             (self.dir / "results").mkdir(exist_ok=True)
             (self.dir / "results" / f"{tid}.json").write_text(
                 json.dumps(res, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        card["state"] = "done"
-        body = card["_body"] + (f"\n\n---\n\n**完成备注（{iso()}）**：{note}\n" if note else "")
+        if done is None:
+            done = res is not None
+        card["state"] = "done" if done else "closed"
+
+        # 现场：这些信息不写进去，事后就再也拼不出来了
+        facts = [f"原状态 {old_state}", f"owner {old_owner or '（无主）'}"]
+        if res is None:
+            facts.append("无结果（未提交 res 分支）")
+        else:
+            facts.append(f"结果 status={res.get('status') or '?'}")
+            if res.get("error"):
+                facts.append(f"失败原因：{str(res.get('error'))[:200]}")
+        head = "关闭作废" if not done else "完成关闭"
+        body = card["_body"] + (
+            f"\n\n---\n\n**{head}（{iso()}）**：{note or '（未填原因）'}"
+            f"\n\n> 现场：{'；'.join(facts)}\n")
         self.save_card(card, body)
-        self.commit_and_push(f"close {tid}" + (f": {note}" if note else ""),
+        verb = "close" if done else "cancel"
+        self.commit_and_push(f"{verb} {tid}" + (f": {note}" if note else ""),
                              [f"tasks/{tid}.md", f"results/{tid}.json"])
         # 收口：删掉 claim/res 分支，Gitea 分支列表里只剩进行中的任务
         for ref in (f"claim/{tid}", f"res/{tid}"):
@@ -861,7 +890,42 @@ class Hive:
                     log(f"已删除分支 {ref}")
                 else:
                     log(f"删不掉 {ref}（可能受保护），保留不影响结果")
-        log(f"{tid} 已关闭")
+        log(f"{tid} 已{'关闭（完成）' if done else '关闭（作废，卡面 state=closed）'}")
+
+    def cmd_reopen(self, tid: str, reason: str = "", who: str = "controller") -> None:
+        """把已完成 / 已作废的卡拉回 ready（人工纠错用）。
+
+        为什么需要：看板「终止」以前直接 close 成终态，终态又不可逆 —— T-0181 就这么
+        丢的：一张没跑完的卡被关掉，想接着干只能手改文件。重开会清 owner、删
+        claim/res 分支、撤掉归档结果（不撤 worker 会当成已完成），并在卡面留一条
+        「谁在什么时候、为什么把卡从 X 拉回 ready」，别让纠错本身变成新的黑盒。
+        """
+        self.fetch()
+        card = self.card(tid)
+        old = card.get("state") or "?"
+        if old not in ("done", "closed"):
+            raise HiveError(
+                f"{tid} 当前是 {old}，只有已完成(done)/已作废(closed)的卡才需要重开；"
+                f"在跑的卡请用 unassign（退回待领取）")
+        for ref in (f"res/{tid}", f"claim/{tid}"):
+            if rev_parse(self.dir, f"origin/{ref}"):
+                git_net(["push", "origin", f":refs/heads/{ref}"], self.dir, check=False)
+                log(f"已删除 {ref}")
+        archived = self.dir / "results" / f"{tid}.json"
+        extra = ""
+        if archived.exists():
+            archived.unlink()   # 原内容还在 git 历史里，工作区必须撤掉，否则被当成已完成
+            extra = "，已撤掉归档结果（原文仍在 git 历史）"
+        card["state"] = "ready"
+        card["owner"] = None
+        body = (card["_body"]
+                + f"\n\n---\n\n**重开（{iso()}，by {who}）**：从 {old} 拉回 ready"
+                + (f"；原因：{reason}" if reason else "")
+                + f"{extra}\n")
+        self.save_card(card, body)
+        self.commit_and_push(f"reopen {tid}" + (f": {reason}" if reason else ""),
+                             self._card_paths(tid))
+        log(f"{tid} 已从 {old} 重开为 ready（未分配）")
 
     # -- 合入 / land ------------------------------------------------------- #
     def code_repo(self, repo_name: str) -> Path:
@@ -3384,7 +3448,16 @@ def cmd_unblock(args) -> None:
 
 
 def cmd_close(args) -> None:
-    Hive(args.dir).cmd_close(args.task, args.note or "")
+    done = None
+    if getattr(args, "as_done", False):
+        done = True
+    elif getattr(args, "as_cancelled", False):
+        done = False
+    Hive(args.dir).cmd_close(args.task, args.note or "", done=done)
+
+
+def cmd_reopen(args) -> None:
+    Hive(args.dir).cmd_reopen(args.task, args.reason or "", who="controller")
 
 
 def cmd_land(args) -> None:
@@ -3761,10 +3834,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--agent", required=True)
     s.set_defaults(func=cmd_assign)
 
-    s = sub.add_parser("close", help="关闭任务")
+    s = sub.add_parser("close", help="关闭任务（有结果记 done，无结果记 closed 作废）")
     s.add_argument("task")
-    s.add_argument("--note")
+    s.add_argument("--note", "--reason", dest="note", help="为什么关闭（建议写清原因）")
+    s.add_argument("--as-done", dest="as_done", action="store_true",
+                   help="强制记为完成（即使没有 result）")
+    s.add_argument("--as-cancelled", dest="as_cancelled", action="store_true",
+                   help="强制记为作废（即使有 result）")
     s.set_defaults(func=cmd_close)
+
+    s = sub.add_parser("reopen", help="把已完成/已作废的卡拉回待领取（人工纠错）")
+    s.add_argument("task")
+    s.add_argument("--reason", default="", help="为什么重开（写进卡面备注）")
+    s.set_defaults(func=cmd_reopen)
 
     s = sub.add_parser("land", help="把已完成的任务分支合入代码仓 main 并 close")
     s.add_argument("task", nargs="?", help="任务号；配合下面 --all 时可不给")

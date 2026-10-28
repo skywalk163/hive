@@ -219,9 +219,11 @@
 
   /** 列的单向判定，一张卡只落一列 */
   function classify(t) {
-    if (t.state === 'done') {
-      // 已完成：落在「最近完成」集合里的归 recent，其余归档到 closed（不会重复）
-      return (state.recentIds && state.recentIds[t.id]) ? 'recent' : 'closed';
+    if (t.state === 'done' || t.state === 'closed') {
+      // done=真完成（最近完成的归 recent），closed=关闭作废（没产出结果就关了）
+      // 两者都归档到「已关闭」。少判 closed 会让作废的卡掉进「待领取」，看着像还要人干。
+      if (t.state === 'done' && state.recentIds && state.recentIds[t.id]) return 'recent';
+      return 'closed';
     }
     if (t.result_status === 'failed' || t.state === 'blocked' || isStale(t)) return 'abnormal';
     if (t.result_status === 'done') return 'merging';
@@ -455,19 +457,26 @@
     });
     h += '</div>';
 
-    // 操作按钮：异常（终止/改派/重试/退回未分配）、进行中（重试/强制收回）、待领取（派给…）
-    if (col === 'abnormal' || col === 'running' || col === 'ready') {
+    // 操作按钮。
+    // 「终止」曾经直接等同于 close，结果把没跑完的卡标成 done（T-0181 的教训），
+    // 现在拆成两个语义清楚的动作：
+    //   unassign=终止本次执行、放回待领取（想继续做就选这个）
+    //   close   =这张卡不做了（有结果记 done，没结果记 closed 作废）
+    if (col === 'abnormal' || col === 'running' || col === 'ready' ||
+        col === 'closed' || col === 'recent') {
       h += '<div class="card-actions">';
       if (col === 'abnormal') {
-        h += actBtn('close', t.id, '终止', 'act-close');
+        h += actBtn('unassign', t.id, '退回待领取', 'act-unassign');
         h += actBtn('reassign-open', t.id, '改派', 'act-reassign');
         h += actBtn('retry', t.id, '重试', 'act-retry');
-        h += actBtn('unassign', t.id, '退回未分配', 'act-unassign');
+        h += actBtn('close', t.id, '关闭作废', 'act-close');
       } else if (col === 'running') {
         h += actBtn('retry', t.id, '重试', 'act-retry');
         h += actBtn('unassign', t.id, '强制收回', 'act-unassign');
-      } else {
+      } else if (col === 'ready') {
         h += actBtn('reassign-open', t.id, '派给…', 'act-reassign');
+      } else {
+        h += actBtn('reopen', t.id, '重开', 'act-reopen');
       }
       h += '</div>';
     }
@@ -1369,13 +1378,15 @@
 
   function _verb(action, override) {
     return override ||
-      ({ close: '终止', retry: '重试', unassign: '退回未分配' })[action] || action;
+      ({ close: '关闭作废', retry: '重试', unassign: '退回待领取',
+         reopen: '重开' })[action] || action;
   }
 
   // 调用后端 /api/task（后端再调用 hive CLI 真正执行）
-  function callTaskAction(action, tid, agent, label) {
+  function callTaskAction(action, tid, agent, label, note) {
     var body = { action: action, tid: tid };
     if (agent) body.agent = agent;
+    if (note) body.note = note;
     flash('正在' + _verb(action, label) + ' ' + tid + ' …');
     fetch('/api/task', {
       method: 'POST', cache: 'no-store',
@@ -1392,6 +1403,45 @@
         }
       })
       .catch(function (e) { flash('请求失败：' + e.message, true); });
+  }
+
+  function taskById(tid) {
+    for (var i = 0; i < state.tasks.length; i++) {
+      if (state.tasks[i].id === tid) return state.tasks[i];
+    }
+    return null;
+  }
+
+  /** 写操作的原因默认值：把现场带进输入框，省得人对着空白框发呆 */
+  function defaultReason(action, t) {
+    var bits = [];
+    if (action === 'reopen') {
+      bits.push('误操作/需要继续执行');
+    } else {
+      if (t && t.state) bits.push('原状态 ' + t.state);
+      if (t && t.stale) bits.push('租约过期');
+      if (t && t.result_status) bits.push('结果 ' + t.result_status);
+      if (t && t.push_message) bits.push(String(t.push_message).slice(0, 80));
+    }
+    return bits.join('；');
+  }
+
+  /** 收集原因；返回 null 表示用户取消。reason 会写进卡面备注（可追溯）。 */
+  function askReason(action, tid) {
+    var t = taskById(tid);
+    var verb = _verb(action);
+    var head = verb + ' ' + tid;
+    if (action === 'close') {
+      head += '\n\n注意：这是「这张卡不做了」，不是「标记完成」。有 result 的记 done，没有的记 closed（作废）。';
+    } else if (action === 'unassign') {
+      head += '\n\n卡会回到待领取，谁都能再领。';
+    } else if (action === 'reopen') {
+      head += '\n\n会把卡拉回待领取，并撤掉归档结果（原文仍在 git 历史里）。';
+    }
+    var r = window.prompt(head + '\n\n请写清原因（会写进卡面备注）：', defaultReason(action, t));
+    if (r === null) return null;
+    r = r.trim();
+    return r || '（未填原因）';
   }
 
   // 改派：把按钮区替换成 agent 下拉 + 确认/取消
@@ -1431,7 +1481,11 @@
       e.preventDefault();
       var action = btn.getAttribute('data-action');
       var tid = btn.getAttribute('data-tid');
-      if (action === 'close' || action === 'unassign' || action === 'retry') {
+      if (action === 'close' || action === 'unassign' || action === 'reopen') {
+        var reason = askReason(action, tid);
+        if (reason === null) return;            // 用户取消
+        callTaskAction(action, tid, null, null, reason);
+      } else if (action === 'retry') {
         // retry 不带 agent：保留原 owner、复用原分支重跑
         if (!window.confirm(_verb(action) + '任务 ' + tid + ' ？')) return;
         callTaskAction(action, tid);

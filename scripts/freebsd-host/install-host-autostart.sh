@@ -30,7 +30,7 @@ for arg in "$@"; do
         --dry-run|-n)   DRY=1 ;;
         --uninstall|-u) UNINSTALL=1 ;;
         -h|--help)      awk '/^set -u/{exit} NR>1 && /^#/{sub(/^# \{0,1\}/,""); print}' "$0"; exit 0 ;;
-        *) echo "未知参数：$arg（用 -h 看用法）" >&2; exit 2 ;;
+        *) echo "未知参数：${arg}（用 -h 看用法）" >&2; exit 2 ;;
     esac
 done
 
