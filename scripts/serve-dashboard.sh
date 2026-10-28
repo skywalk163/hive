@@ -13,7 +13,9 @@ PORT="${PORT:-8787}"
 INTERVAL="${INTERVAL:-20}"
 DASH="$DIR/dashboard"
 STATUS="$DASH/status.json"
-CI_REPOS="${CI_REPOS:-skywalk/hive}"
+# CI_REPOS 留空 = 不拉 CI 状态（CI 环境下强烈建议留空：ci-check.sh 要访问内网
+# Gitea，公网 runner 上连不通会白等一轮超时，把看板启动拖到超时）。
+CI_REPOS="${CI_REPOS-skywalk/hive}"
 CI_EVERY="${CI_EVERY:-6}"
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -41,14 +43,16 @@ refresh_ci() {
 }
 
 refresh || true
-refresh_ci || true
+# 先让 serve.py 能起来，再补 CI 状态：ci-check.sh 最长要 15s（python 的 urlopen
+# timeout），放在 serve.py 启动之前会把"服务就绪"拖过 dashboard-service.sh 的等待窗口。
+[ -n "$CI_REPOS" ] && refresh_ci || true
 TICKS=0
 (
     while :; do
         sleep "$INTERVAL"
         TICKS=$((TICKS + 1))
         refresh || true
-        if [ $((TICKS % CI_EVERY)) -eq 0 ]; then
+        if [ -n "$CI_REPOS" ] && [ $((TICKS % CI_EVERY)) -eq 0 ]; then
             refresh_ci || true
         fi
     done

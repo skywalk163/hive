@@ -44,8 +44,21 @@ do_service() {
     STATE="$(mktemp -d 2>/dev/null || echo /tmp/hive-smoke-$$)"
     export HIVE_STATE="$STATE"
     export PORT INTERVAL=5
+    export CI_REPOS=""          # 公网 CI 连不到内网 Gitea，拉 CI 状态只会白等超时
+    export CI_DISABLED=1
 
-    sh "$SVC" start >/tmp/smoke.start 2>&1 || { bad "start 失败：$(cat /tmp/smoke.start)"; return; }
+    dump_logs() {
+        say "      --- dashboard.log ---"
+        sed -n '$p;1,30p' "$STATE/logs/dashboard.log" 2>/dev/null | sed 's/^/      /'
+        say "      --- status.err ---"
+        sed -n '1,10p' "$DIR/dashboard/status.err" 2>/dev/null | sed 's/^/      /'
+    }
+
+    if ! sh "$SVC" start >/tmp/smoke.start 2>&1; then
+        bad "start 失败：$(cat /tmp/smoke.start)"
+        dump_logs
+        return
+    fi
     ok "start"
 
     i=0
@@ -55,7 +68,12 @@ do_service() {
         i=$((i + 1))
         sleep 0.5
     done
-    [ "$up" -eq 1 ] && ok "HTTP 探活通过" || bad "HTTP 探活失败（$PORT 没起来）"
+    if [ "$up" -eq 1 ]; then
+        ok "HTTP 探活通过"
+    else
+        bad "HTTP 探活失败（$PORT 没起来）"
+        dump_logs
+    fi
 
     sh "$SVC" status >/tmp/smoke.status 2>&1 && ok "status：运行中" || bad "status 说没在跑"
 
