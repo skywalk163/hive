@@ -22,6 +22,7 @@ MCP = ROOT / "mcp_server.py"
 
 EXPECTED_TOOLS = {
     "hive_whoami", "hive_list_tasks", "hive_get_task", "hive_next",
+    "hive_list_pending",
     "hive_claim", "hive_submit", "hive_block", "hive_unblock",
     "hive_abort", "hive_extend_lease",
     "hive_progress", "hive_result", "hive_stats", "hive_doctor",
@@ -677,3 +678,62 @@ def test_controller_retry_clears_result(world, mcp, fake_cmd):
     assert not world.result_refs("T-0001"), "retry 后结果分支应该没了"
     world.sync()
     assert world.card("T-0001")["state"] == "assigned", world.card("T-0001")
+
+
+# --------------------------------------------------------------------------- #
+# T-0188：hive_list_pending（可领卡列表，只读不 claim）
+# --------------------------------------------------------------------------- #
+
+def test_mcp_list_pending_no_agent(world, mcp):
+    """不给 agent：返回全部 ready 且无人持有的卡，按任务号排序，不评分。"""
+    world.add_agent("a1", caps=("python",), command="true")
+    world.add_task("T-0100", title="写文档", paths=("docs/",), needs=("python",))
+    world.add_task("T-0101", title="改代码", paths=("src/",), needs=("rust",))
+    world.add_task("T-0102", title="被占的卡", paths=("docs/",), needs=("python",))
+    world.hive("assign", "T-0102", "--agent", "a1")
+
+    c = mcp("a1")
+    c.initialize()
+    d = c.ok("hive_list_pending")["details"]
+    assert d["count"] == 2, d
+    assert {t["id"] for t in d["tasks"]} == {"T-0100", "T-0101"}
+    assert all(t["score"] is None and t["reasons"] == [] for t in d["tasks"])
+    # 按任务号升序
+    assert [t["id"] for t in d["tasks"]] == ["T-0100", "T-0101"]
+
+
+def test_mcp_list_pending_with_agent(world, mcp):
+    """给了 agent：按匹配打分排序，每条带 score / reasons。"""
+    world.add_agent("a1", caps=("python",), command="true")
+    world.add_task("T-0100", title="能干的卡", paths=("docs/",), needs=("python",))
+    world.add_task("T-0101", title="干不了的卡", paths=("src/",), needs=("rust",))
+    world.add_task("T-0102", title="依赖未就绪的卡", paths=("docs/",),
+                   needs=("python",), depends=("T-9999",))
+
+    c = mcp("a1")
+    c.initialize()
+    d = c.ok("hive_list_pending", agent="a1")["details"]
+    ids = {t["id"] for t in d["tasks"]}
+    assert "T-0100" in ids, d          # 能干的卡要进来
+    assert "T-0101" not in ids          # 能力缺失被排除
+    assert "T-0102" not in ids          # 依赖未就绪被排除
+    top = d["tasks"][0]
+    assert top["id"] == "T-0100"
+    assert top["score"] is not None and top["score"] > 0, top
+    assert top["reasons"], top
+
+
+def test_mcp_list_pending_unknown_agent(world, mcp):
+    """未知 agent：返回 error 文本，不抛栈（tools/call 的 isError=True）。"""
+    world.add_agent("a1", caps=("python",), command="true")
+    world.add_task("T-0100", title="能干的卡", paths=("docs/",), needs=("python",))
+
+    c = mcp("a1")
+    c.initialize()
+    r = c.request("tools/call", {"name": "hive_list_pending",
+                                 "arguments": {"agent": "ghost"}})
+    env = json.loads(r["result"]["content"][0]["text"])
+    assert r["result"]["isError"] is True, r
+    assert env["status"] == "error", env
+    assert "ghost" in env["message"], env
+    assert "Traceback" not in env["message"]

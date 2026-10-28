@@ -35,6 +35,10 @@ from hive import (  # noqa: E402
     _claim_holder, _verify_verdict, commit_file_to_ref, git, iso, now,
     parse_iso, rev_parse,
 )
+try:  # T-0186 的纯逻辑模块；残缺部署（只拷 hive.py）时该工具报错而非整体崩
+    import pending_matcher as pm  # noqa: E402
+except ImportError:  # pragma: no cover
+    pm = None
 
 PROTOCOL_VERSION = "2024-11-05"
 # controller（总控）角色：多了 land/close/retry/assign/dispatch/gc 这些
@@ -82,6 +86,18 @@ TOOLS: list[dict] = [
         "name": "hive_next",
         "description": "给我推荐一张现在就能干的卡：按优先级排序，跳过依赖未就绪、能力不匹配、仓库没登记、已被别人领走的。只推荐，不领取。",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "hive_list_pending",
+        "description": "列出我现在能领的卡（ready 且无人持有），按匹配分数排序并附理由。不给 agent 时返回全部可领卡；给了就按该 agent 的能力/仓库/依赖打分排序。只读，不 claim。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "description": "可选：按这个 agent 打分排序（默认用当前身份）"},
+                "limit": {"type": "integer", "default": 20, "description": "最多返回几条"},
+            },
+            "required": [],
+        },
     },
     {
         "name": "hive_claim",
@@ -478,6 +494,72 @@ class HiveMcp:
                   claim=h.claim_info(tid),
                   result=h.result_info(tid))
 
+    def t_list_pending(self, a: dict) -> dict:
+        """列出可领的卡（只读，不 claim）。
+
+        两条路径：
+          - **不给 `agent`**：返回全部 `ready` 且无人持有的卡，按任务号排序，
+            不评分（score=None、reasons=[]）——只回答「现在有哪些卡等着被领」。
+          - **给了 `agent`**：用 `pending_matcher.match_tasks_for_agent` 按能力/仓库/
+            依赖打分排序，每条带 `score` / `reasons`；`agent` 未登记报错文本（不抛栈）。
+        返回结构与 `hive_list_tasks` 一致：`{"tasks": [...], "count": n}`。
+        """
+        if pm is None:
+            return err("缺少 pending_matcher.py：把它拷到 hive.py 同目录再试",
+                       hint="用 hive_list_tasks 看全貌")
+        h = self.hive()
+        cards = h.cards()
+        agent_name = (a.get("agent") or "").strip()
+        limit_raw = a.get("limit")
+        limit = max(0, int(limit_raw) if limit_raw not in (None, "") else 20)
+
+        def _row(tid: str, card: dict, score: int | None,
+                 reasons: list[str]) -> dict:
+            return {
+                "id": tid,
+                "title": card.get("title") or "",
+                "state": card.get("state") or "",
+                "owner": card.get("owner") or "",
+                "repo": card.get("repo") or "",
+                "priority": card.get("priority") or "",
+                "paths": card.get("paths") or [],
+                "verify": card.get("verify") or [],
+                "depends_on": card.get("depends_on") or [],
+                "score": score,
+                "reasons": reasons,
+            }
+
+        # ready 且无人持有的候选池（两条路径共同的前提）
+        pending = [(tid, c) for tid, c in sorted(cards.items())
+                   if c.get("state") == "ready"
+                   and not str(c.get("owner") or "").strip()]
+
+        if not agent_name:
+            tasks = [_row(tid, c, None, []) for tid, c in pending]
+            tasks = tasks[:limit]
+            return ok(f"当前 {len(tasks)} 张卡可领", tasks=tasks, count=len(tasks))
+
+        if not h.agents().get(agent_name):
+            return err(f"没有登记 agent {agent_name}",
+                       hint=f"hive agent list 看看有哪些（当前请求的是 {agent_name!r}）")
+
+        cfg = h.agent(agent_name)
+        matched = pm.match_tasks_for_agent(cards, cfg, limit=None)
+        # 匹配模块已判 ready/owner，这里再兜一层防御
+        matched = [m for m in matched
+                   if m["task"].get("state") == "ready"
+                   and not str(m["task"].get("owner") or "").strip()]
+        tasks: list[dict] = []
+        for m in matched:
+            tid = str(m["task"].get("id") or "").strip()
+            if not tid:
+                continue
+            tasks.append(_row(tid, m["task"], m["score"], m["reasons"]))
+        # 兜底排序：同分按任务号升序（匹配模块已排，这里保证输出稳定）
+        tasks.sort(key=lambda t: (-(t["score"] or 0), t["id"]))
+        tasks = tasks[:limit]
+        return ok(f"{agent_name} 可领 {len(tasks)} 张卡", tasks=tasks, count=len(tasks))
+
     def t_next(self, _a: dict) -> dict:
         h = self.hive()
         cfg = h.agent(self.agent)
@@ -855,6 +937,7 @@ class HiveMcp:
         "hive_list_tasks": t_list_tasks,
         "hive_get_task": t_get_task,
         "hive_next": t_next,
+        "hive_list_pending": t_list_pending,
         "hive_claim": t_claim,
         "hive_submit": t_submit,
         "hive_block": t_block,

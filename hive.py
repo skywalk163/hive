@@ -48,7 +48,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.17"
+VERSION = "0.9.18"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -87,6 +87,9 @@ TASK_FIELDS = [
     "id", "title", "repo", "base", "state", "owner", "agent", "fresh",
     "priority", "needs", "paths", "locks", "verify", "depends_on",
     "lease_minutes", "timeout_minutes", "created", "retries", "max_retries",
+    # T-0188 追加到列表末尾（不动已有顺序）：避免所有旧卡被大面积重写。
+    # 推送（dispatch-mark）与真正分派（assign）是两个动作，所以这是可选的派生字段。
+    "dispatched_to", "dispatched_at",
 ]
 
 # 文件级锁（任务卡 `locks` 字段）的判定在 conflict.py。放 try 里是因为 hive.py 允许被
@@ -96,6 +99,16 @@ try:
     import conflict
 except ImportError:  # pragma: no cover - 只在缺 conflict.py 的残缺部署上走到
     conflict = None
+
+# 派发流水线三件套（T-0184 / T-0185 / T-0186）：本卡负责把它们接进 CLI 与 MCP。
+# 同样放 try 里：`init` 只拷 hive.py 的残缺部署不该因为缺这些纯逻辑模块就起不来，
+# 只有真用到 prompt / dispatch-mark / status 的派发阶段才报错。
+try:
+    import dispatch_prompt as dp
+    import dispatch_tracking as dt
+    import pending_matcher as pm
+except ImportError:  # pragma: no cover - 只在缺模块的残缺部署上走到
+    dp = dt = pm = None
 
 PROMPT_HEADER = """\
 你是「蜂巢（Hive）」的一名任务执行者。你只负责下面这一张任务卡，不要越界。
@@ -130,6 +143,35 @@ def parse_iso(s: str) -> datetime:
 
 def log(msg: str) -> None:
     print(f"[hive {now():%H:%M:%S}] {msg}", file=sys.stderr, flush=True)
+
+
+# --------------------------------------------------------------------------- #
+# 剪贴板：`hive prompt --clip` 用（增强，不是契约 —— 失败只警告不改退出码）
+# --------------------------------------------------------------------------- #
+
+def _copy_clipboard(text: str) -> bool:
+    """把 text 复制到系统剪贴板。**没有任何工具可用**时返回 False（并打警告）。
+
+    Windows 用 `clip`（复用 Worker 手动模式里的写法，`shell=True, text=True`）；
+    其它平台依次尝试 `pbcopy` / `xclip -selection clipboard` / `wl-copy`。
+    工具存在但写入失败不抛异常、也不改变退出码 —— 剪贴板只是便利，不是派发指令本身。
+    """
+    candidates: list[list[str]]
+    if os.name == "nt":
+        candidates = [["clip"]]
+    else:
+        candidates = [["pbcopy"], ["xclip", "-selection", "clipboard"],
+                      ["wl-copy"]]
+    for cmd in candidates:
+        try:
+            subprocess.run(cmd, input=text, text=True, shell=(os.name == "nt"),
+                           check=False, capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            # 工具不存在或超时：换下一个
+            continue
+        return True
+    log("警告：没有可用的剪贴板工具（clip/pbcopy/xclip/wl-copy），已跳过复制")
+    return False
 
 
 def current_host() -> str:
@@ -1236,6 +1278,18 @@ class Hive:
         res = self.result_info(dep)
         return bool(res and res.get("status") == "done")
 
+    def _dispatch_ttl_minutes(self) -> int:
+        """推送标记的 TTL（分钟）：TTL 内刚推过的卡不再重复派。
+
+        可读环境变量 `HIVE_DISPATCH_TTL_MINUTES`，默认 60。
+        写成方法是为了能在测试里用 monkeypatch / 环境变量钉住，不在模块层读一次。
+        """
+        raw = (os.environ.get("HIVE_DISPATCH_TTL_MINUTES") or "").strip()
+        try:
+            return max(0, int(raw)) if raw else 60
+        except ValueError:
+            return 60
+
     def _assign_local(self, tid: str, agent: str) -> None:
         self.agent(agent)  # 校验已登记
         card = self.card(tid)
@@ -1277,6 +1331,19 @@ class Hive:
         # needs_review / conflict / blocked 都跳过：要么等人、要么等资源、要么等解冲突
         ready = [c for c in cards.values()
                  if c.get("state") == "ready" and not c.get("owner")]
+        # —— T-0188：TTL 内已推送过的卡不再重复派（避免重复通知同一个 agent）。
+        # 旧卡没有 dispatched_to 字段，is_dispatch_candidate 对它们恒为 True，行为不变。
+        dispatch_ttl = self._dispatch_ttl_minutes()
+        ttl_cached: list[tuple[str, str]] = []
+        still_ready = []
+        for c in ready:
+            if dt is not None and not dt.is_dispatch_candidate(
+                    c, dispatched_ttl_minutes=dispatch_ttl):
+                ttl_cached.append((c["id"],
+                                   f"刚推送过（TTL {dispatch_ttl} 分钟内不重复派）"))
+                continue
+            still_ready.append(c)
+        ready = still_ready
         ready.sort(key=lambda c: (PRIORITY_ORDER.get(c.get("priority"), 9), c["id"]))
 
         plan: list[tuple[dict, str, str]] = []
@@ -1366,7 +1433,8 @@ class Hive:
                 "plan": [{"task": c["id"], "agent": n, "repo": c.get("repo"),
                           "priority": c.get("priority"), "reason": r}
                          for c, n, r in plan],
-                "skipped": [{"task": t, "reason": r} for t, r in skipped],
+                "skipped": [{"task": t, "reason": r} for t, r in skipped]
+                           + [{"task": t, "reason": r} for t, r in ttl_cached],
                 "max_per_repo": max_per_repo,
                 "applied": bool(apply),
             }, ensure_ascii=False, indent=2))
@@ -1383,6 +1451,8 @@ class Hive:
             print("没有可分派的任务")
         for tid, reason in skipped:
             print(f"  skip {tid}（不派）: {reason}")
+        for tid, reason in ttl_cached:
+            print(f"  skip {tid}（不派）: {reason}")
 
         if apply and plan:
             for c, n, _r in plan:
@@ -1396,6 +1466,69 @@ class Hive:
         elif plan:
             print("（dry-run；加 --apply 才写入）")
         return len(plan)
+
+    def cmd_prompt(self, tid: str, *, agent: str | None = None,
+                   fmt: str = "markdown", clip: bool = False) -> str:
+        """渲染一张卡的派发指令（`hive prompt`）。
+
+        `fmt`: "markdown" 打印正文；"json" 打印可被脚本 `json.loads` 的 payload。
+        `clip`: 尝试复制到系统剪贴板，失败只警告不改变退出码（剪贴板是增强，不是契约）。
+        """
+        if dp is None:
+            raise HiveError("缺少 dispatch_prompt.py：把它拷到 hive.py 同目录再试")
+        self.fetch()
+        card = self.card(tid)                    # 卡不存在 → HiveError（退出码 1）
+        body = card.pop("_body", "")             # body 来自 parse_card，不再拼 frontmatter
+        card.pop("_path", None)
+        if fmt == "json":
+            text = dp.render_dispatch_prompt(card, agent=agent,
+                                             output_format="json", body=body)
+        elif fmt == "markdown":
+            text = dp.render_dispatch_prompt(card, agent=agent,
+                                             output_format="markdown", body=body)
+        else:
+            raise HiveError(f"不支持的 --format {fmt!r}（可选 markdown/json）")
+
+        if clip:
+            _copy_clipboard(text)                # 失败只 log 警告，不抛
+        if fmt == "json":
+            print(text)                          # stdout 只有一个 JSON 对象
+        else:
+            print(text, end="")
+        return text
+
+    def cmd_dispatch_mark(self, tid: str, agent: str | None = None,
+                          clear: bool = False) -> dict:
+        """给任务卡打「已推送给 X」标记（`hive dispatch-mark`）。
+
+        推送（通知 agent 来领）与真正分派（assign，改 state/owner）是两件事：
+        这里只写 `dispatched_to` / `dispatched_at`，state 保持 ready ——
+        真正把活塞给谁仍由 `assign` 决定。
+        """
+        if dt is None:
+            raise HiveError("缺少 dispatch_tracking.py：把它拷到 hive.py 同目录再试")
+        self.fetch()
+        card = self.card(tid)
+        if clear and agent:
+            raise HiveError("--clear 与 --agent 互斥，一次只给一个")
+        if clear:
+            new_card = dt.clear_dispatched(card)
+            who = "清空"
+        else:
+            if not agent:
+                raise HiveError("dispatch-mark 需要 --agent <name>（或加 --clear）")
+            self.agent(agent)                     # 校验已登记，尽早报错
+            new_card = dt.mark_dispatched(card, agent)
+            who = agent
+        # 只覆盖这两个字段，其余原样保留；state 不动（仍是 ready）
+        card["dispatched_to"] = new_card["dispatched_to"]
+        card["dispatched_at"] = new_card["dispatched_at"]
+        self.save_card(card)
+        self.commit_and_push(f"dispatch-mark {tid} -> {who}", [f"tasks/{tid}.md"])
+        log(f"{tid} 已标记推送 -> {who}")
+        return {"task": tid, "state": card["state"],
+                "dispatched_to": card["dispatched_to"],
+                "dispatched_at": card["dispatched_at"]}
 
     def cmd_doctor(self) -> bool:
         errors: list[str] = []
@@ -1970,7 +2103,7 @@ class Hive:
                 print(f"  ! {w}")
         return reports
 
-    def cmd_status(self, as_json: bool = False) -> None:
+    def cmd_status(self, as_json: bool = False, with_board: bool = False) -> None:
         self.fetch()
         cards = self.cards()
         rows = []
@@ -1987,6 +2120,10 @@ class Hive:
                 "id": tid,
                 "state": state,
                 "owner": c.get("owner") or "",
+                # —— T-0188：派发流水线的派生阶段（pending/dispatched/claimed/...）——
+                "stage": (dt.board_stage(c) if dt is not None else state),
+                "dispatched_to": c.get("dispatched_to") or "",
+                "dispatched_at": c.get("dispatched_at") or "",
                 "title": c.get("title", ""),
                 "repo": c.get("repo") or "",
                 "priority": c.get("priority") or "",
@@ -2014,17 +2151,34 @@ class Hive:
                 "push_source": "git" if st else "",
             })
         if as_json:
-            print(json.dumps(rows, ensure_ascii=False, indent=2))
+            if with_board:
+                # board 摘要是**追加**形态，用 --board 显式开启，避免破坏
+                # dashboard 与既有脚本对「顶层是数组」的硬校验（app.js Array.isArray）。
+                out = {"tasks": rows, "board": dt.summarize_board(cards)}
+            else:
+                out = rows
+            print(json.dumps(out, ensure_ascii=False, indent=2))
             return
         if not rows:
             print("（还没有任务）")
             return
-        w = [4, 9, 12, 8, 16, 8]
-        print(f"{'ID':<{w[0]}} {'STATE':<{w[1]}} {'OWNER':<{w[2]}} "
-              f"{'RESULT':<{w[4]}} {'CLAIM':<{w[5]}} TITLE")
+        board = dt.summarize_board(cards) if dt is not None else None
+        if board and board.get("counts"):
+            # 表头上方加一行分组摘要：例如「待分配 4 / 已推送 2 / 在跑 1」
+            label = {
+                "pending": "待分配", "dispatched": "已推送", "claimed": "已领取",
+                "running": "在跑", "done": "已完成", "failed": "失败",
+                "conflict": "冲突", "blocked": "挂起",
+            }
+            parts = [f"{label.get(s, s)} {n}" for s, n in board["counts"].items()]
+            print(f"分组：{' / '.join(parts)}    合计 {board.get('total')}")
+        w = [4, 9, 12, 8, 8, 16, 8]
+        print(f"{'ID':<{w[0]}} {'STATE':<{w[1]}} {'STAGE':<{w[2]}} {'OWNER':<{w[3]}} "
+              f"{'DISPATCHED':<{w[4]}} {'RESULT':<{w[5]}} {'CLAIM':<{w[6]}} TITLE")
         for r in rows:
-            print(f"{r['id']:<{w[0]}} {r['state']:<{w[1]}} {r['owner']:<{w[2]}} "
-                  f"{r['result']:<{w[4]}} {r['claim']:<{w[5]}} {r['title'][:50]}")
+            print(f"{r['id']:<{w[0]}} {r['state']:<{w[1]}} {r['stage']:<{w[2]}} "
+                  f"{r['owner']:<{w[3]}} {r['dispatched_to']:<{w[4]}} "
+                  f"{r['result']:<{w[5]}} {r['claim']:<{w[6]}} {r['title'][:50]}")
 
     # -- 挂起 / 恢复 ------------------------------------------------------- #
     def _set_state(self, tid: str, state: str, reason: str, who: str,
@@ -3467,7 +3621,7 @@ def cmd_land(args) -> None:
 
 
 def cmd_status(args) -> None:
-    Hive(args.dir).cmd_status(args.json)
+    Hive(args.dir).cmd_status(args.json, args.board)
 
 
 def cmd_gc(args) -> None:
@@ -3509,6 +3663,20 @@ def cmd_retry(args) -> None:
 
 def cmd_unassign(args) -> None:
     Hive(args.dir).cmd_unassign(args.task, args.reason or "", who="controller")
+
+
+def cmd_prompt(args) -> None:
+    tid = args.task or args.task_flag
+    if not tid:
+        raise HiveError("prompt 需要任务号（位置参数或 --task）")
+    Hive(args.dir).cmd_prompt(tid, agent=args.agent, fmt=args.format, clip=args.clip)
+
+
+def cmd_dispatch_mark(args) -> None:
+    tid = args.task or args.task_flag
+    if not tid:
+        raise HiveError("dispatch-mark 需要任务号（位置参数或 --task）")
+    Hive(args.dir).cmd_dispatch_mark(tid, agent=args.agent, clear=args.clear)
 
 
 def cmd_result(args) -> None:
@@ -3878,7 +4046,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("status", help="看板")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--board", action="store_true",
+                   help="--json 时顶层改为 {tasks, board}：board 是派发阶段分组摘要"
+                        "（待分配/已推送/已领取/在跑…），不写该标志时保持数组形态向后兼容")
     s.set_defaults(func=cmd_status)
+
+    # —— T-0188：派发流水线的接线命令 ——
+    s = sub.add_parser("prompt", help="渲染一张卡的派发指令（markdown 或 json payload）")
+    s.add_argument("task", nargs="?", help="任务号，如 T-0184（与 --task 二选一）")
+    s.add_argument("--task", dest="task_flag", default=None,
+                   help="任务号（兼容旧写法，与位置参数等价，二者取其一）")
+    s.add_argument("--agent", help="在指令里追加「领取身份」一行")
+    s.add_argument("--format", dest="format", choices=["markdown", "json"],
+                   default="markdown",
+                   help="markdown=给人看；json=单行 JSON payload（脚本直接 json.loads）")
+    s.add_argument("--clip", action="store_true",
+                   help="打印并复制到系统剪贴板（失败只警告，不改退出码）")
+    s.set_defaults(func=cmd_prompt)
+
+    s = sub.add_parser("dispatch-mark",
+                       help="给任务卡打「已推送给 X」标记（不改变 state，仍是 ready）")
+    s.add_argument("task", nargs="?")
+    s.add_argument("--task", dest="task_flag", default=None,
+                   help="任务号（与位置参数等价，二者取其一）")
+    s.add_argument("--agent", help="推送给哪个 agent（与 --clear 互斥）")
+    s.add_argument("--clear", action="store_true", help="清空推送标记（置 None）")
+    s.set_defaults(func=cmd_dispatch_mark)
 
     s = sub.add_parser("dash", aliases=["dashboard"],
                        help="看板服务：ensure=没起就起（默认）/ start / stop / restart / status / url")

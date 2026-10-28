@@ -88,6 +88,7 @@ python3 hive.py mcp --agent raccoon --dir /path/to/hive    # ← 正确
 | `hive_list_tasks` | 列任务，可按 state / repo / 只看自己的过滤 | |
 | `hive_get_task` | 一张卡的完整内容：frontmatter、正文、paths、verify、租约、结果 | |
 | `hive_next` | 推荐一张**现在就能干**的卡（跳过能力不匹配/依赖未就绪/已被领走） | 只推荐，不领取 |
+| `hive_list_pending` | 列出我能领的卡：按匹配分数排序并附理由（能力/仓库/依赖/在飞冲突） | 不给 `agent` 时返回全部 ready 且无人持有的卡（按任务号）；给了就打分排序。只读，不 claim |
 | `hive_claim` | 申请并领取：指派给我 + 推 claim 租约分支抢锁 + 备好 worktree 和提示词 | 返回工作目录 |
 | `hive_submit` | 提交：commit + push `task/<id>` + 跑 verify + 写结果到 `res/<id>` | 先用 summary.md 或 `note` 说明干了什么 |
 | `hive_abort` | 终止/放弃：释放我的租约，默认把卡退回 ready 让别人能领 | 已出结果的卡不许终止 |
