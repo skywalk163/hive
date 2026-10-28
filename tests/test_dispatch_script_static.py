@@ -11,6 +11,10 @@
    客户端、中文标题），写死一个就只对这一台机器成立，且失败方式是「静默粘错窗口」。
 
 真跑的 dry-run 端到端输出不进 CI（要真窗口），写在任务 summary 里。
+
+T-0192 追加第 7 节：三处「会静默出错」的脆点各有一组守卫 —— 剪贴板重试（退出码 5）、
+AttachThreadInput 激活兜底（退出码 3 语义不变；实测还需一次空 Alt 解前台锁）、
+以及发送后回读（命中 / 未命中退出码 6 / 未校验三态）。这些断言只读文本，不真发按键。
 """
 from __future__ import annotations
 
@@ -307,3 +311,198 @@ def test_ps1_pins_console_encoding():
 
     assert re.search(r"\[Console\]::OutputEncoding\s*=", src), "必须显式设 OutputEncoding"
     assert re.search(r"UTF8Encoding", src), "必须是 UTF-8（无 BOM）"
+
+
+# --- 7. T-0192：三处静默失败的硬化 ---------------------------------------- #
+
+def _apply_body(src: str) -> str:
+    """取 `if ($Apply) { ... }` 的块内文本（真配对，不是「后面出现过」）。"""
+    guard = src.index("if ($Apply)")
+    return _block_after(src, src.index("{", guard))
+
+
+def _function_body(src: str, name: str) -> str:
+    """取 `function <name>(...) { ... }` 的块内文本。"""
+    m = re.search(r"function\s+" + re.escape(name) + r"\b[^{]*\{", src)
+    assert m, f"找不到函数 {name} 的定义"
+    return _block_after(src, m.end() - 1)
+
+
+def test_clipboard_write_has_retry_loop_and_exit_code_5():
+    """剪贴板写入必须自带重试，且全失败走专用退出码 5。
+
+    背景：Clipboard 是全局单例，别的进程开着时 `Set-Clipboard` 会抛
+    ExternalException；`$ErrorActionPreference='Stop'` 会让脚本直接终止并只留一坨
+    .NET 堆栈。没有重试 = 偶发一次占用就丢一次派发。
+    """
+    src = _read(PS1)
+    body = _function_body(src, "Set-ClipboardText")
+
+    assert re.search(r"Set-Clipboard\s+-Value\s+\$Text", body), (
+        "重试函数里必须真的写剪贴板（写的是入参 $Text）"
+    )
+    assert re.search(r"for\s*\(.*-le\s+5", body), "必须有最多 5 次的重试循环"
+    assert re.search(r"150\s*\*\s*\$attempt", body), "退避必须是 150ms × 第几次（不能写死等）"
+    assert re.search(r"catch\s*\{", body) and re.search(r"\.Exception\.Message", body), (
+        "每次失败要记下最后一条异常，最终报错才有信息量"
+    )
+    assert re.search(r"Fail[^\n]*-Code\s+5", body), "全部失败必须用专用退出码 5 退出"
+    assert re.search(r"已重试\s*5\s*次", body), "报错要明说已经重试过 5 次"
+
+
+def test_clipboard_call_site_replaced_and_failure_blocks_sending():
+    """调用点必须换成 Set-ClipboardText，且失败路径在按键之前终止。
+
+    旧调用留着（或新函数只在定义里、调用点没换）时，这条会红：前者说明还有一条
+    不受重试保护的写剪贴板路径，后者说明改了函数但没人用。
+    """
+    src = _read(PS1)
+    apply_body = _apply_body(src)
+
+    assert "Set-ClipboardText $bodyText" in apply_body, "第 6 步必须调用重试版写剪贴板"
+    assert "Set-Clipboard -Value $bodyText" not in src, "旧的裸调用不许留在文件里"
+    assert src.count("Set-Clipboard -Value") == 1, (
+        "裸写剪贴板只允许出现在重试函数内部（多一处就是绕过重试）"
+    )
+
+    # 失败即终止，不能先发按键：-Code 5 必须出现在粘贴之前
+    fail5 = apply_body.index("-Code 5")
+    paste = apply_body.index("SendKeys('^v')")
+    assert fail5 < paste, "剪贴板失败分支必须在粘贴之前（带着旧剪贴板粘贴比不发更糟）"
+    assert re.search(r"一个键都不发|绝不发送|带着旧剪贴板", src), (
+        "注释要写清「失败不发」的理由，避免后人把它改成「尽力而为」"
+    )
+
+
+def test_activation_falls_back_to_attach_thread_input():
+    """激活失败要能用 AttachThreadInput 兜底，且判定看 GetForegroundWindow。
+
+    实测：调用进程本身不是前台时 SetForegroundWindow 返回 false（连续三次 exit 3），
+    但窗口其实能被顶上来；反过来它也可能在窗口已到前台时仍返回 false。所以判定标准
+    只能是「前台句柄 == 目标句柄」。
+    """
+    src = _read(PS1)
+    body = _function_body(src, "Set-WindowForeground")
+
+    assert re.search(r"ShowWindow\s*\([^)]*,\s*9\s*\)", body), "先 SW_RESTORE，最小化窗口才能被顶上来"
+    assert "AttachThreadInput" in body, "必须有 AttachThreadInput 兜底，否则换触发方式就退化"
+    assert re.search(r"AttachThreadInput\([^)]*,\s*\$?true\s*\)", body), "attach 必须真的 attach"
+    assert re.search(r"AttachThreadInput\([^)]*,\s*\$?false\s*\)", body), (
+        "attach 是有状态的，用完必须在 finally 里解开"
+    )
+    assert re.search(r"GetForegroundWindow\(\)\s*-eq\s*\$handle", body), (
+        "判定标准是前台句柄，不是 SetForegroundWindow 的返回值"
+    )
+    assert not re.search(r"return\s+\[bool\]\[HiveDispatch\.Win32\]::SetForegroundWindow", body), (
+        "不许回到「拿返回值当结论」的老写法"
+    )
+    # 真机实测（Win10 19045）：只 attach 仍被前台锁拒绝，需要一次空 Alt 解锁。
+    # 这条钉住「要解锁」这个事实，避免后来人以为 attach 单独就够而把它删掉。
+    assert "keybd_event" in body, (
+        "attach 之后要发一次空 Alt 解前台锁（实测否则仍 exit 3）；只按 Alt 不输入字符"
+    )
+    first_attach = body.index("AttachThreadInput")
+    last_attach = body.rindex("AttachThreadInput")
+    unlock = body.index("keybd_event")
+    assert first_attach < unlock < last_attach, (
+        "解锁必须夹在 attach / detach 之间（顺序：attach -> 空 Alt -> SetForegroundWindow -> detach）"
+    )
+    # 真机踩过：GetWindowThreadProcessId 的线程号是返回值、out 参数是 PID。
+    # 把 PID 当线程号传进 AttachThreadInput 会静默失败（attach=false），必须钉住。
+    assert re.search(
+        r"\$foregroundThread\s*=\s*\[HiveDispatch\.Win32\]::GetWindowThreadProcessId", body
+    ), "线程号必须取返回值；out 参数是 PID，不能拿来 attach"
+
+
+def test_confirm_paste_landed_has_three_states():
+    """回读必须是三态：命中 / 未命中（退出码 6）/ 读不了（警告但记账）。
+
+    两态（成功/失败）会把「UIA 读不了」误判成「没发出去」，导致重复派发；
+    而把「读到文本但没命中」当成成功，就是假绿 —— 账上说发了，窗口里没有。
+    """
+    src = _read(PS1)
+    body = _function_body(src, "Confirm-PasteLanded")
+
+    assert "'landed'" in body and "'missing'" in body and "'unknown'" in body, (
+        "必须显式返回 landed / missing / unknown 三态"
+    )
+    assert re.search(r"IndexOf\([^)]*Sentinel", body), "命中判定是「文本里含 sentinel」"
+    assert re.search(r"return\s+'unknown'", body), "读不了必须是 unknown，不能当失败"
+    apply_body = _apply_body(src)
+    assert re.search(r"-eq\s+'missing'[\s\S]{0,400}?-Code\s+6", apply_body), (
+        "未命中必须用专用退出码 6 退出，且不记账"
+    )
+    assert re.search(r"未校验[^\n]*照常记账", apply_body), "读不了时要明确警告「未校验」并照常记账"
+
+
+def test_confirm_uses_readonly_uia_only():
+    """回读只读：不加第三方依赖、不写目标窗口、不切焦点。
+
+    UIA 的写接口（SetValue）会改目标窗口内容，SetFocus 会抢焦点 —— 两者都会把
+    「回读」变成「再来一次副作用」。
+    """
+    src = _read(PS1)
+    body = _function_body(src, "Confirm-PasteLanded") + _function_body(src, "Read-ControlText")
+
+    assert "UIAutomationClient" in src, "UIAutomation 是 .NET Framework 自带程序集，不许引第三方包"
+    assert "TryGetCurrentPattern" in body, "读文本必须走 TryGetCurrentPattern（不支持的控件要能跳过）"
+    assert "ValuePattern" in body and "TextPattern" in body, (
+        "两种模式都要尝试：ValuePattern 读输入框，TextPattern 读文档"
+    )
+    assert "SetValue" not in body, "不许向目标控件写值"
+    assert "SetFocus" not in body, "不许抢焦点"
+
+
+def test_confirm_runs_after_enter_before_dispatch_mark():
+    """顺序：回车 -> 回读 -> 记账。顺序错了回读就是空转。
+
+    回读在回车之前会读到「还没粘进去」的旧内容；记账在回读之前则意味着未命中也会
+    先记一笔，回读就失去了「不记账」的意义。
+    """
+    src = _read(PS1)
+
+    enter = src.index("SendKeys('{ENTER}')")
+    confirm = re.search(r"\$landed\s*=\s*Confirm-PasteLanded", src)
+    assert confirm, "必须把回读结果接进变量再判断（不能只调用不看）"
+    mark = src.index("$mark = Invoke-Native")
+
+    assert enter < confirm.start() < mark, (
+        f"顺序应为 回车({enter}) < 回读({confirm.start()}) < 记账({mark})"
+    )
+    assert re.search(r"Confirm-PasteLanded[^\n]*-Sentinel\s+\$Task", src), (
+        "sentinel 取任务号（正文里必然出现），不额外往正文塞标记"
+    )
+
+
+def test_readback_name_fallback_is_narrowed():
+    """记事本这类只经 MSAA 桥暴露正文的窗口要能回读；但 Name 兜底必须收窄。
+
+    真机实测（Win10 19045）：记事本的 Edit 控件 ValuePattern / TextPattern 都不支持，
+    全文只出现在 UIA 的 Name 上。不兜底 -> 记事本永远「未校验」，回读形同虚设；
+    兜底不收窄 -> 按钮文字、窗口标题会被当成正文，把「已落进窗口」误判成「没落进」，
+    这是假阴性，人会重复派发。
+    """
+    src = _read(PS1)
+    body = _function_body(src, "Read-ControlText")
+    gate = _function_body(src, "Test-TextContainer")
+
+    assert "Current.Name" in body, "必须有 Name 兜底，否则记事本这类窗口永远读不到正文"
+    assert re.search(r"Test-TextContainer\s+\$Element", body), "Name 兜底必须先过容器判定"
+    assert re.search(r"ClassName", gate), "容器判定要按类名收窄"
+    assert re.search(r"(?i)edit", gate), "类名里带 edit 的（Edit/RichEdit/TextBox）才算容器"
+    assert "ControlType.Document" in gate, "文档类控件也要算容器"
+
+
+def test_notes_exit_code_table_lists_5_and_6():
+    """头部 .NOTES 的退出码表必须写上 5 与 6。
+
+    退出码表是 AHK 气泡与人的唯一对照表；表里没有 5/6，失败时就只剩「退出码 5」，
+    人得回来读代码才知道发生了什么。
+    """
+    src = _read(PS1)
+    m = re.search(r"\.NOTES([\s\S]*?)#>", src)
+    assert m, "脚本头部必须有 .NOTES 段"
+    notes = m.group(1)
+
+    assert re.search(r"5\s*剪贴板", notes), ".NOTES 的退出码表缺 5（剪贴板）"
+    assert re.search(r"6\s*回读", notes), ".NOTES 的退出码表缺 6（回读未命中）"
