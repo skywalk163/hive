@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.9.15 — 2026-10-28
+
+### Added
+
+- **跨平台 CI（GitHub Actions）**：`skywalk163/hive` 是 public 仓，标准 runner 不计费，
+  于是把「只能在本机 Linux 兼容层里测」的那几个脚本放到真机跑——
+  ubuntu / macOS 原生 runner、Windows runner（`.cmd` / `.ps1` 的第一次真机 E2E）、
+  FreeBSD 15.1（`vmactions/freebsd-vm` 起 QEMU）。见 `.github/workflows/cross-platform.yml`。
+  - `unit-linux` 是硬门禁（全量 pytest）；`unit-other`（macOS/Windows）先
+    `continue-on-error`，绿了再收紧。Windows 的 `.cmd`/`.ps1` E2E 同理。
+- **`scripts/ci-smoke.sh`**：把冒烟逻辑从 YAML 里抽出来，本地能原样跑——
+  `syntax`（所有 .sh 过 `sh -n`）、`service`（起 → HTTP 探活 → status → stop →
+  确认端口释放，用 8799 避开真看板）、`autostart`（dry-run，并断言安装器
+  "选定了方式"或"按设计拒绝"，不能既不选也不说）。
+- **`.gitattributes`**：`*.sh` 强制 LF。仓里有 Windows 机器且 `core.autocrlf=true`，
+  CRLF 的 shell 脚本在 CI 上会直接 `$'\r': command not found`。
+
+### Changed
+
+- **仓库白名单对齐现实**：`ALLOWED_REPOS` 从 `{hive}` 扩到 `{hive, lightharness, light}`，
+  `FORBIDDEN` 清空。原因不是"放宽纪律"，而是两个仓早已按流程正式接入：
+  lightharness 服务 0.2.1-rc.3 升级线（T-0170~T-0179），light 有在飞的 T-0181/T-0183。
+  守卫的职责照旧——**没登记的仓永远推不出去**；要退役某个仓，把仓名塞进 `FORBIDDEN`
+  并清掉 agents 登记，测试会逼着把在飞的卡处理掉。`docs/操作手册.md` 同步改了流程说明。
+
+### Fixed
+
+- **`test_mcp_next_skips_unqualified` 一直红**：不是代码坏了，是 418da7e 加同步 TTL
+  （默认 10s，修"每次工具调用卡 30~60s"）后，测试里"推了新卡立刻能看见"的断言会被
+  缓存吃掉。测试 fixture 现在显式 `HIVE_MCP_SYNC_TTL=0`，并新增
+  `test_sync_ttl_skips_refetch` 把缓存的**两个面**都钉住：开 TTL 时看不见新卡、
+  关 TTL 时立刻看得见。生产默认值没动。
+
 ## 0.9.14 — 2026-10-27
 
 ### Added

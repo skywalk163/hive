@@ -1,0 +1,7 @@
+# 行尾统一：shell 脚本必须是 LF，否则在 Windows 上 checkout 后 sh -n / bash 会报
+# "$'\r': command not found"（本仓有 Windows 机器参与，core.autocrlf=true 会改成 CRLF）。
+*.sh    text eol=lf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+*.yml   text eol=lf
+*.yaml  text eol=lf

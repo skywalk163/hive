@@ -32,13 +32,18 @@ class McpClient:
     """极简 MCP stdio 客户端，够测试用。"""
 
     def __init__(self, agent: str, hive_dir: Path, state_dir: Path, env: dict,
-                 role: str = "worker"):
+                 role: str = "worker", env_extra: dict | None = None):
         env = {
             **os.environ,
             **env,
             "HIVE_AGENT": agent,
             "HIVE_ROLE": role,
             "HIVE_STATE": str(state_dir),
+            # 生产默认是 10s 的同步 TTL（省网络往返）；测试里必须关掉，
+            # 否则「推了新卡立刻能看见」这类断言会被缓存吃掉——那是缓存的
+            # 预期行为，不是 bug。缓存的正面行为见 test_sync_ttl_skips_refetch。
+            "HIVE_MCP_SYNC_TTL": "0",
+            **(env_extra or {}),
         }
         self.proc = subprocess.Popen(
             [sys.executable, str(MCP), "--agent", agent, "--role", role,
@@ -103,9 +108,11 @@ def mcp(world):
     """每起一个 MCP client 就配一个独立的 state 目录。"""
     clients: list[McpClient] = []
 
-    def _make(agent: str, hive_dir: Path | None = None, role: str = "worker"):
+    def _make(agent: str, hive_dir: Path | None = None, role: str = "worker",
+              env_extra: dict | None = None):
         c = McpClient(agent, hive_dir or world.hive2,
-                      world.root / f"mcp-state-{agent}", world.git_env, role=role)
+                      world.root / f"mcp-state-{agent}", world.git_env, role=role,
+                      env_extra=env_extra)
         clients.append(c)
         return c
 
@@ -245,6 +252,30 @@ def test_mcp_next_skips_unqualified(world, mcp):
     nxt = c.ok("hive_next")["details"]
     assert nxt["task_id"] == "T-0101"
     assert "hive_claim" in nxt["hint"]
+
+
+def test_sync_ttl_skips_refetch(world, mcp):
+    """钉住同步 TTL 的两面：默认会省下重复 fetch，代价是新推的卡要等几秒才可见。
+
+    418da7e 加这个缓存是为了修「远端慢时每次工具调用卡 30~60s」。它不是 bug，
+    但会打破「每次调用都拉最新」的旧契约，所以两个行为都要有测试守着：
+    开 TTL 时看不见新卡（caching 真的生效），关 TTL 时立刻看得见（同步没坏）。
+    """
+    world.add_agent("a1", caps=("python",))
+    world.add_task("T-0200", title="先有的卡", needs=("python",))
+
+    cached = mcp("a1", env_extra={"HIVE_MCP_SYNC_TTL": "1000"})
+    cached.initialize()
+    assert cached.ok("hive_next")["details"]["task_id"] == "T-0200"
+
+    world.add_task("T-0201", title="刚推上来的卡", needs=("python",))
+    ids = {t["id"] for t in cached.ok("hive_list_tasks", limit=10)["details"]["tasks"]}
+    assert ids == {"T-0200"}, f"TTL 内不该看到新推的卡，实际看到了 {ids}"
+
+    fresh = mcp("a1", env_extra={"HIVE_MCP_SYNC_TTL": "0"})
+    fresh.initialize()
+    ids = {t["id"] for t in fresh.ok("hive_list_tasks", limit=10)["details"]["tasks"]}
+    assert ids == {"T-0200", "T-0201"}, f"TTL=0 必须立刻看得见新卡，实际 {ids}"
 
 
 # --------------------------------------------------------------------------- #

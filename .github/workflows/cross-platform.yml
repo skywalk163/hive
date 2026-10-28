@@ -1,0 +1,162 @@
+name: cross-platform
+
+# 目的：把「只能在本机 Linux 兼容层里测」的那几个脚本，放到真 Windows / macOS /
+# FreeBSD / Ubuntu 上各跑一遍。仓库是 public，GitHub Actions 标准 runner 不计费；
+# FreeBSD 用 vmactions/freebsd-vm（在 ubuntu runner 里起 QEMU 跑 FreeBSD 15.1）。
+#
+# 分工：
+#   unit-*     跑 pytest —— ubuntu 是硬门禁，其余平台先观察（continue-on-error）
+#   smoke-*    跑 scripts/ci-smoke.sh —— 看板服务起停 + 自启安装器分支判定
+#   windows    .cmd / .ps1 的真实 E2E（此前完全没在 Windows 上跑过）
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'tasks/**'
+      - 'inbox/**'
+      - 'results/**'
+      - 'agents/**'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # --------------------------------------------------------------------------
+  unit-linux:
+    name: pytest (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # hive 要 fetch/reset origin/main，浅克隆会缺 ref
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -q pytest
+      - name: 单测
+        run: python -m pytest -q
+
+  # --------------------------------------------------------------------------
+  smoke-linux:
+    name: smoke (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: shellcheck（只看 error 级）
+        run: |
+          if command -v shellcheck >/dev/null; then
+            shellcheck -s sh -S error scripts/*.sh scripts/freebsd-host/*.sh
+          else
+            echo "no shellcheck, skip"
+          fi
+      - name: 冒烟
+        run: sh scripts/ci-smoke.sh all
+
+  # --------------------------------------------------------------------------
+  smoke-macos:
+    name: smoke (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 冒烟
+        run: sh scripts/ci-smoke.sh all
+
+  # --------------------------------------------------------------------------
+  smoke-freebsd:
+    name: smoke (freebsd 15.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 在 FreeBSD 里跑
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          release: '15.1'
+          sync: rsync
+          run: |
+            set -e
+            uname -a
+            sh scripts/ci-smoke.sh syntax
+            # FreeBSD 分支：应当选中 rc.d，并且 --dry-run 不碰系统
+            sh scripts/ci-smoke.sh autostart
+            # 真正验证「这台的 install-autostart 认得出 FreeBSD」
+            sh scripts/install-autostart.sh --dry-run | tee /tmp/out.txt
+            grep -q "FreeBSD rc.d" /tmp/out.txt
+
+  # --------------------------------------------------------------------------
+  smoke-windows:
+    name: smoke (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: sh 脚本语法（Git Bash 的 sh -n）
+        shell: bash
+        run: sh scripts/ci-smoke.sh syntax
+
+      - name: .cmd 服务脚本 E2E（此前从未在 Windows 上跑过）
+        shell: pwsh
+        continue-on-error: true        # TODO: 绿了就删掉这一行
+        run: |
+          $env:PORT = '8799'
+          .\scripts\dashboard-service.cmd start
+          Start-Sleep -Seconds 3
+          $code = (Invoke-WebRequest 'http://127.0.0.1:8799/' -UseBasicParsing).StatusCode
+          Write-Host "HTTP $code"
+          .\scripts\dashboard-service.cmd status
+          .\scripts\dashboard-service.cmd stop
+          if ($code -ne 200) { throw "看板没起来（HTTP $code）" }
+
+      - name: .ps1 计划任务安装/卸载 E2E
+        shell: pwsh
+        continue-on-error: true        # TODO: 绿了就删掉这一行
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1 -NoStart
+          schtasks /query /tn HiveDashboard
+          if ($LASTEXITCODE -ne 0) { throw "计划任务没建出来" }
+          powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1 -Uninstall
+          schtasks /query /tn HiveDashboard 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "计划任务没删掉" }
+
+  # --------------------------------------------------------------------------
+  unit-other:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true            # TODO: 绿了就删掉这一行
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -q pytest
+      - run: python -m pytest -q
