@@ -23,6 +23,8 @@
   close       标记任务完成
   claim       手工领取（调试用）
   gc          回收过期租约
+  cluster     常驻集群：自动发现/注册/选主，实时同步进度与租约
+  ports       端口规划：默认值/当前生效值/占用体检
 
 只用 Python 标准库 + git，Windows / FreeBSD / Linux 同一份代码。
 """
@@ -48,9 +50,24 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.18"
+VERSION = "0.10.2"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
+
+# 端口默认值的唯一来源是 hive_ports.py。缺这个模块（例如老协调仓只拷了
+# hive.py）时退回内置默认，不能让所有命令都起不来。
+try:
+    from hive_ports import (
+        DASHBOARD_PORT as _PORT_DASHBOARD,
+        CLUSTER_HTTP_PORT as _PORT_CLUSTER,
+        CLUSTER_HTTP_ENV as _CLUSTER_PORT_ENV,
+        CLUSTER_DISCOVERY_PORT as _PORT_CLUSTER_DISCOVERY,
+    )
+except ImportError:  # pragma: no cover - 只在残缺部署上走到
+    _PORT_DASHBOARD = 8787
+    _PORT_CLUSTER = 8788
+    _CLUSTER_PORT_ENV = "HIVE_CLUSTER_PORT"
+    _PORT_CLUSTER_DISCOVERY = 8789
 DEFAULT_MAX_PER_REPO = 1
 # 一张卡最多被看门狗**自动**回收几次；超了就转 blocked 退出流水线，不再无限重派。
 # 0 = 一次都不许自动重派（首次判死即 blocked）。人工显式 `hive retry` 不受此限。
@@ -320,6 +337,129 @@ def claim_backoff_delay(attempt: int, cfg: dict | None = None,
 def _claim_sleep(seconds: float) -> None:
     """独立一层是为了测试能替换掉真实等待；KeyboardInterrupt 会原样向上冒。"""
     time.sleep(seconds)
+
+
+# --------------------------------------------------------------------------- #
+# 集群（hive_cluster.py）的本地发布通道
+#
+# 这一层是**可选加速**：git 仍然是 claim/result 的唯一真相。集群没起、端口不通、
+# 版本不匹配都只影响「别人多快看到进度」，绝不影响任务本身。所以这里所有函数
+# 都是 best-effort、短超时、不抛异常。
+# --------------------------------------------------------------------------- #
+CLUSTER_DEFAULT_PORT = _PORT_CLUSTER
+CLUSTER_PORT_ENV = _CLUSTER_PORT_ENV
+CLUSTER_DISCOVERY_DEFAULT_PORT = _PORT_CLUSTER_DISCOVERY
+CLUSTER_STATE_ENV = "HIVE_CLUSTER_STATE"
+
+
+def cluster_state_dir() -> Path:
+    return Path(os.environ.get(CLUSTER_STATE_ENV)
+                or (DEFAULT_STATE / "cluster")).expanduser()
+
+
+def _cluster_saved_config() -> dict:
+    try:
+        data = json.loads((cluster_state_dir() / "config.json").read_text(
+            encoding="utf-8-sig"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def cluster_port() -> int:
+    raw = (os.environ.get(CLUSTER_PORT_ENV) or "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    saved = _cluster_saved_config()
+    try:
+        return int(saved.get("port") or CLUSTER_DEFAULT_PORT)
+    except (TypeError, ValueError):
+        return CLUSTER_DEFAULT_PORT
+
+
+def cluster_token() -> str:
+    token = (os.environ.get("HIVE_CLUSTER_TOKEN") or "").strip()
+    if token:
+        return token
+    saved = _cluster_saved_config()
+    return str(saved.get("token") or "")
+
+
+def cluster_url(path: str = "") -> str:
+    suffix = path.lstrip("/")
+    return f"http://127.0.0.1:{cluster_port()}/api/cluster/{suffix}"
+
+
+def _cluster_http(method: str, path: str, payload=None,
+                  timeout: float = 1.0):
+    """访问本机集群；返回 (code, dict) 或 (None, None)。失败完全静默。"""
+    # 测试进程默认不碰本机 8788：开发者一边跑测试、一边跑着真集群时，
+    # 单测里的 claim 不该把租约/进度写进真实集群。专项测试显式放行。
+    if (os.environ.get("PYTEST_CURRENT_TEST")
+            and not os.environ.get("HIVE_CLUSTER_ALLOW_TEST")):
+        return None, None
+    from urllib import request as _request
+    import urllib.error as _urlerror
+    data = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json; charset=utf-8"
+    token = cluster_token()
+    if token:
+        headers["X-Hive-Cluster-Token"] = token
+    req = _request.Request(cluster_url(path), data=data, headers=headers,
+                           method=method)
+    try:
+        opener = _request.build_opener(_request.ProxyHandler({}))
+        with opener.open(req, timeout=max(0.1, float(timeout))) as resp:
+            raw = resp.read()
+            return getattr(resp, "status", resp.getcode()), json.loads(
+                raw.decode("utf-8")) if raw else None
+    except _urlerror.HTTPError as exc:
+        try:
+            raw = exc.read()
+            return exc.code, (json.loads(raw.decode("utf-8")) if raw else None)
+        except Exception:  # noqa: BLE001
+            return exc.code, None
+    except Exception:  # noqa: BLE001  连不上/超时都当集群没起
+        return None, None
+
+
+def cluster_publish_progress(payload: dict) -> bool:
+    code, _ = _cluster_http("POST", "push", payload, timeout=0.8)
+    return code == 200
+
+
+def cluster_publish_lease(payload: dict) -> bool:
+    code, _ = _cluster_http("POST", "lease", payload, timeout=0.8)
+    return code == 200
+
+
+def cluster_release_lease(tid: str) -> bool:
+    if not tid:
+        return False
+    code, _ = _cluster_http("POST", "release", {"task": tid,
+                                                "reason": "worker-finished"},
+                            timeout=0.5)
+    return code == 200
+
+
+def cluster_ensure(hive_dir=None) -> bool:
+    """给常驻 worker/总控用：本机没有集群就静默拉起。"""
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("HIVE_TESTING"):
+        return False
+    if str(os.environ.get("HIVE_CLUSTER_AUTOSTART", "1")).lower() in (
+            "0", "false", "no", "off"):
+        return False
+    try:
+        import hive_cluster
+        return bool(hive_cluster.ensure_background(hive_dir=hive_dir))
+    except Exception:  # noqa: BLE001  集群是可选件，缺模块也不影响 worker
+        return False
 
 
 # git push 失败的文本里，哪些属于「值得再试一次」的暂时性错误。
@@ -932,6 +1072,7 @@ class Hive:
                     log(f"已删除分支 {ref}")
                 else:
                     log(f"删不掉 {ref}（可能受保护），保留不影响结果")
+        cluster_release_lease(tid)
         log(f"{tid} 已{'关闭（完成）' if done else '关闭（作废，卡面 state=closed）'}")
 
     def cmd_reopen(self, tid: str, reason: str = "", who: str = "controller") -> None:
@@ -967,6 +1108,7 @@ class Hive:
         self.save_card(card, body)
         self.commit_and_push(f"reopen {tid}" + (f": {reason}" if reason else ""),
                              self._card_paths(tid))
+        cluster_release_lease(tid)
         log(f"{tid} 已从 {old} 重开为 ready（未分配）")
 
     # -- 合入 / land ------------------------------------------------------- #
@@ -2030,6 +2172,7 @@ class Hive:
             git(["worktree", "remove", "--force", str(wt)], repo, check=False)
             shutil.rmtree(wt, ignore_errors=True)
 
+        cluster_release_lease(tid)
         print(f"{tid} {result['status']} by {owner}（{result['duration_s']}s）"
               f"\nbranch: task/{tid}  head: {head}\n"
               f"verify: " + ", ".join(f"{v['code']}" for v in verify), flush=True)
@@ -2251,6 +2394,7 @@ class Hive:
         if archived.exists():
             archived.unlink()  # 重新入队时把归档也撤掉，否则 worker 会以为已完成
         self.commit_and_push(f"retry {tid}", self._card_paths(tid, target))
+        cluster_release_lease(tid)
         log(f"{tid} 已重新入队 -> {target}")
 
     def cmd_unassign(self, tid: str, reason: str = "", who: str = "controller") -> None:
@@ -2286,6 +2430,7 @@ class Hive:
         self.save_card(card, body)
         self.commit_and_push(f"unassign {tid}" + (f": {reason}" if reason else ""),
                              self._card_paths(tid))
+        cluster_release_lease(tid)
         log(f"{tid} 已退回 ready 并未分配（原 owner={old_owner or '无'}）")
 
     def cmd_gc(self, minutes: int) -> None:
@@ -2502,6 +2647,7 @@ class Hive:
         """
         total: dict[str, int] = {"reclaimed": 0, "dispatched": 0, "landed": 0, "ticks": 0}
         while True:
+            cluster_ensure(self.dir)
             total["ticks"] += 1
             tick = {"tick": total["ticks"], "reclaimed": 0, "dispatched": 0,
                     "landed": 0, "doctor_ok": True}
@@ -2720,10 +2866,12 @@ class Worker:
             _cleanup_claim_artifacts(self.dir, tid)
             return False
         lease = int(self.h.card(tid).get("lease_minutes") or 180)
+        claimed_at = iso()
+        lease_until = iso(now() + timedelta(minutes=lease))
         payload = json.dumps({
             "task": tid, "agent": self.name,
-            "claimed_at": iso(),
-            "lease_until": iso(now() + timedelta(minutes=lease)),
+            "claimed_at": claimed_at,
+            "lease_until": lease_until,
             "host": os.uname().nodename if hasattr(os, "uname") else os.environ.get("COMPUTERNAME", ""),
         }, ensure_ascii=False, indent=2)
 
@@ -2798,6 +2946,14 @@ class Worker:
                 # 中断（KeyboardInterrupt）或重试用尽：清掉本地可能留下的 claim
                 # 半成品；远端失败 push 本身不会改任何引用。
                 _cleanup_claim_artifacts(self.dir, tid)
+            else:
+                # git 抢锁成功后，把租约广播给本机集群（建议性、best-effort）。
+                # 集群没起时这里只是多一次 0.8s 内的连接失败，不影响 claim。
+                cluster_publish_lease({
+                    "task": tid, "agent": self.name,
+                    "host": self.cfg.get("host") or current_host(),
+                    "claimed_at": claimed_at, "lease_until": lease_until,
+                })
 
     # -- 租约心跳 ---------------------------------------------------------- #
     @contextmanager
@@ -2824,6 +2980,8 @@ class Worker:
             stop.set()
             t.join(timeout=5)
             sp.join(timeout=5)
+            # 任务已结束（成功/失败/异常都算），撤销集群里的建议性租约
+            cluster_release_lease(tid)
 
     def _heartbeat_loop(self, tid: str, interval: int, stop: threading.Event) -> None:
         while not stop.wait(interval):
@@ -2847,6 +3005,12 @@ class Worker:
             json.dumps(payload, ensure_ascii=False, indent=2),
             f"claim/{tid}", f"origin/claim/{tid}",
             f"lease {tid} by {self.name}")
+        cluster_publish_lease({
+            "task": tid, "agent": self.name,
+            "host": info.get("host") or self.cfg.get("host") or current_host(),
+            "claimed_at": info.get("claimed_at") or iso(),
+            "lease_until": payload["lease_until"],
+        })
 
     # -- 任务进度主动上报（agent -> hive）-------------------------------- #
     def set_status(self, tid: str, state: str = "", progress=None,
@@ -2886,22 +3050,30 @@ class Worker:
             log(f"{tid} 状态推送失败（忽略）: {e}")
 
     def _push_http(self, payload: dict) -> None:
-        """HTTP 加速通道：仅当配了 HIVE_PUSH_URL 才推（如 http://host:8787/api/push）。
+        """HTTP 加速通道：先推 HIVE_PUSH_URL（老看板），再退到本机集群。
 
-        跨机 agent 未必能访问看板主机，所以这是「能连就更快」的补充通道；
-        失败完全不影响 git 主通道的结果。
+        跨机 agent 未必能访问看板主机，但**本机**集群一定在同一个 loopback 上；
+        集群再把进度转给主节点并广播给其他机器。这是「不用等 git push 就能
+        拿到第一手进度」的主通道；两条都失败也完全不影响 git 主通道。
         """
+        payload = dict(payload)
+        payload.setdefault("updated_at", iso())
+        payload.setdefault("agent", self.name)
         url = (os.environ.get("HIVE_PUSH_URL") or "").strip()
-        if not url:
+        if url:
+            try:
+                from urllib import request  # 延迟导入：没配 URL 时零开销
+                req = request.Request(
+                    url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}, method="POST")
+                request.urlopen(req, timeout=5).read()
+                return
+            except Exception as e:  # noqa: BLE001
+                log(f"HTTP 状态推送失败（继续试本机集群）: {e}")
+        if cluster_publish_progress(payload):
             return
-        try:
-            from urllib import request  # 延迟导入：没配 URL 时零开销
-            req = request.Request(
-                url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                headers={"Content-Type": "application/json"}, method="POST")
-            request.urlopen(req, timeout=5).read()
-        except Exception as e:  # noqa: BLE001
-            log(f"HTTP 状态推送失败（忽略，git 通道仍在）: {e}")
+        if url:
+            log("HTTP 与集群状态推送都失败（忽略，git 通道仍在）")
 
     def _status_loop(self, tid: str, interval: int, stop: threading.Event) -> None:
         """周期上报：刷新 updated_at 并重推当前进度 —— 长时间没推就是失联信号。"""
@@ -3240,6 +3412,8 @@ class Worker:
         log(f"worker {self.name} 启动（{self.dir}），轮询间隔 {interval}s")
         while True:
             try:
+                # 常驻 worker 同时盯一下本机集群：进程挂了就重新拉起。
+                cluster_ensure(self.dir)
                 # 同 __init__：轮询也不能裸 reset，否则常驻 worker 每隔 interval 秒
                 # 就把主工作区里未提交的改动抹一次。落后+脏时 sync_main 抛 HiveError，
                 # 下面本来就 catch 住并继续下一轮，不会崩。
@@ -3278,10 +3452,16 @@ def cmd_init(args) -> None:
         (d / sub).mkdir(exist_ok=True)
         (d / sub / ".gitkeep").touch()
     # 工具随仓库走：每台机器 clone 下来就能 python3 hive.py
-    tool = d / "hive.py"
-    if not tool.exists():
-        shutil.copy2(Path(__file__).resolve(), tool)
-        os.chmod(tool, 0o755)
+    # 伴侣模块（集群、冲突判定、派发渲染）有就一起带上；缺了也不影响主流程。
+    here = Path(__file__).resolve().parent
+    for name in ("hive.py", "hive_ports.py", "hive_cluster.py",
+                 "conflict.py", "dispatch_prompt.py"):
+        src = here / name
+        dst = d / name
+        if src.exists() and not dst.exists():
+            shutil.copy2(src, dst)
+            if name.endswith(".py"):
+                os.chmod(dst, 0o755)
     readme = d / "README.md"
     if not readme.exists():
         readme.write_text(
@@ -3716,9 +3896,52 @@ def cmd_claim(args) -> None:
 
 
 def cmd_work(args) -> None:
+    # worker 是那台机器上的常驻执行者；顺手把本机集群带起来，其他机器才能
+    # 实时看到这台机器的进度/租约（集群是可选件，起不来不影响 worker）。
+    cluster_ensure(args.dir)
     w = Worker(args.dir, args.agent, keep_worktree=args.keep, hive_state=args.state_dir,
                max_concurrency=args.max_concurrency)
     w.loop(once=args.once, interval=args.interval)
+
+
+def cmd_ports(args) -> int:
+    """显示/体检 hive 的端口规划（默认值只在 hive_ports.py 定义一次）。"""
+    try:
+        import hive_ports
+    except ImportError as exc:
+        raise HiveError(
+            "找不到 hive_ports.py；它是端口默认值的唯一来源，"
+            "请确认它和 hive.py 在同一目录") from exc
+    plan = hive_ports.port_plan()
+    if getattr(args, "json", False):
+        payload = {"plan": plan, "external": hive_ports.external_ports()}
+        if getattr(args, "check", False):
+            payload["check"] = hive_ports.check_ports(
+                getattr(args, "host", None) or "127.0.0.1")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    print(hive_ports.format_plan(plan))
+    if getattr(args, "check", False):
+        print("\n本地占用检查：")
+        for row in hive_ports.check_ports(getattr(args, "host", None) or "127.0.0.1"):
+            tag = "空闲" if row["free"] else "被占用"
+            print(f"  {row['key']:<11} {row['port']:<6} {row['protocol']:<4} {tag}"
+                  + (f"（{row['error']}）" if row["error"] else ""))
+    return 0
+
+
+def cmd_cluster(args) -> int:
+    """常驻集群入口：实现在 hive_cluster.py，缺模块时给出可操作的错误。"""
+    try:
+        import hive_cluster
+    except ImportError as exc:
+        raise HiveError(
+            "找不到 hive_cluster.py；集群是随仓库走的可选件，"
+            "请确认它和 hive.py 在同一目录（或重新 clone 工具仓）") from exc
+    try:
+        return hive_cluster.run_cli(args)
+    except hive_cluster.ClusterError as exc:
+        raise HiveError(str(exc)) from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -3737,8 +3960,8 @@ def cmd_work(args) -> None:
 # 想调探测频率（秒）：HIVE_DASH_AUTOSTART_TTL（默认 300，避免反复 spawn）
 # 想换端口：HIVE_DASHBOARD_PORT（默认 8787，与 scripts/ 各脚本、serve.py 同一来源）
 # --------------------------------------------------------------------------- #
-DASH_DEFAULT_PORT = 8787
-DASH_AUTOSTART_SKIP = {"dash", "dashboard", "init"}
+DASH_DEFAULT_PORT = _PORT_DASHBOARD
+DASH_AUTOSTART_SKIP = {"dash", "dashboard", "init", "cluster", "ports"}
 
 
 def dashboard_port() -> int:
@@ -4082,6 +4305,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--wait", type=float, default=5.0, help="ensure 时最多等多久就绪（秒）")
     s.set_defaults(func=cmd_dash)
 
+    s = sub.add_parser("ports", help="端口规划：查看默认/当前生效端口并可选体检占用")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--check", action="store_true", help="尝试绑定本机端口，检查占用")
+    s.add_argument("--host", default="127.0.0.1", help="体检绑定地址（默认 127.0.0.1）")
+    s.set_defaults(func=cmd_ports)
+
     s = sub.add_parser("retry", help="重试任务（清掉结果与租约）")
     s.add_argument("task")
     s.add_argument("--agent")
@@ -4171,6 +4400,34 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["worker", "controller"],
                    help="worker=只能操作自己的卡；controller=总控，会改动 main")
     s.set_defaults(func=cmd_mcp)
+
+    s = sub.add_parser(
+        "cluster",
+        help="常驻集群：自动发现/注册/主节点选举（类 OSPF；git 仍是唯一真相）")
+    s.add_argument("action", nargs="?", default="status",
+                   choices=["serve", "start", "stop", "restart", "ensure",
+                            "status", "peers", "events", "join", "leave",
+                            "discover", "watch"])
+    s.add_argument("seed_url", nargs="?", help="join 的目标（HOST:PORT 或 URL）")
+    s.add_argument("--port", type=int, default=None, help="HTTP 端口（默认 8788）")
+    s.add_argument("--host", default=None, help="HTTP 绑定地址（默认 0.0.0.0）")
+    s.add_argument("--advertise", default=None,
+                   help="对外公布地址（默认自动猜局域网 IP）")
+    s.add_argument("--name", default=None, help="节点名（默认 hostname）")
+    s.add_argument("--seed", action="append", default=None,
+                   help="静态种子节点，可重复；HOST:PORT 或 URL")
+    s.add_argument("--discovery-port", type=int, default=None,
+                   help=f"UDP 发现端口（默认 {CLUSTER_DISCOVERY_DEFAULT_PORT}）")
+    s.add_argument("--no-discover", action="store_true", help="关闭 UDP 广播发现")
+    s.add_argument("--state-dir", default=None,
+                   help="集群状态目录（默认 ~/.hive/cluster 或 $HIVE_CLUSTER_STATE）")
+    s.add_argument("--token", default=None,
+                   help="共享 token（也可用 $HIVE_CLUSTER_TOKEN；跨机建议必配）")
+    s.add_argument("--lease-grace", type=float, default=None,
+                   help="新主上任后租约恢复宽限秒数（默认 120）")
+    s.add_argument("--since", type=int, default=0, help="events/watch 的起始序号")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_cluster)
 
     s = sub.add_parser("work", help="worker 主循环")
     s.add_argument("--agent", required=True)

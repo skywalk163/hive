@@ -58,9 +58,12 @@ NODE_PATH=./node_modules node dev/ui-test.js
 
 ```sh
 cd ~/dswork/hive
-PORT=8789 INTERVAL=5 ./scripts/serve-dashboard.sh
-curl -s http://127.0.0.1:8789/api/status | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))'
+PORT=8799 INTERVAL=5 ./scripts/serve-dashboard.sh
+curl -s http://127.0.0.1:8799/api/status | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))'
 ```
+
+> 历史备注：这份验证记录最初用的是 8789。现在 8789 已划给集群 UDP 发现，
+> 看板冒烟统一改到 8799，避免 TCP/UDP 混用造成误解。
 
 实测返回 T-0001（真实冒烟任务，`state=done` / `result_status=done`），
 `dashboard/status.json` 由脚本每 5 秒重新生成；停掉脚本后状态文件保留。

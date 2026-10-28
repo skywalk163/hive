@@ -1,0 +1,34 @@
+{
+  "task": "T-0187",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0187",
+  "base": "main",
+  "head": "f6bd775a18e9fe7d1d804e4ad58f8e307cf2d690",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-28T18:57:39+08:00",
+  "finished_at": "2026-10-28T18:57:39+08:00",
+  "duration_s": 0.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_dispatch_script_static.py",
+      "code": 0,
+      "tail": [
+        ".................                                                        [100%]",
+        "17 passed in 0.17s"
+      ]
+    }
+  ],
+  "summary": "# T-0187 交付摘要：Windows GUI 自动派发脚本\n\n## 结论\n\n四件交付物按卡面落齐，静态测试 17 用例全绿，dry-run 在本机用真窗口跑通；\n`prompt` 契约未满足的场景（T-0188 仍是 ready）按要求实测过一次并贴了报错。\n\n| 文件 | 说明 |\n|---|---|\n| `windows/dispatch-agent.ps1` | 派发主逻辑：校验 → 选窗口 → 取正文 → dry-run / 激活+复核 → 粘贴+回车 → 记账 |\n| `windows/dispatch-agent.ahk` | 只有 `^!d` 快捷键 + TrayTip，逻辑全在 ps1 |\n| `windows/dispatch-agents.sample.json` | 占位符示例配置（窗口标题留 `<...>`，不进真配置） |\n| `tests/test_dispatch_script_static.py` | 17 个静态断言，纯读文件，Windows/FreeBSD 都能跑 |\n\n```\n$ python -m pytest -q tests/test_dispatch_script_static.py\n.................                                                        [100%]\n17 passed in 0.18s\n```\n\n## 1. dry-run 端到端（真窗口，未加 -Apply）\n\n`prompt` 子命令还没合入（T-0188 仍 ready），所以正文由一份**临时 stub** 提供：\nstub 只替换「CLI 接线」这一层，payload 用真仓的 `dispatch_prompt.py` 渲染真卡\n`tasks/T-0184.md`。stub 放在 `C:\\Users\\skywalk\\.hive\\t0187-demo\\hive-stub\\`，不进仓。\n\n配置表（`C:\\Users\\skywalk\\.hive\\t0187-demo\\dispatch-agents.json`，不进仓）：\n\n```json\n{\n  \"codearts\": {\"window_title\": \"CodeArts\", \"hive_agent\": \"codearts-win\"},\n  \"workbuddy\": {\"window_title\": \"WorkBuddy AI\", \"hive_agent\": \"workbuddyai-win\"}\n}\n```\n\n```\n> powershell -ExecutionPolicy Bypass -File .\\windows\\dispatch-agent.ps1 -Task T-0184 -Config <cfg> -HiveDir <stub>\nexit=0\n[hive-dispatch] 取派发正文：T-0184 -> codearts-win\n[dry-run] 任务：T-0184\n[dry-run] 目标 agent：codearts（hive_agent=codearts-win）\n[dry-run] 目标窗口标题片段：CodeArts\n[dry-run] 已匹配窗口：PID 14764 / CodeArts / CodeArts\n[dry-run] 正文前 5 行（共 10 行）：\n  1| 请领取任务 T-0184。\n  2| 任务摘要：派发流水线｜dispatch_prompt 模块：从任务卡渲染标准化派发指令。现在的派发是人肉搬运：看板看卡 → 记在脑子里 → 切到 agent APP → 手打 prompt 让 agent 领任务。手打有三类稳定损耗：任务号抄错、契约漏讲、工具名说错。\n  3| 执行契约：\n  4| - 允许修改路径：dispatch_prompt.py、tests/test_dispatch_prompt.py\n  5| - 预期输出：python -m pytest -q tests/test_dispatch_prompt.py\n[dry-run] 将要执行的记账命令：C:\\Python314\\python.exe <stub>\\hive.py --dir <stub> dispatch-mark T-0184 --agent codearts-win\n[dry-run] 未加 -Apply，不发送任何按键。\n```\n\n省略 `-Agent` 时按配置顺序自动挑中 `codearts`（第一个窗口已打开的），输出同上。\n\n## 2. `prompt` 契约未满足的场景（实测，卡面要求）\n\n指向真 hive 仓（`hive.py` 里还没有 `prompt` 子命令）：\n\n```\n> powershell -ExecutionPolicy Bypass -File .\\windows\\dispatch-agent.ps1 -Task T-0184 -Config <cfg>\nexit=2\n[hive-dispatch] 取派发正文：T-0184 -> codearts-win\n[hive-dispatch] 中止：hive prompt 失败（退出码 2）—— CLI 契约未满足。\n[hive-dispatch] 命令：C:\\Python314\\python.exe ...\\T-0187\\hive.py --dir ...\\T-0187 prompt T-0184 --agent codearts-win --format json\n[hive-dispatch] stderr：\nusage: hive [-h] [--dir DIR] [-V]\n            {init,agent,draft,task,take,submit,dispatch,doctor,digest,stats,assign,close,reopen,land,audit,block,unblock,status,dash,dashboard,retry,unassign,requeue,result,gc,watchdog,orchestrate,llm,prune,claim,mcp,work} ...\nhive: error: argument cmd: invalid choice: 'prompt' (choose from 'init', 'agent', ...)\n[hive-dispatch] 这条子命令由 T-0188 接线；未合入前派发流水线只能停在 dry-run。\n```\n\n即：**契约不满足时脚本显式报错并退 2，不会静默粘一段空指令**。\n\n## 3. 其余路径实测\n\n| 场景 | 结果 |\n|---|---|\n| `-Agent nope`（不在配置里） | exit 1，报「配置表里没有 agent「nope」；现有：codearts, workbuddy」 |\n| `-Task T-18`（形态不对） | exit 1，报「任务号形态不对：T-18（应形如 T-0187）」 |\n| `-Apply` 但窗口没开 | exit 3，**在发任何按键之前**中止 |\n| `-Apply`（探针：删掉 SendKeys/Set-Clipboard 的副本） | 激活 CodeArts → 前台复核通过（`已激活窗口：CodeArts`）→ 记账失败时 exit 4 并打印「派发已发生，但 dispatch-mark 失败……请人工补」 |\n\n第 4 行是唯一碰真窗口的验证：因为删掉了 `SendKeys`/`Set-Clipboard`，**没有向任何窗口写入任何字符**，\n只验证了 `Add-Type` 内联 C# 编译、`SetForegroundWindow`、`GetForegroundWindow` 标题复核与退出码 4 的告警链路。\n真发按键（粘贴 + 回车）**未在真机上执行过** —— 会在真 agent 窗口里留下一段指令，不属于本次该做的事。\n\n## 4. 静态测试有牙（反向验证）\n\n逐个注入缺陷，确认对应断言翻红，再还原：\n\n| 注入 | 结果 |\n|---|---|\n| `[switch]$Apply` 改成 `= $true` | `test_apply_is_a_switch_without_default` 红 |\n| 把一处 `SendKeys` 挪到 `if ($Apply)` 块外 | `test_key_sends_are_inside_apply_branch[SendKeys]` 红 |\n| 实现区写死 `\"trae-win\"` | `test_no_agent_name_literal_in_implementation` 红 |\n| 还原 | 17 passed |\n\n第 2 条不是「文件里出现过 `if ($Apply)`」，而是从守卫处做**花括号配对**，断言块内出现次数 == 全文出现次数。\n\n## 5. 与卡面的偏差（都有实测依据）\n\n1. **`$Config` / `$HiveDir` 的默认值从 `param` 块挪到脚本正文。**\n   卡面给的写法 `[string]$HiveDir = (Resolve-Path \"$PSScriptRoot\\..\").Path` 在 5.1 下**是坏的**：\n   带 `[Parameter(...)]` 的 param 块会在 `$PSScriptRoot` 赋值之前求值默认值，实测脚本去 `C:\\` 找 `hive.py`。\n   最小复现：同款 param 块（含 `[Parameter(Mandatory=$true)]`）→ `HiveDir=[C:\\]`；去掉 `[Parameter]` 就正常。\n   现在 param 里留空、正文里用 `$PSScriptRoot` 计算，行为与卡面一致（默认 `<脚本目录>\\dispatch-agents.json` 与上一级目录）。\n2. **ps1 / ahk 必须带 UTF-8 BOM。** 无 BOM 时 PowerShell 5.1 按 ANSI(cp936) 解码，\n   UTF-8 的中文字节会破坏字符串终止 —— 实测脚本**连解析都过不去**（`表达式或语句中包含意外的标记 }`、\n   `字符串缺少终止符: \"@`）。`.sample.json` 相反，必须无 BOM（`json.loads` 见 U+FEFF 直接炸）。\n   已写成两条断言（`test_scripts_are_utf8_with_bom` / `test_sample_json_is_utf8_without_bom`）。\n3. **解释器用环境变量 `HIVE_PYTHON` 覆盖**（默认 PATH 上的 `python`）。卡面参数表没这一项，\n   但本机 `python` 会落到没有 pytest 的托管解释器，留个出口比改参数表干净。\n4. **`ProcessStartInfo.EnvironmentVariables` 不用了**：本机实测取到 null（`无法对 Null 数组进行索引`），\n   改成进程级 `$env:PYTHONIOENCODING` / `$env:PYTHONUTF8`，子进程自然继承。\n\n## 6. 没验证到的 / 遗留\n\n- **AHK 脚本没在真机跑过**：本机没装 AutoHotkey（`C:\\Program Files\\AutoHotkey` 不存在），\n  只有静态断言（v2 声明、调 ps1、带 `-Apply`、有 TrayTip、不含任何逻辑重复）。\n- **真发按键未执行**（见 §3 末）。\n- **`windows/README.md` 第 6 行的「所有脚本都是 ASCII」已过时**：本卡要求中文 UTF-8 输出，\n  与那句冲突。README 不在本卡 paths 内，未改；建议后续小卡订正为「ps1/ahk 为带 BOM 的 UTF-8」。\n- 卡面契约里的 `dispatch-mark` 目前也不存在，脚本按契约调用、失败时 exit 4 并告警（已在 §3 验证）。\n\n## 7. 环境\n\nWindows 10 19045 / Windows PowerShell 5.1.19041 / Python 3.14（`C:\\Python314`）/ pytest 9.1.1；\n测试用 `--basetemp=.hive/pt -p no:cacheprovider` 避开 AppData\\Temp 的沙箱守卫。\n\n## 8. 过程记录（踩到的坑，供后续卡参考）\n\n- 第一次 submit 的 verify 红在 `No module named pytest`：本机 `python` 落到托管 3.13。\n  跑 submit 需要 `PATH` 前置 `C:\\Users\\skywalk\\.hive\\py3shim`（里面的 `python.bat` 转 `C:\\Python314\\python.exe`），\n  否则 verify 必假红。**注意 bash 里前置该目录对 `python` 无效**（bash 不认 `.bat`），\n  要用 `cmd /c \"set PATH=...;%PATH% && python hive.py ... submit ...\"`。\n- 那次失败的 submit 顺带把 worktree 清掉了（失败也会回收），但 `task/T-0187` 分支已推到 origin\n  （`f6bd775`）。恢复方式：`git worktree add <wt> task/T-0187`，文件与 BOM 都还在，\n  重建后复跑 17 passed 才继续 submit。",
+  "error": "",
+  "declared_paths": [
+    "windows/dispatch-agent.ps1",
+    "windows/dispatch-agent.ahk",
+    "windows/dispatch-agents.sample.json",
+    "tests/test_dispatch_script_static.py"
+  ],
+  "changed_files": [],
+  "out_of_paths": []
+}

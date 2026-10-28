@@ -56,12 +56,19 @@ ssh -L 8787:127.0.0.1:8787 skywalk@192.168.0.88
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--status` | `sample-status.json` | `hive status --json` 导出的状态文件路径 |
-| `--port` | `8787` | 监听端口 |
+| `--port` | `8787` | 监听端口（唯一来源 `hive_ports.py`） |
 | `--host` | `127.0.0.1` | 监听地址 |
+
+> 端口不要记散：看板 **8787**、集群 HTTP **8788**、发现 UDP **8789**、冒烟 **8799**。
+> 完整分配与防火墙见 [`docs/端口与服务规划.md`](../docs/端口与服务规划.md)；
+> 现场用 `python3 hive.py ports --check` 体检。
 
 ## 怎么接真实数据
 
-看板只读一个接口：同源的 `GET /api/status`，期望返回任务对象数组（字段见下）。
+看板只读任务接口：同源的 `GET /api/status`，期望返回任务对象数组（字段见下）。
+另有 `GET /api/cluster`：本机常驻集群的只读视图（`running/leader/term/nodes`），
+以及 `/api/status` 里把集群实时进度合并到任务行（`push_source=cluster`）。
+集群 HTTP 默认 `8788`，与看板的 `8787` 分开；发现端口是 UDP `8789`。
 服务器**每次请求都重新读盘**，并在响应上带 `Cache-Control: no-store`，所以只要让
 `--status` 指向的文件保持最新即可，不需要重启服务。
 
@@ -113,6 +120,8 @@ stale === true  ||  ( lease_until 已过  &&  result_status 为空 )
 
 - 顶栏：每列数量统计、最后更新时间、仓库筛选、owner 筛选、文本搜索（id / 标题 / 摘要）、
   自动刷新开关（默认开，15 秒）、深浅色切换（跟随系统，选择记 `localStorage`）。
+  还有集群徽标（每 5 秒读 `/api/cluster`）：显示主节点 / term / 在线节点数；未启动时显示
+  「集群：未启动」。
 - 详情抽屉：点卡片从右侧滑出，展示完整 `result_summary`（保留换行）、每条 verify 的
   命令 + 退出码 + 末尾输出、`head`、耗时、`claimed_at`、`lease_until`、`depends_on`；
   按 `Esc` 或点遮罩关闭。

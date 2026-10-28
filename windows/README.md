@@ -3,7 +3,10 @@
 这台 Windows 的定位是 **best-effort 验收机**：能访问 Gitea 就拉任务、跑 `verify`、写结果；
 它经常死机，所以不放在关键路径上，租约短、任务小、死了靠 `gc/retry` 回收。
 
-> 所有脚本都是 ASCII，兼容 Windows PowerShell 5.1；路径里的中文不会影响执行。
+> `bootstrap.ps1` / `run-worker.ps1` 是 ASCII，兼容 Windows PowerShell 5.1；路径里的中文不会影响执行。
+> `dispatch-agent.ps1` / `dispatch-agent.ahk`（T-0187）例外：它们是**带 UTF-8 BOM 的中文脚本** ——
+> 5.1 对无 BOM 的 .ps1 按 ANSI(cp936) 解码，会破坏中文字符串终止、脚本连解析都过不去；
+> 改这两个文件时**务必保留 BOM**（`.sample.json` 相反，不能带 BOM，否则 `json.loads` 会炸）。
 
 ## 照做清单（Checklist）
 

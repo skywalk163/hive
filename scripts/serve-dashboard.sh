@@ -3,7 +3,7 @@
 # 前台运行 dashboard/serve.py。刷新失败时保留上一份状态，不覆盖。
 #
 #   ./scripts/serve-dashboard.sh            # 默认 127.0.0.1:8787，20 秒刷新
-#   PORT=8790 INTERVAL=10 ./scripts/serve-dashboard.sh
+#   PORT=8799 INTERVAL=10 ./scripts/serve-dashboard.sh   # 8799 是测试/冒烟端口
 #   HIVE_DIR=/path/to/hive PORT=8787 ./scripts/serve-dashboard.sh
 set -u
 
@@ -13,8 +13,8 @@ HIVE="${HIVE_DIR:-$DIR}"
 # 不关掉的话，看板刷新自己会再拉起一个看板（端口打架、进程越滚越多）。
 export HIVE_DASH_AUTOSTART=0
 # 端口来源只有一个：PORT（服务脚本会传下来），其次 HIVE_DASHBOARD_PORT，最后 8787。
-# 8787 同时也是 serve.py --port 与 hive.py DASH_DEFAULT_PORT 的默认值 —— 三处必须一致，
-# 否则会出现「手动跑 8787、服务起 8791」这种看起来像"端口被人改了"的错觉。
+# 默认值与 serve.py / hive.py 一样来自 hive_ports.py；完整规划见
+# docs/端口与服务规划.md。不要在这里写第二套默认值。
 PORT="${PORT:-${HIVE_DASHBOARD_PORT:-8787}}"
 INTERVAL="${INTERVAL:-20}"
 DASH="$DIR/dashboard"

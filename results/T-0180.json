@@ -1,0 +1,41 @@
+{
+  "task": "T-0180",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0180",
+  "base": "main",
+  "head": "23f7cfafa1cee4a593649c1782cfb5662a9de6ac",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-28T19:40:04+08:00",
+  "finished_at": "2026-10-28T20:37:33+08:00",
+  "duration_s": 3449.7,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0180_工作目录集中化.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".....                                                                    [100%]",
+        "5 passed in 20.48s"
+      ]
+    }
+  ],
+  "summary": "# T-0180 交付摘要：工作目录集中化（cwd 收拢为会话状态 + originCwd 派生 + 运行时断言）\n\n## 结论\n\ncwd 从「三套并行、互不引用」收成一条链：**会话携带 → 唯一入口解析 → 取根目录按优先级取根**。\n四条判据（含两条反证）全绿，全量回归见 §5。\n\n| 文件 | 变化 |\n|---|---|\n| `src/工作目录.light` | **新增** 71 行：`解析工作目录` / `断言可用` / `派生子目录` 三个纯函数 |\n| `src/会话.light` | `构造` 增加可选 `来源目录`；头信息写 `工作目录` + `来源目录`；新增 `取工作目录` / `取来源目录`（读取回退）；`新建会话` 透传 |\n| `src/工具_路径安全.light` | `取根目录(会话cwd = 空)`：`HARNESS_ROOT` 强制覆盖 > 会话 cwd > `当前目录()` |\n| `src/cli外壳.light` | `无头运行` / `运行对话循环` 不再自算 `当前目录()` |\n| `src/web服务器.light` | `取会话` 同上 |\n| `src/mcp接线.light` | MCP 相对指令按统一解析出的工作目录解析 |\n| `src/总入口.light` | 主流程 cwd + `dump-config` 的「命令根」行（并标出来源） |\n| `tests/test_T0180_工作目录集中化.py` | **新增** 5 条用例（卡面 4 条 + 1 条 `HARNESS_ROOT` 红线守卫） |\n\n`git diff --stat`：6 个改动文件（4 个调用点 + 会话 + 路径安全）+ 2 个新增，64 insertions / 17 deletions。\n调用点正好 4 个文件，未越界（`会话查询`/`会话格式`/`持久化`/`子智能体` 都没动）。\n\n## 1. 设计要点\n\n- **唯一入口**：`解析工作目录(候选, 兜底)` 是 cwd 唯一的解析处（候选空/相对 → 按兜底；绝对 → 规范化）。\n  四个调用点统一走它，候选是 `HARNESS_CWD`（新增，headless 可指定根），兜底是 `当前目录()`。\n- **根的优先级**（`取根目录`）：`HARNESS_ROOT` 强制覆盖（红线：保留 CLI 共用一根的用法）> 会话 cwd > `当前目录()`。\n  零参调用（`工具_bash` / 读 / 写 / 搜索 / `真实文件系统提供者` 共 18 处）行为一字未变。\n- **会话可读**：`取工作目录()` / `取来源目录()` 从 `头信息` 读，读不到时回退（旧记录 → 来源 = 工作目录），\n  不做旧数据迁移（红线 3）。\n- **派生分离**：`派生子目录(父, 子)` 返回 `{cwd, originCwd}`，子候选为空时两者回退相等。\n- **路径安全规则本体一字未改**（红线 1）：`..` 拒绝、前缀判定、软链归一化仍在 `解析安全路径` 里，\n  本次只改「根从哪里来」。\n\n## 2. 四条判据（逐条贴结果）\n\n```\n$ python -m pytest -q tests/test_T0180_工作目录集中化.py\n.....                                                                    [100%]\n5 passed in 12.60s\n```\n\n| # | 用例 | 判据 | 结果 |\n|---|---|---|---|\n| 1 | `test_会话根优先于全局根_越界必须拒绝`（**反证**） | 会话 cwd = `a`，`../b/x.txt` 落在全局根（= 当前目录 = 父目录）内 → 必须拒绝；同时会话根内文件必须放行 | PASS |\n| 2 | `test_同进程双会话各用各的根`（**反证**） | 同进程 A(cwd=a)/B(cwd=b) 各读自己成功；A 读 B 必须拒绝 | PASS |\n| 3 | `test_派生子目录_cwd_与_originCwd_分离` | `cwd`/`originCwd` 值正确；空子候选回退相等 | PASS |\n| 4 | `test_断言可用_目录被删后返回假且给理由` | 建目录 → ok 真；删目录 → ok 假 + 非空理由；rc==0（不抛裸异常） | PASS |\n| 5 | `test_HARNESS_ROOT_仍是强制覆盖` | 设了 HARNESS_ROOT 时，零参与带会话 cwd 两种调用都以它为准（红线 2） | PASS |\n\n## 3. 反证用例有牙（A/B 实证）\n\n「反证」不能只写在注释里，做了两次注入：\n\n| 注入 | 结果 |\n|---|---|\n| A：`取根目录` 完全退回旧实现（无参数） | **3 红**：用例 1、2、5（旧签名直接 TypeError） |\n| B：签名收 `会话cwd` 但忽略它（最像假绿的假实现） | **2 红**：正好用例 1、2；用例 5 仍绿（HARNESS_ROOT 本就覆盖） |\n| 还原 | 5 passed |\n\nB 是关键：它证明用例 1/2 抓的是「会话根没生效」，而不是「函数签名不对」这种浅层差异。\n\n## 4. 与卡面的偏差（逐条说明）\n\n1. **卡面用例 1 的措辞与目标 3 冲突**：目标 3 说 `HARNESS_ROOT` 是**强制覆盖、优先级最高**，\n   用例 1 又说「越出会话根、但在全局 HARNESS_ROOT 之内 → 必须拒绝」。二者不可同时成立。\n   处理：以目标 3 为准，用例 1 的「全局根」落在 `当前目录()` 兜底这一级（不设 HARNESS_ROOT），\n   判据照样有牙（旧实现会放行）；`HARNESS_ROOT` 的强制覆盖另立用例 5，不留空档。\n2. **新增 `HARNESS_CWD`**：`解析工作目录` 需要一个「候选」才有意义（否则候选恒为空，等于没接线）。\n   卡面没点名这个变量，取值口径与既有 `HARNESS_*` 一致；`dump-config` 会标出「来源: 环境变量 HARNESS_CWD」。\n3. **`会话.构造` 的默认参数**：卡面写「旧调用点（只传一个参数）自动回退」，实际旧调用点是 2 个参数\n   （`新建会话(标识, 工作目录)`）。按「新参数放末尾 + 默认空」实现，旧调用点零改动。\n4. **持久化不落 `originCwd`**（已知限制）：`会话格式.编码V0头` 只白名单写 `cwd`/`parentSession` 等字段，\n   `来源目录` 写盘时被丢弃、读回后回退为 `工作目录`。`会话格式.light` 不在本卡 paths，未改。\n   顶层会话（来源 = 工作目录）不受影响；只有「子代理切了 worktree 再跨进程恢复」会丢来源，建议后续卡补。\n\n## 5. 全量回归\n\n```\n$ LIGHTPLUGIN=<lightplugin 仓根> python -m pytest -q tests/\n1 failed, 2114 passed, 19 skipped, 2 warnings in 1926.07s (0:32:06)\n```\n\n唯一失败：`tests/test_回归.py::test_example_exit_code[test_agentE5钩子.light]`\n\n**与本卡无关（已 A/B 实证）**：在 `HEAD`（未含本卡改动的基线，`be7da46`）上单独复跑同一用例，\n失败文本逐字相同 ——\n\n```\n通过: 注册默认钩子错误: 属性错误\n 类 聊天v1 缺少方法/属性 调用（test_agentE5钩子:59）\n （Python 原始错误：'聊天v1' object has no attribute '调用'）\n```\n\n即基线树同样 `rc=1`，属**既有红**（且不在 `flaky_registry.txt` / `ci_environment_reds.txt` 台账里）。\n本卡改动未新增任何失败（改动前 1 红，改动后 1 红，同一个用例、同一段错误）。\n\n> 附带发现：这条既有红没进任何台账，意味着 lightharness 的 `tests/` 门禁在当前基线上本来就是红的，\n> 谁跑都会红。建议单独开卡定性（`聊天v1` 是 example 内的桩类，缺 `调用` 方法 —— 疑似某次 land 把\n> 桩类改坏或漏改），别让它长期以「反正是红的」状态留在门禁里。\n\n## 6. 环境\n\nWindows 10 / Windows PowerShell 5.1 / Python 3.14（`C:\\Python314`）/ pytest + xdist（`addopts = --timeout=60 -n 4`）。\n全量跑必须 `LIGHTPLUGIN=<lightplugin 仓根>`，否则 `从 生产挂载 导入` 整轮假红（本次已设）。",
+  "error": "",
+  "declared_paths": [
+    "src/工作目录.light",
+    "src/会话.light",
+    "src/工具_路径安全.light",
+    "src/cli外壳.light",
+    "src/web服务器.light",
+    "src/mcp接线.light",
+    "src/总入口.light",
+    "tests/test_T0180_工作目录集中化.py"
+  ],
+  "changed_files": [],
+  "out_of_paths": []
+}

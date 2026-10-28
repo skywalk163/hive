@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.10.1 — 2026-10-28
+
+### Added
+
+- **端口规划单一来源 `hive_ports.py`**：看板 8787 TCP、集群 HTTP 8788 TCP、集群发现
+  8789 UDP、测试/冒烟 8799 TCP、8790–8798 预留；`hive.py` / `hive_cluster.py` /
+  `dashboard/serve.py` 的默认值全部改为从这里读取，杜绝「手动 8787、服务 8791」和
+  「8789 被看板/集群混用」这类错位。
+- **`hive ports [--check] [--json]`**：打印默认值/当前环境变量生效值/外部依赖端口，
+  `--check` 尝试绑定本机端口标出占用；`hive ports` 不触发看板自启。
+- **`docs/端口与服务规划.md`**：完整分配表、防火墙矩阵、多实例改端口步骤、冲突排查、
+  外部依赖（Gitea 3000 / DSH 3080 / LightMem 18443/18444）与历史 8791 备注。
+
+### Changed
+
+- **集群文档明确「建议每台都跑，但不是必须」**：不跑仍可纯 git 工作；分布式消除单点，
+  但不宣称物理意义上的「永不宕机」（全节点断电/全网断开仍会降级）。
+- `README` / `操作手册`（新增 §12 常驻集群与端口 + FAQ Q5）/ `架构与排障全景` /
+  `dashboard/README` / `dashboard/VERIFICATION`（历史 8789 改 8799 并注明）/
+  `scripts/serve-dashboard.sh` / `scripts/dashboard-service.sh` 的端口与集群说明同步更新。
+- `init` 一并复制 `hive_ports.py`；`check.sh` 编译新增模块；新增 `tests/test_ports.py`
+  9 个用例（唯一来源、预留段、环境变量、CLI、init 拷贝）。
+
+## 0.10.0 — 2026-10-28
+
+### Added
+
+- **常驻分布式集群 `hive cluster`（hive_cluster.py）**：每台机器一个 `hive cluster serve`，
+  局域网 UDP 广播自动发现 + 静态 seed 兜底；新节点向主节点注册，节点间心跳/状态/事件
+  互通。主节点停止或崩溃后自动重选，跟随者在 1~8 秒内接管，并通过 `leader_elected`
+  事件通知其他程序。
+- **任期（term）fencing token + 化身号（incarnation）**：每次选举 term+1，旧 term 写入
+  被 409 拒绝；节点重启 incarnation 严格递增，低化身号记录不覆盖新记录，避免僵尸主节点
+  和「死亡传闻」复活。
+- **持久化建议性租约 + 恢复宽限期**：`claims/` 仍是唯一真相；集群额外持久化
+  lease（agent / lease_until / term / gen），新主上任给在飞租约默认 120s 宽限，
+  避免「刚换主就重派」。
+- **实时进度通道**：`Worker.claim/_refresh_lease` 向本机集群发租约，`push_status`
+  先试 `HIVE_PUSH_URL` 再退到 `/api/cluster/push`；看板 `/api/status` 合并集群进度
+  （`push_source=cluster`），并新增 `/api/cluster` 与顶部集群徽标（主节点 / term / 在线数）。
+- **集群 CLI**：`serve / start / stop / restart / ensure / status / peers / events /
+  join / leave / discover / watch`；`hive work` / `hive orchestrate` 启动时自动
+  `cluster ensure`（`HIVE_CLUSTER_AUTOSTART=0` 关闭）。
+- **长轮询 `/api/cluster/wait`** 与事件列表 `/api/cluster/events`，供脚本/看板做秒级通知。
+- 文档 [docs/集群服务.md](docs/集群服务.md)：拓扑、发现/注册、选主、任期/化身号/宽限、
+  API、与 RIP/OSPF 的对照、排障与环境变量。
+
+### Changed
+
+- 版本号 0.9.17 → 0.10.0。
+- `init` 仍然只保证 `hive.py`；集群是可选件，缺 `hive_cluster.py` 时 `hive cluster`
+  给出明确提示，其余命令不受影响。
+
+### Safety
+
+- 集群**不替代** git：claim 原子性、result 审计、land 合流全部不动；集群不可用时
+  worker/dispatch/land 回退到原来的纯 git 路径。
+- 跨机建议配置 `HIVE_CLUSTER_TOKEN`；不配置时仅适合可信局域网。HTTP 明文，跨公网
+  请套 TLS 反向代理。
+- 多数门槛按「当前可见活节点」计算（可用性优先）：2 节点主节点退出后剩余节点可接管；
+  网络分区可能出现短暂双主，恢复后由 term 收敛。需要严格 CP 请用 3 节点。
+
 ## 0.9.17 — 2026-10-28
 
 ### Changed

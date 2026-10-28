@@ -120,6 +120,7 @@
     lastUpdated: null,
     source: '/api/status',
     snapshotAt: null,   // 快照生成时刻（毫秒），来自 X-Snapshot-Mtime；null = 服务端没给
+    cluster: null,      // /api/cluster 的集群视图（leader/term/在线节点）
     inflight: false
   };
 
@@ -253,6 +254,7 @@
     el.stats = document.getElementById('stats');
     el.meta = document.getElementById('meta');
     el.source = document.getElementById('source');
+    el.cluster = document.getElementById('cluster');
     el.banner = document.getElementById('banner');
     el.panel = document.getElementById('state-panel');
     el.columns = document.getElementById('columns');
@@ -727,6 +729,44 @@
     state.source = source;
     state.loading = false;
     render();
+  }
+
+  // ---------- 常驻集群状态（5s 一次，与任务快照解耦） ----------
+  var CLUSTER_MS = 5000;
+
+  function renderCluster(data) {
+    if (!el.cluster) return;
+    var running = !!(data && data.running);
+    var snap = (data && data.state) || {};
+    var leader = snap.leader || {};
+    if (!running) {
+      el.cluster.textContent = '集群：未启动';
+      el.cluster.className = 'cluster off';
+      el.cluster.title = '本机没有运行 hive cluster serve；用 hive cluster start 接入集群';
+      return;
+    }
+    var term = snap.term || 0;
+    var alive = snap.alive || 0;
+    var known = snap.known || 0;
+    var who = leader.name || '无主';
+    var self = snap.self || {};
+    var txt = '集群：' + who + ' · term ' + term + ' · ' + alive + '/' + known;
+    if (snap.role === 'leader' || (self.id && leader.id === self.id)) {
+      txt = '集群：本机主节点 · term ' + term + ' · ' + alive + '/' + known;
+    }
+    el.cluster.textContent = txt;
+    el.cluster.className = 'cluster ' + (leader.id ? 'ok' : 'warn');
+    el.cluster.title = (leader.url ? ('主节点 ' + leader.name + ' ' + leader.url) : '当前没有主节点') +
+      '；节点 ' + alive + '/' + known + ' 在线；数据源 /api/cluster';
+  }
+
+  function loadCluster() {
+    try {
+      fetch('/api/cluster', { cache: 'no-store', headers: { Accept: 'application/json' } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) { state.cluster = d; renderCluster(d); })
+        .catch(function () { renderCluster(null); });
+    } catch (e) { /* 集群是可选件，失败静默 */ }
   }
 
   function loadStatus() {
@@ -1549,6 +1589,8 @@
 
     loadStatus();
     loadCI();
+    loadCluster();
+    setInterval(loadCluster, CLUSTER_MS);
     loadServerConfig();        // 拉取服务端共享默认与系统只读信息
   }
 

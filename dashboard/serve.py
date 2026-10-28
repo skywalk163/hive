@@ -24,6 +24,20 @@ from urllib.parse import urlparse
 BASE_DIR = Path(__file__).resolve().parent
 HIVE_ROOT = BASE_DIR.parent  # dashboard 的上一级就是 hive 仓库根
 
+# 端口默认值的唯一来源（与 hive.py / hive_cluster.py 共用同一份）。
+if str(HIVE_ROOT) not in sys.path:
+    sys.path.insert(0, str(HIVE_ROOT))
+try:
+    from hive_ports import (
+        DASHBOARD_PORT as DEFAULT_DASHBOARD_PORT,
+        CLUSTER_HTTP_PORT as CLUSTER_DEFAULT_PORT,
+        CLUSTER_HTTP_ENV as CLUSTER_PORT_ENV,
+    )
+except ImportError:  # pragma: no cover - 单独拷走 dashboard 时的兜底
+    DEFAULT_DASHBOARD_PORT = 8787
+    CLUSTER_DEFAULT_PORT = 8788
+    CLUSTER_PORT_ENV = "HIVE_CLUSTER_PORT"
+
 # 系统级核心配置：Hub 地址 + 集中式仓库列表，与 agents/<name>.json 共同构成 hive 配置
 HIVE_CONFIG_PATH = HIVE_ROOT / "hive-config.json"
 
@@ -57,6 +71,7 @@ API_PATH = "/api/status"
 API_CONFIG = "/api/config"
 API_TASK = "/api/task"
 API_PUSH = "/api/push"
+API_CLUSTER = "/api/cluster"
 CONFIG_PATH = BASE_DIR / "settings.json"
 NO_STORE = "no-store, no-cache, must-revalidate, max-age=0"
 
@@ -106,6 +121,98 @@ def _ts(s):
         return datetime.fromisoformat(str(s)).timestamp() * 1000.0
     except ValueError:
         return None
+
+
+# ---- 集群（hive_cluster.py）只读桥接 ----------------------------------- #
+CLUSTER_STATE_ENV = "HIVE_CLUSTER_STATE"
+
+
+def cluster_state_dir():
+    return Path(os.environ.get(CLUSTER_STATE_ENV)
+                or (Path.home() / ".hive" / "cluster")).expanduser()
+
+
+def _cluster_config():
+    try:
+        data = json.loads((cluster_state_dir() / "config.json").read_text(
+            encoding="utf-8-sig"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def cluster_port():
+    raw = (os.environ.get(CLUSTER_PORT_ENV) or "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    try:
+        return int(_cluster_config().get("port") or CLUSTER_DEFAULT_PORT)
+    except (TypeError, ValueError):
+        return CLUSTER_DEFAULT_PORT
+
+
+def cluster_token():
+    token = (os.environ.get("HIVE_CLUSTER_TOKEN") or "").strip()
+    if token:
+        return token
+    return str(_cluster_config().get("token") or "")
+
+
+def load_cluster_state():
+    """优先问本机集群要实时状态；进程没跑时退回 state.json 的 snapshot。
+
+    返回 (state|None, running_bool)。任何失败都静默：集群是可选件，
+    看板没有集群也必须能正常显示任务。
+    """
+    import urllib.error as _urlerror
+    from urllib import request as _request
+    url = "http://127.0.0.1:%d/api/cluster/state" % cluster_port()
+    headers = {"Accept": "application/json"}
+    token = cluster_token()
+    if token:
+        headers["X-Hive-Cluster-Token"] = token
+    try:
+        opener = _request.build_opener(_request.ProxyHandler({}))
+        req = _request.Request(url, headers=headers, method="GET")
+        with opener.open(req, timeout=0.6) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        state = body.get("state") if isinstance(body, dict) else None
+        if isinstance(state, dict):
+            return state, True
+    except (_urlerror.URLError, OSError, ValueError):
+        pass
+    try:
+        raw = json.loads((cluster_state_dir() / "state.json").read_text(
+            encoding="utf-8-sig"))
+        if isinstance(raw, dict):
+            snap = raw.get("snapshot")
+            return (snap if isinstance(snap, dict) else raw), False
+    except (OSError, ValueError):
+        pass
+    return None, False
+
+
+def cluster_progress_map(state):
+    """集群 progress -> 与 pushed-status.json 同构的 {tid: item}。"""
+    out = {}
+    if not isinstance(state, dict):
+        return out
+    for tid, item in (state.get("progress") or {}).items():
+        if not isinstance(item, dict):
+            continue
+        out[str(tid)] = {
+            "task": str(tid),
+            "agent": item.get("agent") or "",
+            "state": item.get("state") or "",
+            "progress": item.get("progress"),
+            "step": item.get("step") or "",
+            "message": item.get("message") or "",
+            "updated_at": item.get("updated_at") or "",
+        }
+    return out
 
 
 def write_status_atomic(status_path, text):
@@ -190,6 +297,9 @@ def build_handler(status_path):
             if path == API_CONFIG:
                 self.serve_config_get()
                 return
+            if path == API_CLUSTER:
+                self.serve_cluster_get()
+                return
             entry = STATIC_FILES.get(path)
             if entry is None:
                 self._send_json(404, {"error": "未找到资源: %s" % path})
@@ -225,12 +335,24 @@ def build_handler(status_path):
                         agents.append(json.loads(p.read_text(encoding="utf-8")))
                     except ValueError:
                         pass
+            cstate, crunning = load_cluster_state()
+            leader = (cstate or {}).get("leader") or {}
             return {
                 "status_file": status_path,
                 "dashboard_dir": str(BASE_DIR),
                 "hub": hc.get("hub", os.environ.get("HIVE_HUB", "")),
                 "repos": hc.get("repos", {}) or {},
                 "agents": agents,
+                "cluster": {
+                    "running": crunning,
+                    "state_file": str(cluster_state_dir() / "state.json"),
+                    "port": cluster_port(),
+                    "term": (cstate or {}).get("term", 0),
+                    "leader": leader.get("name") or "",
+                    "leader_url": leader.get("url") or "",
+                    "alive": (cstate or {}).get("alive", 0),
+                    "known": (cstate or {}).get("known", 0),
+                },
             }
 
         def load_dashboard_config(self):
@@ -392,6 +514,7 @@ def build_handler(status_path):
                 self._send_json(500, {"error": "状态文件根节点应为数组"})
                 return
             self._merge_pushed(data)
+            self._merge_cluster(data)
             self._send_json(200, data, extra_headers=self._snapshot_headers())
 
         def _snapshot_headers(self):
@@ -434,6 +557,38 @@ def build_handler(status_path):
                 row["push_source"] = "http"
 
         # ---- /api/push：agent 主动上报进度（HTTP 加速通道）----
+        def serve_cluster_get(self):
+            state, running = load_cluster_state()
+            self._send_json(200, {"ok": True, "running": running, "state": state})
+
+        def _merge_cluster(self, rows):
+            """把集群里的实时进度覆盖到快照行上。
+
+            与 _merge_pushed 同一套规则：只有更新（updated_at 不早于 git 快照里的
+            pushed_at）才覆盖，避免一份旧集群状态把新进度顶回去。
+            """
+            state, _running = load_cluster_state()
+            progress = cluster_progress_map(state)
+            if not progress:
+                return
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                p = progress.get(row.get("id"))
+                if not isinstance(p, dict):
+                    continue
+                p_ts = _ts(p.get("updated_at"))
+                row_ts = _ts(row.get("pushed_at"))
+                if p_ts is not None and row_ts is not None and p_ts < row_ts:
+                    continue
+                for src, dst in (("progress", "progress"), ("state", "push_state"),
+                                 ("step", "push_step"), ("message", "push_message")):
+                    if p.get(src) not in (None, ""):
+                        row[dst] = p[src]
+                if p.get("updated_at"):
+                    row["pushed_at"] = p["updated_at"]
+                row["push_source"] = "cluster"
+
         def serve_push(self):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -581,7 +736,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="蜂巢 Hive 看板静态服务器（零依赖）")
     parser.add_argument("--status", default="sample-status.json",
                         help="hive status --json 导出的状态文件路径（默认 sample-status.json）")
-    parser.add_argument("--port", type=int, default=8787, help="监听端口（默认 8787）")
+    parser.add_argument("--port", type=int, default=DEFAULT_DASHBOARD_PORT,
+                        help=f"监听端口（默认 {DEFAULT_DASHBOARD_PORT}）")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     parser.add_argument("--auto-refresh", dest="auto_refresh", action="store_true",
                         help="后台定期跑 hive status --json 重生成状态文件（辅通道）")
