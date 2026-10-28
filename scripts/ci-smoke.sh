@@ -14,6 +14,10 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PORT="${SMOKE_PORT:-8799}"     # 别用 8791，避免和本机在跑的真看板撞端口
 FAIL=0
 
+# 排查用：不同 shell 对 set -u 的解释不一致时，先看清到底哪个变量是空的。
+[ -n "${CI_SMOKE_DEBUG:-}" ] && printf 'debug: shell=%s PORT=[%s] DIR=[%s]\n' \
+    "$(readlink /proc/$$/exe 2>/dev/null || echo sh)" "$PORT" "$DIR"
+
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '  ok   %s\n' "$*"; }
 bad()  { printf '  FAIL %s\n' "$*" >&2; FAIL=$((FAIL + 1)); }
