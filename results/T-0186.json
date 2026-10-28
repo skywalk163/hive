@@ -1,0 +1,35 @@
+{
+  "task": "T-0186",
+  "agent": "raccoon-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0186",
+  "base": "main",
+  "head": "02912879bf610f6e3e0b3c2911fd150a3338c29b",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-28T16:00:57+08:00",
+  "finished_at": "2026-10-28T16:40:35+08:00",
+  "duration_s": 2378.8,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_pending_matcher.py",
+      "code": 0,
+      "tail": [
+        ".....................................................                    [100%]",
+        "53 passed in 0.24s"
+      ]
+    }
+  ],
+  "summary": "# T-0186 完成：`pending_matcher` 模块（agent 自领任务的匹配与排序）\n\n执行者：raccoon-win（manual 模式）\n\n## 改了什么\n\n新增两个文件，**没有碰 `hive.py` / `mcp_server.py` / `conflict.py` / `dispatch_tracking.py`**\n（`git status` 只有两个新文件，零改动已有文件）。\n\n### `pending_matcher.py`（约 330 行，纯标准库）\n\n四个公开函数，签名与卡面一字不差：\n\n| 函数 | 作用 |\n|---|---|\n| `path_overlap(x, y)` | 两条路径声明是否相互覆盖 |\n| `paths_conflict(a, b)` | 两张**卡**的 `paths`/`locks` 会不会打架 |\n| `explain_match(card, agent, *, cards=None)` | 这张卡适不适合，返回 `{matched, reasons, score}` |\n| `match_tasks_for_agent(cards, agent, *, limit=None)` | 能领的卡 + 排序 |\n\n只 `import conflict`，不 import `hive.py`（有 AST 用例守着这条红线，顺带校验依赖面）。\n\n### 判定链（顺序即优先级，reasons 累积不短路）\n\n1. `state == \"ready\"` 且 `owner` 为空；\n2. `repo` 在 `agent[\"repos\"]` 的键里；\n3. `abilities ∪ capabilities` 覆盖 `needs` 全部标签，缺的逐个点名；\n4. 验收模式 agent 不接 `paths` 非空的卡（`mode==\"verify\"` 两种写法都认）；\n5. 依赖全 `done`（查不到前置卡按未完成，保守）；\n6. 与在飞卡抢文件 → **仍匹配**，每条 −40，逐条点名对手。\n\n打分：基础 100，P1 +30 / P2 +20 / P3 +10，`needs` 非空且全覆盖 +5，每条冲突 −40。\n`matched=False` 一律 `score=0`，避免调用方误读成“分低但能领”。\n\n### `tests/test_pending_matcher.py`（53 个用例）\n\n覆盖卡面要求的 12 项，另加：`claimed` 在飞口径、`closed` 终态、跨仓不比对、\n在飞卡 `locks` 驱动冲突、reasons 不短路、结果结构、空输入、空白容错、AST 依赖红线。\n\n## 两个真实数据跑出来的坑（都已修掉 + 补反证用例）\n\n**1. `done` 卡保留 `owner` → 全仓误撞。** 第一版把“有 owner”直接当在飞，结果本仓\n70 张卡里 62 张 `state=done` 且 owner 有值（`Hive.cmd_close` 不清理 owner），\n任何 `paths` 为空的卡都跟 46 张卡判冲突、分数被扣成 −800 多，排序彻底失真。\n修法：先看终态 `TERMINAL_STATES = (\"done\",\"closed\")` 再判 owner。\n\n**2. 冲突理由刷屏。** `paths` 为空的卡跟全仓在飞卡全撞，逐条打 40 多行把真正的\n原因（能力缺失/依赖未完成）淹掉。修法：逐条列前 5 张，其余折成\n“另有 N 张在飞卡同样抢同一片文件（合计 X 张，共 −40×X）”，**分数照扣全量**。\n\n## 验证\n\n### 变异测试：40/40 全部杀光\n\n做了 40 个定向变异，检查用例是否真能走到被测分支（不是“假绿”）：\n\n- 去掉 owner 判断 / ready 判断 / verify 判断（含两种写法只认一个）/ 依赖检查 /\n  needs 并集 / locks 分支 / 冲突全不判 / 终态判断 → 全部变红；\n- 冲突不扣分、冲突判死、只扣一次分、扣分档位错 10 分、折叠时少扣分 → 全部变红；\n- 同分不按任务号 / 同分不分 id / 排序反向 / limit 失效 → 全部变红；\n- 终态表去掉 `done` 或 `closed`、`claimed` 移出在飞、跨仓也扣分、\n  state/owner 不去空白（三处独立位置）→ 全部变红。\n\n**变异过程抓到三个真空洞，都补了用例：**\n\n- `M16 排序不按id` 首轮**存活**：实现里先 `for tid in sorted(cards)` 迭代，\n  tie-break key 从未被考验。已改成直接迭代 `cards.items()`，确定性只由 sort key 保证；\n- `M22 有冲突还说没冲突` 首轮**存活**：有冲突时 reasons 会同时冒出“不冲突”，\n  自相矛盾。已补断言钉死；\n- `M25 state 不去空白` 首轮**存活**：用例只覆盖了 `explain_match` 里的 strip，\n  没覆盖 `_in_flight` 里那处。已补“带空白的 assigned 仍算在飞 / 带空白的 done 仍是终态”。\n\n### 与 `hive.py` 的口径核对\n\n- `path_overlap` vs `Hive._path_overlap`：15 个边界值 × 225 组笛卡尔积，**0 差异**\n  （含父子目录、尾斜杠、空串、`tests/` vs `testing/`、`./` 前缀不剥离）；\n- `paths_conflict` vs `Hive._paths_conflict`：真实卡表同仓卡两两比对 **1399 对，0 差异**；\n- 在飞口径差异一处，已写进注释并加用例：本模块不读 res 分支，所以“成果已提交但未 close”\n  的卡（真实数据里 T-0185）仍算在飞、仍扣 40 分 —— 偏保守，接线层知道结果可先改 state。\n\n### 测试\n\n```\npython -m pytest -q tests/test_pending_matcher.py   → 53 passed\npython -m pytest -q tests/test_pending_matcher.py tests/test_conflict.py → 72 passed\npython -m py_compile pending_matcher.py tests/test_pending_matcher.py → OK\n```\n\n全量 `pytest`（含 git 端到端用例）在本机 900 秒超时未跑完，属既有用例耗时问题，\n与本卡无关；本卡只新增纯函数模块，影响面已被上面两项聚焦测试覆盖。\n\n## 真实运行：全量卡 × `agents/trae-win.json`\n\n70 张卡（62 done / 3 assigned / 5 ready）→ **能领 0 张**。逐张原因：\n\n| 任务 | 依赖 | needs | 判定要点 |\n|---|---|---|---|\n| T-0187 | T-0184 | windows | 能力全覆盖；依赖未完成：T-0184 |\n| T-0188 | T-0184,T-0185,T-0186 | freebsd | 能力缺失：freebsd；依赖未完成 |\n| T-0189 | T-0188 | freebsd | 能力缺失：freebsd；依赖未完成 |\n| T-0190 | T-0187,T-0188,T-0189 | windows | 能力全覆盖；依赖未完成；与 T-0184/T-0185/T-0186 抢文件（−120） |\n| T-0191 | T-0189 | freebsd | 能力缺失：freebsd；依赖未完成 |\n\n**0 张不是模块判错，是流水线真的堵在依赖上**：唯一的 ready 入口链是\nT-0184 → T-0187，而 T-0184 还在 assigned。反事实验证：把 T-0184/T-0185 置成 done 后，\n`trae-win` 立刻命中 **T-0187（score 125，P2 = 100+20+5）**，链路是通的。\n\n顺带看到的两件事（不在本卡范围，留给接线卡）：\n\n- `freebsd` 这条能力线只有 `fb88-dsh` 一家有。T-0188/0189/0191 三张卡全要 `freebsd`，\n  一旦 fb88-dsh 忙（它 `max_concurrency=1`），这三张就只能排队；\n- T-0190 是 `paths: []` 的卡，按本模块保守口径会跟全仓每一张在飞卡判冲突\n  （真实数据 3 张：T-0184/0185/0186，扣 120）。这不是 bug：`paths` 为空的卡\n  确实可能改任何文件。接线层若要放宽，应让卡面显式写 `locks`。",
+  "error": "",
+  "declared_paths": [
+    "pending_matcher.py",
+    "tests/test_pending_matcher.py"
+  ],
+  "changed_files": [
+    "pending_matcher.py",
+    "tests/test_pending_matcher.py"
+  ],
+  "out_of_paths": []
+}
