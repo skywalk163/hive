@@ -62,7 +62,20 @@ NO_STORE = "no-store, no-cache, must-revalidate, max-age=0"
 
 # 任务操作代理：后端调用 hive CLI 真正执行（前端按钮 -> 这里 -> python3 hive.py）
 HIVE_PY = HIVE_ROOT / "hive.py"
-HIVE_OP_TIMEOUT = 120  # 单条操作超时（秒），hive 命令涉及 git push，给足余量
+HIVE_OP_TIMEOUT = 120  # 单条操作超时（秒）；hive 命令涉及 git push，给足余量
+# 子进程一律走 UTF-8：Windows 下子进程 stdout 默认 cp936，`hive status --json` 碰到
+# ✓ / 全角符号会以 UnicodeEncodeError 退出（rc=1、stdout 空），状态文件于是一直写不出来，
+# 看板就永远停在旧快照或 503。三个平台用同一套环境变量最省事。
+PYTHON_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+# 用当前解释器，别硬编码 python3：Windows 上 python3 常常是 Store 的 App 别名存根
+PYTHON = sys.executable or "python3"
+
+
+def hive_argv(*args):
+    """拼一条 hive CLI 的子进程命令行（统一解释器 + 协调仓根目录）。"""
+    return [PYTHON, str(HIVE_PY), "--dir", str(HIVE_ROOT), *args]
+
+
 TASK_ACTIONS = ("close", "retry", "unassign", "reopen")  # 看板按钮暴露的操作
 TID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")  # 任务号允许字符
 
@@ -72,7 +85,7 @@ PUSHED_STATUS_PATH = BASE_DIR / "pushed-status.json"
 
 def load_pushed():
     try:
-        return json.loads(PUSHED_STATUS_PATH.read_text(encoding="utf-8"))
+        return json.loads(PUSHED_STATUS_PATH.read_text(encoding="utf-8-sig"))
     except (FileNotFoundError, ValueError):
         return {}
 
@@ -102,15 +115,22 @@ def refresh_loop(status_path, interval):
     才会出现在快照里；这个循环就是兜底——长时间没推送的卡也由它刷新出真实状态
     （租约过期 → stale，交给 watchdog 回收）。
     """
-    argv = ["python3", str(HIVE_PY), "--dir", str(HIVE_ROOT), "status", "--json"]
+    argv = hive_argv("status", "--json")
     while True:
         try:
             proc = subprocess.run(argv, capture_output=True, text=True,
+                                  encoding="utf-8", env=PYTHON_ENV,
                                   timeout=HIVE_OP_TIMEOUT)
             if proc.returncode == 0 and proc.stdout.strip():
                 Path(status_path).write_text(proc.stdout, encoding="utf-8")
-        except Exception:
-            pass  # 刷新失败不影响服务，下一轮再试
+            else:
+                # 不能全静默：Windows 上 cp936 曾让这里连续失败而没人发现，
+                # 表现就是「看板一直不刷新」。留一行证据，保留上一份状态。
+                sys.stderr.write("[hive-dashboard] 刷新失败 rc=%s: %s\n"
+                                 % (proc.returncode,
+                                    (proc.stderr or "").strip().splitlines()[-1:]))
+        except Exception as exc:  # noqa: BLE001 —— 刷新失败不影响服务，下一轮再试
+            sys.stderr.write("[hive-dashboard] 刷新异常: %s\n" % exc)
         time.sleep(max(5, int(interval)))
 
 
@@ -343,7 +363,7 @@ def build_handler(status_path):
         # ---- /api/status：每次请求都重新读盘 ----
         def serve_status(self):
             try:
-                raw = Path(status_path).read_text(encoding="utf-8")
+                raw = Path(status_path).read_text(encoding="utf-8-sig")
             except FileNotFoundError:
                 self._send_json(503, {"error": "状态文件不存在: %s" % status_path})
                 return
@@ -460,7 +480,7 @@ def build_handler(status_path):
                 return
 
             note = str(body.get("note") or body.get("reason") or "看板操作")
-            argv = ["python3", str(HIVE_PY), "--dir", str(HIVE_ROOT)]
+            argv = hive_argv()
             if action == "close":
                 # 有 result 记 done、没有记 closed（作废）由 hive 自己判定；
                 # 前端要"强制完成/强制作废"时显式传 done=true/false。
@@ -489,6 +509,7 @@ def build_handler(status_path):
 
             try:
                 proc = subprocess.run(argv, capture_output=True, text=True,
+                                     encoding="utf-8", env=PYTHON_ENV,
                                      timeout=HIVE_OP_TIMEOUT)
             except FileNotFoundError:
                 self._send_json(500, {"ok": False, "error": "找不到 hive.py: %s" % HIVE_PY})
@@ -512,12 +533,16 @@ def build_handler(status_path):
             """操作成功后重跑 `hive status --json` 覆盖状态文件，使看板即时更新。"""
             try:
                 proc = subprocess.run(
-                    ["python3", str(HIVE_PY), "--dir", str(HIVE_ROOT), "status", "--json"],
-                    capture_output=True, text=True, timeout=HIVE_OP_TIMEOUT)
+                    hive_argv("status", "--json"),
+                    capture_output=True, text=True, encoding="utf-8",
+                    env=PYTHON_ENV, timeout=HIVE_OP_TIMEOUT)
                 if proc.returncode == 0 and proc.stdout.strip():
                     Path(status_path).write_text(proc.stdout, encoding="utf-8")
-            except Exception:
-                pass  # 刷新失败不影响主操作结果
+                else:
+                    sys.stderr.write("[hive-dashboard] 状态重生成失败 rc=%s\n"
+                                     % proc.returncode)
+            except Exception as exc:  # noqa: BLE001
+                sys.stderr.write("[hive-dashboard] 状态重生成异常: %s\n" % exc)
 
         # ---- 日志：静音常规访问，只保留 4xx/5xx ----
         def log_message(self, fmt, *args):
