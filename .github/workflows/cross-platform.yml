@@ -28,6 +28,7 @@ concurrency:
 
 permissions:
   contents: read
+  statuses: write     # 失败时把原因写进 commit status，免 admin 权限也能排障
 
 jobs:
   # --------------------------------------------------------------------------
@@ -78,7 +79,24 @@ jobs:
         with:
           python-version: '3.12'
       - name: 冒烟
-        run: sh scripts/ci-smoke.sh all
+        run: |
+          sh scripts/ci-smoke.sh all 2>&1 | tee /tmp/smoke.log
+          exit "${PIPESTATUS[0]}"
+
+      # 作业日志接口要仓库 admin 权限，我们没有；commit status 是公网可读的，
+      # 于是把失败首行塞进 description —— 谁都能一眼看到红在哪，不用登管理员账号。
+      - name: 失败时把原因写进 commit status
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          desc=$(grep -m1 -E 'FAIL|错误|not found|error' /tmp/smoke.log | tr -d '\r' | cut -c1-120)
+          [ -n "$desc" ] || desc="冒烟失败（无可解析的失败行）"
+          curl -s -o /dev/null -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+            -d "{\"state\":\"failure\",\"context\":\"macos-diag\",\"description\":\"$desc\"}"
 
   # --------------------------------------------------------------------------
   smoke-freebsd:
