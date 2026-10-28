@@ -1,0 +1,35 @@
+{
+  "task": "T-0181",
+  "agent": "raccoon-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0181",
+  "base": "main",
+  "head": "2f0a54604925d5447a5b109c8f9e3854d4ddbb7e",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-28T10:50:04+08:00",
+  "finished_at": "2026-10-28T11:22:33+08:00",
+  "duration_s": 1949.4,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/unit/test_R167_L239_同族形态.py tests/unit/test_llvm_builtin_gaps.py",
+      "code": 0,
+      "tail": [
+        "3.13s call     tests/unit/test_llvm_builtin_gaps.py::test_位运算_真跑_位与位或对齐Python",
+        "3.08s call     tests/unit/test_llvm_builtin_gaps.py::test_callable_真跑_带__调用__的对象为真而整数为假",
+        "3.02s call     tests/unit/test_llvm_builtin_gaps.py::test_getattr_真跑_命中取成员缺失取默认值",
+        "3.00s call     tests/unit/test_llvm_builtin_gaps.py::test_属性错误_真跑_抛出未捕获异常",
+        "40 passed in 49.67s"
+      ]
+    }
+  ],
+  "summary": "# T-0181 工作说明：形态③｜PY 腿补编译期拒收（协程体内 异步 运行 f()）\n\n## 做了什么\n1. PY 腿补判型：src/code_generator.py RunAsyncStmt 分支（原 :2203，现 :2215 附近）入口处\n   新增 `if self._in_async_function: raise CodeGenError(...)`——异步段落体内遇 `异步 运行`\n   即编译期拒收，诊断信息指路 等待 / 异步 作用域 / 创建任务。判定口径与原生腿\n   `_in_coroutine`（src/llvm/codegen_typed.py:9264）完全一致：只针对 异步 段落 体内；\n   同步段落体/模块层不受影响（状态位 _in_async_function 由 _generate_paragraph :2769 置位、\n   :2815 还原，异步方法路径 :4026/:4101 同样维护）。\n2. 测试改写（口径切换，裁定生效产物、非回归）：tests/unit/test_R167_L239_同族形态.py 形态③\n   三例从「锁现状/运行时崩」改为编译期拒收断言：\n   - test_形态3_原生腿_拒绝编译协程内异步运行：断言 rc='未实现' 且信息含 RunAsyncStmt+协程\n     （原生腿措辞为繁体「協程內」，按卡不改原生腿，简繁皆可；不再要求含「转译后端」）。\n   - test_形态3_PY腿_协程体内编译期拒收_异步值 / _同步值：断言 rc≠0 且错误含「协程」关键字。\n   - 新增 test_形态3_PY腿_判型不外溢_同步段落与模块层照常（替代原「函数值不被误判」用例，\n     其旧断言对形态③源码取生成码，新语义下本应拒收）：锁同步段落体内/模块层 `异步 运行`\n     照常发 asyncio.run（裁定书 §五关键边界，防过宽误伤）。\n   - 新增 test_形态3_反跑_摘掉PY腿判型即转红（有牙）：复制 cli/src 到 pytest 托管目录、\n     副本摘掉判型跑探针，断言 rc=0（回到 R167-T4 静默现状）。实测摘掉判型 rc=0、还原转绿。\n\n## 验证（本机 Windows，pytest 3.12）\n- `python -m pytest -q tests/unit/test_R167_L239_同族形态.py`：**14 passed**（含两例有牙反跑）。\n- `python -m pytest -q tests/unit/test_llvm_builtin_gaps.py`：17 passed / 9 failed——\n  9 例失败已用干净基线 worktree（git worktree add @ HEAD 5e8d3ecbf、未含本卡改动）复现，\n  **逐例相同失败 ⇒ 预存环境噪音，与本卡改动无关**。失败点全部是收尾清理\n  `sys.audit(\"shutil.rmtree\")` 抛 CHAT_REFERENCE_PROTECTED（沙箱保留扫描拦截临时目录删除），\n  断言本身通过；关键边界 test_RunAsyncStmt现已落地_异步运行可编译（同步段落体内异步运行）\n  green。0.88 权威机上应全绿。\n\n## 遗留风险\n- 本机沙箱拦截 rm，worktree 根残留约 40 个未跟踪测试临时目录 `_r117bgap_*/`（llvm gaps\n  真跑用例的探针目录，非本卡产物）；如提交工具会误收，请在 0.88 侧清理，勿进主干。\n- 原生腿拒绝措辞仍含失真的「请用转译后端」指引（裁定书 §四-2）：动 src/llvm/** 属 9000 例\n  全量门级改动，按卡范围未动，留待同轮全量门的后续轮次。\n- 测试助手 _py腿/_原生腿 从 TemporaryDirectory 改为 mkdtemp 不即时清理：原因是本机沙箱在\n  audit 层直接抛 PermissionError（ignore_cleanup_errors 压不住）；不弱化任何断言，\n  断言执行完毕后才挂清理。",
+  "error": "",
+  "declared_paths": [
+    "src/code_generator.py",
+    "tests/unit/test_R167_L239_同族形态.py"
+  ],
+  "changed_files": [],
+  "out_of_paths": []
+}
