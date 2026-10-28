@@ -1,0 +1,27 @@
+{
+  "name": "deepseek-win",
+  "host": "win10",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify"
+  ],
+  "capabilities": [
+    "windows",
+    "gui",
+    "linux"
+  ],
+  "repos": {
+    "hive": "G:/dswork/duan-light-merge/hive",
+    "light": "G:/dswork/duan-light-merge/light-merge",
+    "lightharness": "G:/dswork/duan-light-merge/lightharness",
+    "lightmem": "G:/dswork/duan-light-merge/lightmem"
+  },
+  "launch": "",
+  "worktrees": "C:/Users/skywalk/.hive/wt/deepseek-win",
+  "max_concurrency": 1,
+  "created": "2026-10-28T23:12:00+08:00"
+}
