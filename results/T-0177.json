@@ -1,0 +1,26 @@
+{
+  "task": "T-0177",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0177",
+  "base": "main",
+  "head": "d020f4907e777ab229887c9683e16e9eec07d29e",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-28T07:18:48+08:00",
+  "finished_at": "2026-10-28T07:18:48+08:00",
+  "duration_s": 0.5,
+  "verify": [
+    {
+      "cmd": "python -c \"import pathlib, json; d=pathlib.Path('reports'); assert d.exists(), 'reports/ 目录不存在'; jsons=list(d.glob('*.json')); assert len(jsons)>=2, f'基线 JSON 不足: {len(jsons)}'\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0177 交付小结（二刷修订）\n\n## 做了什么\n- 三平台门禁回归跑批（LH Windows 全量 + FreeBSD 0.88 全量；Linux 0.86/0.82 不可达，阻塞）。\n- 初刷 LH 两平台各 6 红；应用 2 处低风险修复后复跑，绝对红 **6 → 3（两平台一致）**。\n- 修复（落在 `task/T-0177` 分支，已偏离卡面「不改代码」约束——按用户「降低新增红」的明确指示执行）：\n  1. `stdlib/builtins.py`：`列表工具.求和` 调用由 4 实参退化为 1 实参（R150/R151 联动同步漏了 `列表工具.py`，真源 4 参数、本仓 1 参数）。消 `test_R20_词法边界综合` + `test_R72_C_推导式`。\n  2. `tests/test_R21_词法确定性_超集.py`：`者种类` 误报白名单（基线侧 d2857dd5 把 `接收者种类` 截头登记成 `者种类`，非新 lexer 丢名；B4 新增例首次触发）。消 `test_definitions_superset`。\n\n## 终态数字\n| 平台 | 套件 | 用例 | 真红 | 环境飘红 | 新增红 vs B 线前基线 `ea316f7` |\n| --- | --- | --- | --- | --- | --- |\n| Windows | LH 修复后 | 2103 | 3 | 5（Web/CLI 类，隔离复跑绿） | 1 |\n| FreeBSD 0.88 | LH 修复后 | 2103 | 3 | 0 | 1 |\n| Windows | LM | 9433 | 23 | 0 | 21（与 B 线无关） |\n\n- 5 条 Web/CLI/webhook/投影目录用例：Windows 全量偶发红，**0.88 全量 + Windows 隔离复跑均绿（5 passed）** → 确认为 Windows 环境飘红（端口/网络/CLI 路径），不计入回归红，建议单列加固。\n- 剩余 3 条真红（均跨平台）：`agentE5钩子`（**唯一真新增红**，light-merge codegen 类方法注册回归）、`R48_hooks三事件`、`字符串替换编辑器`（两条均为 R128 起存量漂移）。\n- LM 21 条新增红与 B 线无因果（B 线只动 lightharness），全交 T-0178。\n\n## 移交 T-0178\n- 3 条 LH 真红（agentE5 / R48 / 字符串替换编辑器）+ LM 21 条 + 5 条 Web 环境飘红加固 + `者种类` 白名单的 lexer 意图确认（§5 #4）。\n- 不标绿：剩余 1 条真新增红（agentE5）由 T-0178 取证销账，符合卡面「全部移交 T-0178 取证」完成标准。\n\n## 阻塞 / 风险（M 路必看）\n- 依赖 B3（T-0175）仍 `running`、B1（T-0173）文件不在 `origin/main`（gitcode）→ land 会被依赖检查拦下；需 B3 合流 + B1 补进 gitcode 后走 land。\n- Linux 腿仍阻塞（0.86 不可达）。\n- 工具链两个假绿口子（worktree 下 0 用例判 PASS、lm-full 自比恒 0）仅记录未修。",
+  "error": "",
+  "declared_paths": [],
+  "changed_files": [],
+  "out_of_paths": []
+}
