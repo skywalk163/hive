@@ -1,0 +1,31 @@
+{
+  "task": "T-0178",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0178",
+  "base": "main",
+  "head": "7d6460f4679c66410b0189b5b5e4d78796900876",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-28T07:29:55+08:00",
+  "finished_at": "2026-10-28T09:23:39+08:00",
+  "duration_s": 6824.9,
+  "verify": [
+    {
+      "cmd": "python -c \"import pathlib; t=pathlib.Path('tests/flaky_registry.txt').read_text(encoding='utf-8') if pathlib.Path('tests/flaky_registry.txt').exists() else ''; print(f'flaky_registry 行数: {len(t.splitlines())}')\"",
+      "code": 0,
+      "tail": [
+        "flaky_registry 行数: 50"
+      ]
+    }
+  ],
+  "summary": "# T-0178 F 路｜新红/flaky 兜底 取证 summary\n\n## 基线\n- worktree 分支 task/T-0178，已 merge E 路 d020f49（含 列表工具.求和 实参退化修复 + 者种类白名单），站在 E 路结果之上继续处置。\n- E 路移交 8 条 LH 红 + LM 21 条 + 者种类白名单意图确认。\n\n## 修了 3 条真红（src/ 实现 bug，非 example 期望过期）\n1. **src/钩子.light 消息钩子判定**：原用 `是空(缘由)` 判断\"是否已取到首个 reject\"，空字符串缘由被误判为\"无拒绝\"导致放行（example `点_空缘由仍拒绝` 实际=None 期望=\"\"）。改用独立 `已拒绝` 标志位，空字符串缘由原样浮出。单跑 test_R48_hooks三事件.light 转绿。\n2. **src/字符串替换编辑器.light 执行编辑命令**：原用 `是空(路径)` 判断缺 path，`path=\"\"` 被当\"缺 path\"抛\"参数 path 必填\"，没走到 解析目标 的非空校验。改用 `有路径` 键存在判断，键缺才抛必填，键存在但值空/空白交给 解析目标 抛\"路径必须为非空字符串\"。\n3. **src/字符串替换编辑器.light 必填参数**：原用 `是空(值)` 判缺省，空字符串 \"\" 被当 None 抛\"必填\"，违反注释\"file_text allowEmpty=真、空文件合法\"。改用 `值 == 空(None)` 判断，空串交给 `允许空==假` 分支。单跑 test_字符串替换编辑器.light 全量 PASS。\n\n## 登记 5 条 flaky（tests/flaky_registry.txt F-03~F-07，windows 平台）\nE 路 Windows 全量 xdist 偶发、隔离复跑恒绿。F 路复核：`pytest -o addopts= --timeout=60` 隔离 5 passed in 83.31s：\n- F-03 test_CLI命令面.light（xdist gw3 worker crashed）\n- F-04 test_R42_真实webhook.light（xdist gw1 worker crashed）\n- F-05 运行Web服务器.light（xdist gw4 worker crashed，本身起 HTTP 监听）\n- F-06 test_R87_B3_基建_团队状态收敛.light（Permission denied: src/团队花名册.light）\n- F-07 tests/unit/test_会话持久化JSONL.py::test_投影目录_空cwd（Permission denied: stdlib/内置核心字典.light）\n\n## 第一次全量（run1，43:55）新发现 2 条环境红 → F-08/F-09\n- test_终端PTY.light / test_异步PTY.light：当前 Windows session（无 console 窗口/后台进程）CreatePseudoConsole 稳定 HRESULT E_INVALIDARG(-2147024890)。直接 运行.py 单跑亦红（非偶发），0.88 环境与有 console 交互 session 下绿。非 B 路回归（F 路未动 stdlib/伪终端.light）。已登记 F-08/F-09。\n\n## 越界 1 条真红（未修，交 M 路）\n- **test_agentE5钩子.light**：`'聊天v1' object has no attribute '调用'`。最小复现证实 light-merge 编译器 R128 后把类里 `段落 调用()` 映射成 Python `__call__`（类属性=['__call__',...]，无 '调用'）。example 用 `聊天.调用` 取 bound method 失效。E 路四象限已证\"换 R128 期编译器即绿、B 线前 LH + 当前 LM 也红\"——非 B 路引入、非环境 flaky、稳定复现。根因在编译器（light-merge 仓，越界）+ example（examples/，不在 paths）。建议 M 路开卡二选一：example 传可调用实例 `聊天` 而非 `聊天.调用`，或编译器对 `__call__` 暴露 `调用` 别名。\n\n## 越界 21 条（LM/LightMem 套件）\nE 路移交的 LM 21 条新增红属 lightmem 仓全量（9433 条规模），非 lightharness 仓 tests//src/ 范围，本卡不动。建议 M 路分派 LM 专项卡。\n\n## 者种类白名单意图确认（E 路 §5 #4）\n**有意，非笔误。** E 路探针证实：旧基线 d2857dd5 预扫描把形参 `接收者种类` 截头登记成 `者种类`，现行 lexer 登记完整名 `接收者种类`。白名单 `('test_R176_型协清单校验.light','者种类')` 登记的是旧基线侧截头误报，注释与豁免逻辑正确。\n\n## 验证\n- 3 个修复 example 单跑全绿（R48 / 字符串替换编辑器 / R176 者种类随 E 路已修）。\n- 5 条 flaky 隔离 pytest 全绿。\n- 全量回归：\n  - run1（43:55）：3 failed（agentE5 越界 + 终端PTY/异步PTY 环境红），2083 passed。\n  - run2（36:58）：1 failed（仅 agentE5 越界），2085 passed；PTY 命中 F-08/F-09 豁免转绿。\n  - 修复项（R48/字符串替换编辑器）两次全量均在 passed，无复发。",
+  "error": "",
+  "declared_paths": [
+    "tests/",
+    "src/"
+  ],
+  "changed_files": [],
+  "out_of_paths": []
+}
