@@ -39,7 +39,8 @@
   解释器可用环境变量 HIVE_PYTHON 覆盖，默认取 PATH 上的 python。
 
   退出码：0 成功（含 dry-run）；1 参数/配置/hive.py 问题；2 prompt 契约未满足；
-  3 窗口没找到或前台窗口不匹配；4 派发已发生但 dispatch-mark 失败。
+  3 窗口没找到或前台窗口不匹配；4 派发已发生但 dispatch-mark 失败；
+  5 剪贴板写入失败（已重试 5 次，一个键都没发）；6 回读未命中（按键没落进窗口，未记账）。
 #>
 
 param(
@@ -188,6 +189,14 @@ namespace HiveDispatch {
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
 
+        [DllImport("user32.dll")] public static extern bool AttachThreadInput(
+            uint idAttach, uint idAttachTo, bool fAttach);
+        [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(
+            IntPtr hWnd, out uint lpdwProcessId);
+        [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")] public static extern void keybd_event(
+            byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
         public static string ForegroundTitle() {
             StringBuilder sb = new StringBuilder(1024);
             GetWindowText(GetForegroundWindow(), sb, sb.Capacity);
@@ -210,7 +219,54 @@ function Set-WindowForeground($WindowProcess) {
         if ($handle -eq [IntPtr]::Zero) { return $false }
         # 9 = SW_RESTORE：最小化的窗口先还原，否则 SetForegroundWindow 只亮任务栏
         [void][HiveDispatch.Win32]::ShowWindow($handle, 9)
-        return [bool][HiveDispatch.Win32]::SetForegroundWindow($handle)
+        [void][HiveDispatch.Win32]::SetForegroundWindow($handle)
+
+        # 判定只看「前台句柄是不是目标」——实测 SetForegroundWindow 会在窗口其实已经
+        # 到前台时仍返回 false，拿它的返回值当结论会误报失败（T-0192 第 3 条）。
+        # 而且切换是异步的：调用返回后句柄可能还没变，所以判几轮，别抢在别人前面判负。
+        for ($i = 0; $i -lt 8; $i++) {
+            if ([HiveDispatch.Win32]::GetForegroundWindow() -eq $handle) { return $true }
+            Start-Sleep -Milliseconds 50
+        }
+
+        # 兜底：本进程不是前台（计划任务、别的脚本、终端不在前台）时，前台锁会拒绝
+        # SetForegroundWindow。把自己的输入队列 attach 到当前前台线程上，就能借它的
+        # 输入权把目标窗口顶上来；attach 是有状态的，用完必须解。
+        $foreground = [HiveDispatch.Win32]::GetForegroundWindow()
+        $currentThread = [HiveDispatch.Win32]::GetCurrentThreadId()
+        $foregroundPid = [uint32]0
+        $foregroundThread = [uint32]0
+        if ($foreground -ne [IntPtr]::Zero) {
+            # 注意：线程号是**返回值**，out 参数拿到的是 PID。这里曾经把 PID 当线程号
+            # 传给 AttachThreadInput，attach 永远 false、前台锁永远不放行（实测）。
+            $foregroundThread = [HiveDispatch.Win32]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+        }
+
+        $attached = $false
+        $landed = $false
+        if ($foregroundThread -ne 0 -and $foregroundThread -ne $currentThread) {
+            $attached = [HiveDispatch.Win32]::AttachThreadInput($currentThread, $foregroundThread, $true)
+        }
+        try {
+            if ($attached) {
+                # Win10 19045 实测：只 attach 还不够，前台锁仍然生效（attach 成功、
+                # SetForegroundWindow 仍返回 false、前台句柄没变）。发一次「空 Alt」
+                # 让前台锁放行是标准做法：单独按 Alt 不输入任何字符、不碰窗口内容，
+                # 也不改变 5/6 的语义。真正要粘的正文仍然只走第 6 步的粘贴按键。
+                [HiveDispatch.Win32]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)   # Alt down
+                [HiveDispatch.Win32]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)   # Alt up
+            }
+            [void][HiveDispatch.Win32]::SetForegroundWindow($handle)
+            for ($i = 0; $i -lt 16; $i++) {
+                if ([HiveDispatch.Win32]::GetForegroundWindow() -eq $handle) { $landed = $true; break }
+                Start-Sleep -Milliseconds 50
+            }
+        } finally {
+            if ($attached) {
+                [void][HiveDispatch.Win32]::AttachThreadInput($currentThread, $foregroundThread, $false)
+            }
+        }
+        return $landed
     }
     # 兜底：没有 Win32 时用 AppActivate（返回是否成功），复核交给调用方
     $shell = New-Object -ComObject WScript.Shell
@@ -222,6 +278,116 @@ function Get-ForegroundWindowTitle {
     # 拿不到前台标题就返回空串：调用方的匹配必然失败 -> 中止发送。
     # 「复核不了」和「复核不通过」在这里是同一个结论：不发。
     return ''
+}
+
+# --- 发送后回读（UIAutomation，.NET Framework 自带，不加第三方依赖）-------- #
+#
+# 为什么需要它：WScript.Shell 的按键注入没有返回值，被 UIPI / 不同桌面 / 目标以管理员
+# 运行时照样「成功返回」，脚本打印「已发送」并记账，而窗口里一个字符都没有。回读是唯一
+# 能把「账上记了」和「真的落进去了」对上的手段（T-0192 第 3 条）。
+
+function Initialize-UiAutomation {
+    # UIAutomationClient 是 .NET Framework 自带程序集，不引第三方包；加载失败（PS7 的
+    # .NET Core、精简运行时）就如实返回 false，由调用方按「未校验」处理。
+    if ('System.Windows.Automation.AutomationElement' -as [type]) { return $true }
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+        Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Test-TextContainer($Element) {
+    # 「这个元素像是装正文的容器吗」——只用来决定 Name 兜底能不能当正文读。
+    # 真机实测（Windows 10 19045 的记事本）：它的 Edit 控件既不支持 ValuePattern 也不
+    # 支持 TextPattern，正文只出现在 UIA 的 Name 上。不加这层兜底，记事本永远是「未校验」，
+    # 回读等于白做。但 Name 也会是按钮文字 / 窗口标题，所以必须限定得足够窄，
+    # 否则「读到一个不相干的标签」会被误判成「正文没落进窗口」（假阴性 -> 让人重派）。
+    try {
+        $className = [string]$Element.Current.ClassName
+        if ($className -match '(?i)edit') { return $true }
+        $controlType = $Element.Current.ControlType.ProgrammaticName
+        if ($controlType -eq 'ControlType.Document' -or $controlType -eq 'ControlType.Edit') { return $true }
+    } catch {
+    }
+    return $false
+}
+
+function Read-ControlText($Element) {
+    # 只读：TryGetCurrentPattern / Current.* 都不写目标、不切焦点。
+    try {
+        $valuePattern = $null
+        if ($Element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$valuePattern)) {
+            $value = [string]$valuePattern.Current.Value
+            if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+        }
+    } catch {
+        # 控件不支持 / 已销毁，换下一种模式
+    }
+    try {
+        $textPattern = $null
+        if ($Element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$textPattern)) {
+            $text = [string]$textPattern.DocumentRange.GetText(8192)
+            if (-not [string]::IsNullOrWhiteSpace($text)) { return $text }
+        }
+    } catch {
+    }
+    # 最后的只读兜底：文本容器类控件的 Name（记事本这类只经 MSAA 桥暴露正文的窗口）。
+    if (Test-TextContainer $Element) {
+        try {
+            $name = [string]$Element.Current.Name
+            if (-not [string]::IsNullOrWhiteSpace($name)) { return $name }
+        } catch {
+        }
+    }
+    return $null
+}
+
+function Get-WindowReadableText($Root) {
+    # 按 ControlView 广度优先找第一个能读出非空文本的控件。
+    # 加节点上限：UIA 在没有缓存的树上可能很慢，读不到就当「不支持回读」，不能卡死派发。
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $queue = New-Object System.Collections.Queue
+    $queue.Enqueue($Root)
+    $visited = 0
+    while ($queue.Count -gt 0 -and $visited -lt 200) {
+        $node = $queue.Dequeue()
+        $visited++
+        $text = Read-ControlText $node
+        if (-not [string]::IsNullOrWhiteSpace($text)) { return $text }
+        try {
+            $child = $walker.GetFirstChild($node)
+            while ($null -ne $child) {
+                $queue.Enqueue($child)
+                $child = $walker.GetNextSibling($child)
+            }
+        } catch {
+            # 某个分支不可枚举（控件刚销毁），跳过即可
+        }
+    }
+    return $null
+}
+
+function Confirm-PasteLanded($WindowProcess, [string]$Sentinel) {
+    # 三态，调用方据此决定「记账 / 不记账 / 记账但警告」：
+    #   landed  = 读到文本且含 sentinel
+    #   missing = 读到文本但不含 sentinel（按键去了别处或没生效）
+    #   unknown = UIA 不可用 / 控件不支持 / 读异常（不能据此判失败）
+    $handle = $WindowProcess.MainWindowHandle
+    if ($handle -eq [IntPtr]::Zero) { return 'unknown' }
+    if (-not (Initialize-UiAutomation)) { return 'unknown' }
+    try {
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+        if ($null -eq $root) { return 'unknown' }
+        $text = Get-WindowReadableText $root
+        if ([string]::IsNullOrWhiteSpace($text)) { return 'unknown' }
+        if ($text.IndexOf($Sentinel, [System.StringComparison]::Ordinal) -ge 0) { return 'landed' }
+        return 'missing'
+    } catch {
+        return 'unknown'
+    }
 }
 
 # --------------------------------------------------------------------------- #
@@ -346,6 +512,27 @@ if (-not $Apply) {
 # --------------------------------------------------------------------------- #
 
 if ($Apply) {
+    # 剪贴板是全局单例：别的进程正开着它时 Set-Clipboard 会抛 ExternalException
+    # （实测 "Requested Clipboard operation did not succeed"）。$ErrorActionPreference
+    # = 'Stop' 下脚本会直接终止，只剩一坨 .NET 堆栈，所以这里自己重试并给专用退出码。
+    # 全部失败时**一个键都不发**：带着旧剪贴板粘贴等于把上一次的内容粘进窗口，比不发更糟。
+    function Set-ClipboardText([string]$Text) {
+        $lastError = ''
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+                Set-Clipboard -Value $Text -ErrorAction Stop
+                return
+            } catch {
+                $lastError = $_.Exception.Message
+                Write-Step "写剪贴板失败（第 $attempt/5 次）：$lastError"
+                if ($attempt -lt 5) {
+                    Start-Sleep -Milliseconds (150 * $attempt)
+                }
+            }
+        }
+        Fail "写剪贴板失败（已重试 5 次）：$lastError" -Code 5
+    }
+
     if (-not $window) {
         Fail "agent「$($target.Name)」的窗口没打开（配置里的标题片段：$($target.WindowTitle)）" -Code 3
     }
@@ -365,13 +552,26 @@ if ($Apply) {
     Write-Step "已激活窗口：$foregroundTitle"
 
     # 6. 正文进剪贴板 -> 粘贴 -> 回车
-    Set-Clipboard -Value $bodyText
+    Set-ClipboardText $bodyText
     Start-Sleep -Milliseconds $SendDelayMs
     $keyboard = New-Object -ComObject WScript.Shell
     $keyboard.SendKeys('^v')
     Start-Sleep -Milliseconds $SendDelayMs
     $keyboard.SendKeys('{ENTER}')
     Write-Step "已发送：粘贴 + 回车（正文 $($lines.Count) 行）"
+
+    # 6'. 发送后回读。SendKeys 失败是静默的，这是唯一能证明「真的落进窗口」的一步。
+    # 三态：命中 -> 记账；读到文本但没命中 -> 不记账（退出码 6）；读不了 -> 记账但警告
+    # （「未校验」比「假绿」诚实，也比「误判没发出去」安全 —— 后者会让人重复派发）。
+    Start-Sleep -Milliseconds $SendDelayMs
+    $landed = Confirm-PasteLanded -WindowProcess $window -Sentinel $Task
+    if ($landed -eq 'landed') {
+        Write-Step "已确认正文落到窗口（回读到 $Task）"
+    } elseif ($landed -eq 'missing') {
+        Fail "回读目标窗口没有读到 $Task：按键没有落进窗口，未记账（人工确认后重派）" -Code 6
+    } else {
+        Write-Host "[hive-dispatch] 未校验：本窗口不支持回读，照常记账 —— 请人工确认正文是否落进窗口" -ForegroundColor Yellow
+    }
 
     # 7. 记账。派发已经发生，记账失败必须让人看见，不能悄悄吞掉。
     $mark = Invoke-Native -Exe $python -Arguments $markArgs
