@@ -1,0 +1,31 @@
+{
+  "task": "T-0179",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0179",
+  "base": "main",
+  "head": "be7da46c77f11681d1ed64ce29fe51657489f362",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-28T13:41:53+08:00",
+  "finished_at": "2026-10-28T13:41:53+08:00",
+  "duration_s": 0.7,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import pathlib; t=pathlib.Path('CHANGELOG.md').read_text(encoding='utf-8'); assert '0.2.1' in t, 'CHANGELOG 缺 0.2.1 段'; print('CHANGELOG OK')\"",
+      "code": 0,
+      "tail": [
+        "CHANGELOG OK"
+      ]
+    }
+  ],
+  "summary": "# T-0179 M路收口：合流 + CHANGELOG + 交付报告 + 版本决策 v0.5.0-rc1\n\n## 做了什么\n\n1. **合流**（task/T-0179 上四个独立 merge commit，各路保持独立提交）：\n   - `1b4d566` merge gitcode/main（带回 C/D/B4；唯一真冲突 `docs/功能对标/对标清单.json`，双侧从 #328 续编撞号）\n   - `17d1613` merge gitcode/task/T-0175（B3）、`40f588e` merge gitcode/task/T-0177（E）、`f3f5161` merge gitcode/task/T-0178（F，含 E 之上 F-08/F-09 登记）\n2. **对标清单编号统一**：B1 侧原 #329/#330/#331（模型列表解码/缓存/令牌计量折叠）与 gitcode 侧 B4 typert 簇的 #329-#331 撞号，重编为 **#349-#351**（#328 B2 两侧同源不冲突）；合并后 345 条 / max #351 / 无重复；历史跳号 #263-#268 维持不硬填；`说明` 里留痕。\n3. **CHANGELOG.md** 加 `[v0.5.0-rc1] — 2026-10-28` 段（Keep a Changelog：新增/修复/验证三节），数字锚定 `reports/` 基线 JSON 与 R177 报告（初刷 LH 2103/6 → E 修复后真红 3 → F 修后 run2 2085 passed/1 failed；LM 9433/23）。\n4. **docs/多平台差异清单.md** 追加「0.2.1-rc.3 对齐增量」段（A 结论/B 移植拒绝表/C 宿主面/D FreeBSD/E 三平台数字/F flaky 台账）。**数字按合并树核正**：C 路实为宿主面登记 §9 append +27 条（86→113）；D 路实为 16 文件对账、结论零同步（预制稿误写 15 文件/59 条起续编，已改）。\n5. **版本决策**：`v0.4.0-rc2 → v0.5.0-rc1`（minor 位）——B 路为上游 0.2.1 minor 特性移植（12 项落地），非 patch；tag 待 land 后打在 main 顶。\n6. **交付报告** `docs/功能对标/0.2.1-rc.3对齐_交付报告.md` 全稿（结论先行/增量摘要/移植拒绝表/三平台矩阵/flaky 取证/FreeBSD 同步/遗留 6 项/收口动作记录）。\n\n## 改了哪些文件（全部在卡面 paths 内）\n\n- `CHANGELOG.md`（改）\n- `docs/功能对标/对标清单.json`（三侧合并 + 重编）\n- `docs/多平台差异清单.md`（追加段）\n- `docs/功能对标/0.2.1-rc.3对齐_交付报告.md`（新建）\n\n## 跑了什么验证\n\n- 卡面 verify：首次 submit 因卡面 verify 写 `python`（fb98 无裸名 python）报 127 failed，已修卡面为 `python3`（lesson T-0114 同型，hive 仓提交 0e5212e）并 retry 重跑 → **CHANGELOG OK**（通过）。\n- 合并树冒烟（本机 fb98，LIGHT_MERGE=/tmp/duan-light-merge/light-merge）：\n  - B1 三 example（解码/缓存/令牌折叠）rc=0 全绿；\n  - E 修复现绿：`test_R20_词法边界综合` / `test_R72_C_推导式`；\n  - F 修复现绿：`test_R48_hooks三事件` / `test_字符串替换编辑器`；\n  - B3：`pytest tests/unit/test_子代理预设选择.py test_子代理活化.py test_工作区成员.py` → 22 passed；`examples/test_R175_B3复刻.light` 全绿。\n\n## 没做 / 风险\n\n- 未复跑三平台全量（E/F 已交基线，M 只做合并树冒烟；合流树 = B1+B3+B4 并集为首次同树，建议下轮门禁复刷一次全量）。\n- Linux 0.86 腿仍阻塞（E 路遗留）；agentE5钩子 1 条越界红待开卡（编译器 `__call__` 映射，light-merge 仓）；LM 21 条新增红待 LM 专项卡。\n- take 人工领取绕过 needs=windows 能力门（dispatch 才检查），属用户明确指令。\n- 首次 submit 失败后 worktree 被 submit 流程清理（未 --keep），已从 origin task/T-0179 @ be7da46 重建，内容零丢失。\n- 后续收尾（本卡 submit 后由总控/本机继续）：close T-0175/T-0177/T-0178 → `hive land T-0179 --apply` → main 打 tag `v0.5.0-rc1` → push 三远端（ff，不 force）。",
+  "error": "",
+  "declared_paths": [
+    "CHANGELOG.md",
+    "docs/"
+  ],
+  "changed_files": [],
+  "out_of_paths": []
+}
