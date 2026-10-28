@@ -1,0 +1,36 @@
+{
+  "task": "T-0189",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0189",
+  "base": "main",
+  "head": "5a96c6d2564a866267bc12aac6cad611b4c3064a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-29T07:35:05+08:00",
+  "finished_at": "2026-10-29T07:35:05+08:00",
+  "duration_s": 0.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_dashboard_dispatch_ui.py",
+      "code": 0,
+      "tail": [
+        "...........................                                              [100%]",
+        "27 passed in 13.00s"
+      ]
+    }
+  ],
+  "summary": "# T-0189 完工摘要：看板「复制派发指令」按钮 + dispatched 阶段列\n\n## 做了什么\n\n### 1. `dashboard/serve.py` —— 新增只读接口\n\n`GET /api/dispatch-prompt?task=T-0184&agent=trae-win[&format=markdown|json]`\n\n- 进程内渲染：`hive.parse_card()` 读卡 + `dispatch_prompt.render_dispatch_prompt()` 出文本，\n  **没有** `subprocess` 调 `hive.py`（否则一次 `git fetch` 就能拖死 HTTP 线程）；已用静态断言钉住；\n- 任务号严格 `^T-\\d{4}$`（比 `/api/push` 的 `TID_RE` 更严 —— 这里会把任务号拼进文件名，\n  放行 `../` 就是目录穿越）→ 否则 400；卡不存在 404；卡面坏掉（缺 frontmatter）400；\n  `agent` 沿用 `AGENT_NAME_RE`；`format` 只认 `markdown/json`；\n- 响应 `application/json; charset=utf-8`，body `{\"task\",\"format\",\"text\"}`，失败一律 `{\"error\":...}`，无 500 裸栈；\n- 顺带让 `/api/status` 接受 `hive status --json --board` 的 `{\"tasks\":[...],\"board\":{...}}` 形态\n  （裸数组行为完全不变），board 摘要才有服务端权威口径可透传。\n\n### 2. `dashboard/app.js` / `index.html` / `style.css`\n\n- 每张卡（含已完成/已关闭）都有「复制派发指令」按钮：`fetch` 只读接口 →\n  `navigator.clipboard.writeText`，失败回退隐藏 `textarea` + `document.execCommand(\"copy\")`\n  （HTTP 非安全上下文必走这条）；成功后按钮变「已复制」2 秒复原，**不刷新整页**；\n- 卡片/抽屉都渲染 `stage` 徽标（待分配/已推送/已领取/在跑/已完成/失败/冲突/挂起），\n  `dispatched` 卡额外挂「→ trae-win」，`dispatched_to` 两路来源都认（卡字段 or `stage === 'dispatched'`）；\n- 表头 meta 行显示 board 摘要「待分配 2 / 已推送 1 / 已领取 2 / 在跑 2 / 已完成 1」：\n  优先服务端 `board.counts`，其次按每张卡的 `stage` 现算，两者都没有（旧快照）→ 整条 `hidden`；\n- 复制按钮用 `stopImmediatePropagation`：卡片自己也挂了 click→开抽屉，两个监听在同一节点上，\n  `stopPropagation` 拦不住同节点的后一个。实测点复制后抽屉**没有**打开；\n- `style.css` 只新增 `.stage-badge` / `.act-copy` / `.board` 规则，配色全部复用既有 CSS 变量，\n  没动既有配色与布局变量。\n\n### 3. `dashboard/sample-status.json`\n\n8 张卡全部补 `stage` / `dispatched_to` / `dispatched_at`；新增两张：`T-0189`（dispatched → trae-win）\n与 `T-0190`（pending）。**这两张特意用真实存在的任务号** —— 否则 `--status sample-status.json`\n起来后点复制只会拿到「任务卡不存在」，演示等于假绿。\n\n### 4. `tests/test_dashboard_dispatch_ui.py`（新增，27 用例）\n\n三层：接口层（真起 `ThreadingHTTPServer`，覆盖 200/400/404、两种 format、坏卡、坏 agent、坏 format、\n`../` 穿越）、静态层（两条剪贴板路径、接口地址、徽标渲染、board 槽位、CSS 规则）、\n降级层（`normalize` 的 `|| ''` 兜底、`boardCounts` 的三级回落、`renderBoard` 的隐藏分支、\n`STAGE_LABEL[s] || s || ''`）。\n\n## verify\n\n```\n$ python -m pytest -q tests/test_dashboard_dispatch_ui.py\n...........................                                              [100%]\n27 passed in 10.98s\n```\n\n顺带回归相邻看板/派发用例（一起跑）：\n\n```\n$ python -m pytest -q tests/test_dashboard_cluster.py tests/test_dashboard_freshness.py \\\n    tests/test_dashboard_serve_encoding.py tests/test_dispatch_prompt.py \\\n    tests/test_dashboard_dispatch_ui.py\n...........................................................              [100%]\n59 passed in 21.69s\n```\n\n## 起真服务后的 curl 输出（前 10 行）\n\n```\n$ python serve.py --status sample-status.json --port 8799\n$ curl -s http://127.0.0.1:8799/api/status | head -3\n[{\"id\": \"T-0101\", \"state\": \"running\", \"stage\": \"running\", \"dispatched_to\": \"\", \"dispatched_at\": \"\", \"owner\": \"fb88-dsh\", ...},\n {\"id\": \"T-0102\", \"state\": \"running\", \"stage\": \"running\", ...},\n {\"id\": \"T-0103\", \"state\": \"assigned\", \"stage\": \"claimed\", ...}]\n\n$ curl -s \"http://127.0.0.1:8799/api/dispatch-prompt?task=T-0187\" | head -10\n{\"task\": \"T-0187\", \"format\": \"markdown\", \"text\": \"请领取任务 T-0187。\\n任务摘要：派发流水线｜Windows GUI 自动派发脚本\n（PowerShell + AutoHotkey）。第三层要省掉「人工粘贴」：Hive 生成指令 → 脚本切窗口 → 粘贴 → 回车 → 回 Hive\n标记已推送。...\\n执行契约：\\n- 允许修改路径：windows/dispatch-agent.ps1、windows/dispatch-agent.ahk、\nwindows/dispatch-agents.sample.json、tests/test_dispatch_script_static.py\\n- 预期输出：python -m pytest -q\ntests/test_dispatch_script_static.py\\n- 失败策略：180 分钟内未完成即放弃；失败时把卡住的位置写进\n.hive/summary.md 并回 hive_submit，不要硬凑\\n- 禁止行为：不修改 hive.py / mcp_server.py / dashboard/ /\ndispatch_prompt.py（T-0184 / T-0188 的路径）；...\\n领取方式：调用 MCP 工具 hive_claim，参数 task_id=T-0187\\n\n完成后调用 hive_submit 提交。\"}\n```\n\n## 浏览器里真点了一次（headless Chromium + Playwright，非 mock）\n\n起 `serve.py --status sample-status.json`，打开看板，点 `T-0189` 卡的「复制派发指令」：\n\n```json\n{\n  \"board_summary\": \"待分配 2 / 已推送 1 / 已领取 2 / 在跑 2 / 已完成 1\",\n  \"dispatched_card_badges\": [\"已推送\", \"→ trae-win\"],\n  \"button_before\": \"复制派发指令\",\n  \"button_after\": \"已复制\",\n  \"clipboard_head\": [\"请领取任务 T-0189。\", \"任务摘要：派发流水线｜看板：复制派发指令按钮 + dispatched 列。...\", \"执行契约：\"],\n  \"clipboard_has_hive_claim\": true,\n  \"clipboard_has_paths\": true,\n  \"drawer_opened\": false,\n  \"button_restored\": \"复制派发指令\",\n  \"drawer_clip_has_hive_claim\": true,\n  \"old_board_hidden\": true,\n  \"old_badge_count\": 0,\n  \"old_body_has_undefined\": false\n}\n```\n\n- 剪贴板里真拿到含 `hive_claim` 与 `dashboard/app.js` 的全文；\n- 点复制**没有**顺带打开详情抽屉（`drawer_opened: false`），说明 stopImmediatePropagation 生效；\n- 2 秒后按钮自己复原成「复制派发指令」，页面没重载；\n- 换一份没有 `stage` / `board` 的旧快照：board 摘要整条隐藏、`.stage-badge` 数量 0、\n  整页文本里没有 `undefined`（旧看板行为不变）。\n\n截图：`C:\\Users\\skywalk\\AppData\\Local\\Temp\\t0189\\board.png`（未入库）。\n\n## 改动文件（全部在 paths 内）\n\n```\ndashboard/serve.py             +80\ndashboard/app.js              +209\ndashboard/style.css            +30\ndashboard/index.html            +2\ndashboard/sample-status.json   ±14\ntests/test_dashboard_dispatch_ui.py  （新增 27 用例）\n```\n\n## 一次假红的原因（已排除，不影响本卡结论）\n\n第一次 `hive submit` 报 `verify 未通过`，尾巴是：\n\n```\n[safe-delete][SAFE_DELETE_FAIL_CLOSED] {\"target\": \"...\\\\T-0189\\\\.hive\\\\pt\", \"reason\": \"trash-failed\"}\n26 passed, 1 error in 20.65s\n```\n\n不是用例的问题：我本地预跑时用 `--basetemp=.hive/pt` 在 worktree 里留下了 `.hive/pt`，\nsubmit 复用同一路径时 pytest 要先删旧 basetemp，被沙箱 safe-delete 守卫拦住 → setup error。\n**教训：submit 的 basetemp 必须每次用新目录**，不能复用上一次的。\n重跑时改用新目录 `.hive/pt-r2`，27 用例全绿。\n\n## 顺带发现（不在本卡范围，未改）\n\n`style.css` 的 `.ci-strip` 用的是 `var(--surface, #1e2230)` / `var(--border, ...)` /\n`var(--text-2, ...)`，而本文件的变量叫 `--panel` / `--border` / `--text`，\n`--surface` 与 `--text-2` 根本不存在 → 浅色主题下 CI 条落进深色兜底值，\n看板顶部会出现一条 18px 的深色空条（截图里能看到）。属既有缺陷（与 T-0189 无关），\n按「不改动既有配色与布局变量」的红线**没有**动它，建议另开卡统一变量命名。",
+  "error": "",
+  "declared_paths": [
+    "dashboard/app.js",
+    "dashboard/index.html",
+    "dashboard/style.css",
+    "dashboard/serve.py",
+    "dashboard/sample-status.json",
+    "tests/test_dashboard_dispatch_ui.py"
+  ],
+  "changed_files": [],
+  "out_of_paths": []
+}
