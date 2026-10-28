@@ -48,7 +48,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.9.16"
+VERSION = "0.9.17"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 DEFAULT_MAX_PER_REPO = 1
@@ -2732,7 +2732,7 @@ class Worker:
             log(f"{tid} 状态推送失败（忽略）: {e}")
 
     def _push_http(self, payload: dict) -> None:
-        """HTTP 加速通道：仅当配了 HIVE_PUSH_URL 才推（如 http://host:8791/api/push）。
+        """HTTP 加速通道：仅当配了 HIVE_PUSH_URL 才推（如 http://host:8787/api/push）。
 
         跨机 agent 未必能访问看板主机，所以这是「能连就更快」的补充通道；
         失败完全不影响 git 主通道的结果。
@@ -3567,9 +3567,9 @@ def cmd_work(args) -> None:
 #
 # 想关掉：HIVE_DASH_AUTOSTART=0
 # 想调探测频率（秒）：HIVE_DASH_AUTOSTART_TTL（默认 300，避免反复 spawn）
-# 想换端口：HIVE_DASHBOARD_PORT（默认 8791）
+# 想换端口：HIVE_DASHBOARD_PORT（默认 8787，与 scripts/ 各脚本、serve.py 同一来源）
 # --------------------------------------------------------------------------- #
-DASH_DEFAULT_PORT = 8791
+DASH_DEFAULT_PORT = 8787
 DASH_AUTOSTART_SKIP = {"dash", "dashboard", "init"}
 
 
@@ -3616,6 +3616,8 @@ def _dashboard_run_script(action: str, port: int | None = None,
         return 1
     env = dict(os.environ)
     env["PORT"] = str(port or dashboard_port())
+    # 两个名字都传：脚本侧以 HIVE_DASHBOARD_PORT 为唯一来源，PORT 是历史兼容。
+    env["HIVE_DASHBOARD_PORT"] = env["PORT"]
     if interval:
         env["INTERVAL"] = str(interval)
     if script.suffix == ".cmd":
@@ -3636,6 +3638,7 @@ def _dashboard_spawn(port: int | None = None, interval: int | None = None) -> bo
         return False
     env = dict(os.environ)
     env["PORT"] = str(port or dashboard_port())
+    env["HIVE_DASHBOARD_PORT"] = env["PORT"]
     if interval:
         env["INTERVAL"] = str(interval)
     if script.suffix == ".cmd":
@@ -3692,7 +3695,7 @@ def _dashboard_autostart(args) -> None:
     """挂在 main() 入口：任何子命令都顺手把看板兜住，失败绝不影响主流程。"""
     if os.environ.get("HIVE_DASH_AUTOSTART", "1").lower() in ("0", "false", "no", "off"):
         return
-    # 测试期间不要偷偷拉起后台服务：既污染环境，也可能占住 8791 端口。
+    # 测试期间不要偷偷拉起后台服务：既污染环境，也可能占住 8787 端口。
     if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("HIVE_TESTING"):
         return
     name = getattr(getattr(args, "func", None), "__name__", "")
@@ -3881,7 +3884,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="看板服务：ensure=没起就起（默认）/ start / stop / restart / status / url")
     s.add_argument("action", nargs="?", default="ensure",
                    choices=["ensure", "start", "stop", "restart", "status", "url"])
-    s.add_argument("--port", type=int, default=None, help="覆盖端口（默认 $HIVE_DASHBOARD_PORT 或 8791）")
+    s.add_argument("--port", type=int, default=None, help="覆盖端口（默认 $HIVE_DASHBOARD_PORT 或 8787）")
     s.add_argument("--interval", type=int, default=None, help="状态刷新间隔秒数")
     s.add_argument("--wait", type=float, default=5.0, help="ensure 时最多等多久就绪（秒）")
     s.set_defaults(func=cmd_dash)

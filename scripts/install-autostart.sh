@@ -5,7 +5,7 @@
 #   scripts/install-autostart.sh                # 按当前系统安装
 #   scripts/install-autostart.sh --dry-run      # 只打印将要做的事，不落盘
 #   scripts/install-autostart.sh --uninstall    # 卸载自启
-#   PORT=8791 INTERVAL=20 scripts/install-autostart.sh
+#   PORT=8787 INTERVAL=20 scripts/install-autostart.sh   # 端口默认取 HIVE_DASHBOARD_PORT，再退回 8787
 #
 # 各系统采用的方式（都是该系统下"成熟服务"的常规做法）：
 #   Linux   + systemd : ~/.config/systemd/user/hive-dashboard.service + systemctl --user enable
@@ -26,7 +26,7 @@ set -u
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SERVE="$DIR/scripts/serve-dashboard.sh"
-PORT="${PORT:-8791}"
+PORT="${PORT:-${HIVE_DASHBOARD_PORT:-8787}}"
 INTERVAL="${INTERVAL:-20}"
 STATE_DIR="${HIVE_STATE:-$HOME/.hive}"
 LOG_DIR="$STATE_DIR/logs"
@@ -214,7 +214,7 @@ desc="蜂巢 Hive 任务看板"
 load_rc_config $name
 
 : ${hive_dashboard_enable:="NO"}
-: ${hive_dashboard_port:="8791"}
+: ${hive_dashboard_port:="8787"}
 : ${hive_dashboard_interval:="20"}
 : ${hive_dashboard_dir:="__DIR__"}
 : ${hive_dashboard_user:="__USER__"}

@@ -11,19 +11,27 @@
 #   scripts/dashboard-service.sh status     # 没在跑时退出码 1（便于脚本判断）
 #
 # 可调环境变量：
-#   PORT=8791        监听端口（默认 8791）
+#   PORT=8787        监听端口（默认取 HIVE_DASHBOARD_PORT，再退回 8787）
 #   INTERVAL=20      状态刷新间隔秒数（默认 20，交给 serve-dashboard.sh 的循环）
 #   HIVE_STATE=~/.hive   PID 与日志目录（默认 ~/.hive）
 #
+# 端口只有一个来源：HIVE_DASHBOARD_PORT（hive.py 的 DASH_DEFAULT_PORT 也是 8787）。
+# 历史上这里默认 8791、而 serve.py/serve-dashboard.sh 默认 8787，导致「手动跑在
+# 8787、服务起在 8791」，文档全写 8787，看起来很像是端口被谁改了。现已统一。
+#
+# ⚠ 改 serve-dashboard.sh 必须 stop → 改 → start：shell 是按字节偏移边读边执行的，
+#   原地改一个正在跑的脚本会让它后面的解析整体错位（实测出现过 `esh_ci: not found`
+#   和刷新循环空转、日志暴涨几百 MB）。
+#
 # 开机自启（用户级，无需 root）：
 #   ( crontab -l 2>/dev/null | grep -v dashboard-service; \
-#     echo "@reboot /bin/sh -c 'sleep 15; PORT=8791 $DIR/scripts/dashboard-service.sh start'" ) | crontab -
+#     echo "@reboot /bin/sh -c 'sleep 15; PORT=8787 $DIR/scripts/dashboard-service.sh start'" ) | crontab -
 set -u
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SERVE="$DIR/scripts/serve-dashboard.sh"
 
-PORT="${PORT:-8791}"
+PORT="${PORT:-${HIVE_DASHBOARD_PORT:-8787}}"
 INTERVAL="${INTERVAL:-20}"
 WAIT_S="${WAIT_S:-30}"   # 等 serve.py 就绪的秒数：大仓首次 `hive status` 可能要几十秒
 STATE_DIR="${HIVE_STATE:-$HOME/.hive}"
@@ -67,14 +75,22 @@ do_start() {
         return 1
     fi
     mkdir -p "$RUN_DIR" "$LOG_DIR"
+    # 日志轮转：只在启动时做（运行中 mv 会和正在写的进程抢）。
+    # 刷新循环一旦出问题会以每秒上百行的速度灌日志，实测到过 338MB 没人发现。
+    if [ -f "$LOG_FILE" ]; then
+        size="$(wc -c <"$LOG_FILE" 2>/dev/null | tr -d ' ')"
+        if [ "${size:-0}" -gt 10485760 ]; then
+            mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
+        fi
+    fi
     cd "$DIR" || return 1
     # setsid 不是 POSIX：Linux 有，macOS/FreeBSD 默认没有。有就用来脱离会话
     # （停止时可以整组回收），没有就退回 nohup，靠 stop 里的兜底清理子进程。
     if command -v setsid >/dev/null 2>&1; then
-        PORT="$PORT" INTERVAL="$INTERVAL" \
+        PORT="$PORT" HIVE_DASHBOARD_PORT="$PORT" INTERVAL="$INTERVAL" \
             setsid nohup "$SERVE" >>"$LOG_FILE" 2>&1 &
     else
-        PORT="$PORT" INTERVAL="$INTERVAL" \
+        PORT="$PORT" HIVE_DASHBOARD_PORT="$PORT" INTERVAL="$INTERVAL" \
             nohup "$SERVE" >>"$LOG_FILE" 2>&1 &
     fi
     echo $! >"$PID_FILE"

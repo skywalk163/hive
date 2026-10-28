@@ -2,7 +2,7 @@
 #
 # 用法（PowerShell）：
 #   powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1
-#   powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1 -Port 8791
+#   powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1 -Port 8787
 #   powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1 -Uninstall
 #
 # 采用方式：计划任务「用户登录时」触发（schtasks /sc onlogon）。
@@ -11,12 +11,18 @@
 #     脚本 -RunAsSystem 参数走这条路（会申请提权）。
 
 param(
-    [int]$Port = 8791,
+    [int]$Port = 8787,
     [int]$Interval = 20,
     [switch]$Uninstall,
     [switch]$RunAsSystem,
     [switch]$NoStart
 )
+
+# 端口来源：-Port 优先，其次 $env:HIVE_DASHBOARD_PORT，最后上面 param 的默认 8787。
+# 三者与 hive.py / dashboard-service.cmd / *.sh 保持同一个默认值，别再各写各的。
+if (-not $PSBoundParameters.ContainsKey('Port') -and $env:HIVE_DASHBOARD_PORT) {
+    $Port = [int]$env:HIVE_DASHBOARD_PORT
+}
 
 $ErrorActionPreference = 'Stop'
 

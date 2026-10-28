@@ -108,6 +108,18 @@ def _ts(s):
         return None
 
 
+def write_status_atomic(status_path, text):
+    """原子替换写状态文件（T-0191 §4）。
+
+    Path.write_text 直写主文件时，另一个读者正好读到一半就拿到半截 JSON
+    → /api/status 500。先写 tmp 再 os.replace（同目录 rename，POSIX 上原子），
+    主文件任何时刻都是完整状态。refresh_loop 与 _refresh_status 共用。
+    """
+    tmp = Path(str(status_path) + ".tmp.py")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, status_path)
+
+
 def refresh_loop(status_path, interval):
     """「辅」通道：定期跑 `hive status --json` 重生成状态文件。
 
@@ -122,7 +134,7 @@ def refresh_loop(status_path, interval):
                                   encoding="utf-8", env=PYTHON_ENV,
                                   timeout=HIVE_OP_TIMEOUT)
             if proc.returncode == 0 and proc.stdout.strip():
-                Path(status_path).write_text(proc.stdout, encoding="utf-8")
+                write_status_atomic(status_path, proc.stdout)
             else:
                 # 不能全静默：Windows 上 cp936 曾让这里连续失败而没人发现，
                 # 表现就是「看板一直不刷新」。留一行证据，保留上一份状态。
@@ -155,9 +167,10 @@ def build_handler(status_path):
             if self.command != "HEAD":
                 self.wfile.write(body)
 
-        def _send_json(self, code, payload):
+        def _send_json(self, code, payload, extra_headers=None):
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self._send(code, body, "application/json; charset=utf-8")
+            self._send(code, body, "application/json; charset=utf-8",
+                       extra_headers=extra_headers)
 
         def _send_file(self, filename, ctype):
             path = BASE_DIR / filename
@@ -379,7 +392,19 @@ def build_handler(status_path):
                 self._send_json(500, {"error": "状态文件根节点应为数组"})
                 return
             self._merge_pushed(data)
-            self._send_json(200, data)
+            self._send_json(200, data, extra_headers=self._snapshot_headers())
+
+        def _snapshot_headers(self):
+            """快照生成时刻（文件 mtime，epoch 秒）。
+
+            为什么需要它：刷新循环一旦停摆，/api/status 仍然 200，页面照旧渲染一份
+            几小时前的数据，人却以为它是实时的（2026-10-28 就因此误判「退回没生效」）。
+            把 mtime 交给前端，页面才能自己说「这份数据是几分钟前的」。
+            """
+            try:
+                return {"X-Snapshot-Mtime": "%d" % int(os.stat(status_path).st_mtime)}
+            except OSError:
+                return {}
 
         def _merge_pushed(self, rows):
             """把 agent HTTP 直推的进度覆盖到快照行上（HTTP 比 git 通道更快）。
@@ -537,7 +562,7 @@ def build_handler(status_path):
                     capture_output=True, text=True, encoding="utf-8",
                     env=PYTHON_ENV, timeout=HIVE_OP_TIMEOUT)
                 if proc.returncode == 0 and proc.stdout.strip():
-                    Path(status_path).write_text(proc.stdout, encoding="utf-8")
+                    write_status_atomic(status_path, proc.stdout)
                 else:
                     sys.stderr.write("[hive-dashboard] 状态重生成失败 rc=%s\n"
                                      % proc.returncode)

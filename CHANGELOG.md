@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.9.17 — 2026-10-28
+
+### Changed
+
+- **看板端口统一到 8787，并且只有一个来源 `HIVE_DASHBOARD_PORT`**。
+  此前 `serve.py` / `serve-dashboard.sh` 默认 8787，而 `dashboard-service.sh`、`hive.py`
+  的按需自愈、各平台自启安装器默认 8791 —— 于是「手动跑在 8787、服务起在 8791」，
+  文档（README / 操作手册 / dashboard/README）全篇写 8787，实际访问却要换端口，
+  看起来像端口被人偷偷改了。现在所有入口默认 8787，`PORT` 保留为历史覆盖项，
+  脚本侧一律 `${PORT:-${HIVE_DASHBOARD_PORT:-8787}}`，`hive.py` 拉起时两个名字都传。
+- 文档补一句「端口来源」与「改看板脚本必须 stop→改→start」：shell 按字节偏移边读边执行，
+  热改正在运行的脚本会让解析错位（实测出现 `esh_ci: not found` 与刷新循环空转）。
+
+### Added
+
+- **`/api/status` 返回 `X-Snapshot-Mtime`**（状态文件 mtime，epoch 秒），前端据此显示
+  「数据源：/api/status（快照 3 分钟前）」，超过 10 分钟加 ⚠ 提示。
+  刷新循环停摆时 `/api/status` 依旧 200，页面会安安静静渲染几小时前的数据——
+  2026-10-28 就因为一份 2h43m 的旧快照、外加前端 `isStale()` 用过期租约判异常，
+  让人以为「手工退回没生效」。
+
+### Fixed
+
+- **刷新循环会往日志里灌垃圾**：`refresh()` 用固定的 `status.json.tmp`，多个实例并存时
+  互相踩——别人写完、这边失败分支 `rm` 掉、再 `mv` 就报 `stat 失败: 没有那个文件或目录`，
+  实测灌到 **338MB**。改成 `status.json.tmp.$$` 各写各的，`.gitignore` 补 `tmp*` 通配。
+- **日志不轮转**：`dashboard-service.sh start` 时若 `dashboard.log` 超过 10MB，
+  先 `mv` 成 `.log.1`（只在启动时做，运行中轮转会和正在写的进程抢）。
+
 ## 0.9.16 — 2026-10-28
 
 ### Changed

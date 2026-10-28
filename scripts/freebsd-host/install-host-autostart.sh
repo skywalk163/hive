@@ -20,7 +20,7 @@ RCD_DST="/usr/local/etc/rc.d/hive_dashboard"
 CHROOT_DIR="${HIVE_CHROOT:-/compat/ubuntu}"
 HIVE_DIR="${HIVE_DIR:-/home/skywalk/dswork/hive}"
 HIVE_USER="${HIVE_USER:-skywalk}"
-PORT="${PORT:-8791}"
+PORT="${PORT:-${HIVE_DASHBOARD_PORT:-8787}}"
 INTERVAL="${INTERVAL:-20}"
 
 DRY=0

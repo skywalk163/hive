@@ -12,7 +12,10 @@ HIVE="${HIVE_DIR:-$DIR}"
 # 关键：下面 refresh() 会调 `hive status`，而 hive 入口有「按需自愈」——
 # 不关掉的话，看板刷新自己会再拉起一个看板（端口打架、进程越滚越多）。
 export HIVE_DASH_AUTOSTART=0
-PORT="${PORT:-8787}"
+# 端口来源只有一个：PORT（服务脚本会传下来），其次 HIVE_DASHBOARD_PORT，最后 8787。
+# 8787 同时也是 serve.py --port 与 hive.py DASH_DEFAULT_PORT 的默认值 —— 三处必须一致，
+# 否则会出现「手动跑 8787、服务起 8791」这种看起来像"端口被人改了"的错觉。
+PORT="${PORT:-${HIVE_DASHBOARD_PORT:-8787}}"
 INTERVAL="${INTERVAL:-20}"
 DASH="$DIR/dashboard"
 STATUS="$DASH/status.json"
@@ -29,10 +32,14 @@ fi
 mkdir -p "$DASH"
 
 refresh() {
-    if python3 "$HIVE/hive.py" --dir "$HIVE" status --json >"$STATUS.tmp" 2>"$DASH/status.err"; then
-        mv "$STATUS.tmp" "$STATUS"
+    # tmp 名带 $$：多个实例（历史上真出现过）共用一个 status.json.tmp 时会互相踩——
+    # A 写完、B 的失败分支把它 rm 掉、A 再去 mv 就报「stat 失败: 没有那个文件或目录」，
+    # 这种错误会以每秒上百行的速度灌进日志（实测灌到 338MB）。各写各的 tmp 就没有竞争。
+    tmp="$STATUS.tmp.$$"
+    if python3 "$HIVE/hive.py" --dir "$HIVE" status --json >"$tmp" 2>"$DASH/status.err"; then
+        mv -f "$tmp" "$STATUS" 2>/dev/null || rm -f "$tmp"
     else
-        rm -f "$STATUS.tmp"
+        rm -f "$tmp"
     fi
 }
 

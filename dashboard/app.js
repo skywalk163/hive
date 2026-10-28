@@ -119,6 +119,7 @@
     error: '',
     lastUpdated: null,
     source: '/api/status',
+    snapshotAt: null,   // 快照生成时刻（毫秒），来自 X-Snapshot-Mtime；null = 服务端没给
     inflight: false
   };
 
@@ -559,10 +560,39 @@
     el.stats.innerHTML = html;
   }
 
+  /** 读服务端给的快照时刻（秒 → 毫秒）。拿不到返回 null，不影响主流程。 */
+  function headerTime(r) {
+    try {
+      var v = r && r.headers && r.headers.get('X-Snapshot-Mtime');
+      if (!v) return null;
+      var sec = Number(v);
+      return (isFinite(sec) && sec > 0) ? sec * 1000 : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * 数据源文案 = 来源 + 快照有多旧。
+   *
+   * 刷新循环停摆时 /api/status 依旧 200，页面会安安静静地渲染一份几小时前的数据，
+   * 看的人却以为它是实时的（2026-10-28 就因为一份 2h43m 的旧快照误判"退回没生效"）。
+   * 所以这里把快照时刻显式摆出来，超过 10 分钟再给个警示。
+   */
+  function sourceLabel() {
+    var s = state.source;
+    if (!state.snapshotAt) return s;
+    var ageMin = (Date.now() - state.snapshotAt) / 60000;
+    var txt = relTime(state.snapshotAt);
+    if (txt) s += '（快照 ' + txt + '）';
+    if (ageMin >= 10) s = '⚠ ' + s + ' —— 快照可能已停更，检查看板服务';
+    return s;
+  }
+
   function renderMeta() {
     if (!state.lastUpdated) { el.meta.textContent = '最后更新：—'; return; }
     el.meta.textContent = '最后更新 ' + relTime(state.lastUpdated) + '（' + dtf.format(state.lastUpdated) + '）';
-    el.source.textContent = '数据源：' + state.source;
+    el.source.textContent = '数据源：' + sourceLabel();
   }
 
   function renderFilters() {
@@ -707,6 +737,8 @@
 
     fetch('/api/status', { cache: 'no-store', headers: { Accept: 'application/json' } })
       .then(function (r) {
+        // 快照时刻（服务端文件 mtime）。拿不到就保持 null，只影响标签文案。
+        state.snapshotAt = headerTime(r);
         if (!r.ok) {
           return r.json().catch(function () { return null; }).then(function (body) {
             throw new Error((body && body.error) ? body.error : ('HTTP ' + r.status));
@@ -737,6 +769,7 @@
         state.autoRefresh = false;      // 手动载入后停掉自动刷新，避免覆盖
         el.auto.checked = false;
         storeSet(STORE_AUTO, 'off');
+        state.snapshotAt = null;        // 本地文件没有"快照时刻"，别拿上次 HTTP 的冒充
         setTasks(data, file.name);
       } catch (e) {
         state.error = '本地文件解析失败：' + ((e && e.message) ? e.message : e);

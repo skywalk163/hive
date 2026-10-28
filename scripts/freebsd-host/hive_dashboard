@@ -19,7 +19,7 @@
 #   hive_dashboard_chroot    兼容层根目录（默认 /compat/ubuntu）
 #   hive_dashboard_dir       看板脚本所在仓库路径（默认 /home/skywalk/dswork/hive）
 #   hive_dashboard_user      以哪个用户跑（默认 skywalk）
-#   hive_dashboard_port      监听端口（默认 8791）
+#   hive_dashboard_port      监听端口（默认 8787，与全仓其它入口一致）
 #   hive_dashboard_interval  状态刷新间隔秒数（默认 20）
 #
 # 说明：这里不接 daemon(8) —— dashboard-service.sh 自己会 setsid/nohup 脱离会话，
@@ -42,7 +42,7 @@ load_rc_config $name
 : ${hive_dashboard_chroot:="/compat/ubuntu"}
 : ${hive_dashboard_dir:="/home/skywalk/dswork/hive"}
 : ${hive_dashboard_user:="skywalk"}
-: ${hive_dashboard_port:="8791"}
+: ${hive_dashboard_port:="8787"}
 : ${hive_dashboard_interval:="20"}
 
 start_cmd="hive_dashboard_start"
