@@ -19,7 +19,7 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 BASE_DIR = Path(__file__).resolve().parent
 HIVE_ROOT = BASE_DIR.parent  # dashboard 的上一级就是 hive 仓库根
@@ -72,6 +72,14 @@ API_CONFIG = "/api/config"
 API_TASK = "/api/task"
 API_PUSH = "/api/push"
 API_CLUSTER = "/api/cluster"
+API_DISPATCH_PROMPT = "/api/dispatch-prompt"
+
+# 任务卡目录：默认就是协调仓根的 tasks/；测试可以替换这个模块级变量指向临时目录。
+TASKS_DIR = HIVE_ROOT / "tasks"
+# 派发接口的任务号必须严格是 T-四位数字：这里比 /api/push 的 TID_RE 更严，
+# 因为接口会把任务号直接拼进文件名（TID_RE 允许 `../`，拼路径就成了穿越口子）。
+DISPATCH_TID_RE = re.compile(r"^T-\d{4}$")
+DISPATCH_FORMATS = ("markdown", "json")
 CONFIG_PATH = BASE_DIR / "settings.json"
 NO_STORE = "no-store, no-cache, must-revalidate, max-age=0"
 
@@ -253,6 +261,23 @@ def refresh_loop(status_path, interval):
         time.sleep(max(5, int(interval)))
 
 
+def load_card_file(path):
+    """读一张任务卡 → (card_dict, body)。
+
+    复用 `hive.parse_card`（frontmatter 的唯一权威解析器），**不 shell 出去调 CLI**：
+    `hive prompt` 会先 `git fetch`，一次网络等待就能把 HTTP 线程拖死。
+    """
+    from hive import parse_card          # 延迟导入：hive.py 很大，只在真要用时付代价
+    return parse_card(Path(path))
+
+
+def render_dispatch(card, agent, fmt, body):
+    """调 dispatch_prompt 渲染派发指令（纯函数，无副作用）。"""
+    import dispatch_prompt
+    return dispatch_prompt.render_dispatch_prompt(
+        card, agent=agent or None, output_format=fmt, body=body)
+
+
 def build_handler(status_path):
     """用闭包把状态文件路径注入请求处理器（避免全局变量）。"""
 
@@ -299,6 +324,9 @@ def build_handler(status_path):
                 return
             if path == API_CLUSTER:
                 self.serve_cluster_get()
+                return
+            if path == API_DISPATCH_PROMPT:
+                self.serve_dispatch_prompt()
                 return
             entry = STATIC_FILES.get(path)
             if entry is None:
@@ -495,6 +523,40 @@ def build_handler(status_path):
                 dashboard = self.load_dashboard_config()
             self._send_json(200, {"system": self.system_info(), "dashboard": dashboard})
 
+        # ---- /api/dispatch-prompt：只读渲染「可粘贴的派发指令」 ----
+        def serve_dispatch_prompt(self):
+            """把一张卡渲染成派发指令交给前端复制。
+
+            纯只读：不领卡、不改状态、不写盘。所有失败都回 JSON（400/404/500），
+            绝不把异常栈直接甩给浏览器。
+            """
+            query = parse_qs(urlparse(self.path).query)
+            tid = (query.get("task") or [""])[0].strip()
+            if not DISPATCH_TID_RE.match(tid):
+                self._send_json(400, {"error": "task 必须形如 T-0001，收到: %r" % tid})
+                return
+            agent = (query.get("agent") or [""])[0].strip()
+            if agent and not AGENT_NAME_RE.match(agent):
+                self._send_json(400, {"error": "agent 不合法: %s" % agent})
+                return
+            fmt = ((query.get("format") or ["markdown"])[0].strip().lower()
+                   or "markdown")
+            if fmt not in DISPATCH_FORMATS:
+                self._send_json(400, {"error": "format 只支持 %s，收到: %s"
+                                             % ("/".join(DISPATCH_FORMATS), fmt)})
+                return
+            card_path = Path(TASKS_DIR) / ("%s.md" % tid)
+            if not card_path.is_file():
+                self._send_json(404, {"error": "任务卡不存在: %s" % tid})
+                return
+            try:
+                card, body = load_card_file(card_path)
+                text = render_dispatch(card, agent, fmt, body)
+            except Exception as exc:  # noqa: BLE001 —— 卡面坏掉也是 400，不是 500 裸栈
+                self._send_json(400, {"error": "渲染失败: %s" % exc})
+                return
+            self._send_json(200, {"task": tid, "format": fmt, "text": text})
+
         # ---- /api/status：每次请求都重新读盘 ----
         def serve_status(self):
             try:
@@ -510,8 +572,22 @@ def build_handler(status_path):
             except ValueError as exc:
                 self._send_json(500, {"error": "状态文件不是合法 JSON: %s" % exc})
                 return
-            if not isinstance(data, list):
+            if not isinstance(data, (list, dict)):
                 self._send_json(500, {"error": "状态文件根节点应为数组"})
+                return
+            if isinstance(data, dict):
+                # `hive status --json --board` 的形态：{"tasks": [...], "board": {...}}。
+                # 只透传这两个键，其余键不猜也不编。
+                tasks = data.get("tasks")
+                if not isinstance(tasks, list):
+                    self._send_json(500, {"error": "状态文件对象缺少 tasks 数组"})
+                    return
+                self._merge_pushed(tasks)
+                self._merge_cluster(tasks)
+                payload = {"tasks": tasks}
+                if isinstance(data.get("board"), dict):
+                    payload["board"] = data["board"]
+                self._send_json(200, payload, extra_headers=self._snapshot_headers())
                 return
             self._merge_pushed(data)
             self._merge_cluster(data)
