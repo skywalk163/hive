@@ -1,0 +1,26 @@
+{
+  "name": "codearts-win11",
+  "host": "win11",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify"
+  ],
+  "capabilities": [
+    "windows",
+    "gui",
+    "linux"
+  ],
+  "repos": {
+    "hive": "C:/codeartswork/hive",
+    "light": "C:/codeartswork/light",
+    "lightmem": "C:/codeartswork/lightmem"
+  },
+  "launch": "",
+  "worktrees": "C:/Users/PCbeta Tester/.hive/wt/codearts-win11",
+  "max_concurrency": 1,
+  "created": "2026-10-28T21:23:04+08:00"
+}
