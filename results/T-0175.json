@@ -1,0 +1,52 @@
+{
+  "task": "T-0175",
+  "agent": "codearts-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0175",
+  "base": "main",
+  "head": "7a4ca74fd89a51a8eb67356af8c8ef222f6c2fbc",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-27T20:02:21+08:00",
+  "finished_at": "2026-10-28T00:21:30+08:00",
+  "duration_s": 15549.7,
+  "verify": [
+    {
+      "cmd": "set PYTEST_ADDOPTS=--basetemp=.hive/pt -p no:cacheprovider && C:\\Python314\\python.exe -m pytest tests/unit/test_子代理预设选择.py tests/unit/test_子代理活化.py tests/unit/test_工作区成员.py tests/test_回归.py -q --timeout=120 -k \"子代理预设 or 子代理活化 or 工作区成员 or R175\"",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......................                                                  [100%]",
+        "23 passed in 29.54s"
+      ]
+    }
+  ],
+  "summary": "# T-0175 B3 路纯逻辑复刻（codearts-win）\n\n## 做了什么\n\n按上游 `G:/github/deepseek-harness` 的 `dsh-v0.2.0-rc.2..dsh-v0.2.1-rc.3` 逐包定级：B3 负责的\n11 个包（subagent / extensions / interaction / mcp / guard / feedback / todo / plan / spill /\nstorage / workspace）里，**真正的纯逻辑增量只有 3 处**，其余是 `invariant.ts` 批量退场、\n`locale/*.json` + README i18n、以及注释级改动。\n\n移植（3 个新模块 + 单测 + examples 判据）：\n\n| # | 上游 | 光明模块 | 单测 | 判据 |\n|---|---|---|---|---|\n| 1 | `subagent/tool-subagent/src/preset-selection.ts`（+98） | `src/子代理预设选择.light`（175 行） | `tests/unit/test_子代理预设选择.py`（12 例） | §A 11 判据 |\n| 2 | `subagent/subagent/src/activation.ts`（+186） | `src/子代理活化.light`（126 行） | `tests/unit/test_子代理活化.py`（5 例） | §B 15 判据 |\n| 3 | `workspace/workspace/src/entity.ts`（+9/−8） | `src/工作区成员.light`（66 行） | `tests/unit/test_工作区成员.py`（5 例） | §C 8 判据 |\n\n端到端判据：`examples/test_R175_B3复刻.light`（85 行，§A/§B/§C 合计 34 条断言）。\n\n**对标清单新增编号：#346（预设选择）、#347（活化）、#348（工作区成员）** —— 按清单实际末号\n#345 续编（#327 已被 R126 占用）。\n\n语言缺陷账新增：**L-183**（`记` 已不是定义关键字，但名称错误的「参考示例」仍写 `记`；\n`src/计划模式.light` 整篇用 `记` 且无任何门禁覆盖 → 静默失效的存量模块）、\n**L-184**（无 `集合` 类型 / 无对象身份 `===`，本轮三处复刻点各自的绕行口径）。\n\n登记为「不移植」（有据，不硬搬）：\n- `invariant.ts` 批量删除（interaction/commands、permission-presets、user-approval、plan-mode、\n  storage-domain、todo/tool-todo、workspace/workspace、subagent/subagent 等）：不变量模块整体退场，\n  无替代逻辑可复刻。\n- `locale/*.json` + `README.i18n.yaml`：宿主面 i18n 资源。\n- `storage/storage-domain/src/index.ts`、`plan/plan-mode/src/index.ts`：diff 逐行看只有注释文案改动\n  （plan-mode 另有 `approved` 由 `const: true` 改成普通布尔 + 「驳回」分支，依赖 user-questions 的\n  `AskUserQuestionAnswer` 与 `exec.concludeTurn`，属宿主接线）。\n- `subagent/subagent/src/manager.ts`（+1493）：把 continuation / continuation-activation / inbox /\n  run-settlement 四个模块合并成一个管理器 —— 属**架构面重构**，建议单开一张卡。\n- `extensions/*`（cordis-client/host-runner、tool-cordis、ui-cordis）：client/UI/Cordis 宿主面。\n- guard / feedback / todo / mcp：本轮无 src 逻辑变更（仅 README + locale + invariant 删除）。\n\n## 验证\n\n卡面 verify（已订正，见卡体「卡面订正」节；原文 PowerShell 管道在 cmd.exe 下 rc=255）：\n\n```\nset PYTEST_ADDOPTS=--basetemp=.hive/pt -p no:cacheprovider && C:\\Python314\\python.exe -m pytest\n  tests/unit/test_子代理预设选择.py tests/unit/test_子代理活化.py tests/unit/test_工作区成员.py\n  tests/test_回归.py -q --timeout=120 -k \"子代理预设 or 子代理活化 or 工作区成员 or R175\"\n```\n\n实测 **23 passed / rc=0**（22 单测 + 1 examples 探针）。\n\n反跑纪律（单点破坏-还原，证据 `hive/temp/fanpao.log`）：\n破坏 `src/工作区成员.light` 的「可解析=假 → 保留归属」分支（`返回 真`→`返回 假`）：\n破坏前 rc=0 → 破坏后 **rc=1**（`断言真失败: C3 解析不出→保留归属`）→ 还原后 rc=0。\n\n零系统临时目录：所有临时件落在 `hive/temp/`（项目目录内，已在 `.gitignore` 之外单独放置，\n不入任何仓）；worktree 内的 pytest basetemp 用 `.hive/pt`（git 忽略）。\n\n## 没做 / 风险\n\n- 卡面原 verify 不可执行，已订正（去 PowerShell 管道 + 改定向判据 + 补 paths）。\n- 按卡面 ⛔「不跑全量回归」，本轮只跑定向判据；本机全量基线本身非绿\n  （`src/生产挂载.light` 在 HEAD 不存在；`tests/test_R21_词法确定性_超集.py::test_definitions_superset`\n  确定性 `NotADirectoryError WinError 267`）。\n- `SubagentPresetSelection.validate` 的「缺文档」语义做了显式化（上游由 `readDocument` 抛错），\n  已在模块头部与 #346 登记。\n- `src/计划模式.light` 仍用已失效的 `记` 关键字（见 L-183），不在本卡 paths，本轮未动。\n- 取证 worktree 已从 `C:/Users/skywalk/.hive/wt/...` 迁到项目内\n  `G:/dswork/duan-light-merge/.worktrees/codearts-win/T-0175`，并把 `agents/codearts-win.json`\n  的 `worktrees` 一并改到 `G:/dswork/duan-light-merge/.worktrees/codearts-win`。",
+  "error": "",
+  "declared_paths": [
+    "src/持久化/",
+    "src/存储.light",
+    "src/文件.light",
+    "src/子代理预设选择.light",
+    "src/子代理活化.light",
+    "src/工作区成员.light",
+    "tests/",
+    "examples/",
+    "docs/功能对标/"
+  ],
+  "changed_files": [
+    "docs/功能对标/对标清单.json",
+    "docs/功能对标/语言缺陷账.md",
+    "examples/test_R175_B3复刻.light",
+    "src/子代理活化.light",
+    "src/子代理预设选择.light",
+    "src/工作区成员.light",
+    "tests/unit/test_子代理活化.py",
+    "tests/unit/test_子代理预设选择.py",
+    "tests/unit/test_工作区成员.py"
+  ],
+  "out_of_paths": []
+}
