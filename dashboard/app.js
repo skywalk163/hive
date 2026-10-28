@@ -121,6 +121,7 @@
     source: '/api/status',
     snapshotAt: null,   // 快照生成时刻（毫秒），来自 X-Snapshot-Mtime；null = 服务端没给
     cluster: null,      // /api/cluster 的集群视图（leader/term/在线节点）
+    board: null,        // /api/status 附带的 board 摘要（stage 分桶）；旧快照里没有 → null
     inflight: false
   };
 
@@ -185,6 +186,10 @@
       repo: t.repo || '',
       priority: t.priority || '',
       state: t.state || '',
+      // —— 派发阶段（T-0188 的派生字段）：旧快照没有 stage，取空串后由徽标处静默跳过 ——
+      stage: t.stage || '',
+      dispatched_to: t.dispatched_to || '',
+      dispatched_at: t.dispatched_at || '',
       owner: t.owner || '',
       claim_agent: t.claim_agent || '',
       claimed_at: t.claimed_at || '',
@@ -255,6 +260,7 @@
     el.meta = document.getElementById('meta');
     el.source = document.getElementById('source');
     el.cluster = document.getElementById('cluster');
+    el.board = document.getElementById('board');
     el.banner = document.getElementById('banner');
     el.panel = document.getElementById('state-panel');
     el.columns = document.getElementById('columns');
@@ -327,6 +333,36 @@
     if (rs === 'done') return '<span class="badge ok">done</span>';
     if (rs === 'failed') return '<span class="badge danger">failed</span>';
     return '';
+  }
+
+  // ---------- 派发阶段（T-0189）----------
+  // 与 dispatch_tracking.board_stage 的取值一一对应；查不到的中文名回落到阶段原名，
+  // 保证旧/新快照都不会渲染出 undefined。
+  var STAGE_LABEL = {
+    pending: '待分配', dispatched: '已推送', claimed: '已领取',
+    running: '在跑', done: '已完成', failed: '失败',
+    conflict: '冲突', blocked: '挂起'
+  };
+  var STAGE_ORDER = ['pending', 'dispatched', 'claimed', 'running',
+                     'done', 'failed', 'conflict', 'blocked'];
+
+  function stageLabel(s) { return STAGE_LABEL[s] || s || ''; }
+
+  /** 阶段徽标；dispatched 卡额外挂一枚「→ agent」。
+   *  dispatched_to 的来源两路都认：卡上的 `dispatched_to`，以及 `stage === 'dispatched'`。 */
+  function stageBadge(t) {
+    var s = t.stage || '';
+    var to = t.dispatched_to || '';
+    var h = '';
+    if (s) {
+      h += '<span class="badge stage-badge" data-stage="' + esc(s) +
+        '" title="派发阶段：' + esc(stageLabel(s)) + '">' + esc(stageLabel(s)) + '</span>';
+    }
+    if (to && (!s || s === 'dispatched')) {
+      h += '<span class="badge stage-badge stage-to" data-stage="dispatched"' +
+        ' title="已推送给 ' + esc(to) + '">→ ' + esc(to) + '</span>';
+    }
+    return h;
   }
 
   /** 已领取 / 租约剩余 / 已过期 */
@@ -409,6 +445,7 @@
     if (stale) h += '<span class="badge danger">租约过期</span>';
     else if (isLeaseUrgent(t)) h += '<span class="badge warn">租约将到期</span>';
     h += resultBadge(t);
+    h += stageBadge(t);
     h += '</div>';
 
     h += '<h3 class="card-title">' + esc(t.title) + '</h3>';
@@ -460,6 +497,12 @@
     });
     h += '</div>';
 
+    // 复制派发指令：每张卡都有（含已完成/已关闭），只复制文本，不领卡不改状态。
+    h += '<div class="card-copy">' +
+      '<button type="button" class="act act-copy" data-copy="' + esc(t.id) +
+      '" title="把这张卡的派发指令复制到剪贴板，粘到 agent 对话框即可">复制派发指令</button>' +
+      '</div>';
+
     // 操作按钮。
     // 「终止」曾经直接等同于 close，结果把没跑完的卡标成 done（T-0181 的教训），
     // 现在拆成两个语义清楚的动作：
@@ -486,12 +529,94 @@
     return h;
   }
 
+  // ---------- 复制派发指令（T-0189）----------
+  /**
+   * 写剪贴板：优先异步 Clipboard API，失败（HTTP 非安全上下文 / 无权限 / 老浏览器）
+   * 再走隐藏 textarea + execCommand("copy")。两条路径都返回 Promise。
+   */
+  function writeClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).catch(function () {
+        return legacyCopy(text);
+      });
+    }
+    return legacyCopy(text);
+  }
+
+  function legacyCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.left = '-1000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    var ok = false;
+    try {
+      ta.select();
+      ta.setSelectionRange(0, ta.value.length);   // iOS Safari 只认 setSelectionRange
+      ok = document.execCommand("copy");
+    } catch (e) {
+      ok = false;
+    }
+    document.body.removeChild(ta);
+    return ok ? Promise.resolve() : Promise.reject(new Error('浏览器拒绝写入剪贴板'));
+  }
+
+  /** 按钮文字变「已复制」2 秒后复原；只改按钮，不刷新整页 */
+  var COPY_TIMERS = Object.create(null);
+  function flashCopied(btn) {
+    if (!btn) return;
+    if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+    var tid = btn.dataset.copy || '';
+    btn.textContent = '已复制';
+    btn.classList.add('is-copied');
+    btn.disabled = true;
+    if (COPY_TIMERS[tid]) clearTimeout(COPY_TIMERS[tid]);
+    COPY_TIMERS[tid] = setTimeout(function () {
+      btn.textContent = btn.dataset.label;
+      btn.classList.remove('is-copied');
+      btn.disabled = false;
+      delete COPY_TIMERS[tid];
+    }, 2000);
+  }
+
+  function copyDispatch(tid, btn) {
+    fetch('/api/dispatch-prompt?task=' + encodeURIComponent(tid),
+          { cache: 'no-store', headers: { Accept: 'application/json' } })
+      .then(function (r) {
+        return r.json().catch(function () { return null; }).then(function (body) {
+          if (!r.ok) throw new Error((body && body.error) ? body.error : ('HTTP ' + r.status));
+          return body || {};
+        });
+      })
+      .then(function (body) {
+        return writeClipboard(body.text || '').then(function () {
+          flashCopied(btn);
+          flash('已复制 ' + tid + ' 的派发指令，切到 agent 粘贴即可');
+        });
+      })
+      .catch(function (e) {
+        flash('复制失败：' + ((e && e.message) ? e.message : e), true);
+      });
+  }
+
   function createCard(t) {
     var card = document.createElement('article');
     card.className = 'card is-new';
     card.tabIndex = 0;
     card.setAttribute('role', 'button');
     card.dataset.id = t.id;
+    // 复制按钮必须**先**注册并 stopImmediatePropagation：卡片自己也有 click → openDrawer，
+    // 两个监听挂在同一个节点上，stopPropagation 拦不住同节点的后一个，只有 immediate 版有效。
+    card.addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest('[data-copy]') : null;
+      if (!btn || !card.contains(btn)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      copyDispatch(btn.getAttribute('data-copy') || t.id, btn);
+    });
     card.addEventListener('click', function () { openDrawer(t.id); });
     card.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
@@ -546,6 +671,56 @@
     recent: '最近还没有完成的任务。',
     closed: '暂无已关闭任务（点上方「展开」查看）'
   };
+
+  /**
+   * board 摘要的取值：优先用服务端给的 `board.counts`（dispatch_tracking 的权威口径），
+   * 拿不到就按每张卡的 `stage` 现算；两个来源都没有（旧快照）→ 返回 null，
+   * 调用方据此整条隐藏，绝不渲染 undefined。
+   */
+  function boardCounts() {
+    var b = state.board && state.board.counts;
+    if (b && typeof b === 'object') {
+      return { counts: b, total: Number(state.board.total) || state.tasks.length };
+    }
+    var counts = Object.create(null);
+    var seen = false;
+    var total = 0;
+    state.tasks.forEach(function (t) {
+      if (!t.stage) return;
+      seen = true;
+      total++;
+      counts[t.stage] = (counts[t.stage] || 0) + 1;
+    });
+    return seen ? { counts: counts, total: total } : null;
+  }
+
+  function renderBoard() {
+    if (!el.board) return;
+    var b = boardCounts();
+    if (!b) {
+      el.board.hidden = true;
+      el.board.textContent = '';
+      return;
+    }
+    var counts = b.counts || {};
+    var parts = [];
+    var used = Object.create(null);
+    STAGE_ORDER.forEach(function (s) {
+      var n = counts[s] || 0;
+      used[s] = true;
+      if (n > 0) parts.push(stageLabel(s) + ' ' + n);
+    });
+    // 服务端将来加新阶段时也别丢：不认识的键按原名排在后面
+    Object.keys(counts).forEach(function (s) {
+      if (used[s]) return;
+      var n = Number(counts[s]) || 0;
+      if (n > 0) parts.push(stageLabel(s) + ' ' + n);
+    });
+    if (!parts.length) parts.push('合计 ' + (b.total || 0));
+    el.board.textContent = parts.join(' / ');
+    el.board.title = '派发分组（全部任务，不受筛选影响）· 合计 ' + (b.total || 0);
+    el.board.hidden = false;
+  }
 
   function renderStats(counts) {
     // 统计条既是仪表盘也是快捷筛选器：点某列只看该列，再点「共 N 个」恢复全部
@@ -676,6 +851,7 @@
     applyFilters();
     renderFilters();
     renderBanner();
+    renderBoard();     // 早退分支（loading/error/empty）也要走，旧快照在这里静默隐藏
 
     if (state.loading && !state.tasks.length) { showPanel('loading'); renderStats({}); return; }
     if (!state.tasks.length && state.error) { showPanel('error', state.error); renderStats({}); return; }
@@ -787,8 +963,12 @@
         return r.json();
       })
       .then(function (data) {
-        if (!Array.isArray(data)) throw new Error('状态文件根节点不是数组');
-        setTasks(data, '/api/status');
+        // 两种形态都吃：裸数组（旧快照）与 {tasks, board}（hive status --json --board）
+        var list = Array.isArray(data) ? data
+          : (data && Array.isArray(data.tasks) ? data.tasks : null);
+        if (!list) throw new Error('状态文件既不是数组，也没有 tasks 数组');
+        state.board = (!Array.isArray(data) && data && data.board) || null;
+        setTasks(list, '/api/status');
       })
       .catch(function (e) {
         state.error = (e && e.message) ? e.message : String(e);
@@ -805,12 +985,15 @@
     reader.onload = function () {
       try {
         var data = JSON.parse(String(reader.result));
-        if (!Array.isArray(data)) throw new Error('文件根节点不是数组');
+        var list = Array.isArray(data) ? data
+          : (data && Array.isArray(data.tasks) ? data.tasks : null);
+        if (!list) throw new Error('文件根节点既不是数组，也没有 tasks 数组');
+        state.board = (!Array.isArray(data) && data && data.board) || null;
         state.autoRefresh = false;      // 手动载入后停掉自动刷新，避免覆盖
         el.auto.checked = false;
         storeSet(STORE_AUTO, 'off');
         state.snapshotAt = null;        // 本地文件没有"快照时刻"，别拿上次 HTTP 的冒充
-        setTasks(data, file.name);
+        setTasks(list, file.name);
       } catch (e) {
         state.error = '本地文件解析失败：' + ((e && e.message) ? e.message : e);
         render();
@@ -846,15 +1029,22 @@
     h += '<div class="drawer-head"><div class="card-row">' +
       '<span class="tid big">' + esc(t.id) + '</span>' + prioBadge(t) +
       (stale ? '<span class="badge danger">租约过期</span>' : '') + resultBadge(t) +
+      stageBadge(t) +
       '<span class="badge state">' + esc(COL_TITLE[col]) + '</span>' +
       '</div><h2 id="drawer-title">' + esc(t.title) + '</h2>' +
       '<button type="button" class="btn icon close" id="drawer-close" aria-label="关闭详情">✕</button></div>';
 
     h += '<div class="drawer-body">';
 
+    h += '<div class="drawer-copy">' +
+      '<button type="button" class="act act-copy" data-copy="' + esc(t.id) + '">复制派发指令</button>' +
+      '</div>';
+
     h += kvBlock('概览', [
       ['所在列', COL_TITLE[col]],
       ['state', t.state],
+      ['派发阶段', t.stage ? stageLabel(t.stage) : ''],
+      ['已推送给', t.dispatched_to],
       ['仓库', t.repo],
       ['owner', ownerOf(t) || ''],
       ['抢锁 agent', t.claim_agent || ''],
@@ -905,12 +1095,22 @@
     return h;
   }
 
+  /** 抽屉里的「复制派发指令」：抽屉不套在卡片里，单独绑一次即可 */
+  function bindDrawerCopy() {
+    var btn = el.drawer.querySelector('[data-copy]');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      copyDispatch(btn.getAttribute('data-copy') || drawerId, btn);
+    });
+  }
+
   function openDrawer(id) {
     var t = findTask(id);
     if (!t) return;
     drawerId = id;
     lastFocus = document.activeElement;
     el.drawer.innerHTML = drawerHTML(t);
+    bindDrawerCopy();
     el.drawer.classList.add('open');
     el.drawer.setAttribute('aria-hidden', 'false');
     el.overlay.classList.add('open');
@@ -927,6 +1127,7 @@
     var scroll = el.drawer.querySelector('.drawer-body');
     var top = scroll ? scroll.scrollTop : 0;
     el.drawer.innerHTML = drawerHTML(t);
+    bindDrawerCopy();
     document.getElementById('drawer-close').addEventListener('click', closeDrawer);
     var body = el.drawer.querySelector('.drawer-body');
     if (body) body.scrollTop = top;

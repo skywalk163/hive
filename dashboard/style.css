@@ -157,6 +157,9 @@ body {
 .cluster.ok { color: var(--ok, #1f9d55); }
 .cluster.warn { color: var(--warn, #b7791f); }
 .cluster.off { color: var(--muted); opacity: .8; }
+/* 派发分组摘要（T-0189）：只在拿到 stage/board 时显示，[hidden] 时不占位 */
+.board { color: var(--muted); white-space: nowrap; }
+.board[hidden] { display: none; }
 
 .banner {
   background: var(--danger-bg);
@@ -397,6 +400,25 @@ body {
 .badge.danger { background: var(--danger-bg); color: var(--danger); border-color: var(--danger); }
 .badge.state { background: var(--accent-soft); color: var(--accent); }
 
+/* 派发阶段徽标（T-0189）：配色只复用既有变量，不改布局 */
+.badge.stage-badge { background: var(--panel-alt); color: var(--muted); border-color: var(--border); }
+.badge.stage-badge[data-stage="dispatched"] {
+  background: var(--accent-soft); color: var(--accent); border-color: var(--accent);
+}
+.badge.stage-badge[data-stage="claimed"],
+.badge.stage-badge[data-stage="running"],
+.badge.stage-badge[data-stage="done"] {
+  background: var(--ok-bg); color: var(--ok); border-color: var(--ok);
+}
+.badge.stage-badge[data-stage="failed"],
+.badge.stage-badge[data-stage="conflict"] {
+  background: var(--danger-bg); color: var(--danger); border-color: var(--danger);
+}
+.badge.stage-badge[data-stage="blocked"] {
+  background: var(--warn-bg); color: var(--warn); border-color: var(--warn);
+}
+.badge.stage-badge.stage-to { font-family: var(--mono); }
+
 .card-title {
   margin: 0;
   font-size: 13px;
@@ -482,6 +504,14 @@ body {
 .act-unassign { color: var(--warn); border-color: var(--warn); }
 .act-ok { color: var(--ok); border-color: var(--ok); }
 .act-cancel { color: var(--muted); }
+
+/* 复制派发指令（T-0189）：每张卡都有，与操作按钮同款但更轻 */
+.card-copy { margin-top: 6px; }
+.drawer-copy { margin: 0 0 10px; }
+.act-copy { color: var(--accent); border-color: var(--accent); }
+.act-copy:hover { background: var(--accent-soft); }
+.act-copy.is-copied { color: var(--ok); border-color: var(--ok); background: var(--ok-bg); }
+.act-copy[disabled] { cursor: default; }
 .agent-pick {
   font-size: 11px;
   border-radius: 6px;
