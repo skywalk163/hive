@@ -84,19 +84,25 @@ jobs:
           exit "${PIPESTATUS[0]}"
 
       # 作业日志接口要仓库 admin 权限，我们没有；commit status 是公网可读的，
-      # 于是把失败首行塞进 description —— 谁都能一眼看到红在哪，不用登管理员账号。
+      # 于是把日志尾巴塞进 description —— 谁都能一眼看到红在哪，不用登管理员账号。
       - name: 失败时把原因写进 commit status
         if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
         run: |
-          desc=$(grep -m1 -E 'FAIL|错误|not found|error' /tmp/smoke.log | tr -d '\r' | cut -c1-120)
-          [ -n "$desc" ] || desc="冒烟失败（无可解析的失败行）"
-          curl -s -o /dev/null -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }}" \
-            -d "{\"state\":\"failure\",\"context\":\"macos-diag\",\"description\":\"$desc\"}"
+          post() {
+            curl -s -o /dev/null -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/statuses/$SHA" \
+              -d "{\"state\":\"failure\",\"context\":\"$1\",\"description\":\"$2\"}"
+          }
+          clean() { tr -d '\r' | tr '\n"' '  ' | tr -s ' ' | cut -c1-120; }
+          post macos-diag  "$(tail -c 200 /tmp/smoke.log 2>/dev/null | clean)"
+          post macos-start "$(tail -c 200 /tmp/smoke.start 2>/dev/null | clean)"
+          post macos-svc   "$(tail -c 200 "${HIVE_STATE:-/tmp}/logs/dashboard.log" 2>/dev/null | clean)"
 
   # --------------------------------------------------------------------------
   smoke-freebsd:
