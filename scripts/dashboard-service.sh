@@ -25,6 +25,7 @@ SERVE="$DIR/scripts/serve-dashboard.sh"
 
 PORT="${PORT:-8791}"
 INTERVAL="${INTERVAL:-20}"
+WAIT_S="${WAIT_S:-30}"   # 等 serve.py 就绪的秒数：大仓首次 `hive status` 可能要几十秒
 STATE_DIR="${HIVE_STATE:-$HOME/.hive}"
 RUN_DIR="$STATE_DIR/run"
 LOG_DIR="$STATE_DIR/logs"
@@ -79,7 +80,8 @@ do_start() {
     echo $! >"$PID_FILE"
     # 等一下确认真起来了（serve.py 监听失败会立刻退出）
     i=0
-    while [ "$i" -lt 20 ]; do
+    tries=$((WAIT_S * 2))
+    while [ "$i" -lt "$tries" ]; do
         if pid_of >/dev/null; then
             if curl -s -o /dev/null -m 2 "http://127.0.0.1:$PORT/" 2>/dev/null; then
                 echo "看板已启动（pid=$(pid_of)），端口 $PORT"

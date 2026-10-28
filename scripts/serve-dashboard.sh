@@ -9,6 +9,9 @@ set -u
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 HIVE="${HIVE_DIR:-$DIR}"
+# 关键：下面 refresh() 会调 `hive status`，而 hive 入口有「按需自愈」——
+# 不关掉的话，看板刷新自己会再拉起一个看板（端口打架、进程越滚越多）。
+export HIVE_DASH_AUTOSTART=0
 PORT="${PORT:-8787}"
 INTERVAL="${INTERVAL:-20}"
 DASH="$DIR/dashboard"

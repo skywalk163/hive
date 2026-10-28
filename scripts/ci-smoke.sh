@@ -49,6 +49,7 @@ do_service() {
     export HIVE_STATE="$STATE"
     export PORT INTERVAL=5
     export CI_REPOS=""          # 公网 CI 连不到内网 Gitea，拉 CI 状态只会白等超时
+    export HIVE_DASH_AUTOSTART=0   # 冒烟时别让 hive status 反过来再拉一个看板
     export CI_DISABLED=1
 
     dump_logs() {
@@ -67,7 +68,7 @@ do_service() {
 
     i=0
     up=0
-    while [ "$i" -lt 20 ]; do
+    while [ "$i" -lt 120 ]; do    # 最多等 60s：首刷 status 慢的机器（macOS runner）要更多时间
         if curl -s -o /dev/null -m 2 "http://127.0.0.1:$PORT/"; then up=1; break; fi
         i=$((i + 1))
         sleep 0.5
