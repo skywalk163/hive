@@ -34,7 +34,8 @@ AGENTS = ROOT / "agents"
 # 按 docs/操作手册.md「要放开就先确认对方仓库的接入约定，并同步更新白名单」的流程，
 # 2026-10-28 把这两个仓正式纳入白名单 —— 注意这**不是**放开事故防线：
 # 事故的根因是"未登记也能推"，现在仍然只有登记过的仓才动得了。
-ALLOWED_REPOS = {"hive", "lightharness", "light"}
+# lightmem：649abc9 登记 codearts-win11 时一并接入（该提交漏改白名单，补在此处）。
+ALLOWED_REPOS = {"hive", "lightharness", "light", "lightmem"}
 
 # 已明确退役/禁止接入的仓库。要重新禁掉某个仓，只做两步：
 #   1) 把仓名加到这里；
