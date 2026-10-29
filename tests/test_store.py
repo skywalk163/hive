@@ -21,6 +21,8 @@ def test_claim_cas_and_idempotent(tmp_path):
     assert out["ok"] and out["claim"]["owner"] == "agent-a"
     assert out["claim"]["lease_seq"] == 1
     assert s.task("T-0001")["state"] == "claimed"
+    assert s.task("T-0001")["title"] == "t"
+    assert s.task("T-0001")["repo"] == "light"
     assert s.last_seq() == 1
 
     again = s.claim("T-0001", "agent-a", term=3, lease_minutes=10)

@@ -272,7 +272,10 @@ class Store:
             "payload_json=excluded.payload_json, updated=excluded.updated",
             (str(task["id"]), str(task.get("state") or "ready"),
              str(task.get("owner") or ""), int(task.get("retries") or 0),
-             json.dumps(task.get("payload") or {}, ensure_ascii=False),
+             json.dumps({k: v for k, v in task.items()
+                        if k not in ("id", "state", "owner", "retries",
+                                     "updated", "def_hash")},
+                       ensure_ascii=False),
              str(task.get("def_hash") or ""), str(task.get("updated") or _iso())))
 
     def _upsert_claim(self, claim: dict | None) -> None:
@@ -382,7 +385,9 @@ class Store:
                 raise StoreError(f"{tid} 的租约不属于 {agent}")
             task = self.task(tid) or {"id": tid}
             task = dict(task)
-            task.update({"state": "ready" if requeue else "blocked",
+            has_result = self.result_info(tid) is not None
+            task.update({"state": ("submitted" if has_result
+                                   else ("ready" if requeue else "blocked")),
                          "owner": "", "updated": _iso()})
             op = {"op_id": op_id or uuid.uuid4().hex, "type": "release",
                   "task_id": tid, "term": int(term), "ts": _iso(),

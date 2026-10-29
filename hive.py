@@ -2664,6 +2664,9 @@ class Hive:
 
     def cmd_retry(self, tid: str, agent: str | None = None, fresh: bool = False) -> None:
         card = self.card(tid)
+        if claim_backend() == "store":
+            info = self.claim_info(tid) or {}
+            store_release(tid, str(info.get("agent") or ""), requeue=True)
         if fresh:
             card["fresh"] = True
         self.fetch()
