@@ -35,6 +35,10 @@ def main() -> int:
     os.environ.setdefault("HIVE_CLUSTER_AUTOSTART", "0")
     tmp = Path(tempfile.mkdtemp(prefix="hive-selftest-"))
     print(f"临时目录: {tmp}")
+    # 自测固定走 Git claim；不要读开发机 ~/.hive 的 store 配置。
+    os.environ["HIVE_CLAIM_BACKEND"] = "git"
+    os.environ["HIVE_STORE"] = "0"
+    os.environ.pop("HIVE_STORE_PATH", None)
     git_env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 
