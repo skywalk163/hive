@@ -1689,6 +1689,98 @@ class Hive:
                 "dispatched_to": card["dispatched_to"],
                 "dispatched_at": card["dispatched_at"]}
 
+    # -- 代码仓同步（T-0193） --------------------------------------------- #
+    def _sync_one_repo(self, name: str, path: Path) -> dict:
+        """把单个代码仓对齐到 origin 主线，**只快进、绝不强制**。
+
+        与 `_sync_for_commit` 同一套安全边界：网络类 git 操作走 `git_net`（带
+        HIVE_NET_TIMEOUT），合并且只 `merge --ff-only`；ff 失败只说明原因并跳过，
+        绝不用 `reset --hard` / `--force`。本机未提交改动只要不与传入提交重叠，
+        原样保留（git 自己保证）；万一重叠，git 拒绝 ff 且不丢任何东西。
+
+        返回结构化结果 dict：
+          status: up-to-date / fast-forwarded / diverged / unreachable /
+                  missing / no-remote
+        """
+        path = path.expanduser()
+        if not path.exists():
+            return {"repo": name, "path": str(path), "status": "missing",
+                    "reason": "本机路径不存在"}
+        try:
+            git_net(["fetch", "--prune", "origin"], path)
+        except HiveError as e:
+            return {"repo": name, "path": str(path), "status": "unreachable",
+                    "reason": str(e).splitlines()[0] if str(e).strip() else "fetch 失败"}
+
+        remote = rev_parse(path, "origin/main") or rev_parse(path, "origin/master")
+        head = rev_parse(path, "HEAD")
+        if not remote:
+            return {"repo": name, "path": str(path), "status": "no-remote",
+                    "reason": "origin/main（或 origin/master）不存在"}
+        if not head or head == remote:
+            return {"repo": name, "path": str(path), "status": "up-to-date"}
+
+        p = git(["merge", "--ff-only", remote], path, check=False)
+        if p.returncode == 0:
+            return {"repo": name, "path": str(path), "status": "fast-forwarded",
+                    "sha": rev_parse(path, "HEAD") or remote}
+
+        # ff 失败：本地分叉，或未提交改动与传入提交重叠。绝不自动解冲突。
+        dirty = git(["status", "--porcelain", "--untracked-files=no"], path,
+                    check=False).stdout.strip()
+        err_lines = (p.stderr or "").strip().splitlines()
+        reason = err_lines[0] if err_lines else "无法快进合并"
+        out = {"repo": name, "path": str(path), "status": "diverged",
+               "reason": reason}
+        if dirty:
+            out["dirty"] = dirty
+        return out
+
+    def cmd_sync_repos(self, repo: str | None = None, as_json: bool = False,
+                       quiet: bool = False) -> dict:
+        """同步主控本机登记的所有代码仓到 origin 主线（只快进）。
+
+        `hive sync-repos`：对 `Hive.repos()` 的每个本机路径执行
+        fetch + merge --ff-only origin（网络操作带 HIVE_NET_TIMEOUT）。
+        `--repo <name>` 只同步指定仓；`--json` 输出结构化结果。
+
+        quiet=True 时不打印（orchestrate 复用，只返回结构）。
+        本命令是只读同步，不做任何卡片写操作。
+        """
+        repos = self.repos()
+        if repo:
+            if repo not in repos:
+                raise HiveError(f"没有登记代码仓 {repo}")
+            targets = {repo: repos[repo]}
+        else:
+            targets = dict(repos)
+
+        results = []
+        for name in sorted(targets):
+            results.append(self._sync_one_repo(name, targets[name]))
+
+        if not quiet:
+            if as_json:
+                print(json.dumps({"results": results}, ensure_ascii=False, indent=2))
+            else:
+                for r in results:
+                    status = r["status"]
+                    if status == "up-to-date":
+                        print(f"{r['repo']}: 已最新")
+                    elif status == "fast-forwarded":
+                        print(f"{r['repo']}: 快进到 {r.get('sha', '')[:12]}")
+                    elif status == "diverged":
+                        print(f"{r['repo']}: 落后但无法快进（{r.get('reason', '')}）")
+                    elif status == "unreachable":
+                        print(f"{r['repo']}: 远端不可达（{r.get('reason', '')}）")
+                    elif status == "missing":
+                        print(f"{r['repo']}: 本机路径不存在（{r.get('path', '')}）")
+                    elif status == "no-remote":
+                        print(f"{r['repo']}: 找不到远端主线（{r.get('reason', '')}）")
+                    else:
+                        print(f"{r['repo']}: {status}")
+        return {"results": results}
+
     def cmd_doctor(self) -> bool:
         errors: list[str] = []
         warns: list[str] = []
@@ -2648,26 +2740,30 @@ class Hive:
     def cmd_orchestrate(self, interval: int = 60, once: bool = False,
                         iterations: int | None = None, dispatch: bool = True,
                         watchdog: bool = True, land: bool = True, doctor: bool = True,
+                        sync: bool = True,
                         dispatch_limit: int | None = None, max_land: int | None = None,
                         watchdog_minutes: int = 180, orphan_grace: int = 45,
                         stop_file: str | None = None, as_json: bool = False) -> None:
-        """总控进程（脑）：循环跑 看门狗 → 分派 → 合入 → 体检，替代人工 drive。
+        """总控进程（脑）：循环跑 看门狗 → 分派 → 合入 → 同步 → 体检，替代人工 drive。
 
         每轮 tick 顺序：
           1. watchdog --apply（回收死卡 / 孤儿 / 僵尸）
           2. dispatch --apply（把 ready 卡分派给空闲且能力匹配的 exec agent）
           3. land --all --apply（把 verify 全绿、依赖就绪的 done 卡合入并 close）
-          4. doctor（报告问题，不改动）
+          4. sync-repos（把本机代码仓快进到 origin 主线，只快进不强制）
+          5. doctor（报告问题，不改动）
         单轮内任何子步骤抛 HiveError 都 catch 住、记 log、继续下一轮，绝不整进程崩。
         安全默认：三个写操作本身都是「带 --apply 才真改」，这里显式传了 --apply，
         不引入新的破坏性开关。manual agent 的卡 dispatch 本来就不碰，留给人工。
+        sync 只做快进同步，失败不中断整轮（T-0193）。
         """
-        total: dict[str, int] = {"reclaimed": 0, "dispatched": 0, "landed": 0, "ticks": 0}
+        total: dict[str, int] = {"reclaimed": 0, "dispatched": 0, "landed": 0,
+                                 "synced": 0, "ticks": 0}
         while True:
             cluster_ensure(self.dir)
             total["ticks"] += 1
             tick = {"tick": total["ticks"], "reclaimed": 0, "dispatched": 0,
-                    "landed": 0, "doctor_ok": True}
+                    "landed": 0, "synced": 0, "doctor_ok": True}
             try:
                 if watchdog:
                     reclaimed = self.cmd_watchdog(minutes=watchdog_minutes,
@@ -2680,6 +2776,9 @@ class Hive:
                     res = self.cmd_land(all_tasks=True, apply=True, limit=max_land)
                     ok = [r for r in res if isinstance(r, dict) and r.get("closed")]
                     tick["landed"] = len(ok)
+                if sync:
+                    sync_res = self.cmd_sync_repos(quiet=True)
+                    tick["synced"] = len(sync_res["results"])
                 if doctor:
                     tick["doctor_ok"] = self.cmd_doctor()
             except HiveError as e:
@@ -2687,13 +2786,15 @@ class Hive:
             total["reclaimed"] += tick["reclaimed"]
             total["dispatched"] += tick["dispatched"]
             total["landed"] += tick["landed"]
+            total["synced"] += tick["synced"]
 
             if as_json:
                 print(json.dumps(tick, ensure_ascii=False))
             else:
                 log(f"[orchestrate] tick {total['ticks']} 完成: "
                     f"回收={tick['reclaimed']} 分派={tick['dispatched']} "
-                    f"合入={tick['landed']} 体检={'OK' if tick['doctor_ok'] else '有告警'}")
+                    f"合入={tick['landed']} 同步={tick['synced']} "
+                    f"体检={'OK' if tick['doctor_ok'] else '有告警'}")
 
             if once:
                 break
@@ -3836,9 +3937,14 @@ def cmd_orchestrate(args) -> None:
         iterations=args.iterations,
         dispatch=not args.no_dispatch, watchdog=not args.no_watchdog,
         land=not args.no_land, doctor=not args.no_doctor,
+        sync=not args.no_sync,
         dispatch_limit=args.dispatch_limit, max_land=args.max_land,
         watchdog_minutes=args.watchdog_minutes, orphan_grace=args.orphan_grace,
         stop_file=args.stop_file, as_json=args.json)
+
+
+def cmd_sync_repos(args) -> None:
+    Hive(args.dir).cmd_sync_repos(repo=args.repo, as_json=args.json)
 
 
 def cmd_llm(args) -> None:
@@ -4368,6 +4474,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-land", action="store_true", help="关闭自动合入阶段")
     s.add_argument("--no-watchdog", action="store_true", help="关闭看门狗回收阶段")
     s.add_argument("--no-doctor", action="store_true", help="关闭体检阶段")
+    s.add_argument("--no-sync", action="store_true", help="关闭代码仓同步阶段")
     s.add_argument("--dispatch-limit", dest="dispatch_limit", type=int, default=None,
                    help="每轮最多分派几张（默认不限制）")
     s.add_argument("--max-land", dest="max_land", type=int, default=None,
@@ -4401,6 +4508,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", help="只清这个代码仓（默认：agent 登记的所有）")
     s.add_argument("--apply", action="store_true", help="真删；默认只列计划")
     s.set_defaults(func=cmd_prune)
+
+    s = sub.add_parser("sync-repos",
+                       help="把主控本机登记的代码仓同步到 origin 主线（只快进，不强制）")
+    s.add_argument("--repo", help="只同步这一个代码仓（默认：agent 登记的所有）")
+    s.add_argument("--json", action="store_true", help="输出结构化 JSON")
+    s.set_defaults(func=cmd_sync_repos)
 
     s = sub.add_parser("claim", help="手工领取")
     s.add_argument("task")
