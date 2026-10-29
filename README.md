@@ -236,7 +236,7 @@ chroot 里的小浣熊 / WorkBuddy 的完整接法（共享 `/home`、manual wor
 - 小浣熊这种深链登录、沙箱受限的 Electron 客户端；
 - 暂时不想给 agent 配 API key 的机器。
 
-**小浣熊接 MCP 的现成配置**（已在 `~/.box-agent/config/mcp.json` 验证可用，14 个工具）：
+**小浣熊接 MCP 的现成配置**（已在 `~/.box-agent/config/mcp.json` 验证可用，15 个工具）：
 
 ```json
 {"command": "python3",
@@ -291,7 +291,7 @@ PORT=8787 INTERVAL=20 ./scripts/serve-dashboard.sh
 
 ## 11. MCP：让 agent 自己来领活
 
-`hive mcp` 起一个 MCP stdio server，把任务总线暴露成 14 个工具。接上之后 agent
+`hive mcp` 起一个 MCP stdio server，把任务总线暴露成 15 个工具。接上之后 agent
 不用等人喂卡，自助闭环：**查任务 → 领卡 → 干活 → 提交 → 干不下去还回去**。
 
 ```sh
@@ -342,6 +342,6 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy
 - [Gitea 接入](docs/Gitea接入.md)：私有仓、host-scoped 凭据 helper、T-0001 冒烟记录
 - [chroot GUI agent](docs/CHROOT_GUI_AGENTS.md)：小浣熊 / WorkBuddy 的完整接法
 - [MCP 接入](docs/MCP接入.md)：让任意 agent 通过 MCP 查/领/交/终止任务
-- [集群架构 v3.1](docs/集群架构-v3.1.md)：目标架构（P0 已落地，P2 待做）：hived、本地副本、OSPF 式自适应、Git 里程碑
+- [集群架构 v3.1](docs/集群架构-v3.1.md)：目标架构（P0/P1 已落地，P2 待做）：hived、本地副本、OSPF 式自适应、Git 里程碑
 - [方案全文](../多机Agent协同开发方案.md)
 - [CHANGELOG](CHANGELOG.md)

@@ -63,6 +63,12 @@ def serve_stdio(url: str = DEFAULT_URL, token: str = "") -> int:
                               "error": {"code": -32603,
                                         "message": f"无法连接 hived MCP: {raw.decode('utf-8', 'replace')}"}},
                              ensure_ascii=True), flush=True)
+        elif code not in (202, 204):
+            rid = msg.get("id") if isinstance(msg, dict) else None
+            print(json.dumps({"jsonrpc": "2.0", "id": rid,
+                              "error": {"code": -32603,
+                                        "message": f"hived MCP HTTP {code}: {raw.decode('utf-8', 'replace')}"}},
+                             ensure_ascii=True), flush=True)
         # 202/204（notification）不输出
     return 0
 
