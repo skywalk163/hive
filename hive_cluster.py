@@ -1194,7 +1194,7 @@ class Cluster:
         self._remove_pid()
         if self.store is not None:
             try:
-                self.store.close()
+                self.store.close_conn()
             except Exception:  # noqa: BLE001
                 pass
             self.store = None

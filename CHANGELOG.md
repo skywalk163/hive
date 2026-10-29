@@ -30,6 +30,7 @@
   落后超过压缩点时自动改走 snapshot。
 - **P2b：archive 元数据复制**：`mark_archived` 作为 op 复制，不再只是 leader 本地状态；
   `ArchiveAgent` 通过 leader store API 提交，Git 归档 + store archived_at 一致。
+- **`hive store [check]`**：本机 store 计数/commit_seq/压缩点与 SQLite integrity_check。
 
 ### Changed
 

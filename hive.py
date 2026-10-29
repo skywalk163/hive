@@ -4258,6 +4258,36 @@ def cmd_mcp(args) -> int:
     return mcp_server.main(argv)
 
 
+def cmd_store(args) -> int:
+    from hive_store import Store
+    path = store_db_path()
+    if not path.exists():
+        print(f"store 不存在：{path}（先 hive daemon start --store）")
+        return 1
+    try:
+        s = Store(path, "local")
+    except Exception as exc:  # noqa: BLE001
+        print(f"store 打不开：{path}: {exc}")
+        return 1
+    try:
+        if getattr(args, "action", "status") == "check":
+            rows = s.check()
+            print("\n".join(rows))
+            return 0 if rows == ["ok"] else 1
+        summary = s.summary()
+        if getattr(args, "json", False):
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+        else:
+            print(f"store {summary['path']}  node={summary['node']}")
+            print(f"tasks={summary['tasks']} claims={summary['claims']} "
+                  f"results={summary['results']} archive_pending={summary.get('archive_pending', 0)}")
+            print(f"commit_seq={summary['commit_seq']} last_seq={summary['last_seq']} "
+                  f"compacted_through={summary.get('compacted_through', 0)}")
+        return 0
+    finally:
+        s.close_conn()
+
+
 def cmd_doctor(args) -> None:
     if not Hive(args.dir).cmd_doctor():
         sys.exit(1)
@@ -4719,6 +4749,11 @@ def build_parser() -> argparse.ArgumentParser:
                    
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_dispatch)
+
+    s = sub.add_parser("store", help="查看/体检本机 SQLite store（P2）")
+    s.add_argument("action", nargs="?", default="status", choices=["status", "check"])
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_store)
 
     s = sub.add_parser("doctor", help="检查协调仓库/任务/租约/结果")
     s.set_defaults(func=cmd_doctor)

@@ -128,7 +128,7 @@ class Store:
         if "committed" not in cols:
             self._db.execute("ALTER TABLE ops ADD COLUMN committed INTEGER NOT NULL DEFAULT 1")
 
-    def close(self) -> None:
+    def close_conn(self) -> None:
         with self._lock:
             try:
                 self._db.close()
@@ -176,6 +176,11 @@ class Store:
                 except sqlite3.Error:
                     pass
                 raise
+
+    def check(self) -> list[str]:
+        with self._lock:
+            rows = self._db.execute("PRAGMA integrity_check").fetchall()
+            return [str(r[0]) for r in rows]
 
     def snapshot(self) -> dict:
         with self._lock:
