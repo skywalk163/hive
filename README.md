@@ -15,22 +15,69 @@ MCP server 与 LLM 总控已拆成独立模块（`mcp_server.py` / `llm_controll
 - 领取靠 `git push` 的原子性：两个 worker 抢同一张卡，只有一个 push 成功。
 - 自带 `dispatch`（能力/负载/依赖感知）、`doctor`（体检）、`stats`（成功率/耗时）。
 
+## 0. 约定：先进入工作目录
+
+hive 按**每台机器一个 agent 工作目录**来用：仓库都放在工作目录下，日常命令也在里面跑。
+
+| 平台 | 工作目录 | hive 仓位置 |
+|---|---|---|
+| FreeBSD / Linux / macOS | `~/dswork` | `~/dswork/hive` |
+| Windows（PowerShell） | `G:\dswork`（或 `D:\dswork`） | `G:\dswork\hive` |
+
+> Windows 老机器上的目录叫 `G:\dswork\duan-light-merge`（历史命名），它等价于 `G:\dswork`；
+> 本文统一写后者，老机器把路径替换过去即可。
+
+```sh
+# FreeBSD / Linux / macOS
+cd ~/dswork
+```
+
+```powershell
+# Windows
+cd G:\dswork
+```
+
+**下文所有命令都假设你已经在这个工作目录里**，因此统一用仓内相对路径：
+
+```sh
+# FreeBSD / Linux / macOS
+python3 hive/hive.py --dir hive cluster start
+```
+
+```powershell
+# Windows：路径分隔符换成反斜杠，参数不变
+python3 hive\hive.py --dir hive cluster start
+```
+
+- `--dir hive` 指工作目录下的 hive 仓（任务卡/结果/agent 配置都在里面），不是家目录。
+- Windows 上 `python3` 不在 PATH 时，换成 `python` 或 `py -3`，其余参数不变。
+- 不要写 `python3 ~/hive/hive.py --dir ~/hive`：那要求把仓 clone 到家目录，和本约定冲突。
+- 除路径分隔符外，两个平台的命令参数完全一致。
+
 ## 1. 协调仓库
 
 推荐做法：**把本工具仓直接推成 `skywalk/hive`**，这样 `hive.py`、`windows/`、`docs/`
 都跟着仓库走：
 
 ```sh
-cd ~/dswork/hive
+# 在工作目录里
+cd hive
 git remote add origin http://192.168.1.5:3000/skywalk/hive.git
 git push -u origin main
 ```
 
-任意机器 clone 之后跑一次 `init` 补齐任务目录：
+任意机器在工作目录里 clone 成 `hive/`，再跑一次 `init` 补齐任务目录：
 
 ```sh
-git clone http://192.168.1.5:3000/skywalk/hive.git ~/hive
-python3 ~/hive/hive.py --dir ~/hive init
+# FreeBSD / Linux / macOS
+git clone http://192.168.1.5:3000/skywalk/hive.git hive
+python3 hive/hive.py --dir hive init
+```
+
+```powershell
+# Windows
+git clone http://192.168.1.5:3000/skywalk/hive.git hive
+python3 hive\hive.py --dir hive init
 ```
 
 也可以从空仓库开始（`init --remote ...` 会建目录并推第一版），但那样就没有现成的
@@ -60,11 +107,18 @@ hive/
 **git 仍是唯一真相**，集群只是把「等下一次 git push 才能看到进度」变成秒级。
 
 ```sh
-python3 ~/hive/hive.py --dir ~/hive cluster start     # 后台常驻
-python3 ~/hive/hive.py --dir ~/hive cluster status    # 谁是主节点 / 谁在线
-python3 ~/hive/hive.py --dir ~/hive cluster peers
-python3 ~/hive/hive.py --dir ~/hive cluster watch     # 事件流
-python3 ~/hive/hive.py --dir ~/hive cluster sync      # 本机代码同步状态
+python3 hive/hive.py --dir hive cluster start     # 后台常驻
+python3 hive/hive.py --dir hive cluster status    # 谁是主节点 / 谁在线
+python3 hive/hive.py --dir hive cluster peers
+python3 hive/hive.py --dir hive cluster watch     # 事件流
+python3 hive/hive.py --dir hive cluster sync      # 本机代码同步状态
+```
+
+Windows 同理，只换分隔符：
+
+```powershell
+python3 hive\hive.py --dir hive cluster start
+python3 hive\hive.py --dir hive cluster status
 ```
 
 - 默认 HTTP `8788`、UDP 发现 `8789`；跨网段用 `--seed 192.168.1.5:8788`。
@@ -89,7 +143,7 @@ agent 配置里写清楚：这台机器能干什么、仓库在哪、用什么�
 
 ```sh
 # FreeBSD 主力机：dsh headless，prompt 从 stdin 进
-python3 ~/hive/hive.py --dir ~/hive agent add \
+python3 hive/hive.py --dir hive agent add \
   --name fb88-dsh \
   --command "dsh --profile headless -" \
   --capabilities freebsd python compiler pytest \
@@ -100,10 +154,14 @@ python3 ~/hive/hive.py --dir ~/hive agent add \
 Windows VM（没有 agent CLI 也能当验收机）：
 
 ```powershell
-python C:\hive\hive.py --dir C:\hive agent add --name win10 --mode verify `
+# 工作目录 G:\dswork（D 盘就换盘符）
+python3 hive\hive.py --dir hive agent add --name win10 --mode verify `
   --capabilities windows exe powershell `
-  --repo hive=C:\hive --worktrees C:\hive-wt
+  --repo hive=G:\dswork\hive --worktrees G:\dswork\hive-wt
 ```
+
+> `--repo` / `--worktrees` 写**绝对路径**：worker 可能被计划任务从别的 cwd 拉起，
+> 相对路径会解析到错误位置。
 
 三种模式：
 
@@ -120,7 +178,7 @@ python C:\hive\hive.py --dir C:\hive agent add --name win10 --mode verify `
 ## 3. 建卡与分派（总控做的事）
 
 ```sh
-python3 ~/hive/hive.py --dir ~/hive task new \
+python3 hive/hive.py --dir hive task new \
   --title "修复 LLVM 后端 Windows 路径分隔符" \
   --repo hive \
   --paths src/codegen/ tests/ \
@@ -129,11 +187,11 @@ python3 ~/hive/hive.py --dir ~/hive task new \
   --body-file /tmp/card.md
 
 # 手工指定
-python3 ~/hive/hive.py --dir ~/hive assign T-0101 --agent win10
+python3 hive/hive.py --dir hive assign T-0101 --agent win10
 
 # 自动分派：先看计划，再 --apply
-python3 ~/hive/hive.py --dir ~/hive dispatch
-python3 ~/hive/hive.py --dir ~/hive dispatch --apply --limit 3
+python3 hive/hive.py --dir hive dispatch
+python3 hive/hive.py --dir hive dispatch --apply --limit 3
 ```
 
 任务卡就是 `tasks/T-0101.md`，可以直接改、可以 review、可以回滚。
@@ -142,11 +200,13 @@ python3 ~/hive/hive.py --dir ~/hive dispatch --apply --limit 3
 ## 4. worker
 
 ```sh
-# FreeBSD：丢进 tmux，断线也不怕
-tmux new -s hive-fb88 -d "python3 ~/hive/hive.py --dir ~/hive work --agent fb88-dsh --interval 30"
+# FreeBSD：丢进 tmux，断线也不怕（在工作目录里执行）
+tmux new -s hive-fb88 -d "python3 hive/hive.py --dir hive work --agent fb88-dsh --interval 30"
+```
 
+```powershell
 # Windows：计划任务 / 开机启动，登录后常驻
-python C:\hive\hive.py --dir C:\hive work --agent win10 --interval 60
+python3 hive\hive.py --dir hive work --agent win10 --interval 60
 ```
 
 `scripts/` 下有两个省事的壳：`start-worker.sh <agent>`（自动把 `OPENAI_API_KEY`
@@ -167,28 +227,30 @@ python C:\hive\hive.py --dir C:\hive work --agent win10 --interval 60
 
 ## 5. 看板与运维
 
+> 下面以 Unix 写法为例；Windows 把 `hive/hive.py` 写成 `hive\hive.py`，参数不变。
+
 ```sh
-python3 ~/hive/hive.py --dir ~/hive status
+python3 hive/hive.py --dir hive status
 #  ID      STATE      OWNER        RESULT   CLAIM            TITLE
 #  T-0101  assigned   win10        done     win10@10-22T23 修复 LLVM 后端…
 
-python3 ~/hive/hive.py --dir ~/hive doctor   # 任务卡/租约/结果/agent 配置体检
-python3 ~/hive/hive.py --dir ~/hive stats    # 成功率、中位耗时、按 agent/仓库
+python3 hive/hive.py --dir hive doctor   # 任务卡/租约/结果/agent 配置体检
+python3 hive/hive.py --dir hive stats    # 成功率、中位耗时、按 agent/仓库
 
-python3 ~/hive/hive.py --dir ~/hive land   T-0101            # 合入 dry-run（默认，不动东西）
-python3 ~/hive/hive.py --dir ~/hive land   T-0101 --apply    # 合入 main 并 close
-python3 ~/hive/hive.py --dir ~/hive land   --all --apply     # 把能合的都合掉
+python3 hive/hive.py --dir hive land   T-0101            # 合入 dry-run（默认，不动东西）
+python3 hive/hive.py --dir hive land   T-0101 --apply    # 合入 main 并 close
+python3 hive/hive.py --dir hive land   --all --apply     # 把能合的都合掉
 
-python3 ~/hive/hive.py --dir ~/hive result T-0101      # 看摘要
-python3 ~/hive/hive.py --dir ~/hive retry  T-0101      # 失败重跑（清结果+租约，续用原分支）
-python3 ~/hive/hive.py --dir ~/hive retry  T-0101 --fresh  # 从 main 重来
-python3 ~/hive/hive.py --dir ~/hive gc --minutes 180   # 回收跑飞的租约
-python3 ~/hive/hive.py --dir ~/hive prune              # 清代码仓里已合并的 task/verify 分支（dry-run）
-python3 ~/hive/hive.py --dir ~/hive close T-0101 --note "已 land 合入"
+python3 hive/hive.py --dir hive result T-0101      # 看摘要
+python3 hive/hive.py --dir hive retry  T-0101      # 失败重跑（清结果+租约，续用原分支）
+python3 hive/hive.py --dir hive retry  T-0101 --fresh  # 从 main 重来
+python3 hive/hive.py --dir hive gc --minutes 180   # 回收跑飞的租约
+python3 hive/hive.py --dir hive prune              # 清代码仓里已合并的 task/verify 分支（dry-run）
+python3 hive/hive.py --dir hive close T-0101 --note "已 land 合入"
 
 # 不跑 worker 的人工链路（GUI agent 场景，与该 agent 的 worker 二选一）
-python3 ~/hive/hive.py --dir ~/hive take   T-0101 --agent workbuddy
-python3 ~/hive/hive.py --dir ~/hive submit T-0101
+python3 hive/hive.py --dir hive take   T-0101 --agent workbuddy
+python3 hive/hive.py --dir hive submit T-0101
 ```
 
 `land` 是最后一步的自动化：在**临时 worktree** 里真跑一遍 merge（不是靠 `merge-tree` 猜），
@@ -207,7 +269,15 @@ python3 ~/hive/hive.py --dir ~/hive submit T-0101
 适合**没有 agent CLI** 的机器：只跑验收，不改代码。任务卡里必须至少有一条 `verify`。
 
 ```sh
-agent add --name win10 --mode verify --repo hive=C:\hive ...
+# 在验收机上登记（FreeBSD / Linux / macOS）
+python3 hive/hive.py --dir hive agent add --name win10 --mode verify \
+  --repo hive=/path/to/hive --worktrees ~/.hive/wt
+```
+
+```powershell
+# Windows 验收机
+python3 hive\hive.py --dir hive agent add --name win10 --mode verify `
+  --repo hive=G:\dswork\hive --worktrees G:\dswork\hive-wt
 ```
 
 要验证某个修复分支，把任务卡的 `base` 写成 `task/T-0101` 即可；worker 检出那条分支跑命令，
@@ -219,11 +289,11 @@ Windows 专属 bug 的三卡闭环：诊断卡（win10/verify）→ 修复卡（
 
 这类 agent 没有稳定的命令行入口，用 `--manual`：
 
-```sh
-# Windows 里的 dumate / Trae / CodeArts：直接打开工作区
-python C:\hive\hive.py --dir C:\hive agent add --name win10-gui --mode manual `
+```powershell
+# Windows 里的 dumate / Trae / CodeArts：直接打开工作区（工作目录 G:\dswork）
+python3 hive\hive.py --dir hive agent add --name win10-gui --mode manual `
   --launch "trae {worktree}" `
-  --repo hive=C:\hive --worktrees C:\hive-wt
+  --repo hive=G:\dswork\hive --worktrees G:\dswork\hive-wt
 ```
 
 `launch` 支持 `{worktree}`、`{task}`、`{prompt}`；`trae` 不在 PATH 就写完整路径，或用 `explorer {worktree}`。
@@ -265,7 +335,13 @@ chroot 里的小浣熊 / WorkBuddy 的完整接法（共享 `/home`、manual wor
 ## 9. 自测
 
 ```sh
-python3 selftest.py
+# 在工作目录里
+python3 hive/selftest.py
+```
+
+```powershell
+# Windows
+python3 hive\selftest.py
 ```
 
 会在临时目录里模拟「一个代码仓库 + 两个 worker 抢同一张卡」，断言只有一个领取成功、只产出一个结果；还覆盖 verify-only 模式、跨卡验收（base=task/T-xxxx）、失败上报、`retry`/`gc`。
@@ -273,12 +349,13 @@ python3 selftest.py
 ## 10. 看板
 
 ```sh
-cd ~/dswork/hive
-PORT=8787 INTERVAL=20 ./scripts/serve-dashboard.sh
+# 在工作目录里（脚本会自己定位 hive 仓）
+PORT=8787 INTERVAL=20 ./hive/scripts/serve-dashboard.sh
 # 浏览器打开 http://127.0.0.1:8787
 ```
 
-远程看：`ssh -L 8787:127.0.0.1:8787 skywalk@192.168.0.88`，浏览器开 `http://127.0.0.1:8787`。
+远程看：`ssh -L 8787:127.0.0.1:8787 skywalk@192.168.0.88`，浏览器开 `http://127.0.0.1:8787`
+（这条 `ssh` 在 Windows PowerShell 里用法相同）。Windows 上不跑看板服务，隧道到 FreeBSD 看即可。
 
 端口只有一个来源：`HIVE_DASHBOARD_PORT`（默认 **8787**），`PORT` 是历史兼容的覆盖项。
 服务化入口 `scripts/dashboard-service.sh start|stop|status`、`hive dash`、各平台自启安装器
@@ -299,18 +376,18 @@ PORT=8787 INTERVAL=20 ./scripts/serve-dashboard.sh
 不用等人喂卡，自助闭环：**查任务 → 领卡 → 干活 → 提交 → 干不下去还回去**。
 
 ```sh
-python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy
+python3 hive/hive.py mcp --agent workbuddy --dir hive
 ```
 
-客户端配置：
+客户端配置（MCP 客户端的工作目录不是你的终端，路径要绝对）：
 
 ```json
 {
   "mcpServers": {
     "hive-workbuddy": {
       "command": "python3",
-      "args": ["/home/skywalk/hive/hive.py",
-               "mcp", "--agent", "workbuddy", "--dir", "/home/skywalk/hive"]
+      "args": ["/home/skywalk/dswork/hive/hive.py",
+               "mcp", "--agent", "workbuddy", "--dir", "/home/skywalk/dswork/hive"]
     }
   }
 }
@@ -319,6 +396,7 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy
 > `--dir` 必须写在 `mcp` **后面**。写在前面会被顶层的同名参数吃掉、子命令取不到而**静默回退**
 > 到默认 clone（`~/.hive/clones/mcp-<agent>`），不报错。不确定就看启动那行 stderr 的 `dir=`。
 > 也可以干脆不传 `--dir`，用默认独占 clone（推荐）。
+> Windows 上把 `command` 换成 `python`、路径换成 `G:\\dswork\\hive\\hive.py`（JSON 里反斜杠要写两个）。
 
 | 工具 | 作用 |
 |---|---|

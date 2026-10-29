@@ -35,8 +35,8 @@ CLI 的问题是人要敲。agent 能调 MCP 之后，闭环里就少一个人�
 ## 2. 起服务
 
 ```sh
-python3 ~/dswork/hive/hive.py mcp --agent workbuddy
-# 要指定协调仓就写在 mcp 后面：... hive.py mcp --agent workbuddy --dir ~/hive
+python3 hive/hive.py mcp --agent workbuddy
+# 要指定协调仓就写在 mcp 后面：... hive.py mcp --agent workbuddy --dir hive
 ```
 
 - **必须指定 `--agent`**（或设 `HIVE_AGENT`）。一个 server 进程 = 一个 agent 的身份，
@@ -75,7 +75,7 @@ MCP 客户端里加一段：
 }
 ```
 
-Windows 上把 `command` 换成 `python`、`args` 里的路径换成 `C:\hive\hive.py` 即可。
+Windows 上把 `command` 换成 `python`、`args` 里的路径换成 `G:\dswork\hive\hive.py` 即可。
 
 ### 3.1 `--dir` 必须写在 `mcp` 后面（否则静默失效）
 
@@ -118,7 +118,7 @@ worker 视角只能操作自己的卡。要让 agent 当**总控**（合入、�
 起 server 时加 `--role controller`：
 
 ```sh
-python3 ~/hive/hive.py mcp --agent workbuddy --role controller
+python3 hive/hive.py mcp --agent workbuddy --role controller
 ```
 
 工具数从 14 变 **21**（实测），多出 7 个全都是会改动 main 的操作：

@@ -8,6 +8,11 @@
 > 5.1 对无 BOM 的 .ps1 按 ANSI(cp936) 解码，会破坏中文字符串终止、脚本连解析都过不去；
 > 改这两个文件时**务必保留 BOM**（`.sample.json` 相反，不能带 BOM，否则 `json.loads` 会炸）。
 
+> **路径约定**：按 README §0，Windows 工作目录是 `G:\dswork`（或 `D:\dswork`），hive 仓放
+> `G:\dswork\hive`。本文早期示例仍按 `C:\hive` 写；要用新布局，给 `bootstrap.ps1` 加
+> `-Root G:\dswork\hive -Worktrees G:\dswork\hive-wt`，并把下面命令里的 `C:\hive` 换成
+> `G:\dswork\hive`。FreeBSD 侧命令都假设已在工作目录（`~/dswork`）里。
+
 ## 照做清单（Checklist）
 
 > 从零到接上，按顺序做。每步都有验收判据，卡住就看最后一节排障。
@@ -86,11 +91,11 @@
 ### E. 在 FreeBSD 侧确认
 
 - [ ] ```sh
-  python3 hive.py --dir ~/dswork/hive agent list
+  python3 hive/hive.py --dir hive agent list
   ```
   ✅ 看到 `win10  host=win10`
 - [ ] ```sh
-  python3 hive.py --dir ~/dswork/hive dispatch --host win10
+  python3 hive/hive.py --dir hive dispatch --host win10
   ```
   ✅ 能列出卡（没有卡会提示"没有可分派的任务"，也算命令通）
 
@@ -98,15 +103,15 @@
 
 - [ ] 在 FreeBSD 写一张**只改文档**的小卡
 - [ ] ```sh
-  python3 hive.py --dir ~/dswork/hive dispatch --host win10 --apply
+  python3 hive/hive.py --dir hive dispatch --host win10 --apply
   ```
 - [ ] Windows 侧领取并完成（D1 让 agent 调 `hive_claim`，D2 等 worker 自动领）
 - [ ] ```sh
-  python3 hive.py --dir ~/dswork/hive result T-xxxx
+  python3 hive/hive.py --dir hive result T-xxxx
   ```
   ✅ `status: done`
 - [ ] ```sh
-  python3 hive.py --dir ~/dswork/hive land T-xxxx --apply
+  python3 hive/hive.py --dir hive land T-xxxx --apply
   ```
 
 ### G. 排障速查
@@ -311,7 +316,7 @@ Get-ScheduledTask -TaskName HiveWorker-win10 | Format-List State
 Get-Content C:\hive\logs\worker-win10.log -Tail 30
 
 # 在任意一台有仓库的机器上
-python3 hive.py --dir ~/hive status
+python3 hive/hive.py --dir hive status
 ```
 
 预期：`win10` 出现在 `agents/win10.json`；`inbox/win10/` 有任务时日志出现

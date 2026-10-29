@@ -37,8 +37,8 @@ http://127.0.0.1:8787
 ### 在蜂巢仓库里跑真实数据
 
 ```sh
-cd ~/dswork/hive
-PORT=8787 INTERVAL=20 ./scripts/serve-dashboard.sh
+# 在工作目录里（脚本会自己定位 hive 仓）
+PORT=8787 INTERVAL=20 ./hive/scripts/serve-dashboard.sh
 ```
 
 脚本会每 20 秒执行一次 `hive status --json > dashboard/status.json`，再起 `serve.py`；

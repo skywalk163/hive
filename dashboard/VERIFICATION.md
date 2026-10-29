@@ -57,7 +57,7 @@ NODE_PATH=./node_modules node dev/ui-test.js
 ## 3. 接真实 hive 数据
 
 ```sh
-cd ~/dswork/hive
+cd hive
 PORT=8799 INTERVAL=5 ./scripts/serve-dashboard.sh
 curl -s http://127.0.0.1:8799/api/status | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))'
 ```

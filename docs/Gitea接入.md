@@ -13,7 +13,7 @@
 ## 2. 仓库
 
 - 新建仓库：`http://192.168.1.5:3000/skywalk/hive`
-- 本地 `~/dswork/hive` 已 `init`（补齐 `tasks/ inbox/ results/ agents/`）并推送 `main`
+- 本地工作目录下的 `hive/`（FreeBSD `~/dswork/hive`）已 `init`（补齐 `tasks/ inbox/ results/ agents/`）并推送 `main`
 - 仓库内容：`hive.py`、`windows/`、`docs/`、`tests/`、`examples/`、`CHANGELOG.md`、`.gitignore`
 - 默认分支 `main`；目前只有 `main` 一个分支（冒烟任务的 claim/res 已随 `close` 删除）
 
@@ -70,11 +70,11 @@ GIT_TERMINAL_PROMPT=0 git ls-remote http://192.168.1.5:3000/skywalk/hive.git
 ## 5. 真实冒烟（T-0001）
 
 ```sh
-python3 hive.py --dir ~/dswork/hive task new --id T-0001 \
+python3 hive/hive.py --dir hive task new --id T-0001 \
   --title "集成冒烟：light 测试环境" --repo light --needs freebsd \
   --verify "python3 -m pytest -q tests/test_lpd_002_import_hint.py" ...
-python3 hive.py --dir ~/dswork/hive assign T-0001 --agent fb88-verify
-python3 hive.py --dir ~/dswork/hive work --agent fb88-verify --once
+python3 hive/hive.py --dir hive assign T-0001 --agent fb88-verify
+python3 hive/hive.py --dir hive work --agent fb88-verify --once
 ```
 
 结果：
