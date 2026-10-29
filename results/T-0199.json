@@ -1,0 +1,41 @@
+{
+  "task": "T-0199",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0199",
+  "base": "main",
+  "head": "b87021202981e57c3825908f82485cbef2b6de07",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-29T10:18:15+00:00",
+  "finished_at": "2026-10-29T19:06:55+08:00",
+  "duration_s": 2920.1,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/unit/test_LH21_未定义名.py",
+      "code": 0,
+      "tail": [
+        "0.01s call     tests/unit/test_LH21_未定义名.py::test_e016_not_in_default_lint",
+        "0.01s setup    tests/unit/test_LH21_未定义名.py::test_cli_check_names",
+        "",
+        "(7 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "18 passed in 7.35s"
+      ]
+    }
+  ],
+  "summary": "# T-0199 结果补记（深挖后还原，非重做）\n\n## 交付物（已在 light main）\nE016 未定义名 + W016 导入名被局部遮蔽，均 opt-in，`LightLinter.lint()` 默认扫描不变；\n`src/linter/cli.py --check-names`（含 --json）；`tools/内置名清单.py` 机器可读清单；\n`tests/unit/test_LH21_未定义名.py` 18 条用例。\n\n## 已落盘 light main\nmerge `d481554c3`（合入 task/T-0199 @ b87021202）+ `e1332f188`（测试适配 T-0197 收编 `去空白`，E016 正例改用 `最后出现位置`）。\norigin/main 现为 `e1332f188`，18 passed。\n\n## 为什么补写 res/T-0199\ncontroller 误触 `retry T-0199 --fresh` 删掉了 res/T-0199 与 results/T-0199.json；task/T-0199（b87021202）一直在远端且内容已在 main。\nhead = task 分支头 b87021202（是 e1332f188 的祖先，land 时对 main 为 already-up-to-date）。\n",
+  "error": "",
+  "declared_paths": [
+    "src/linter",
+    "tools/内置名清单.py",
+    "tests/unit/test_LH21_未定义名.py"
+  ],
+  "changed_files": [
+    "src/linter/light_linter.py",
+    "src/linter/cli.py",
+    "tools/内置名清单.py",
+    "tests/unit/test_LH21_未定义名.py"
+  ],
+  "out_of_paths": []
+}
