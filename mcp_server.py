@@ -338,10 +338,12 @@ def state_root(agent: str) -> Path:
 class HiveMcp:
     """一个 agent 视角下的 hive。读操作用 Hive，写操作用 Worker（会先同步 main）。"""
 
-    def __init__(self, hive_dir: Path, agent: str, role: str = "worker"):
+    def __init__(self, hive_dir: Path, agent: str, role: str = "worker",
+                 cache=None):
         self.hive_dir = hive_dir
         self.agent = agent
         self.role = role if role in ("worker", "controller") else "worker"
+        self.cache = cache       # P1 hived：只读缓存；stdio 模式为 None
         self._last_sync = 0.0   # 上次 fetch+reset 的时间（见 hive() 的 TTL 说明）
 
     @property
@@ -367,6 +369,13 @@ class HiveMcp:
             git(["reset", "--hard", "-q", "origin/main"], h.dir)
             self._last_sync = now_s
         return h
+
+    def hive_view(self):
+        """只读工具用：有缓存就返回缓存视图，没有就走真实 Hive。"""
+        if self.cache is not None:
+            from mcp_cache import CachedHive
+            return CachedHive(self.hive_dir, self.cache)
+        return self.hive()
 
     def worker(self) -> Worker:
         # Worker.__init__ 会 fetch + reset --hard origin/main，保证写之前是最新的
@@ -420,7 +429,7 @@ class HiveMcp:
 
     # -- 工具实现 ---------------------------------------------------------- #
     def t_whoami(self, _a: dict) -> dict:
-        h = self.hive()
+        h = self.hive_view()
         cfg = h.agent(self.agent)
         rows = self._rows(h)
         mine = [r for r in rows if self.agent in (r["owner"], r["claim_agent"])]
@@ -467,7 +476,7 @@ class HiveMcp:
         )
 
     def t_list_tasks(self, a: dict) -> dict:
-        h = self.hive()
+        h = self.hive_view()
         state = (a.get("state") or "").strip()
         repo = (a.get("repo") or "").strip()
         mine_only = bool(a.get("mine_only"))
@@ -484,7 +493,7 @@ class HiveMcp:
 
     def t_get_task(self, a: dict) -> dict:
         tid = a["task_id"]
-        h = self.hive()
+        h = self.hive_view()
         card = h.card(tid)
         body = card.pop("_body", "")
         card.pop("_path", None)
@@ -507,7 +516,7 @@ class HiveMcp:
         if pm is None:
             return err("缺少 pending_matcher.py：把它拷到 hive.py 同目录再试",
                        hint="用 hive_list_tasks 看全貌")
-        h = self.hive()
+        h = self.hive_view()
         cards = h.cards()
         agent_name = (a.get("agent") or "").strip()
         limit_raw = a.get("limit")
@@ -561,7 +570,7 @@ class HiveMcp:
         return ok(f"{agent_name} 可领 {len(tasks)} 张卡", tasks=tasks, count=len(tasks))
 
     def t_next(self, _a: dict) -> dict:
-        h = self.hive()
+        h = self.hive_view()
         cfg = h.agent(self.agent)
         for tid, c in sorted(h.cards().items(),
                              key=lambda kv: (PRIORITY_ORDER.get(kv[1].get("priority"), 9), kv[0])):
@@ -763,7 +772,7 @@ class HiveMcp:
 
     def t_result(self, a: dict) -> dict:
         tid = a["task_id"]
-        res = self.hive().result_info(tid)
+        res = self.hive_view().result_info(tid)
         if not res:
             return err(f"{tid} 还没有结果")
         v = _verify_verdict(res.get("verify") or [])
@@ -776,7 +785,7 @@ class HiveMcp:
                   result=res, verify_strength=v["verdict"])
 
     def t_stats(self, _a: dict) -> dict:
-        h = self.hive()
+        h = self.hive_view()
         rows = self._rows(h)
         done = [r for r in rows if r["result"] == "done"]
         failed = [r for r in rows if r["result"] == "failed"]
@@ -908,7 +917,7 @@ class HiveMcp:
                   reclaimed=n, applied=bool(a.get("apply")))
 
     def t_doctor(self, _a: dict) -> dict:
-        h = self.hive()
+        h = self.hive_view()
         issues: list[str] = []
         cards = h.cards()
         for tid, c in cards.items():
@@ -963,8 +972,9 @@ class HiveMcp:
 # --------------------------------------------------------------------------- #
 
 class McpServer:
-    def __init__(self, impl: HiveMcp):
+    def __init__(self, impl: HiveMcp, protocol_version: str = PROTOCOL_VERSION):
         self.impl = impl
+        self.protocol_version = protocol_version
 
     def result(self, rid, payload: dict) -> dict:
         return {"jsonrpc": "2.0", "id": rid, "result": payload}
@@ -999,7 +1009,7 @@ class McpServer:
 
         if method == "initialize":
             return self.result(rid, {
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": self.protocol_version,
                 "capabilities": {"tools": {}},
                 "serverInfo": SERVER_INFO,
                 "instructions": (

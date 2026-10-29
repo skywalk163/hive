@@ -85,3 +85,47 @@ def test_after_land_emits_repo_event(world, monkeypatch):
     names = {r.get("name") for r in captured["data"].get("repos") or []}
     assert "light" in names
     assert "hive" in names
+
+
+def test_cluster_starts_mcp_http(world, tmp_path):
+    import json
+    import time
+    from urllib import request as urlrequest
+
+    import mcp_auth
+    import hive_cluster as hc
+
+    world.add_agent("fb", mode="manual")
+    token_file = tmp_path / "state" / "mcp_tokens.json"
+    token = mcp_auth.enroll("fb", "worker", path=token_file)
+    cfg = hc.Config(
+        state_dir=tmp_path / "state", name="mcp-node", host="127.0.0.1",
+        port=0, advertise="127.0.0.1", discover=False, seeds=[],
+        heartbeat_interval=0.08, peer_timeout=0.5, dead_timeout=1.2,
+        election_min=0.3, election_jitter=0.1, leader_lease=0.7,
+        lease_grace=2.0, hive_dir=world.hive1, electable=True,
+        sync_enabled=False, mcp_enabled=True, mcp_port=0,
+        mcp_write_dir=tmp_path / "write", mcp_read_dir=tmp_path / "read",
+    )
+    c = hc.Cluster(cfg)
+    c.start()
+    try:
+        end = time.time() + 8
+        while time.time() < end and not (c.mcp_service and c.mcp_service.port):
+            time.sleep(0.1)
+        assert c.mcp_service is not None, c.mcp_service
+        url = f"http://127.0.0.1:{c.mcp_service.port}/mcp"
+        req = urlrequest.Request(
+            url,
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                             "params": {"protocolVersion": "2025-03-26",
+                                        "capabilities": {}, "clientInfo": {"name": "t"}}}).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {token}"},
+            method="POST")
+        opener = urlrequest.build_opener(urlrequest.ProxyHandler({}))
+        with opener.open(req, timeout=10) as resp:
+            body = json.loads(resp.read().decode())
+        assert body["result"]["protocolVersion"] == "2025-03-26"
+    finally:
+        c.stop()

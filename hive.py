@@ -3758,6 +3758,21 @@ def cmd_init(args) -> None:
 
 
 def cmd_agent(args) -> None:
+    if args.action in ("enroll", "revoke"):
+        import mcp_auth
+        if not args.name:
+            raise HiveError(f"agent {args.action} 需要 --name")
+        if args.action == "revoke":
+            n = mcp_auth.revoke(args.name)
+            log(f"已吊销 {args.name} 的 {n} 个 MCP token")
+            return
+        token = mcp_auth.enroll(args.name, getattr(args, "role", "worker") or "worker")
+        cfg = mcp_auth.config_snippet(token)
+        print(f"agent: {args.name}")
+        print(f"token: {token}")
+        print("MCP 配置（写到该 agent 的客户端配置里）：")
+        print(json.dumps(cfg, ensure_ascii=False, indent=2))
+        return
     h = Hive(args.dir)
     if args.action == "list":
         for p in sorted((h.dir / "agents").glob("*.json")):
@@ -4018,7 +4033,10 @@ def cmd_dispatch(args) -> None:
 
 
 def cmd_mcp(args) -> int:
-    """启动 MCP server（stdio）。转发给 mcp_server.py，保持 CLI 一个入口。"""
+    """启动 MCP server（stdio）或 stdio→hived 桥。"""
+    if getattr(args, "connect", False):
+        import mcp_bridge
+        return mcp_bridge.serve_stdio(args.url, args.token)
     import mcp_server
     argv = ["--agent", args.agent, "--role", args.role]
     if args.mcp_dir:
@@ -4206,6 +4224,11 @@ def cmd_ports(args) -> int:
 
 def cmd_cluster(args) -> int:
     """常驻集群入口：实现在 hive_cluster.py，缺模块时给出可操作的错误。"""
+    # `hive daemon` 是 cluster 的别名（argparse alias 不保留用户输入的命令名）；
+    # daemon 默认带 MCP HTTP，除非显式 --no-mcp。
+    raw = sys.argv[1:]
+    if "daemon" in raw and "--no-mcp" not in raw:
+        args.mcp = True
     try:
         import hive_cluster
     except ImportError as exc:
@@ -4412,8 +4435,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_init)
 
     s = sub.add_parser("agent", help="登记 / 查看 agent")
-    s.add_argument("action", choices=["add", "list"])
+    s.add_argument("action", choices=["add", "list", "enroll", "revoke"])
     s.add_argument("--name")
+    s.add_argument("--role", choices=["worker", "controller"],
+                   help="MCP token 的角色（enroll 时用；默认 worker）")
     s.add_argument("--command", help="执行命令（prompt 从 stdin 传入）")
     s.add_argument("--manual", action="store_true", help="GUI 半自动模式（等价 --mode manual）")
     s.add_argument("--mode", choices=["exec", "verify", "manual"],
@@ -4680,11 +4705,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--role", default=os.environ.get("HIVE_ROLE", "worker"),
                    choices=["worker", "controller"],
                    help="worker=只能操作自己的卡；controller=总控，会改动 main")
+    s.add_argument("--connect", action="store_true",
+                   help="不启 stdio server，改为连接本机 hived 的 8790（stdio 桥）")
+    s.add_argument("--url", default=os.environ.get("HIVE_MCP_URL",
+                                                   "http://127.0.0.1:8790/mcp"),
+                   help="--connect 的目标 URL")
+    s.add_argument("--token", default=os.environ.get("HIVE_MCP_TOKEN", ""),
+                   help="--connect 的 agent token（或用 $HIVE_MCP_TOKEN）")
     s.set_defaults(func=cmd_mcp)
 
     s = sub.add_parser(
-        "cluster",
-        help="常驻集群：自动发现/注册/主节点选举（类 OSPF；git 仍是唯一真相）")
+        "cluster", aliases=["daemon"],
+        help="常驻集群/hived：自动发现/注册/主节点选举；daemon 别名默认带 MCP HTTP")
     s.add_argument("action", nargs="?", default="status",
                    choices=["serve", "start", "stop", "restart", "ensure",
                             "status", "peers", "events", "sync", "join", "leave",
@@ -4710,6 +4742,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="observer：不参选、不投票（verify-only 机器用）")
     s.add_argument("--no-sync", action="store_true",
                    help="关闭本机 repo.updated 代码同步")
+    s.add_argument("--mcp", action="store_true",
+                   help="启动本机 MCP HTTP 入口（127.0.0.1:8790）")
+    s.add_argument("--no-mcp", action="store_true", help="不启动 MCP HTTP 入口")
+    s.add_argument("--mcp-port", type=int, default=None,
+                   help="MCP HTTP 端口（默认 8790）")
+    s.add_argument("--mcp-bind", default=None,
+                   help="MCP 绑定地址（默认 127.0.0.1）")
     s.add_argument("--since", type=int, default=0, help="events/watch 的起始序号")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_cluster)

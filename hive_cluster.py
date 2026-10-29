@@ -297,6 +297,30 @@ class Config:
                                           bool(saved.get("sync", True)))
         else:
             self.sync_enabled = bool(kw.get("sync_enabled"))
+        if kw.get("mcp_enabled") is None:
+            self.mcp_enabled = _env_bool("HIVE_MCP_HTTP",
+                                         bool(saved.get("mcp", False)))
+        else:
+            self.mcp_enabled = bool(kw.get("mcp_enabled"))
+        mcp_port = kw.get("mcp_port")
+        if mcp_port is None:
+            mcp_port = os.environ.get("HIVE_MCP_PORT")
+        if mcp_port is None:
+            mcp_port = saved.get("mcp_port")
+        self.mcp_port = int(mcp_port if mcp_port is not None else 8790)
+        self.mcp_bind = str(
+            kw.get("mcp_bind") or os.environ.get("HIVE_MCP_BIND")
+            or saved.get("mcp_bind") or "127.0.0.1")
+        self.mcp_write_dir = Path(
+            kw.get("mcp_write_dir") or os.environ.get("HIVE_MCP_WRITE_DIR")
+            or saved.get("mcp_write_dir")
+            or (Path.home() / ".hive" / "clones" / "mcp-hived")
+        ).expanduser()
+        self.mcp_read_dir = Path(
+            kw.get("mcp_read_dir") or os.environ.get("HIVE_MCP_READ_DIR")
+            or saved.get("mcp_read_dir")
+            or (Path.home() / ".hive" / "clones" / "mcp-hived-read")
+        ).expanduser()
 
         seeds = kw.get("seeds")
         if seeds is None:
@@ -357,6 +381,11 @@ class Config:
             "lease_grace": self.lease_grace,
             "electable": bool(self.electable),
             "sync": bool(self.sync_enabled),
+            "mcp": bool(self.mcp_enabled),
+            "mcp_port": self.mcp_port,
+            "mcp_bind": self.mcp_bind,
+            "mcp_write_dir": str(self.mcp_write_dir),
+            "mcp_read_dir": str(self.mcp_read_dir),
         })
         if self.token:
             # 0600 权限；本机看板/CLI 需要用它访问 /api/cluster/state。
@@ -777,6 +806,7 @@ class Cluster:
         self._http_thread: threading.Thread | None = None
         self.discovery: Discovery | None = None
         self.sync_agent: RepoSyncAgent | None = None
+        self.mcp_service = None
 
         self.role = "follower"
         self.term = 0
@@ -850,6 +880,20 @@ class Cluster:
         self.discovery.start()
         self.sync_agent = RepoSyncAgent(self)
         self.sync_agent.start()
+        if self.config.mcp_enabled:
+            try:
+                from mcp_http import McpHttpService
+                self.mcp_service = McpHttpService(
+                    self.config.hive_dir,
+                    port=self.config.mcp_port,
+                    bind=self.config.mcp_bind,
+                    state_dir=self.config.state_dir,
+                    write_dir=self.config.mcp_write_dir,
+                    read_dir=self.config.mcp_read_dir,
+                )
+                self.mcp_service.start()
+            except Exception as exc:  # noqa: BLE001  MCP 是可选入口
+                _log(f"mcp: 启动失败（忽略）: {exc}")
 
         for target, name in ((self._loop_heartbeat, "hive-cluster-heartbeat"),
                              (self._loop_maintenance, "hive-cluster-maintenance"),
@@ -882,6 +926,11 @@ class Cluster:
                 self.cond.notify_all()
         except Exception as exc:  # noqa: BLE001 停止路径尽力而为
             _log(f"停止时保存状态失败（忽略）：{exc}")
+        if self.mcp_service is not None:
+            try:
+                self.mcp_service.stop()
+            except Exception:  # noqa: BLE001
+                pass
         if self.sync_agent is not None:
             self.sync_agent.stop()
         if self.discovery is not None:
@@ -2278,6 +2327,8 @@ def build_handler(cluster: Cluster):
                     "cluster_id": snap["cluster_id"], "protocol": PROTOCOL,
                     "uptime_s": round(_now() - cluster.started_epoch, 1),
                     "peers": snap["alive"], "quorum": snap["quorum"],
+                    "mcp": (cluster.mcp_service.status()
+                            if cluster.mcp_service is not None else {"enabled": False}),
                 })
                 return
             if not self._authorized():
@@ -2392,6 +2443,12 @@ def _config_from_args(args) -> Config:
         lease_grace=getattr(args, "lease_grace", None),
         electable=(False if getattr(args, "no_elect", False) else None),
         sync_enabled=(False if getattr(args, "no_sync", False) else None),
+        mcp_enabled=(
+            True if getattr(args, "mcp", False)
+            else (False if getattr(args, "no_mcp", False)
+                  else (True if getattr(args, "command", "") == "daemon" else None))),
+        mcp_port=getattr(args, "mcp_port", None),
+        mcp_bind=getattr(args, "mcp_bind", None),
         hive_dir=getattr(args, "dir", None),
     )
 
@@ -2519,6 +2576,9 @@ def _spawn_background(config: Config, args) -> int:
         argv += ["--no-elect"]
     if not config.sync_enabled:
         argv += ["--no-sync"]
+    if config.mcp_enabled:
+        argv += ["--mcp", "--mcp-port", str(config.mcp_port),
+                 "--mcp-bind", str(config.mcp_bind)]
     if not config.discover:
         argv += ["--no-discover"]
     for seed in config.seeds:
@@ -2843,8 +2903,8 @@ def ensure_background(hive_dir=None, state_dir=None) -> bool:
 # 供 hive.py 的 argparse 直接复用
 def add_parser(sub) -> None:
     p = sub.add_parser(
-        "cluster",
-        help="常驻集群：自动发现/注册/主节点选举（类 OSPF；git 仍是唯一真相）")
+        "cluster", aliases=["daemon"],
+        help="常驻集群/hived：自动发现/注册/主节点选举；daemon 别名默认带 MCP HTTP")
     p.add_argument("action", nargs="?", default="status",
                    choices=["serve", "start", "stop", "restart", "ensure",
                             "status", "peers", "events", "sync", "join", "leave",
@@ -2870,6 +2930,13 @@ def add_parser(sub) -> None:
                    help="observer：不参选、不投票（verify-only 机器用）")
     p.add_argument("--no-sync", action="store_true",
                    help="关闭本机 repo.updated 代码同步")
+    p.add_argument("--mcp", action="store_true",
+                   help="启动本机 MCP HTTP 入口（127.0.0.1:8790）")
+    p.add_argument("--no-mcp", action="store_true", help="不启动 MCP HTTP 入口")
+    p.add_argument("--mcp-port", type=int, default=None,
+                   help="MCP HTTP 端口（默认 8790）")
+    p.add_argument("--mcp-bind", default=None,
+                   help="MCP 绑定地址（默认 127.0.0.1）")
     p.add_argument("--since", type=int, default=0, help="events/watch 的起始序号")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=lambda a: run_cli(a))
