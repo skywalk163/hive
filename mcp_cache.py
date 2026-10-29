@@ -222,9 +222,22 @@ class CachedHive:
         res = self.result_info(dep)
         return bool(res and res.get("status") == "done")
 
-    def landable(self, *args, **kwargs):
-        # 总控工具才用，读走真实 Hive；不缓存这个派生列表。
-        return self._real.landable(*args, **kwargs)
+    def landable(self) -> list[str]:
+        cards = self.cards()
+        out = []
+        for tid, card in cards.items():
+            if card.get("state") == "done":
+                continue
+            res = self.result_info(tid)
+            if not res or res.get("status") != "done":
+                continue
+            if any(v.get("code") for v in (res.get("verify") or [])):
+                continue
+            if any((cards.get(d) or {}).get("state") != "done"
+                   for d in (card.get("depends_on") or [])):
+                continue
+            out.append(tid)
+        return sorted(out)
 
     def __getattr__(self, name):
         return getattr(self._real, name)
