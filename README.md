@@ -3,6 +3,8 @@
 > **状态：活跃开发中**，按任务卡迭代，变更记在 `CHANGELOG.md`。
 > hive 是自包含的工具，**没有**并入任何其它项目。「光明（LightLang）」是一门独立的
 > 中文编程语言，与本项目无关——只是早期拿它的代码仓当过登记示例。
+>
+> **第一次用？直接看 [使用指南](docs/使用指南.md)**：人照着命令跑，AI 照着工具序列用。
 
 一个 Python 脚本（`hive.py`）+ 一个 git 仓库，把「总控 AI 拆任务」和「多台机器上的 agent 干活」连起来。
 MCP server 与 LLM 总控已拆成独立模块（`mcp_server.py` / `llm_controller.py`）。
@@ -335,6 +337,7 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy
 
 ## 12. 更多文档
 
+- **[使用指南](docs/使用指南.md)：从单机到多机、从 Git claim 到 P2 store，人和 AI 都能照着做**
 - **[AGENT 快速上手](docs/AGENT快速上手.md)：第一次接 hive 的 agent 从这里开始（agent 视角，含实测输出和踩坑）**
 - [操作手册](docs/操作手册.md)：每天的命令、总控流程、故障处理
 - [任务卡模板](docs/任务卡模板.md)：代码卡 / 验收卡 / 诊断卡 / 手动卡
