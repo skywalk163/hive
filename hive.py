@@ -3232,14 +3232,46 @@ class Worker:
         self.manual = self.mode == "manual"
         # 并发上限：显式参数优先（start-worker.sh --max-concurrency），否则用 agent
         # 配置的 max_concurrency；1 表示串行（与旧行为逐字一致）。
+        # 显式覆盖存下来，_reload_cfg 重读配置时不能把它冲掉（T-0204）。
+        self._max_concurrency_override = max_concurrency
         self.max_workers = max(1, int(max_concurrency or self.cfg.get("max_concurrency") or 1))
         if self.mode == "exec" and not self.cmd:
             raise HiveError(f"agent {agent_name} 没配置 command（或设 mode: verify / manual）")
         # 本机各任务的进度缓存，供心跳重推与里程碑更新（不上报就没人知道在干什么）
         self._status: dict[str, dict] = {}
 
+    # -- 配置热更新（T-0204） --------------------------------------------- #
+    def _reload_cfg(self) -> dict:
+        """每次领卡前重读 agents/<name>.json，让新增仓库/能力无需重启即生效。
+
+        2026-10-29 踩到：Worker.__init__ 只在启动时读一次配置，之后总控往
+        agents/<name>.json 里加一个新仓库（或改能力标签），正在跑的 worker 完全
+        看不到，导致每一张该仓的卡都**瞬间失败**（"没有配置仓库 ... 的本地路径"），
+        而且 dispatch 与 worker 双方都不觉得异常。
+
+        配置文件很小，每次 pending / claim 都重读一遍，代价可忽略。读取失败时
+        沿用旧配置并留一条日志（不因配置暂时损坏就把整台机器上的 worker 停摆）。
+        """
+        try:
+            cfg = self.h.agent(self.name)
+        except HiveError as e:
+            log(f"{self.name} 重读配置失败（沿用旧配置）: {e}")
+            return self.cfg
+        self.cfg = cfg
+        self.cmd = cfg.get("command") or ""
+        self.launch = cfg.get("launch") or ""
+        self.mode = cfg.get("mode") or ("manual" if cfg.get("manual") else "exec")
+        self.manual = self.mode == "manual"
+        # 显式 --max-concurrency 覆盖配置；没显式传才跟着配置走。
+        self.max_workers = max(1, int(
+            self._max_concurrency_override or cfg.get("max_concurrency") or 1))
+        return self.cfg
+
     # -- 队列 -------------------------------------------------------------- #
     def pending(self) -> list[tuple[str, dict]]:
+        # 每次领卡前重读 agent 配置（T-0204）：新增仓库/能力必须无需重启就可见，
+        # 否则正在跑的 worker 会拿旧配置去匹配，让整批该仓的卡静默秒败。
+        self._reload_cfg()
         if claim_backend() == "store":
             store = local_store()
             if store is None:
@@ -3302,6 +3334,7 @@ class Worker:
           HIVE_CLAIM_MAX_RETRIES 控制，超了抛 HiveError（绝不无限退避）；
         * push 的原子性完全不动：仍然是普通 push，非快进拒绝就是拒绝，绝不 force。
         """
+        self._reload_cfg()  # T-0204：领卡前也刷新配置，与 pending 口径一致
         if claim_backend() == "store":
             info = self.h.claim_info(tid)
             holder = _claim_holder(info)
@@ -3626,7 +3659,10 @@ class Worker:
             max_workers = self.max_workers
         max_workers = max(1, int(max_workers))
         if len(tids) == 1 or max_workers == 1:
-            return {tid: self.run_task(tid) for tid in tids}
+            # T-0204：串行路径也要错误隔离。旧代码是裸的
+            # `{tid: self.run_task(tid) for tid in tids}`，一张卡抛异常会一路烧穿
+            # 主循环、拖垮整台机器的 worker。这里逐张 try/except，单卡失败只判它自己。
+            return {tid: self._run_task_isolated(tid) for tid in tids}
 
         results: dict[str, dict] = {}
         with ThreadPoolExecutor(
@@ -3647,6 +3683,22 @@ class Worker:
                         tid, card, None, f"并发执行异常: {e!r}")
         return results
 
+    def _run_task_isolated(self, tid: str) -> dict:
+        """串行路径的单卡执行 + 错误隔离（T-0204）。
+
+        任何异常只判这张卡失败，绝不向上抛——否则 `loop` 里一张状态不一致的卡
+        （例如 worktree 被回收）就能让整台机器上的 worker 进程退出。
+        """
+        try:
+            return self.run_task(tid)
+        except Exception as e:  # noqa: BLE001  错误隔离：只算本卡失败
+            log(f"{tid} 执行异常（不拖垮其他任务）: {e!r}")
+            try:
+                card = self.h.card(tid)
+            except Exception:  # noqa: BLE001  取不到卡也要能落一条失败
+                card = {}
+            return self._fail(tid, card, None, f"执行异常: {e!r}")
+
     def run_task(self, tid: str) -> dict:
         card = self.h.card(tid)
         repo_name = card.get("repo") or ""
@@ -3665,10 +3717,6 @@ class Worker:
         wt_root.mkdir(parents=True, exist_ok=True)
         wt = wt_root / tid
 
-        if wt.exists():
-            git(["worktree", "remove", "--force", str(wt)], repo, check=False)
-            shutil.rmtree(wt, ignore_errors=True)
-
         verify_only = self.mode == "verify"
         if verify_only and not (card.get("verify") or []):
             return self._fail(tid, card, None, "verify 模式的任务卡必须至少有一条 verify 命令")
@@ -3679,10 +3727,30 @@ class Worker:
             branch = f"verify/{tid}"  # 只读检出，不产出代码分支
         elif not card.get("fresh") and rev_parse(repo, f"origin/task/{tid}"):
             base = f"origin/task/{tid}"  # 续跑上次的活；retry --fresh 时从 main 重来
+
+        # T-0204：worktree 可能已被回收（gc / 手动清理），但卡仍是 assigned（有结果、
+        # 还没 land）。resume 时**绝不**拿一个不存在的目录去 subprocess.run / 当 cwd，
+        # 那会让 FileNotFoundError 一路烧穿整条 worker 流水线。这里统一：
+        #   1) 目录还在就先卸掉（不管它还是不是合法 worktree）；
+        #   2) 用 `git worktree add` 重建，拉到卡的 base；
+        #   3) 重建后校验目录确实可用，否则把卡标 blocked 并写清原因，继续下一张。
         try:
+            if wt.exists():
+                git(["worktree", "remove", "--force", str(wt)], repo, check=False)
+                shutil.rmtree(wt, ignore_errors=True)
             git(["worktree", "add", "-B", branch, str(wt), base], repo)
         except HiveError as e:
-            return self._fail(tid, card, None, f"创建 worktree 失败: {e}")
+            # T-0204：重建失败就把卡标 blocked 并写明原因，绝不整进程退出。
+            reason = f"worktree 重建失败: {e}"
+            self._block_card(tid, card, reason)
+            return self._blocked_result(tid, card, reason)
+        # 校验：worktree add 报成功但目录却不可用（磁盘满、路径被抢占、残留元数据），
+        # 不能拿它当 cwd 去跑，否则还是 FileNotFoundError 整进程退出。git worktree
+        # 的 .git 一定是个文件（指向主仓 .git/worktrees/<name>），缺失即不可用。
+        if not (wt / ".git").exists():
+            reason = f"worktree 重建后不可用（.git 缺失）: {wt}"
+            self._block_card(tid, card, reason)
+            return self._blocked_result(tid, card, reason)
 
         # .hive/ 只给 agent 和 worker 用，不进 git
         ex = git(["rev-parse", "--git-path", "info/exclude"], wt).stdout.strip()
@@ -3883,6 +3951,36 @@ class Worker:
         log(f"{tid} 失败: {error}")
         return result
 
+    def _block_card(self, tid: str, card: dict, reason: str) -> None:
+        """把一张卡标 blocked 并写明原因（T-0204）。
+
+        用于 worker 遇到**无法自行恢复**的卡（例如 worktree 重建失败）时，把卡推给
+        人来处理，而不是让整条流水线停摆。best-effort：标失败只 log，绝不再抛，
+        因为调用方还要继续处理下一张。
+        """
+        try:
+            self.h.cmd_block(tid, reason=reason, who="worker")
+        except Exception as e:  # noqa: BLE001  标不上也要能继续
+            log(f"{tid} 标 blocked 失败（忽略，继续下一张）: {e}")
+
+    def _blocked_result(self, tid: str, card: dict, reason: str) -> dict:
+        """写一条 blocked 结果（看板/res 上有痕迹可查），返回该结果 dict。"""
+        result = {
+            "task": tid, "agent": self.name, "status": "blocked",
+            "branch": f"task/{tid}", "base": card.get("base") or "main",
+            "head": None, "exit_code": 1, "timed_out": False,
+            "started_at": iso(), "finished_at": iso(), "duration_s": 0,
+            "verify": [], "summary": reason, "error": reason,
+        }
+        try:
+            self._write_result(tid, result)
+        except Exception as e:  # noqa: BLE001
+            log(f"{tid} 写 blocked 结果失败（忽略）: {e}")
+        (self.state / "done" / tid).write_text(
+            json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        log(f"{tid} 已转 blocked: {reason}")
+        return result
+
     def _write_result(self, tid: str, result: dict) -> None:
         commit_file_to_ref(
             self.dir, f"results/{tid}.json",
@@ -3908,11 +4006,17 @@ class Worker:
                 pending = self.pending()
                 claimed: list[str] = []
                 for tid, _card in pending:
-                    if self.claim(tid):
-                        claimed.append(tid)
+                    # T-0204：单张卡 claim 的意外（配置损坏、claim 锁逻辑抛非 HiveError）
+                    # 只跳过这一张，绝不拖垮本轮其它卡，更不烧穿主循环。
+                    try:
+                        if self.claim(tid):
+                            claimed.append(tid)
+                    except Exception as e:  # noqa: BLE001
+                        log(f"{tid} 领取异常（跳过本张，继续下一张）: {e!r}")
                 if claimed:
                     # 一轮里可领的卡一次性丢进池子，按 max_concurrency 并发跑；
                     # 上限为 1 时 run_tasks 退化回逐张串行，行为与旧循环一致。
+                    # T-0204：run_tasks 内部已对单卡做错误隔离，单卡异常只判它自己。
                     self.run_tasks(claimed)
                 if once:
                     if not pending:
@@ -3923,6 +4027,8 @@ class Worker:
                 return
             except HiveError as e:
                 log(f"循环出错（继续）: {e}")
+            except Exception as e:  # noqa: BLE001  T-0204：单卡意外绝不整进程退出
+                log(f"循环异常（继续，不停掉流水线）: {e!r}")
             time.sleep(interval)
 
 
