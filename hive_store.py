@@ -460,7 +460,7 @@ class Store:
                 "claimed_at": _iso(), "renewed_at": _iso(), "state": "active",
             }
             task = dict(task)
-            task.update({"state": "claimed", "owner": agent, "updated": _iso()})
+            task.update({"state": "running", "owner": agent, "updated": _iso()})
             op = {"op_id": op_id or uuid.uuid4().hex, "type": "claim",
                   "task_id": tid, "term": int(term), "ts": _iso(),
                   "payload": {"task": task, "claim": claim}}

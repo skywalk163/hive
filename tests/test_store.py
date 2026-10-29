@@ -20,7 +20,7 @@ def test_claim_cas_and_idempotent(tmp_path):
     out = s.claim("T-0001", "agent-a", term=3, lease_minutes=10)
     assert out["ok"] and out["claim"]["owner"] == "agent-a"
     assert out["claim"]["lease_seq"] == 1
-    assert s.task("T-0001")["state"] == "claimed"
+    assert s.task("T-0001")["state"] == "running"
     assert s.task("T-0001")["title"] == "t"
     assert s.task("T-0001")["repo"] == "light"
     assert s.last_seq() == 1
@@ -76,7 +76,7 @@ def test_ops_replicate_to_second_store(tmp_path):
     cb = b.claim_info("T-0001")
     assert cb and cb["owner"] == "agent-a"
     assert cb["lease_id"] == c["claim"]["lease_id"]
-    assert b.task("T-0001")["state"] == "claimed"
+    assert b.task("T-0001")["state"] == "running"
 
 
 def test_read_cache_overlays_store_runtime(world, tmp_path, monkeypatch):
@@ -94,7 +94,7 @@ def test_read_cache_overlays_store_runtime(world, tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_STORE_PATH", str(store_path))
     cache = ReadCache(world.hive2)
     cache.refresh()
-    assert cache.cards()["T-0001"]["state"] == "claimed"
+    assert cache.cards()["T-0001"]["state"] == "running"
     assert cache.cards()["T-0001"]["owner"] == "agent-a"
     claim = cache.claim_info("T-0001")
     assert claim and claim["agent"] == "agent-a"
