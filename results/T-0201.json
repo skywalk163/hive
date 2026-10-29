@@ -1,0 +1,43 @@
+{
+  "task": "T-0201",
+  "agent": "fb88-dsh",
+  "status": "done",
+  "branch": "task/T-0201",
+  "base": "main",
+  "mode": "exec",
+  "head": "c5f7cf79713c44f0a47b0ac59145106ec207a263",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-29T09:59:58+00:00",
+  "finished_at": "2026-10-29T10:17:34+00:00",
+  "duration_s": 1056.5,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/unit/test_LH01_时间算术.py",
+      "code": 0,
+      "tail": [
+        "0.02s call     tests/unit/test_LH01_时间算术.py::Test时刻转换::test_时刻转戳_与戳转时刻往返",
+        "0.02s call     tests/unit/test_LH01_时间算术.py::Test解析时间容错::test_无效字符串返回空",
+        "",
+        "(11 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "21 passed in 2.67s"
+      ]
+    }
+  ],
+  "summary": "# T-0201 工作说明（LH-01｜时间加减/时间差秒/时刻转戳/戳转时刻，解析时间失败返空）\n\n## 结论\nLH-01（P1 stdlib 缺口）：`解析时间` 已有，缺「加减」与「相差」。已在 `stdlib/时间管理.py` 补齐 `时间加减`、`时间差秒`、`时刻转戳`、`戳转时刻`，并将 `解析时间` 改为解析失败返回 `空`（None）不抛异常，与试探型转换约定一致。\n\n## 改动\n1. `stdlib/时间管理.py`：修改 `解析时间` 为 try/except 返回 None；新增 `时刻转戳`、`戳转时刻`、`时间加减`、`时间差秒` 四函数；`__all__` 补 4 个新导出。\n2. `stdlib/时间管理.light`：文件头能力边界注释补记 4 个新函数（原生腿无法完成，Python 腿兜底）。\n3. `tests/unit/test_LH01_时间算术.py`：新建，覆盖时间差秒正负/零、时间加减跨月/跨年/闰日/平年、多参数相加、时间戳往返、解析时间失败返空。\n\n## 验证\n本环境 bash 沙箱不可用（无 bubblewrap/Landlock，无审批通道），无法跑 pytest；以上均经静态/手工推演核对。需 worker 跑：`python3 -m pytest -q tests/unit/test_LH01_时间算术.py`。\n\n## 风险\n- `解析时间` 行为变更（失败返回 None）可能影响依赖方；已 grep 全仓，无既有测试依赖抛异常行为。\n- `时间加减` 用 `time.mktime`/`time.localtime`（本地时间），跨 DST 边界时 wall-clock 可能偏移；任务未要求 DST 处理，测试日期避开 DST 转换。",
+  "error": "",
+  "declared_paths": [
+    "stdlib/时间管理.py",
+    "stdlib/时间管理.light",
+    "tests/unit/test_LH01_时间算术.py"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "stdlib/时间管理.light",
+    "stdlib/时间管理.py",
+    "tests/unit/test_LH01_时间算术.py"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md"
+  ]
+}
