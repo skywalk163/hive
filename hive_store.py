@@ -248,19 +248,28 @@ class Store:
             ).fetchone()
             if existing:
                 return int(existing["seq"])
-            seq = self._append_op_locked(op)
-            payload = op.get("payload") or {}
-            if isinstance(payload.get("task"), dict):
-                self._upsert_task(payload["task"])
-            if "claim" in payload:
-                if payload.get("claim") is None:
-                    self._db.execute("DELETE FROM claims WHERE task_id=?",
-                                     (str(op.get("task_id") or ""),))
-                else:
-                    self._upsert_claim(payload.get("claim"))
-            if "result" in payload:
-                self._upsert_result(payload.get("result"))
-            return seq
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                seq = self._append_op_locked(op)
+                payload = op.get("payload") or {}
+                if isinstance(payload.get("task"), dict):
+                    self._upsert_task(payload["task"])
+                if "claim" in payload:
+                    if payload.get("claim") is None:
+                        self._db.execute("DELETE FROM claims WHERE task_id=?",
+                                         (str(op.get("task_id") or ""),))
+                    else:
+                        self._upsert_claim(payload.get("claim"))
+                if "result" in payload:
+                    self._upsert_result(payload.get("result"))
+                self._db.execute("COMMIT")
+                return seq
+            except Exception:
+                try:
+                    self._db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
 
     def _upsert_task(self, task: dict | None) -> None:
         if not isinstance(task, dict) or not task.get("id"):
@@ -331,6 +340,8 @@ class Store:
             task = self.task(tid)
             if task is None:
                 raise StoreError(f"没有任务 {tid}")
+            if str(task.get("state") or "") in ("done", "closed"):
+                raise StoreError(f"{tid} 已关闭")
             if self.result_info(tid):
                 raise StoreError(f"{tid} 已经有结果")
             cur = self.claim_info(tid)
