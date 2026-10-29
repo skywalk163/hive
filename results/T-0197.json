@@ -1,0 +1,40 @@
+{
+  "task": "T-0197",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0197",
+  "base": "main",
+  "head": "f1b2854078018ebfd61056a37c94f6320af67247",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-29T11:23:44+08:00",
+  "finished_at": "2026-10-29T12:20:30+08:00",
+  "duration_s": 3406.7,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/unit/test_LH08_内置名与语义.py",
+      "code": 0,
+      "tail": [
+        "0.01s setup    tests/unit/test_LH08_内置名与语义.py::TestLH02皆空::test_wide_empty_but_empty_unchanged",
+        "0.01s setup    tests/unit/test_LH08_内置名与语义.py::TestLH07试转整数::test_no_throw_and_default",
+        "",
+        "(4 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "7 passed in 15.63s"
+      ]
+    }
+  ],
+  "summary": "# T-0197 交付摘要 —— 内置层对拍七条（LH-02/03/04/07/08/11/14）\n\nagent: doubao-win ｜ 日期: 2026-10-29 ｜ 验收: `python3 -m pytest -q tests/unit/test_LH08_内置名与语义.py` → **7 passed**\n\n## 七条落点与复测结论\n\n| 条 | 现状 | 处置 |\n|---|---|---|\n| LH-08 是数字 | HEAD 上仍是旧映射（关键字 是数字→是数值），未自行修好 | **反转**：关键字 是数字→宽松谓词（int/float 排 bool，或单数字字符）；是数值单独可达；是数字符=等价别名。命名层不兼容变更，CHANGELOG 已写迁移口径 |\n| LH-07 试转整数/字符串全数字 | 均缺失 | 新增 试转整数/试转浮点（不抛、支持正负号与首尾空白）；字符串全数字 补 builtin_map 达源码可达 |\n| LH-02 皆空 | 无 | 新增 皆空（null/\"\"/空列表/空字典）；是空 语义一行未动 |\n| LH-03 字典取值 | 无 | 新增 字典取值（缺键或值为空都回落默认）；字典获取 保留 Python 语义 |\n| LH-11 去空白/反转 | 去空白 NameError、反转 返回迭代器 | 去空白=去除空白 真实别名（本地段落由 _user_defined_functions 守卫压住不被劫持）；反转 返回新列表；枚举 维持现状（卡允许，验收未含） |\n| LH-14 字节长度 | 无；编码.字节长度 实为十六进制字节数（与卡上猜测一致） | 新增内置 字节长度(文本,编码=\"utf-8\") 真实字节数；撞名口径 CHANGELOG 已注明 |\n| LH-04 排序 key | 第三参不存在 | 排序列表 加 键=空 参（收段落）；不传 key 行为不变 |\n\n## 改动文件\n- src/code_generator.py：builtin_map 追加（是数字/是数值/皆空/字典取值/试转整数/试转浮点/字节长度/去空白/字符串全数字/反转），未重排已有条目；stdlib 缺失兜底 lambda 同步\n- src/keywords.py：STDLIB_VERB_ARITY 补 9 条\n- stdlib/builtins.py：是数字/是数值 重写转发、新增 皆空/字典取值/试转整数/试转浮点/字节长度/反转/去空白别名；排序列表加 键；__all__ 同步\n- stdlib/内置核心判型.light：是数字 改宽松谓词、新增 皆空\n- tests/unit/test_LH08_内置名与语义.py：新增 7 独立用例\n- tests/test_lpd_016_判型族.py：随 LH-08 反转更新断言（是数字(\"7\") False→True）\n- tests/integration/test_missing_stdlib.py：legacy src 兜底腿断言同步\n- CHANGELOG.md：T-0197 条目 + 迁移口径\n\n## 验证\n- 新验收 7 passed；旧判型族测试通过；stdlib 缺失兜底 12 passed；空壳护栏 6 passed。\n- 预存在的环境缺口（与本卡无关）：tests/unit/test_builtins_drift.py 7 个 FileNotFound，因其比对兄弟仓 lightharness 的 worktree（本机未签出）。\n\n## 边界与后续\n- 只加不改存量：是空 语义未动、不传 key 排序行为未动。\n- **后续另立卡**：src/code_generator_unified.py 的 builtin_map 仍按旧 是数字=是数值 映射（unified 腿用例仍出旧值），跨后端（含 antlrparser/native 腿）名实一致化未在本卡 paths 内，已在 CHANGELOG 标注。",
+  "error": "",
+  "declared_paths": [
+    "src/code_generator.py",
+    "src/keywords.py",
+    "stdlib/builtins.py",
+    "stdlib/内置核心判型.light",
+    "stdlib/内置核心转换.light",
+    "stdlib/编码.light",
+    "tests/unit/test_LH08_内置名与语义.py"
+  ],
+  "changed_files": [],
+  "out_of_paths": []
+}
