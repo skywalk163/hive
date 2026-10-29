@@ -12,10 +12,13 @@
 - **daemon 配置不匹配保护**：已有集群进程不是 store/MCP 模式时，`daemon start --store`
   不再静默返回 0，而是提示用 `daemon restart`（热加载不存在）。
 
+- **两阶段提交 + commit_index**：leader 先 prepare 到多数，再本地 commit、向 follower
+  发 commit；`commit_seq` 作为选举限制和新主截断未提交尾部的依据。新增
+  `/api/cluster/op/since` 追平接口，节点注册后自动从 leader 拉已提交 op。
+
 ### Changed
 
-- **P2b 仍未完成**：dispatch/assign 全量迁移、ArchiveWorker 归档状态机、coordinator
-  进 hived、commit_index/追平日志仍待做。
+- **P2b 仍未完成**：dispatch/assign 全量迁移、ArchiveWorker 归档状态机、coordinator 进 hived。
 
 ## 0.13.0 — 2026-10-29
 

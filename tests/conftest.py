@@ -160,6 +160,13 @@ class World:
         return out.split()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_live_hive_config(monkeypatch):
+    """测试不读开发机 ~/.hive 的运行时配置（否则本机跑 store 会把测试带偏）。"""
+    monkeypatch.setenv("HIVE_CLAIM_BACKEND", "git")
+    monkeypatch.delenv("HIVE_STORE_PATH", raising=False)
+
+
 @pytest.fixture()
 def world(tmp_path) -> World:
     return World(tmp_path)

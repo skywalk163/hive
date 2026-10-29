@@ -954,6 +954,31 @@ class Cluster:
         except Exception as exc:  # noqa: BLE001
             _log(f"store: 摄入任务卡失败（忽略）: {exc}")
 
+    def _store_catch_up(self, base: str) -> None:
+        """新节点/重连：从 leader 拉已 commit 的 op，补齐本地 store。"""
+        if self.store is None or not base:
+            return
+        try:
+            local = self.store.commit_seq()
+            code, body = http_json(
+                base.rstrip("/") + f"/api/cluster/op/since?since={local}",
+                "GET", None, 5.0, self.config.token)
+            if code != 200 or not isinstance(body, dict):
+                return
+            ops = [op for op in (body.get("ops") or [])
+                   if isinstance(op, dict) and op.get("committed")]
+            if not ops:
+                return
+            self.store.truncate_uncommitted()
+            n = 0
+            for op in ops:
+                self.store.apply_op(op)
+                n += 1
+            _log(f"store: 从 {base} 追平 {n} 条 op（commit_seq="
+                 f"{self.store.commit_seq()}）")
+        except Exception as exc:  # noqa: BLE001
+            _log(f"store: 追平失败（忽略）: {exc}")
+
     def stop(self) -> None:
         if self._stop.is_set():
             return
@@ -1175,7 +1200,7 @@ class Cluster:
             "agents": self._local_agents(),
             "capabilities": [],
             "electable": bool(self.config.electable),
-            "last_store_seq": self.store.last_seq() if getattr(self, "store", None) else 0,
+            "last_store_seq": self.store.commit_seq() if getattr(self, "store", None) else 0,
             "hive_dir": str(self.config.hive_dir),
         }
 
@@ -1632,6 +1657,11 @@ class Cluster:
         self._mark_dirty_locked()
 
     def _become_leader_locked(self) -> None:
+        if self.store is not None:
+            try:
+                self.store.truncate_uncommitted()
+            except Exception:  # noqa: BLE001
+                pass
         old_role = self.role
         self.role = "leader"
         self.leader_id = self.node_id
@@ -1642,6 +1672,9 @@ class Cluster:
         self._leader_fail_at = None
         self.event_seq = 0
         self._recover_leases_locked()
+        if self.store is not None:
+            threading.Thread(target=self._broadcast_truncate,
+                             name="hive-store-truncate", daemon=True).start()
         self._emit_locked(
             "leader_elected",
             message=f"{self.config.name} 成为主节点，term={self.term}"
@@ -1682,7 +1715,7 @@ class Cluster:
                      if nid != self.node_id and nid in voters and rec.get("url")]
             body = {"term": term, "candidate": self._self_node(),
                     "last_event": self.events[-1]["id"] if self.events else "",
-                    "last_store_seq": self.store.last_seq() if self.store else 0}
+                    "last_store_seq": self.store.commit_seq() if self.store else 0}
 
         votes = {self.node_id}
         try:
@@ -1990,6 +2023,9 @@ class Cluster:
                     self._adopt_leader_locked(leader, int((state or {}).get("term") or 0))
                 self._mark_dirty_locked()
             _log(f"已注册到主节点 {base}")
+            if self.store is not None:
+                threading.Thread(target=self._store_catch_up, args=(base,),
+                                 name="hive-store-catchup", daemon=True).start()
             return True
         # 409：对方知道主节点，重试一次
         if isinstance(resp, dict):
@@ -2006,6 +2042,10 @@ class Cluster:
                                 resp2.get("state") or {}, from_leader=True)
                             self._mark_dirty_locked()
                         _log(f"已注册到主节点 {alt}")
+                        if self.store is not None:
+                            threading.Thread(target=self._store_catch_up,
+                                             args=(alt,), name="hive-store-catchup",
+                                             daemon=True).start()
                         return True
             node = resp.get("node")
             if isinstance(node, dict):
@@ -2082,7 +2122,7 @@ class Cluster:
         if cand.get("electable") is False:
             return 200, {"ok": True, "granted": False, "term": self.term,
                          "reason": "candidate_not_electable"}
-        my_seq = self.store.last_seq() if self.store else 0
+        my_seq = self.store.commit_seq() if self.store else 0
         if int(cand.get("last_store_seq") or 0) < my_seq:
             return 200, {"ok": True, "granted": False, "term": self.term,
                          "reason": "store_behind",
@@ -2258,22 +2298,27 @@ class Cluster:
             if action == "claim":
                 return self.store.claim(tid, agent, term,
                                         int(body.get("lease_minutes") or 10),
-                                        str(body.get("host") or ""), op_id)
+                                        str(body.get("host") or ""), op_id,
+                                        commit=False)
             if action == "lease":
                 return self.store.renew(tid, agent, str(body.get("lease_id") or ""),
-                                        term, int(body.get("minutes") or 10), op_id)
+                                        term, int(body.get("minutes") or 10), op_id,
+                                        commit=False)
             if action == "release":
                 return self.store.release(tid, agent, str(body.get("lease_id") or ""),
-                                          term, bool(body.get("requeue", True)), op_id)
+                                          term, bool(body.get("requeue", True)), op_id,
+                                          commit=False)
             if action == "result":
                 return self.store.result(tid, agent, str(body.get("lease_id") or ""),
                                          term, dict(body.get("payload") or {}),
-                                         str(body.get("status") or "done"), op_id)
+                                         str(body.get("status") or "done"), op_id,
+                                         commit=False)
             if action == "assign":
-                return self.store.assign(tid, agent, term, op_id)
+                return self.store.assign(tid, agent, term, op_id, commit=False)
             if action == "close":
                 return self.store.close(tid, bool(body.get("done", True)),
-                                        str(body.get("note") or ""), term, op_id)
+                                        str(body.get("note") or ""), term, op_id,
+                                        commit=False)
         except StoreError as exc:
             raise ClusterError(str(exc)) from exc
         raise ClusterError(f"未知 store 动作 {action}")
@@ -2290,6 +2335,29 @@ class Cluster:
             with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
                 futs = [pool.submit(http_json,
                                     str(p["url"]).rstrip("/") + "/api/cluster/op",
+                                    "POST", body, 1.5, self.config.token)
+                        for p in peers]
+                for fut in as_completed(futs):
+                    try:
+                        code, resp = fut.result()
+                        if code == 200 and isinstance(resp, dict) and resp.get("ok"):
+                            ok += 1
+                    except Exception:  # noqa: BLE001
+                        pass
+        return ok >= quorum
+
+    def _commit_op_replicated(self, seq: int) -> bool:
+        with self.lock:
+            peers = [dict(rec) for nid, rec in self.nodes.items()
+                     if nid != self.node_id and rec.get("url")
+                     and self._node_status_locked(rec) in ("alive", "suspect")]
+            quorum = self._quorum_locked()
+        ok = 1 if self.store is not None and self.store.commit_seq() >= seq else 0
+        if peers:
+            body = {"seq": int(seq), "term": self.term}
+            with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+                futs = [pool.submit(http_json,
+                                    str(p["url"]).rstrip("/") + "/api/cluster/op/commit",
                                     "POST", body, 1.5, self.config.token)
                         for p in peers]
                 for fut in as_completed(futs):
@@ -2333,8 +2401,13 @@ class Cluster:
             if ops:
                 if not self._replicate_op(ops[0]):
                     return 503, {"ok": False, "code": "E_NO_QUORUM",
-                                 "error": "未达到多数复制，写未确认",
+                                 "error": "未达到多数 prepare，写未确认",
                                  "term": self.term, **out}
+        self.store.commit_op(seq)
+        if not self._commit_op_replicated(seq):
+            return 503, {"ok": False, "code": "E_NO_QUORUM_COMMIT",
+                         "error": "多数 prepare 成功但 commit 未达多数；客户端可重试",
+                         "term": self.term, **out}
         return 200, {"ok": True, "term": self.term, **out}
 
     def handle_store_state(self) -> tuple[int, dict]:
@@ -2367,11 +2440,59 @@ class Cluster:
             if self.store is None:
                 return 503, {"ok": False, "error": "store 未启用"}
             try:
-                seq = self.store.apply_op(op)
+                seq = self.store.stage_op(op)
+            except Exception as exc:  # noqa: BLE001
+                return 500, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            self._persist_locked()
+        return 200, {"ok": True, "seq": seq, "term": self.term, "staged": True}
+
+    def handle_op_commit(self, body: dict) -> tuple[int, dict]:
+        """leader 确认 op 已多数 prepare 后，follower 才把它应用到状态机。"""
+        if not isinstance(body, dict):
+            return 400, {"ok": False, "error": "请求体必须是对象"}
+        try:
+            seq = int(body.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        if seq <= 0:
+            return 400, {"ok": False, "error": "commit 需要 seq"}
+        term = int(body.get("term") or 0)
+        with self.lock:
+            if term and term < self.term:
+                return 409, {"ok": False, "stale": True, "term": self.term}
+            if self.store is None:
+                return 503, {"ok": False, "error": "store 未启用"}
+            try:
+                self.store.commit_op(seq)
             except Exception as exc:  # noqa: BLE001
                 return 500, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
             self._persist_locked()
         return 200, {"ok": True, "seq": seq, "term": self.term}
+
+    def _broadcast_truncate(self) -> None:
+        with self.lock:
+            peers = [dict(rec) for nid, rec in self.nodes.items()
+                     if nid != self.node_id and rec.get("url")]
+            term = self.term
+        for peer in peers:
+            try:
+                http_json(str(peer["url"]).rstrip("/") + "/api/cluster/op/truncate",
+                          "POST", {"term": term}, 1.0, self.config.token)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def handle_op_truncate(self, body: dict) -> tuple[int, dict]:
+        if not isinstance(body, dict):
+            return 400, {"ok": False, "error": "请求体必须是对象"}
+        term = int(body.get("term") or 0)
+        with self.lock:
+            if term and term < self.term:
+                return 409, {"ok": False, "stale": True, "term": self.term}
+            if self.store is None:
+                return 503, {"ok": False, "error": "store 未启用"}
+            seq = self.store.truncate_uncommitted()
+            self._persist_locked()
+        return 200, {"ok": True, "commit_seq": seq, "term": self.term}
 
     def handle_seed(self, body: dict) -> tuple[int, dict]:
         raw = str(body.get("url") or body.get("seed") or "").strip()
@@ -2557,6 +2678,19 @@ def build_handler(cluster: Cluster):
                 code, payload = cluster.handle_store_state()
                 self._send(code, payload)
                 return
+            if path == "/api/cluster/op/since":
+                try:
+                    since = int((query.get("since") or ["0"])[0])
+                except (TypeError, ValueError):
+                    since = 0
+                if cluster.store is None:
+                    self._send(503, {"ok": False, "error": "store 未启用"})
+                    return
+                ops = [op for op in cluster.store.ops_since(since)
+                       if op.get("committed")]
+                self._send(200, {"ok": True, "ops": ops,
+                                 "commit_seq": cluster.store.commit_seq()})
+                return
             if path == "/api/cluster/config":
                 cfg = cluster.config
                 self._send(200, {"ok": True, "cluster_id": cfg.cluster_id,
@@ -2597,6 +2731,10 @@ def build_handler(cluster: Cluster):
                     code, payload = cluster.handle_event(body)
                 elif path == "/api/cluster/op":
                     code, payload = cluster.handle_op(body)
+                elif path == "/api/cluster/op/commit":
+                    code, payload = cluster.handle_op_commit(body)
+                elif path == "/api/cluster/op/truncate":
+                    code, payload = cluster.handle_op_truncate(body)
                 elif path.startswith("/api/cluster/store/"):
                     code, payload = cluster.handle_store(
                         path.rsplit("/", 1)[-1], body)

@@ -98,3 +98,24 @@ def test_read_cache_overlays_store_runtime(world, tmp_path, monkeypatch):
     assert cache.cards()["T-0001"]["owner"] == "agent-a"
     claim = cache.claim_info("T-0001")
     assert claim and claim["agent"] == "agent-a"
+
+
+def test_stage_commit_truncate(tmp_path):
+    s = Store(tmp_path / "two-phase.db", "n")
+    s.ingest_cards({"T-0001": _card()})
+    out = s.claim("T-0001", "A", term=1, lease_minutes=10, commit=False)
+    assert out["seq"] == 1
+    assert s.last_seq() == 1 and s.commit_seq() == 0
+    assert s.claim_info("T-0001") is None  # staged 不改变状态
+
+    s.commit_op(1)
+    assert s.commit_seq() == 1
+    assert s.claim_info("T-0001")["owner"] == "A"
+
+    s2 = Store(tmp_path / "two-phase-2.db", "n2")
+    s2.ingest_cards({"T-0001": _card()})
+    o = s2.claim("T-0001", "B", term=1, lease_minutes=10, commit=False)
+    assert s2.commit_seq() == 0
+    assert s2.truncate_uncommitted() == 0
+    assert s2.last_seq() == 0
+    assert s2.claim_info("T-0001") is None

@@ -111,7 +111,8 @@ class Store:
             type TEXT NOT NULL,
             task_id TEXT NOT NULL DEFAULT '',
             payload_json TEXT NOT NULL DEFAULT '{}',
-            ts TEXT NOT NULL DEFAULT ''
+            ts TEXT NOT NULL DEFAULT '',
+            committed INTEGER NOT NULL DEFAULT 1
         );
         """)
         self._db.execute(
@@ -119,6 +120,11 @@ class Store:
             (str(SCHEMA_VERSION),))
         self._db.execute(
             "INSERT OR IGNORE INTO meta(key,value) VALUES('last_seq','0')")
+        self._db.execute(
+            "INSERT OR IGNORE INTO meta(key,value) VALUES('commit_seq','0')")
+        cols = {r["name"] for r in self._db.execute("PRAGMA table_info(ops)")}
+        if "committed" not in cols:
+            self._db.execute("ALTER TABLE ops ADD COLUMN committed INTEGER NOT NULL DEFAULT 1")
 
     def close(self) -> None:
         with self._lock:
@@ -141,6 +147,10 @@ class Store:
         with self._lock:
             return int(self._meta("last_seq", "0") or 0)
 
+    def commit_seq(self) -> int:
+        with self._lock:
+            return int(self._meta("commit_seq", "0") or 0)
+
     def summary(self) -> dict:
         with self._lock:
             tasks = self._db.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
@@ -148,8 +158,8 @@ class Store:
                 "SELECT COUNT(*) AS n FROM claims WHERE state='active'").fetchone()["n"]
             results = self._db.execute("SELECT COUNT(*) AS n FROM results").fetchone()["n"]
             return {"tasks": int(tasks), "claims": int(claims), "results": int(results),
-                    "last_seq": self.last_seq(), "node": self.node_id,
-                    "path": str(self.path)}
+                    "last_seq": self.last_seq(), "commit_seq": self.commit_seq(),
+                    "node": self.node_id, "path": str(self.path)}
 
     # -- 读 ---------------------------------------------------------------- #
     def task(self, tid: str) -> dict | None:
@@ -188,6 +198,7 @@ class Store:
                 out.append({"seq": int(row["seq"]), "term": int(row["term"]),
                             "op_id": row["op_id"], "type": row["type"],
                             "task_id": row["task_id"], "ts": row["ts"],
+                            "committed": int(row["committed"] or 0),
                             "payload": payload})
             return out
 
@@ -223,16 +234,16 @@ class Store:
     def _next_seq_locked(self) -> int:
         return int(self._meta("last_seq", "0") or 0) + 1
 
-    def _append_op_locked(self, op: dict) -> int:
+    def _append_op_locked(self, op: dict, committed: int = 1) -> int:
         seq = int(op.get("seq") or self._next_seq_locked())
         try:
             self._db.execute(
-                "INSERT INTO ops(seq,term,op_id,type,task_id,payload_json,ts) "
-                "VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO ops(seq,term,op_id,type,task_id,payload_json,ts,committed) "
+                "VALUES(?,?,?,?,?,?,?,?)",
                 (seq, int(op.get("term") or 0), str(op["op_id"]),
                  str(op["type"]), str(op.get("task_id") or ""),
                  json.dumps(op.get("payload") or {}, ensure_ascii=False),
-                 str(op.get("ts") or _iso())))
+                 str(op.get("ts") or _iso()), int(committed)))
         except sqlite3.IntegrityError:
             row = self._db.execute("SELECT seq FROM ops WHERE op_id=?",
                                    (str(op["op_id"]),)).fetchone()
@@ -241,7 +252,7 @@ class Store:
         return seq
 
     def apply_op(self, op: dict) -> int:
-        """幂等应用一个 op（leader 本地或 follower 复制）。"""
+        """幂等应用一个 op（测试/兼容路径：追加即提交）。"""
         with self._lock:
             existing = self._db.execute(
                 "SELECT seq FROM ops WHERE op_id=?", (str(op.get("op_id") or ""),)
@@ -250,18 +261,9 @@ class Store:
                 return int(existing["seq"])
             self._db.execute("BEGIN IMMEDIATE")
             try:
-                seq = self._append_op_locked(op)
-                payload = op.get("payload") or {}
-                if isinstance(payload.get("task"), dict):
-                    self._upsert_task(payload["task"])
-                if "claim" in payload:
-                    if payload.get("claim") is None:
-                        self._db.execute("DELETE FROM claims WHERE task_id=?",
-                                         (str(op.get("task_id") or ""),))
-                    else:
-                        self._upsert_claim(payload.get("claim"))
-                if "result" in payload:
-                    self._upsert_result(payload.get("result"))
+                seq = self._append_op_locked(op, committed=1)
+                self._apply_payload_locked(op)
+                self._set_meta("commit_seq", str(seq))
                 self._db.execute("COMMIT")
                 return seq
             except Exception:
@@ -270,6 +272,87 @@ class Store:
                 except sqlite3.Error:
                     pass
                 raise
+
+    def stage_op(self, op: dict) -> int:
+        """只落 op 日志，不改状态；leader 拿到多数 ACK 后再 commit。"""
+        with self._lock:
+            existing = self._db.execute(
+                "SELECT seq FROM ops WHERE op_id=?", (str(op.get("op_id") or ""),)
+            ).fetchone()
+            if existing:
+                return int(existing["seq"])
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                seq = self._append_op_locked(op, committed=0)
+                self._db.execute("COMMIT")
+                return seq
+            except Exception:
+                try:
+                    self._db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+
+    def commit_op(self, seq: int) -> int:
+        """leader/follower 把 staged op 真正应用到状态机。"""
+        with self._lock:
+            row = self._db.execute("SELECT * FROM ops WHERE seq=?",
+                                   (int(seq),)).fetchone()
+            if row is None:
+                raise StoreError(f"没有 op seq={seq}")
+            if int(row["committed"] or 0):
+                self._set_meta("commit_seq", str(max(self.commit_seq(), int(seq))))
+                return int(seq)
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except ValueError:
+                payload = {}
+            op = {"seq": int(seq), "term": int(row["term"]),
+                  "op_id": row["op_id"], "type": row["type"],
+                  "task_id": row["task_id"], "payload": payload}
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._apply_payload_locked(op)
+                self._db.execute("UPDATE ops SET committed=1 WHERE seq=?", (int(seq),))
+                self._set_meta("commit_seq", str(int(seq)))
+                self._db.execute("COMMIT")
+                return int(seq)
+            except Exception:
+                try:
+                    self._db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+
+    def truncate_uncommitted(self) -> int:
+        """新 leader 上任：丢弃未提交的尾部 op，把 last_seq 对齐 commit_seq。"""
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute("DELETE FROM ops WHERE committed=0")
+                commit_seq = self.commit_seq()
+                self._set_meta("last_seq", str(commit_seq))
+                self._db.execute("COMMIT")
+                return commit_seq
+            except Exception:
+                try:
+                    self._db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+
+    def _apply_payload_locked(self, op: dict) -> None:
+        payload = op.get("payload") or {}
+        if isinstance(payload.get("task"), dict):
+            self._upsert_task(payload["task"])
+        if "claim" in payload:
+            if payload.get("claim") is None:
+                self._db.execute("DELETE FROM claims WHERE task_id=?",
+                                 (str(op.get("task_id") or ""),))
+            else:
+                self._upsert_claim(payload.get("claim"))
+        if "result" in payload:
+            self._upsert_result(payload.get("result"))
 
     def _upsert_task(self, task: dict | None) -> None:
         if not isinstance(task, dict) or not task.get("id"):
@@ -327,7 +410,7 @@ class Store:
 
     # -- 业务动作（leader） ------------------------------------------------- #
     def claim(self, tid: str, agent: str, term: int, lease_minutes: int,
-              host: str = "", op_id: str = "") -> dict:
+              host: str = "", op_id: str = "", commit: bool = True) -> dict:
         lease_seconds = max(60, int(lease_minutes) * 60)
         with self._lock:
             if op_id:
@@ -363,12 +446,12 @@ class Store:
             op = {"op_id": op_id or uuid.uuid4().hex, "type": "claim",
                   "task_id": tid, "term": int(term), "ts": _iso(),
                   "payload": {"task": task, "claim": claim}}
-            op["seq"] = self.apply_op(op)
+            op["seq"] = self.apply_op(op) if commit else self.stage_op(op)
             return {"ok": True, "idempotent": False, "claim": claim,
                     "task": task, "seq": op["seq"]}
 
     def renew(self, tid: str, agent: str, lease_id: str, term: int,
-              minutes: int, op_id: str = "") -> dict:
+              minutes: int, op_id: str = "", commit: bool = True) -> dict:
         with self._lock:
             cur = self.claim_info(tid)
             if not cur or cur.get("state") != "active":
@@ -384,11 +467,11 @@ class Store:
             op = {"op_id": op_id or uuid.uuid4().hex, "type": "lease",
                   "task_id": tid, "term": int(term), "ts": _iso(),
                   "payload": {"claim": claim}}
-            op["seq"] = self.apply_op(op)
+            op["seq"] = self.apply_op(op) if commit else self.stage_op(op)
             return {"ok": True, "claim": claim, "seq": op["seq"]}
 
     def release(self, tid: str, agent: str, lease_id: str, term: int,
-                requeue: bool = True, op_id: str = "") -> dict:
+                requeue: bool = True, op_id: str = "", commit: bool = True) -> dict:
         with self._lock:
             cur = self.claim_info(tid)
             if cur and (cur.get("owner") != agent
@@ -403,11 +486,12 @@ class Store:
             op = {"op_id": op_id or uuid.uuid4().hex, "type": "release",
                   "task_id": tid, "term": int(term), "ts": _iso(),
                   "payload": {"task": task, "claim": None}}
-            op["seq"] = self.apply_op(op)
+            op["seq"] = self.apply_op(op) if commit else self.stage_op(op)
             return {"ok": True, "task": task, "seq": op["seq"]}
 
     def result(self, tid: str, agent: str, lease_id: str, term: int,
-               payload: dict, status: str = "done", op_id: str = "") -> dict:
+               payload: dict, status: str = "done", op_id: str = "",
+               commit: bool = True) -> dict:
         with self._lock:
             if op_id:
                 row = self._db.execute("SELECT seq FROM ops WHERE op_id=?",
@@ -433,21 +517,22 @@ class Store:
             op = {"op_id": op_id or uuid.uuid4().hex, "type": "result",
                   "task_id": tid, "term": int(term), "ts": _iso(),
                   "payload": {"task": task, "result": result}}
-            op["seq"] = self.apply_op(op)
+            op["seq"] = self.apply_op(op) if commit else self.stage_op(op)
             return {"ok": True, "task": task, "result": result, "seq": op["seq"]}
 
-    def assign(self, tid: str, agent: str, term: int, op_id: str = "") -> dict:
+    def assign(self, tid: str, agent: str, term: int, op_id: str = "",
+               commit: bool = True) -> dict:
         with self._lock:
             task = dict(self.task(tid) or {"id": tid})
             task.update({"state": "assigned", "owner": agent, "updated": _iso()})
             op = {"op_id": op_id or uuid.uuid4().hex, "type": "assign",
                   "task_id": tid, "term": int(term), "ts": _iso(),
                   "payload": {"task": task}}
-            op["seq"] = self.apply_op(op)
+            op["seq"] = self.apply_op(op) if commit else self.stage_op(op)
             return {"ok": True, "task": task, "seq": op["seq"]}
 
     def close(self, tid: str, done: bool = True, note: str = "",
-              term: int = 0, op_id: str = "") -> dict:
+              term: int = 0, op_id: str = "", commit: bool = True) -> dict:
         with self._lock:
             task = dict(self.task(tid) or {"id": tid})
             task.update({"state": "done" if done else "closed", "owner": "",
@@ -456,7 +541,7 @@ class Store:
                   "task_id": tid, "term": int(term), "ts": _iso(),
                   "payload": {"task": task, "claim": None,
                               "note": str(note or "")}}
-            op["seq"] = self.apply_op(op)
+            op["seq"] = self.apply_op(op) if commit else self.stage_op(op)
             return {"ok": True, "task": task, "seq": op["seq"]}
 
     # -- 行转换 ------------------------------------------------------------ #
