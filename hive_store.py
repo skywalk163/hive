@@ -274,7 +274,7 @@ class Store:
                 raise StoreError(f"没有结果 {tid}")
             if cur.get("archived_at"):
                 return {"ok": True, "idempotent": True, "archived_at":
-                        cur.get("archived_at"), "seq": self.last_seq()}
+                        cur.get("archived_at"), "seq": 0}
             op = {"op_id": op_id or uuid.uuid4().hex, "type": "archive",
                   "task_id": tid, "term": int(term), "ts": _iso(),
                   "payload": {"archive": {"task_id": tid,

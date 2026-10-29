@@ -2586,13 +2586,13 @@ class Cluster:
                     return 503, {"ok": False, "code": "E_NO_QUORUM",
                                  "error": "未达到多数 prepare，写未确认",
                                  "term": self.term, **out}
-        # 先让 follower commit（凑够多数-1），本地最后 commit；避免出现
-        # “leader 本地已提交、但多数没有”的分叉。
-        if not self._commit_op_replicated(seq):
-            return 503, {"ok": False, "code": "E_NO_QUORUM_COMMIT",
-                         "error": "prepare 达多数但 commit 未达多数；写未确认",
-                         "term": self.term, **out}
-        self.store.commit_op(seq)
+            # 先让 follower commit（凑够多数-1），本地最后 commit；避免出现
+            # “leader 本地已提交、但多数没有”的分叉。
+            if not self._commit_op_replicated(seq):
+                return 503, {"ok": False, "code": "E_NO_QUORUM_COMMIT",
+                             "error": "prepare 达多数但 commit 未达多数；写未确认",
+                             "term": self.term, **out}
+            self.store.commit_op(seq)
         return 200, {"ok": True, "term": self.term, **out}
 
     def handle_store_state(self) -> tuple[int, dict]:
