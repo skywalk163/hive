@@ -122,6 +122,8 @@ class Store:
             "INSERT OR IGNORE INTO meta(key,value) VALUES('last_seq','0')")
         self._db.execute(
             "INSERT OR IGNORE INTO meta(key,value) VALUES('commit_seq','0')")
+        self._db.execute(
+            "INSERT OR IGNORE INTO meta(key,value) VALUES('compacted_through','0')")
         cols = {r["name"] for r in self._db.execute("PRAGMA table_info(ops)")}
         if "committed" not in cols:
             self._db.execute("ALTER TABLE ops ADD COLUMN committed INTEGER NOT NULL DEFAULT 1")
@@ -151,6 +153,80 @@ class Store:
         with self._lock:
             return int(self._meta("commit_seq", "0") or 0)
 
+    def compacted_through(self) -> int:
+        with self._lock:
+            return int(self._meta("compacted_through", "0") or 0)
+
+    def compact(self, keep: int = 1000) -> int:
+        """删除已提交且不再需要回放的旧 op；新节点用 snapshot 追平。"""
+        with self._lock:
+            cutoff = self.commit_seq() - max(0, int(keep))
+            if cutoff <= self.compacted_through():
+                return 0
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    "DELETE FROM ops WHERE seq<=? AND committed=1", (cutoff,))
+                self._set_meta("compacted_through", str(cutoff))
+                self._db.execute("COMMIT")
+                return cutoff
+            except Exception:
+                try:
+                    self._db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            claims = {}
+            for tid in self._db.execute("SELECT task_id FROM claims"):
+                claim = self.claim_info(str(tid["task_id"]))
+                if claim:
+                    claims[str(tid["task_id"])] = claim
+            results = {}
+            for row in self._db.execute("SELECT task_id FROM results"):
+                tid = str(row["task_id"])
+                res = self.result_info(tid)
+                if res:
+                    results[tid] = res
+            return {"commit_seq": self.commit_seq(), "last_seq": self.last_seq(),
+                    "compacted_through": self.compacted_through(),
+                    "tasks": self.tasks(), "claims": claims, "results": results}
+
+    def import_snapshot(self, snap: dict) -> int:
+        if not isinstance(snap, dict):
+            raise StoreError("snapshot 不是对象")
+        commit = int(snap.get("commit_seq") or 0)
+        with self._lock:
+            if commit <= self.commit_seq():
+                return self.commit_seq()
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute("DELETE FROM tasks")
+                self._db.execute("DELETE FROM claims")
+                self._db.execute("DELETE FROM results")
+                self._db.execute("DELETE FROM ops")
+                for task in (snap.get("tasks") or {}).values():
+                    self._upsert_task(task)
+                for claim in (snap.get("claims") or {}).values():
+                    self._upsert_claim(claim)
+                for res in (snap.get("results") or {}).values():
+                    self._upsert_result(res)
+                self._set_meta("commit_seq", str(commit))
+                self._set_meta("last_seq", str(max(commit, int(
+                    snap.get("last_seq") or commit))))
+                self._set_meta("compacted_through", str(int(
+                    snap.get("compacted_through") or commit)))
+                self._db.execute("COMMIT")
+                return commit
+            except Exception:
+                try:
+                    self._db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+
     def summary(self) -> dict:
         with self._lock:
             tasks = self._db.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
@@ -162,6 +238,7 @@ class Store:
             return {"tasks": int(tasks), "claims": int(claims), "results": int(results),
                     "archive_pending": int(pending),
                     "last_seq": self.last_seq(), "commit_seq": self.commit_seq(),
+                    "compacted_through": self.compacted_through(),
                     "node": self.node_id, "path": str(self.path)}
 
     # -- 读 ---------------------------------------------------------------- #
@@ -189,13 +266,24 @@ class Store:
                 (int(limit),)).fetchall()
             return [self._result_row(r) for r in rows]
 
-    def mark_archived(self, tid: str, sha: str = "") -> bool:
+    def mark_archived(self, tid: str, sha: str = "", op_id: str = "",
+                      term: int = 0, commit: bool = True) -> dict:
         with self._lock:
-            cur = self._db.execute(
-                "UPDATE results SET archived_at=?, archive_sha=? "
-                "WHERE task_id=? AND archived_at=''",
-                (_iso(), str(sha or ""), str(tid)))
-            return cur.rowcount > 0
+            cur = self.result_info(tid)
+            if not cur:
+                raise StoreError(f"没有结果 {tid}")
+            if cur.get("archived_at"):
+                return {"ok": True, "idempotent": True, "archived_at":
+                        cur.get("archived_at"), "seq": self.last_seq()}
+            op = {"op_id": op_id or uuid.uuid4().hex, "type": "archive",
+                  "task_id": tid, "term": int(term), "ts": _iso(),
+                  "payload": {"archive": {"task_id": tid,
+                                          "archived_at": _iso(),
+                                          "archive_sha": str(sha or "")}}}
+            op["seq"] = self.apply_op(op) if commit else self.stage_op(op)
+            return {"ok": True, "idempotent": False,
+                    "archived_at": op["payload"]["archive"]["archived_at"],
+                    "seq": op["seq"]}
 
     def tasks(self) -> dict[str, dict]:
         with self._lock:
@@ -371,6 +459,13 @@ class Store:
                 self._upsert_claim(payload.get("claim"))
         if "result" in payload:
             self._upsert_result(payload.get("result"))
+        archive = payload.get("archive")
+        if isinstance(archive, dict) and archive.get("task_id"):
+            self._db.execute(
+                "UPDATE results SET archived_at=?, archive_sha=? WHERE task_id=?",
+                (str(archive.get("archived_at") or _iso()),
+                 str(archive.get("archive_sha") or ""),
+                 str(archive.get("task_id"))))
 
     def _upsert_task(self, task: dict | None) -> None:
         if not isinstance(task, dict) or not task.get("id"):

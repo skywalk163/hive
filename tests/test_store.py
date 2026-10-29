@@ -135,9 +135,27 @@ def test_archive_agent_writes_git_and_marks(world, tmp_path):
              payload={"task": "T-0001", "status": "done", "agent": "fb",
                       "head": "abc", "summary": "ok"})
     fake = SimpleNamespace(config=SimpleNamespace(hive_dir=world.hive1),
-                           store=s, role="leader")
+                           store=s, role="leader", term=1)
+    fake.handle_store = lambda action, body: (
+        200, s.mark_archived(body["task"], body.get("sha", ""), term=1))
     n = ArchiveAgent(fake).tick()
     assert n == 1
     assert world.refs("refs/heads/res/T-0001")
     res = s.result_info("T-0001")
     assert res["archived_at"]
+
+
+def test_compact_snapshot_import(tmp_path):
+    a = Store(tmp_path / "snap-a.db", "a")
+    a.ingest_cards({"T-0001": _card()})
+    a.claim("T-0001", "A", term=1, lease_minutes=10)
+    snap = a.snapshot()
+    assert snap["commit_seq"] == 1
+    assert a.compact(keep=0) == 1
+    assert a.ops_since(0) == []
+
+    b = Store(tmp_path / "snap-b.db", "b")
+    assert b.import_snapshot(snap) == 1
+    assert b.commit_seq() == 1
+    assert b.claim_info("T-0001")["owner"] == "A"
+    assert b.task("T-0001")["state"] == "running"

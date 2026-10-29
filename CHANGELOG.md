@@ -25,10 +25,16 @@
 - **P2b：两阶段提交 + commit_index**：prepare 多数 → leader commit → follower commit；
   `commit_seq` 用于选主限制和新主截断；`/api/cluster/op/since` 用于重连追平。
 
+- **P2b：op log 压缩/快照/追平**：`Store.compact(keep=1000)` 删除旧 committed op；
+  `GET /api/cluster/store/snapshot` 导出全量状态；新节点先 snapshot 再 `/op/since`，
+  落后超过压缩点时自动改走 snapshot。
+- **P2b：archive 元数据复制**：`mark_archived` 作为 op 复制，不再只是 leader 本地状态；
+  `ArchiveAgent` 通过 leader store API 提交，Git 归档 + store archived_at 一致。
+
 ### Changed
 
-- **P2b 边界**：dispatch/assign/result accepted/archive/commit_index 已接；op log 压缩、
-  snapshot、极端分区回滚、真四客户端压测仍待补。
+- **P2b 边界**：dispatch/assign/result accepted/archive/commit_index/压缩/追平已接；
+  极端分区混沌、真四客户端压测仍待补。
 
 ## 0.13.0 — 2026-10-29
 

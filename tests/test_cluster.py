@@ -546,3 +546,19 @@ def test_store_dispatch_assigns_without_git(world, cluster_factory,
     assert any(tid == "T-0001" for tid, _ in w.pending())
     assert w.claim("T-0001") is True
     assert c.store.claim_info("T-0001")["owner"] == "fb"
+
+
+def test_store_commit_failure_does_not_apply_locally(cluster_factory, monkeypatch):
+    """prepare 成功但 commit 未达多数：leader 本地也不能先应用。"""
+    c = cluster_factory("a", store_enabled=True)
+    assert wait_until(lambda: c.snapshot().get("role") == "leader", timeout=6)
+    c.store.ingest_cards({"T-0001": {"id": "T-0001", "state": "ready",
+                                    "title": "t"}})
+    monkeypatch.setattr(c, "_replicate_op", lambda op: True)
+    monkeypatch.setattr(c, "_commit_op_replicated", lambda seq: False)
+    code, resp = c.handle_store("claim", {"task": "T-0001", "agent": "A",
+                                          "lease_minutes": 10, "term": c.term})
+    assert code == 503 and resp.get("code") == "E_NO_QUORUM_COMMIT", resp
+    assert c.store.claim_info("T-0001") is None
+    assert c.store.commit_seq() == 0
+    assert c.store.last_seq() == 1

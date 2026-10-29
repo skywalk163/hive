@@ -857,6 +857,8 @@ class ArchiveAgent:
                 continue
             try:
                 self.tick()
+                if self.cluster.store is not None:
+                    self.cluster.store.compact(keep=1000)
                 self.last_run = _now()
                 self.last_error = ""
             except Exception as exc:  # noqa: BLE001
@@ -875,23 +877,29 @@ class ArchiveAgent:
             if not tid:
                 continue
             git_res = h.result_info(tid)
+            sha = ""
             if isinstance(git_res, dict):
-                store.mark_archived(tid, str(git_res.get("head") or ""))
+                sha = str(git_res.get("head") or "")
+            else:
+                payload = res.get("payload")
+                if not isinstance(payload, dict) or not payload:
+                    continue
+                try:
+                    commit_file_to_ref(
+                        h.dir, f"results/{tid}.json",
+                        json.dumps(payload, ensure_ascii=False, indent=2),
+                        f"res/{tid}", "origin/main",
+                        f"result {tid}: archived from store", force=True)
+                    sha = str(payload.get("head") or "")
+                except Exception as exc:  # noqa: BLE001
+                    self.last_error = f"{tid}: {exc}"
+                    continue
+            code, resp = self.cluster.handle_store(
+                "archive", {"task": tid, "sha": sha, "term": self.cluster.term})
+            if code == 200 and isinstance(resp, dict) and resp.get("ok"):
                 n += 1
-                continue
-            payload = res.get("payload")
-            if not isinstance(payload, dict) or not payload:
-                continue
-            try:
-                commit_file_to_ref(
-                    h.dir, f"results/{tid}.json",
-                    json.dumps(payload, ensure_ascii=False, indent=2),
-                    f"res/{tid}", "origin/main",
-                    f"result {tid}: archived from store", force=True)
-                store.mark_archived(tid, str(payload.get("head") or ""))
-                n += 1
-            except Exception as exc:  # noqa: BLE001
-                self.last_error = f"{tid}: {exc}"
+            else:
+                self.last_error = f"{tid}: archive store {code} {resp}"
         return n
 
 
@@ -1091,27 +1099,49 @@ class Cluster:
             _log(f"store: 摄入任务卡失败（忽略）: {exc}")
 
     def _store_catch_up(self, base: str) -> None:
-        """新节点/重连：从 leader 拉已 commit 的 op，补齐本地 store。"""
+        """新节点/重连：先 snapshot，再拉已 commit 的 op。"""
         if self.store is None or not base:
             return
+        base = base.rstrip("/")
+
+        def _snapshot() -> bool:
+            code, body = http_json(
+                base + "/api/cluster/store/snapshot", "GET", None, 10.0,
+                self.config.token)
+            if code != 200 or not isinstance(body, dict):
+                return False
+            snap = body.get("snapshot")
+            if not isinstance(snap, dict):
+                return False
+            self.store.import_snapshot(snap)
+            return True
+
         try:
             local = self.store.commit_seq()
+            if local <= 0:
+                _snapshot()
+                local = self.store.commit_seq()
             code, body = http_json(
-                base.rstrip("/") + f"/api/cluster/op/since?since={local}",
-                "GET", None, 5.0, self.config.token)
+                base + f"/api/cluster/op/since?since={local}", "GET", None,
+                5.0, self.config.token)
+            if code == 409 and isinstance(body, dict) and body.get("snapshot_required"):
+                if _snapshot():
+                    local = self.store.commit_seq()
+                    code, body = http_json(
+                        base + f"/api/cluster/op/since?since={local}", "GET",
+                        None, 5.0, self.config.token)
             if code != 200 or not isinstance(body, dict):
                 return
             ops = [op for op in (body.get("ops") or [])
                    if isinstance(op, dict) and op.get("committed")]
-            if not ops:
-                return
             self.store.truncate_uncommitted()
             n = 0
             for op in ops:
                 self.store.apply_op(op)
                 n += 1
-            _log(f"store: 从 {base} 追平 {n} 条 op（commit_seq="
-                 f"{self.store.commit_seq()}）")
+            if n:
+                _log(f"store: 从 {base} 追平 {n} 条 op（commit_seq="
+                     f"{self.store.commit_seq()}）")
         except Exception as exc:  # noqa: BLE001
             _log(f"store: 追平失败（忽略）: {exc}")
 
@@ -2465,6 +2495,9 @@ class Cluster:
                 return self.store.close(tid, bool(body.get("done", True)),
                                         str(body.get("note") or ""), term, op_id,
                                         commit=False)
+            if action == "archive":
+                return self.store.mark_archived(
+                    tid, str(body.get("sha") or ""), op_id, term, commit=False)
         except StoreError as exc:
             raise ClusterError(str(exc)) from exc
         raise ClusterError(f"未知 store 动作 {action}")
@@ -2493,12 +2526,16 @@ class Cluster:
         return ok >= quorum
 
     def _commit_op_replicated(self, seq: int) -> bool:
+        """leader 本地 commit 之前，先让“多数-1”个 follower commit。"""
         with self.lock:
             peers = [dict(rec) for nid, rec in self.nodes.items()
                      if nid != self.node_id and rec.get("url")
                      and self._node_status_locked(rec) in ("alive", "suspect")]
             quorum = self._quorum_locked()
-        ok = 1 if self.store is not None and self.store.commit_seq() >= seq else 0
+        need = max(0, quorum - 1)
+        if need == 0:
+            return True
+        ok = 0
         if peers:
             body = {"seq": int(seq), "term": self.term}
             with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
@@ -2513,7 +2550,7 @@ class Cluster:
                             ok += 1
                     except Exception:  # noqa: BLE001
                         pass
-        return ok >= quorum
+        return ok >= need
 
     def handle_store(self, action: str, body: dict) -> tuple[int, dict]:
         if not isinstance(body, dict):
@@ -2549,11 +2586,13 @@ class Cluster:
                     return 503, {"ok": False, "code": "E_NO_QUORUM",
                                  "error": "未达到多数 prepare，写未确认",
                                  "term": self.term, **out}
-        self.store.commit_op(seq)
+        # 先让 follower commit（凑够多数-1），本地最后 commit；避免出现
+        # “leader 本地已提交、但多数没有”的分叉。
         if not self._commit_op_replicated(seq):
             return 503, {"ok": False, "code": "E_NO_QUORUM_COMMIT",
-                         "error": "多数 prepare 成功但 commit 未达多数；客户端可重试",
+                         "error": "prepare 达多数但 commit 未达多数；写未确认",
                          "term": self.term, **out}
+        self.store.commit_op(seq)
         return 200, {"ok": True, "term": self.term, **out}
 
     def handle_store_state(self) -> tuple[int, dict]:
@@ -2829,6 +2868,12 @@ def build_handler(cluster: Cluster):
                 code, payload = cluster.handle_store_state()
                 self._send(code, payload)
                 return
+            if path == "/api/cluster/store/snapshot":
+                if cluster.store is None:
+                    self._send(503, {"ok": False, "error": "store 未启用"})
+                    return
+                self._send(200, {"ok": True, "snapshot": cluster.store.snapshot()})
+                return
             if path == "/api/cluster/op/since":
                 try:
                     since = int((query.get("since") or ["0"])[0])
@@ -2836,6 +2881,11 @@ def build_handler(cluster: Cluster):
                     since = 0
                 if cluster.store is None:
                     self._send(503, {"ok": False, "error": "store 未启用"})
+                    return
+                if since < cluster.store.compacted_through():
+                    self._send(409, {"ok": False, "snapshot_required": True,
+                                     "compacted_through": cluster.store.compacted_through(),
+                                     "commit_seq": cluster.store.commit_seq()})
                     return
                 ops = [op for op in cluster.store.ops_since(since)
                        if op.get("committed")]
