@@ -281,7 +281,7 @@ class Store:
             try:
                 seq = self._append_op_locked(op, committed=1)
                 self._apply_payload_locked(op)
-                self._set_meta("commit_seq", str(seq))
+                self._set_meta("commit_seq", str(max(self.commit_seq(), seq)))
                 self._db.execute("COMMIT")
                 return seq
             except Exception:
@@ -332,7 +332,7 @@ class Store:
             try:
                 self._apply_payload_locked(op)
                 self._db.execute("UPDATE ops SET committed=1 WHERE seq=?", (int(seq),))
-                self._set_meta("commit_seq", str(int(seq)))
+                self._set_meta("commit_seq", str(max(self.commit_seq(), int(seq))))
                 self._db.execute("COMMIT")
                 return int(seq)
             except Exception:
