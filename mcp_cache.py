@@ -13,9 +13,11 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
-from hive import Hive, HiveError, IN_FLIGHT_STATES, git, git_net
+from hive import (Hive, HiveError, IN_FLIGHT_STATES, claim_backend,
+                  git, git_net, iso, local_store)
 
 # 只缓存「在飞」卡的 claim/result；已 close 的卡从 main 的 results/ 文件读。
 _CACHE_STATES = set(IN_FLIGHT_STATES) | {"assigned", "running", "submitted"}
@@ -106,13 +108,45 @@ class ReadCache:
             results: dict[str, dict] = {}
             statuses: dict[str, dict] = {}
 
+            # 1a) store 模式：运行时状态以 store 为准（tasks 只覆盖运行字段）
+            if claim_backend() == "store":
+                store = local_store()
+                if store is not None:
+                    for tid, st in store.tasks().items():
+                        card = cards.get(tid)
+                        if not isinstance(card, dict):
+                            continue
+                        card = dict(card)
+                        for key in ("state", "owner", "retries"):
+                            if st.get(key) not in (None, ""):
+                                card[key] = st[key]
+                        cards[tid] = card
+                    for tid in cards:
+                        claim = store.claim_info(tid)
+                        if claim:
+                            claim = dict(claim)
+                            claim["agent"] = claim.get("owner") or ""
+                            claim["lease_until"] = iso(datetime.fromtimestamp(
+                                float(claim.get("lease_until") or 0)))
+                            claims[tid] = claim
+                        res = store.result_info(tid)
+                        if res:
+                            body = res.get("payload") if isinstance(res.get("payload"), dict) else {}
+                            out = dict(body) if body else {}
+                            out.update({"task": tid, "status": res.get("status") or "",
+                                        "agent": res.get("agent") or "",
+                                        "accepted_at": res.get("accepted_at") or "",
+                                        "archived_at": res.get("archived_at") or "",
+                                        "archive_sha": res.get("archive_sha") or ""})
+                            results[tid] = out
+
             # 1) close 后归档到 main 的 results/（纯文件，最快）
             for p in sorted((h.dir / "results").glob("T-*.json")):
                 try:
                     data = json.loads(p.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
-                if isinstance(data, dict):
+                if isinstance(data, dict) and p.stem not in results:
                     results[p.stem] = data
 
             # 2) 在飞卡才查 claim/res/status 分支（通常几十张，不是几百张）
@@ -121,9 +155,10 @@ class ReadCache:
                 if state not in _CACHE_STATES and not card.get("owner"):
                     continue
                 try:
-                    claim = h.claim_info(tid)
-                    if isinstance(claim, dict):
-                        claims[tid] = claim
+                    if claim_backend() != "store":
+                        claim = h.claim_info(tid)
+                        if isinstance(claim, dict):
+                            claims[tid] = claim
                     if tid not in results:
                         res = h.result_info(tid)
                         if isinstance(res, dict):

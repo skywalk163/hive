@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.14.0 — 2026-10-29
+
+### Added
+
+- **P2b：hived 只读缓存接 store**：`mcp_cache` 在 `claim_backend=store` 时用 store 的
+  task 运行字段/claim/result 覆盖 Git 卡面；MCP `hive_whoami`/`hive_list_tasks` 等能看到
+  store 领取，不再只读 Git。
+- **result accepted 镜像**：Worker/manual submit 写完 Git result 后同步写 store
+  `results`（`accepted`），`Store.release` 不会再把已提交结果打回 ready。
+- **daemon 配置不匹配保护**：已有集群进程不是 store/MCP 模式时，`daemon start --store`
+  不再静默返回 0，而是提示用 `daemon restart`（热加载不存在）。
+
+### Changed
+
+- **P2b 仍未完成**：dispatch/assign 全量迁移、ArchiveWorker 归档状态机、coordinator
+  进 hived、commit_index/追平日志仍待做。
+
 ## 0.13.0 — 2026-10-29
 
 ### Added

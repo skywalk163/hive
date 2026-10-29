@@ -77,3 +77,24 @@ def test_ops_replicate_to_second_store(tmp_path):
     assert cb and cb["owner"] == "agent-a"
     assert cb["lease_id"] == c["claim"]["lease_id"]
     assert b.task("T-0001")["state"] == "claimed"
+
+
+def test_read_cache_overlays_store_runtime(world, tmp_path, monkeypatch):
+    """P2b：hived 只读缓存以 store 的 claim/state 覆盖 Git 卡面。"""
+    from mcp_cache import ReadCache
+    from hive import Hive
+
+    world.add_task("T-0001", repo="light")
+    store_path = tmp_path / "cache-store.db"
+    s = Store(store_path, "n")
+    s.ingest_cards(Hive(str(world.hive1)).cards())
+    s.claim("T-0001", "agent-a", term=1, lease_minutes=10)
+
+    monkeypatch.setenv("HIVE_CLAIM_BACKEND", "store")
+    monkeypatch.setenv("HIVE_STORE_PATH", str(store_path))
+    cache = ReadCache(world.hive2)
+    cache.refresh()
+    assert cache.cards()["T-0001"]["state"] == "claimed"
+    assert cache.cards()["T-0001"]["owner"] == "agent-a"
+    claim = cache.claim_info("T-0001")
+    assert claim and claim["agent"] == "agent-a"

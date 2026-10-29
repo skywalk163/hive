@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.13.0"
+VERSION = "0.14.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 
@@ -573,6 +573,18 @@ def store_release(tid: str, agent: str, requeue: bool = True) -> dict | None:
     try:
         return store_call("release", {"task": tid, "agent": agent,
                                       "lease_id": lease_id, "requeue": requeue})
+    except HiveError:
+        return None
+
+
+def store_result(tid: str, agent: str, lease_id: str,
+                 result: dict) -> dict | None:
+    try:
+        return store_call("result", {
+            "task": tid, "agent": agent, "lease_id": lease_id,
+            "status": str(result.get("status") or "done"),
+            "payload": result,
+        })
     except HiveError:
         return None
 
@@ -2468,6 +2480,9 @@ class Hive:
             f"res/{tid}", "origin/main",
             f"result {tid}: {result['status']} by {owner} (manual)", force=True,
         )
+        if claim_backend() == "store":
+            claim = self.claim_info(tid) or {}
+            store_result(tid, owner, str(claim.get("lease_id") or ""), result)
 
         if not keep:
             git(["worktree", "remove", "--force", str(wt)], repo, check=False)
@@ -3820,6 +3835,9 @@ class Worker:
             f"res/{tid}", "origin/main",
             f"result {tid}: {result['status']} by {self.name}", force=True,
         )
+        if claim_backend() == "store":
+            claim = self.h.claim_info(tid) or {}
+            store_result(tid, self.name, str(claim.get("lease_id") or ""), result)
 
     # -- 主循环 ------------------------------------------------------------ #
     def loop(self, once=False, interval=30) -> None:

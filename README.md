@@ -344,6 +344,6 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy
 - [Gitea 接入](docs/Gitea接入.md)：私有仓、host-scoped 凭据 helper、T-0001 冒烟记录
 - [chroot GUI agent](docs/CHROOT_GUI_AGENTS.md)：小浣熊 / WorkBuddy 的完整接法
 - [MCP 接入](docs/MCP接入.md)：让任意 agent 通过 MCP 查/领/交/终止任务
-- [集群架构 v3.1](docs/集群架构-v3.1.md)：目标架构（P0/P1 + P2a 已落地，P2b 待做）：hived、本地副本、OSPF 式自适应、Git 里程碑
+- [集群架构 v3.1](docs/集群架构-v3.1.md)：目标架构（P0/P1 + P2a 已落地，P2b 进行中）：hived、本地副本、OSPF 式自适应、Git 里程碑
 - [方案全文](../多机Agent协同开发方案.md)
 - [CHANGELOG](CHANGELOG.md)

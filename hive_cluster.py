@@ -2753,6 +2753,19 @@ def _spawn_background(config: Config, args) -> int:
     """脱离当前会话拉起 `hive.py cluster serve`。"""
     health = _local_health(config)
     if health:
+        want_store = config.store_enabled or config.claim_backend == "store"
+        store = health.get("store") if isinstance(health.get("store"), dict) else {}
+        mcp = health.get("mcp") if isinstance(health.get("mcp"), dict) else {}
+        if want_store and "tasks" not in store:
+            print(f"集群已在运行，但不是 store 模式：{config.name} "
+                  f"http://127.0.0.1:{config.port}\n"
+                  "请用 `hive daemon restart --store --claim-backend store` 重启，"
+                  "或先 `daemon stop` 再 start。", file=sys.stderr)
+            return 1
+        if config.mcp_enabled and not mcp.get("enabled"):
+            print(f"集群已在运行，但 MCP HTTP 未启用/未就绪：{config.name}\n"
+                  "请用 `hive daemon restart --mcp` 重启。", file=sys.stderr)
+            return 1
         print(f"集群已在运行：{config.name} term={health.get('term')} "
               f"role={health.get('role')} http://127.0.0.1:{config.port}")
         return 0
