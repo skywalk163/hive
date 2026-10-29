@@ -411,3 +411,22 @@ def test_udp_discovery_roundtrip(tmp_path):
         assert reply["port"] == c.port
     finally:
         c.stop()
+
+
+def test_observer_does_not_elect(cluster_factory):
+    """P0：verify-only 机器设 electable=false，只观察、不参选。"""
+    a = cluster_factory("a")
+    b = cluster_factory("b", seeds=[a.url], electable=False)
+    assert wait_until(lambda: a.snapshot().get("role") == "leader", timeout=6)
+    assert wait_until(lambda: b.snapshot().get("role") != "leader", timeout=1)
+
+    sb = b.snapshot()
+    assert sb["self"]["electable"] is False
+    assert sb["role"] != "leader"
+
+    def _sees_b():
+        nodes = {n.get("name"): n for n in a.snapshot().get("nodes") or []}
+        return nodes.get("b")
+
+    nb = wait_until(_sees_b, timeout=4)
+    assert nb is not None and nb.get("electable") is False

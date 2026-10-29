@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.11.0 — 2026-10-29
+
+### Added
+
+- **P0 代码同步事件 `repo.updated` + 每机 `RepoSyncAgent`**：`land` 成功后把
+  `{task, repos:[{name, sha}]}` 发给本机集群，集群广播给其他节点；各机 SyncAgent
+  按本机 `repos` 映射做 `ff-only` 快进，写 `~/.hive/cluster/sync_cursor.json`。
+  事件漏了也没关系：每 5 分钟用 `git ls-remote` 对比游标补偿。`hive cluster sync`
+  （或 `GET /api/cluster/sync`）可查看游标/最近状态。
+- **`hive cluster --no-elect` / `HIVE_CLUSTER_ELECTABLE=0`**：verify-only 机器做 observer，
+  不参选、不投票；协调/land 只在 electable 节点上发生。
+- **orchestrate leader gate**：有集群时只有当前 leader 跑 watchdog/dispatch/land；
+  follower/no-leader 跳过写动作并节流打日志；写前复核 term，旧主自动停手。
+- **`HIVE_STATUS_GIT`**：`auto`（默认，仅里程碑且集群不可用时兜底）/`always`（旧行为）/
+  `never`。进度默认只走集群/HTTP，不再每 60s force push `status/<tid>`。
+- **测试**：`tests/test_status_git.py`、`tests/test_cluster_sync.py`，
+  orchestrate leader gate 4 例、observer 不参选 1 例。
+
+### Changed
+
+- **land 后本机主检出立即快进**：不再等下一轮 orchestrate 的 `sync-repos`；
+  事件里带协调仓 `hive` 和代码仓，其他机器按需同步。
+- **CI 决策**：Gitea CI 当前关闭（Agent 产出速度超过 CI 承载）；`docs/集群架构-v3.1.md`
+  的 Git/CI 预算已改为「CI 关闭时只按仓库 push 算，重新开启再评估合并队列」。
+- **P0 边界**：claim/lease 仍以 Git 为真相；`_refresh_lease` 保留。P2 才迁 store。
+
 ## 0.10.1 — 2026-10-28
 
 ### Added

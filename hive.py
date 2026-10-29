@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.10.2"
+VERSION = "0.11.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 
@@ -302,6 +302,26 @@ def status_push_interval() -> int:
     return int(_env_number("HIVE_STATUS_PUSH_S", 60, int, minimum=0))
 
 
+STATUS_GIT_ENV = "HIVE_STATUS_GIT"
+
+
+def status_git_mode() -> str:
+    """进度是否还写 Git。
+
+    * ``auto``（默认）：只有里程碑、且本机集群不可用时才写一次；
+    * ``always``：旧行为，每次上报都 force push ``status/<tid>``（排障用）；
+    * ``never``：永不写 Git，只走集群/HTTP。
+
+    返回 ``auto`` / ``always`` / ``never``；非法值按 ``auto``。
+    """
+    raw = (os.environ.get(STATUS_GIT_ENV) or "auto").strip().lower()
+    if raw in ("1", "true", "yes", "on", "always"):
+        return "always"
+    if raw in ("0", "false", "no", "off", "never"):
+        return "never"
+    return "auto"
+
+
 def claim_backoff_config() -> dict:
     """本次 claim 的退避参数快照。
 
@@ -429,6 +449,12 @@ def _cluster_http(method: str, path: str, payload=None,
         return None, None
 
 
+def cluster_available(timeout: float = 0.3) -> bool:
+    """本机集群是否在线（只探 health，免 token、短超时）。"""
+    code, _ = _cluster_http("GET", "health", timeout=timeout)
+    return code == 200
+
+
 def cluster_publish_progress(payload: dict) -> bool:
     code, _ = _cluster_http("POST", "push", payload, timeout=0.8)
     return code == 200
@@ -446,6 +472,25 @@ def cluster_release_lease(tid: str) -> bool:
                                                 "reason": "worker-finished"},
                             timeout=0.5)
     return code == 200
+
+
+def cluster_publish_event(etype: str, task: str = "", data: dict | None = None) -> bool:
+    """把一条控制面事件发给本机集群；失败静默（git 仍是兜底）。"""
+    if not etype:
+        return False
+    code, _ = _cluster_http("POST", "event",
+                            {"type": etype, "task": task, "data": data or {}},
+                            timeout=1.0)
+    return code == 200
+
+
+def cluster_state() -> dict | None:
+    """读本机集群状态；没起/超时返回 None（调用方按“无集群”处理）。"""
+    code, data = _cluster_http("GET", "state", timeout=0.8)
+    if code != 200 or not isinstance(data, dict):
+        return None
+    state = data.get("state")
+    return state if isinstance(state, dict) else data
 
 
 def cluster_ensure(hive_dir=None) -> bool:
@@ -1262,10 +1307,49 @@ class Hive:
             plan["problems"].append(
                 f"合并已推入 {target}，但关卡失败：{e}。"
                 f"处理好协调仓的未提交改动后跑 hive close {tid} 收尾")
+            self._after_land(plan)
             return plan
         plan["closed"] = True
         plan["status"] = "landed"
+        self._after_land(plan)
         return plan
+
+    def _after_land(self, plan: dict) -> None:
+        """land 之后：本机主检出立即同步 + 向集群发 repo.updated（P0）。"""
+        tid = str(plan.get("task") or "")
+        repo_name = str(plan.get("repo") or "")
+        repos_by_name: dict[str, str] = {}
+        if repo_name and plan.get("head"):
+            repos_by_name[repo_name] = str(plan["head"])
+        local = self.repos()
+        # 协调仓的逻辑名：优先用本机 agent 配置里指向 self.dir 的那个名字，
+        # 找不到才退回 "hive"（跨机事件靠这个名字匹配，不能直接用目录名）。
+        hive_name = next(
+            (str(name) for name, path in local.items()
+             if Path(path).expanduser().resolve() == self.dir.resolve()),
+            "hive")
+        try:
+            hive_sha = rev_parse(self.dir, "HEAD")
+            if hive_sha:
+                repos_by_name[hive_name] = hive_sha
+        except Exception:  # noqa: BLE001
+            pass
+        repos = [{"name": name, "sha": sha}
+                 for name, sha in repos_by_name.items()]
+        # 协调仓刚被 close 推过，本地 HEAD 就是最新；不再 fetch，避免 land --all
+        # 时每张卡都拉一次 hive 仓。事件里仍带 hive，别的机器按需 ff。
+        for name in dict.fromkeys(x for x in (repo_name,) if x):
+            path = local.get(name)
+            if path is None:
+                continue
+            try:
+                res = self._sync_one_repo(name, Path(path))
+                log(f"[land] {tid} 本机同步 {name}: {res.get('status')}")
+            except Exception as exc:  # noqa: BLE001
+                log(f"[land] {tid} 本机同步 {name} 失败（忽略）: {exc}")
+        if repos and not cluster_publish_event(
+                "repo.updated", task=tid, data={"repos": repos}):
+            log(f"[land] {tid} 集群不可用，repo.updated 未发出（等各机补偿）")
 
     def cmd_land(self, tid: str | None = None, apply: bool = False, note: str = "",
                  all_tasks: bool = False, as_json: bool = False, limit: int | None = None):
@@ -2737,6 +2821,37 @@ class Hive:
         return len(to_reclaim) + len(to_block)
 
     # -- 总控进程 ---------------------------------------------------------- #
+    def _cluster_gate(self) -> dict:
+        """本机在集群里的角色：leader / follower / no-leader / no-cluster。
+
+        `no-cluster` 表示集群没起或不可达，按旧行为继续跑（单机/应急模式）。
+        """
+        snap = cluster_state()
+        if not snap:
+            return {"mode": "no-cluster", "term": 0, "leader": {}, "self": {}}
+        leader = snap.get("leader") if isinstance(snap.get("leader"), dict) else {}
+        me = snap.get("self") if isinstance(snap.get("self"), dict) else {}
+        role = str(snap.get("role") or "")
+        if role == "leader" and leader.get("id") == me.get("id"):
+            mode = "leader"
+        elif leader.get("id"):
+            mode = "follower"
+        else:
+            mode = "no-leader"
+        return {"mode": mode, "term": int(snap.get("term") or 0),
+                "leader": leader, "self": me}
+
+    def _leader_still(self, term: int) -> bool:
+        """写动作前复核：还是同一 term 的 leader 才继续。"""
+        snap = cluster_state()
+        if not snap:
+            return False
+        leader = snap.get("leader") if isinstance(snap.get("leader"), dict) else {}
+        me = snap.get("self") if isinstance(snap.get("self"), dict) else {}
+        return (str(snap.get("role") or "") == "leader"
+                and leader.get("id") == me.get("id")
+                and int(snap.get("term") or 0) == int(term))
+
     def cmd_orchestrate(self, interval: int = 60, once: bool = False,
                         iterations: int | None = None, dispatch: bool = True,
                         watchdog: bool = True, land: bool = True, doctor: bool = True,
@@ -2759,30 +2874,49 @@ class Hive:
         """
         total: dict[str, int] = {"reclaimed": 0, "dispatched": 0, "landed": 0,
                                  "synced": 0, "ticks": 0}
+        last_skip_log = 0.0
         while True:
-            cluster_ensure(self.dir)
+            have_cluster = cluster_ensure(self.dir)
             total["ticks"] += 1
             tick = {"tick": total["ticks"], "reclaimed": 0, "dispatched": 0,
-                    "landed": 0, "synced": 0, "doctor_ok": True}
-            try:
-                if watchdog:
-                    reclaimed = self.cmd_watchdog(minutes=watchdog_minutes,
-                                                 apply=True, orphan_grace=orphan_grace)
-                    tick["reclaimed"] = reclaimed
-                if dispatch:
-                    dispatched = self.cmd_dispatch(apply=True, limit=dispatch_limit)
-                    tick["dispatched"] = dispatched
-                if land:
-                    res = self.cmd_land(all_tasks=True, apply=True, limit=max_land)
-                    ok = [r for r in res if isinstance(r, dict) and r.get("closed")]
-                    tick["landed"] = len(ok)
-                if sync:
-                    sync_res = self.cmd_sync_repos(quiet=True)
-                    tick["synced"] = len(sync_res["results"])
-                if doctor:
-                    tick["doctor_ok"] = self.cmd_doctor()
-            except HiveError as e:
-                log(f"[orchestrate] tick {total['ticks']} 出错（继续）: {e}")
+                    "landed": 0, "synced": 0, "doctor_ok": True,
+                    "role": "", "skipped": ""}
+            gate = self._cluster_gate()
+            mode, term = gate["mode"], gate["term"]
+            if have_cluster and mode == "no-cluster":
+                # 集群刚拉起/还没就绪：宁可跳过一轮，也不要在“以为没集群”时重复 land。
+                mode, term = "no-leader", 0
+            tick["role"] = mode
+            if mode in ("follower", "no-leader"):
+                tick["skipped"] = mode
+                tick["doctor_ok"] = None
+            else:
+                def can_write() -> bool:
+                    # 无集群：旧行为，不拦；有集群：每个写动作前复核 term/leader。
+                    return mode != "leader" or self._leader_still(term)
+
+                try:
+                    if watchdog and can_write():
+                        reclaimed = self.cmd_watchdog(minutes=watchdog_minutes,
+                                                     apply=True, orphan_grace=orphan_grace)
+                        tick["reclaimed"] = reclaimed
+                    if dispatch and can_write():
+                        dispatched = self.cmd_dispatch(apply=True, limit=dispatch_limit)
+                        tick["dispatched"] = dispatched
+                    if land and can_write():
+                        res = self.cmd_land(all_tasks=True, apply=True, limit=max_land)
+                        ok = [r for r in res if isinstance(r, dict) and r.get("closed")]
+                        tick["landed"] = len(ok)
+                    if sync and can_write():
+                        sync_res = self.cmd_sync_repos(quiet=True)
+                        tick["synced"] = len(sync_res["results"])
+                    if doctor and can_write():
+                        tick["doctor_ok"] = self.cmd_doctor()
+                    if mode == "leader" and not self._leader_still(term):
+                        tick["skipped"] = "lost-leader"
+                        tick["doctor_ok"] = None
+                except HiveError as e:
+                    log(f"[orchestrate] tick {total['ticks']} 出错（继续）: {e}")
             total["reclaimed"] += tick["reclaimed"]
             total["dispatched"] += tick["dispatched"]
             total["landed"] += tick["landed"]
@@ -2790,6 +2924,11 @@ class Hive:
 
             if as_json:
                 print(json.dumps(tick, ensure_ascii=False))
+            elif tick["skipped"]:
+                now = time.time()
+                if now - last_skip_log >= 30:
+                    log(f"[orchestrate] 本机 {mode}，跳过写动作（{tick['skipped']}）")
+                    last_skip_log = now
             else:
                 log(f"[orchestrate] tick {total['ticks']} 完成: "
                     f"回收={tick['reclaimed']} 分派={tick['dispatched']} "
@@ -3139,40 +3278,52 @@ class Worker:
                      ("step", step), ("message", message)):
             if v not in (None, ""):
                 cur[k] = v
-        self.push_status(tid, **cur)
+        self.push_status(tid, milestone=True, **cur)
 
-    def push_status(self, tid: str, **fields) -> None:
-        """把进度推到 status/<tid> 分支 —— agent 主动上报的主通道。
+    def push_status(self, tid: str, milestone: bool = False, **fields) -> None:
+        """上报进度：默认只走集群/HTTP，不再每个心跳 force push Git。
 
         同一张卡多次推送按字段合并（只覆盖本次给了的），所以心跳可以只刷新时间、
-        里程碑只更新进度。best-effort：失败只 log，绝不打断正在跑的任务
-        （与租用心跳同一原则）。
+        里程碑只更新进度。best-effort：失败只 log，绝不打断正在跑的任务。
+
+        是否写 Git 由 ``HIVE_STATUS_GIT`` 控制（见 :func:`status_git_mode`）：
+        ``auto`` 只在里程碑且本机集群不可用时写一次，避免 Gitea 被 60s 进度刷爆。
         """
+        mode = status_git_mode()
+        write_git = mode == "always" or (
+            mode == "auto" and milestone and not cluster_available())
         try:
-            prev = self.h.status_info(tid)
-            payload = dict(prev) if isinstance(prev, dict) else {}
-            payload.update({k: v for k, v in fields.items() if v is not None})
+            payload = {k: v for k, v in fields.items() if v is not None}
             payload["task"] = tid
             payload["agent"] = self.name
             payload["updated_at"] = iso()
-            parent = (f"origin/status/{tid}"
-                      if rev_parse(self.dir, f"origin/status/{tid}") else "origin/main")
-            self.h.fetch()
-            commit_file_to_ref(
-                self.h.dir, f"status/{tid}.json",
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                f"status/{tid}", parent,
-                f"status {tid} by {self.name}", force=True)
+            if write_git:
+                try:
+                    prev = self.h.status_info(tid)
+                    merged = dict(prev) if isinstance(prev, dict) else {}
+                    merged.update(payload)
+                    payload = merged
+                    parent = (f"origin/status/{tid}"
+                              if rev_parse(self.dir, f"origin/status/{tid}")
+                              else "origin/main")
+                    self.h.fetch()
+                    commit_file_to_ref(
+                        self.h.dir, f"status/{tid}.json",
+                        json.dumps(payload, ensure_ascii=False, indent=2),
+                        f"status/{tid}", parent,
+                        f"status {tid} by {self.name}", force=True)
+                except Exception as e:  # noqa: BLE001  写 Git 失败不影响集群通道
+                    log(f"{tid} 状态写 Git 失败（继续推集群）: {e}")
             self._push_http(payload)
         except Exception as e:  # noqa: BLE001  best-effort，绝不影响任务本身
             log(f"{tid} 状态推送失败（忽略）: {e}")
 
     def _push_http(self, payload: dict) -> None:
-        """HTTP 加速通道：先推 HIVE_PUSH_URL（老看板），再退到本机集群。
+        """进度主通道：先推 HIVE_PUSH_URL（老看板），再退到本机集群。
 
         跨机 agent 未必能访问看板主机，但**本机**集群一定在同一个 loopback 上；
-        集群再把进度转给主节点并广播给其他机器。这是「不用等 git push 就能
-        拿到第一手进度」的主通道；两条都失败也完全不影响 git 主通道。
+        集群再把进度转给主节点并广播给其他机器。P0 起 Git 不再是进度主通道：
+        两条都失败只影响看板，不再每 60s force push。
         """
         payload = dict(payload)
         payload.setdefault("updated_at", iso())
@@ -3191,7 +3342,7 @@ class Worker:
         if cluster_publish_progress(payload):
             return
         if url:
-            log("HTTP 与集群状态推送都失败（忽略，git 通道仍在）")
+            log("HTTP 与集群状态推送都失败（忽略；进度只影响看板）")
 
     def _status_loop(self, tid: str, interval: int, stop: threading.Event) -> None:
         """周期上报：刷新 updated_at 并重推当前进度 —— 长时间没推就是失联信号。"""
@@ -4536,7 +4687,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="常驻集群：自动发现/注册/主节点选举（类 OSPF；git 仍是唯一真相）")
     s.add_argument("action", nargs="?", default="status",
                    choices=["serve", "start", "stop", "restart", "ensure",
-                            "status", "peers", "events", "join", "leave",
+                            "status", "peers", "events", "sync", "join", "leave",
                             "discover", "watch"])
     s.add_argument("seed_url", nargs="?", help="join 的目标（HOST:PORT 或 URL）")
     s.add_argument("--port", type=int, default=None, help="HTTP 端口（默认 8788）")
@@ -4555,6 +4706,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="共享 token（也可用 $HIVE_CLUSTER_TOKEN；跨机建议必配）")
     s.add_argument("--lease-grace", type=float, default=None,
                    help="新主上任后租约恢复宽限秒数（默认 120）")
+    s.add_argument("--no-elect", action="store_true",
+                   help="observer：不参选、不投票（verify-only 机器用）")
+    s.add_argument("--no-sync", action="store_true",
+                   help="关闭本机 repo.updated 代码同步")
     s.add_argument("--since", type=int, default=0, help="events/watch 的起始序号")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_cluster)

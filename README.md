@@ -62,6 +62,7 @@ python3 ~/hive/hive.py --dir ~/hive cluster start     # 后台常驻
 python3 ~/hive/hive.py --dir ~/hive cluster status    # 谁是主节点 / 谁在线
 python3 ~/hive/hive.py --dir ~/hive cluster peers
 python3 ~/hive/hive.py --dir ~/hive cluster watch     # 事件流
+python3 ~/hive/hive.py --dir ~/hive cluster sync      # 本机代码同步状态
 ```
 
 - 默认 HTTP `8788`、UDP 发现 `8789`；跨网段用 `--seed 192.168.1.5:8788`。
@@ -71,6 +72,9 @@ python3 ~/hive/hive.py --dir ~/hive cluster watch     # 事件流
 - 跨机建议设置同一个 `HIVE_CLUSTER_TOKEN`。
 - `hive work` / `hive orchestrate` 会自动拉起本机集群（`HIVE_CLUSTER_AUTOSTART=0` 关闭）。
 - 新机器在同网段启动即可自动注册；主节点停掉后 1~8 秒内自动出新主。
+- verify-only / GUI 机器用 `cluster start --no-elect` 做 observer，只观察不参选。
+- **P0 起进度默认不写 Git**：`HIVE_STATUS_GIT=auto` 只在里程碑且集群不可用时兜底；
+  land 后各机按 `repo.updated` 自动 `ff-only` 同步主检出。
 - 细节、API、选主/任期/化身号/宽限期的取舍：见 [docs/集群服务.md](docs/集群服务.md)。
 
 ## 2. 登记机器
@@ -336,5 +340,6 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy
 - [Gitea 接入](docs/Gitea接入.md)：私有仓、host-scoped 凭据 helper、T-0001 冒烟记录
 - [chroot GUI agent](docs/CHROOT_GUI_AGENTS.md)：小浣熊 / WorkBuddy 的完整接法
 - [MCP 接入](docs/MCP接入.md)：让任意 agent 通过 MCP 查/领/交/终止任务
+- [集群架构 v3.1](docs/集群架构-v3.1.md)：目标架构（P0 已落地，P2 待做）：hived、本地副本、OSPF 式自适应、Git 里程碑
 - [方案全文](../多机Agent协同开发方案.md)
 - [CHANGELOG](CHANGELOG.md)

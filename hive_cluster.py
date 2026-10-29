@@ -286,6 +286,17 @@ class Config:
         self.lease_grace = float(
             kw.get("lease_grace") or os.environ.get("HIVE_CLUSTER_LEASE_GRACE")
             or saved.get("lease_grace") or DEFAULT_LEASE_GRACE)
+        # 只有 coordinator/electable 节点参选；verify-only 机器设 0 做 observer。
+        if kw.get("electable") is None:
+            self.electable = _env_bool("HIVE_CLUSTER_ELECTABLE",
+                                       bool(saved.get("electable", True)))
+        else:
+            self.electable = bool(kw.get("electable"))
+        if kw.get("sync_enabled") is None:
+            self.sync_enabled = _env_bool("HIVE_CLUSTER_SYNC",
+                                          bool(saved.get("sync", True)))
+        else:
+            self.sync_enabled = bool(kw.get("sync_enabled"))
 
         seeds = kw.get("seeds")
         if seeds is None:
@@ -344,6 +355,8 @@ class Config:
             "advertise": self.advertise,
             "seeds": list(dict.fromkeys(self.seeds)),
             "lease_grace": self.lease_grace,
+            "electable": bool(self.electable),
+            "sync": bool(self.sync_enabled),
         })
         if self.token:
             # 0600 权限；本机看板/CLI 需要用它访问 /api/cluster/state。
@@ -529,6 +542,224 @@ class Discovery:
 # 集群本体
 # --------------------------------------------------------------------------- #
 
+class RepoSyncAgent:
+    """P0 轻量代码同步器：消费 repo.updated 事件 + 5 分钟游标补偿。
+
+    不参与一致性；只做安全快进（复用 hive.Hive._sync_one_repo 的 ff-only 边界）。
+    没有 git 仓/没有 hive 模块时自动降级为 no-op，不影响集群本身。
+    """
+
+    def __init__(self, cluster):
+        self.cluster = cluster
+        self.config = cluster.config
+        self.state_path = self.config.state_dir / "sync_cursor.json"
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.RLock()
+        self._hive = None
+        self._hive_failed = False
+        self._last_error = ""
+        self._last_run = 0.0
+        saved = _read_json(self.state_path, {}) or {}
+        self._state = saved if isinstance(saved, dict) else {}
+        self._state.setdefault("repos", {})
+        self._last_event_id = str(self._state.get("last_event_id") or "")
+        self._last_reconcile = 0.0
+
+    # -- 生命周期 ---------------------------------------------------------- #
+    def start(self) -> None:
+        if not self.config.sync_enabled:
+            _log("sync: 已关闭（HIVE_CLUSTER_SYNC=0）")
+            return
+        if not (self.config.hive_dir / ".git").exists():
+            _log(f"sync: {self.config.hive_dir} 不是 git 仓，跳过")
+            return
+        self._thread = threading.Thread(target=self._loop, name="hive-repo-sync",
+                                        daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=3)
+
+    def status(self) -> dict:
+        with self._lock:
+            return {
+                "enabled": bool(self.config.sync_enabled),
+                "running": bool(self._thread and self._thread.is_alive()),
+                "last_event_id": self._last_event_id,
+                "last_run": _iso(self._last_run) if self._last_run else "",
+                "last_error": self._last_error,
+                "repos": copy.deepcopy(self._state.get("repos") or {}),
+            }
+
+    # -- 主循环 ------------------------------------------------------------ #
+    def _loop(self) -> None:
+        # 启动先补偿一轮，避免“关机期间漏掉的事件”等 5 分钟。
+        self._safe_tick(reconcile=True)
+        while not self._stop.wait(15):
+            self._safe_tick(reconcile=(_now() - self._last_reconcile) >= 300)
+
+    def _safe_tick(self, reconcile: bool = False) -> None:
+        try:
+            self._consume_events()
+            if reconcile:
+                self._reconcile()
+            self._last_run = _now()
+        except Exception as exc:  # noqa: BLE001  同步失败不能拖垮集群
+            self._last_error = f"{type(exc).__name__}: {exc}"
+            _log(f"sync: 本轮失败（忽略）: {self._last_error}")
+
+    # -- 事件 -------------------------------------------------------------- #
+    def _consume_events(self) -> None:
+        snap = self.cluster.snapshot()
+        events = [e for e in (snap.get("events") or [])
+                  if e.get("type") == "repo.updated"]
+        if not events:
+            return
+        # 找到上次消费的位置；找不到（事件被截断/leader 重启）就从头扫一遍，
+        # 靠 sha 对比保证幂等。
+        start = 0
+        if self._last_event_id:
+            for idx, ev in enumerate(events):
+                if str(ev.get("id")) == self._last_event_id:
+                    start = idx + 1
+                    break
+        for ev in events[start:]:
+            data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+            for item in data.get("repos") or []:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if name:
+                    self._sync_repo(name, str(item.get("sha") or ""))
+            self._last_event_id = str(ev.get("id") or self._last_event_id)
+            self._save()
+
+    # -- 补偿 -------------------------------------------------------------- #
+    def _reconcile(self) -> None:
+        self._last_reconcile = _now()
+        for name, path in self._repos().items():
+            target = self._remote_head(path)
+            if not target:
+                continue
+            cur = (self._state.get("repos") or {}).get(name) or {}
+            if cur.get("sha") == target:
+                if cur.get("status") != "up-to-date":
+                    cur["status"] = "up-to-date"
+                    cur["updated_at"] = _iso()
+                    cur["error"] = ""
+                    self._state.setdefault("repos", {})[name] = cur
+                    self._save()
+                continue
+            self._sync_repo(name, target)
+
+    def _repos(self) -> dict:
+        h = self._hive_obj()
+        if h is None:
+            return {}
+        try:
+            return {str(k): Path(v) for k, v in h.repos().items()}
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = f"repos: {exc}"
+            return {}
+
+    def _hive_obj(self):
+        if self._hive is not None:
+            return self._hive
+        if self._hive_failed:
+            return None
+        try:
+            import hive as hive_mod
+            self._hive = hive_mod.Hive(self.config.hive_dir)
+        except Exception as exc:  # noqa: BLE001
+            self._hive_failed = True
+            self._last_error = f"hive import: {exc}"
+            _log(f"sync: 无法加载 hive.Hive（同步停用）: {exc}")
+        return self._hive
+
+    # -- 单仓 -------------------------------------------------------------- #
+    def _sync_repo(self, name: str, target: str = "") -> None:
+        with self._lock:
+            repos = self._repos()
+            path = repos.get(name)
+            if not path:
+                self._record(name, "", "missing", target, "本机没有登记这个仓")
+                return
+            h = self._hive_obj()
+            if h is None:
+                return
+            try:
+                res = h._sync_one_repo(name, path)
+            except Exception as exc:  # noqa: BLE001
+                self._record(name, str(path), "error", target, str(exc))
+                return
+            status = str(res.get("status") or "unknown")
+            actual = self._git_rev(path, "HEAD")
+            rec = {
+                "path": str(path),
+                "status": status,
+                "target": target,
+                "sha": actual,
+                "updated_at": _iso(),
+                "detail": res.get("reason") or res.get("dirty") or "",
+            }
+            if status in ("up-to-date", "fast-forwarded"):
+                rec["synced_at"] = _iso()
+            self._record(name, str(path), status, target, "", rec)
+            _log(f"sync: {name} {status} {str(actual)[:12]}"
+                 + (f" target={str(target)[:12]}" if target else ""))
+
+    def _record(self, name: str, path: str, status: str, target: str,
+                error: str = "", rec: dict | None = None) -> None:
+        with self._lock:
+            item = rec or {
+                "path": path, "status": status, "target": target,
+                "updated_at": _iso(), "detail": error,
+            }
+            item["error"] = error
+            self._state.setdefault("repos", {})[name] = item
+            self._save()
+
+    def _save(self) -> None:
+        self._state["last_event_id"] = self._last_event_id
+        self._state["updated_at"] = _iso()
+        try:
+            _write_json(self.state_path, self._state)
+        except OSError as exc:  # noqa: BLE001
+            self._last_error = f"save: {exc}"
+
+    # -- git 小工具 -------------------------------------------------------- #
+    @staticmethod
+    def _git_rev(repo: Path, ref: str) -> str:
+        try:
+            p = subprocess.run(["git", "-C", str(repo), "rev-parse", ref],
+                               capture_output=True, text=True, timeout=5)
+            return p.stdout.strip() if p.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    @staticmethod
+    def _remote_head(repo: Path) -> str:
+        try:
+            p = subprocess.run(
+                ["git", "-C", str(repo), "ls-remote", "origin",
+                 "refs/heads/main", "refs/heads/master"],
+                capture_output=True, text=True, timeout=15,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+            if p.returncode != 0:
+                return ""
+            for line in p.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] in ("refs/heads/main",
+                                                    "refs/heads/master"):
+                    return parts[0]
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return ""
+
+
 class Cluster:
     def __init__(self, config: Config):
         self.config = config
@@ -545,6 +776,7 @@ class Cluster:
         self._http: ThreadingHTTPServer | None = None
         self._http_thread: threading.Thread | None = None
         self.discovery: Discovery | None = None
+        self.sync_agent: RepoSyncAgent | None = None
 
         self.role = "follower"
         self.term = 0
@@ -616,6 +848,8 @@ class Cluster:
 
         self.discovery = Discovery(self)
         self.discovery.start()
+        self.sync_agent = RepoSyncAgent(self)
+        self.sync_agent.start()
 
         for target, name in ((self._loop_heartbeat, "hive-cluster-heartbeat"),
                              (self._loop_maintenance, "hive-cluster-maintenance"),
@@ -648,6 +882,8 @@ class Cluster:
                 self.cond.notify_all()
         except Exception as exc:  # noqa: BLE001 停止路径尽力而为
             _log(f"停止时保存状态失败（忽略）：{exc}")
+        if self.sync_agent is not None:
+            self.sync_agent.stop()
         if self.discovery is not None:
             self.discovery.stop()
         if self._http is not None:
@@ -837,6 +1073,7 @@ class Cluster:
             "pid": os.getpid(),
             "agents": self._local_agents(),
             "capabilities": [],
+            "electable": bool(self.config.electable),
             "hive_dir": str(self.config.hive_dir),
         }
 
@@ -861,6 +1098,7 @@ class Cluster:
                                        or _epoch(out.get("last_seen")) or 0.0)
         out["last_seen"] = out.get("last_seen") or (
             _iso(out["last_seen_epoch"]) if out["last_seen_epoch"] else "")
+        out.setdefault("electable", True)
         try:
             out["port"] = int(out.get("port") or 0)
         except (TypeError, ValueError):
@@ -1164,15 +1402,14 @@ class Cluster:
             return self._snapshot_locked()
 
     def _quorum_locked(self) -> int:
-        alive = 1 + sum(1 for nid, n in self.nodes.items()
-                        if nid != self.node_id
-                        and self._node_status_locked(n) == "alive")
-        return 1 if alive <= 1 else alive // 2 + 1
+        voters = len(self._alive_voter_ids_locked())
+        return 1 if voters <= 1 else voters // 2 + 1
 
     def _alive_voter_ids_locked(self) -> list[str]:
-        ids = [self.node_id]
+        ids = [self.node_id] if self.config.electable else []
         for nid, rec in self.nodes.items():
-            if nid != self.node_id and self._node_status_locked(rec) == "alive":
+            if (nid != self.node_id and self._node_status_locked(rec) == "alive"
+                    and rec.get("electable", True)):
                 ids.append(nid)
         return ids
 
@@ -1316,6 +1553,8 @@ class Cluster:
     def _start_election(self) -> None:
         with self.lock:
             if self._stop.is_set() or self._election_inflight:
+                return
+            if not self.config.electable:
                 return
             if self.role == "leader" and self.leader_lease_until > _now():
                 return
@@ -1734,6 +1973,12 @@ class Cluster:
         cid = str(cand.get("id") or "")
         if not cid:
             return 400, {"ok": False, "granted": False, "error": "缺少 candidate.id"}
+        if not self.config.electable:
+            return 200, {"ok": True, "granted": False, "term": self.term,
+                         "reason": "observer"}
+        if cand.get("electable") is False:
+            return 200, {"ok": True, "granted": False, "term": self.term,
+                         "reason": "candidate_not_electable"}
         with self.lock:
             if term < self.term:
                 return 200, {"ok": True, "granted": False, "term": self.term,
@@ -1855,6 +2100,42 @@ class Cluster:
         payload["lease_until_epoch"] = _now()
         return self.handle_lease(payload)
 
+    def handle_event(self, body: dict) -> tuple[int, dict]:
+        """控制面事件（P0：repo.updated）。leader 落事件并广播；follower 转发。"""
+        if not isinstance(body, dict):
+            return 400, {"ok": False, "error": "请求体必须是对象"}
+        etype = str(body.get("type") or "").strip()
+        if etype != "repo.updated":
+            return 400, {"ok": False, "error": f"不支持的事件类型 {etype!r}"}
+        task = str(body.get("task") or "")
+        data = body.get("data") if isinstance(body.get("data"), dict) else {}
+        term = int(body.get("term") or 0)
+        with self.lock:
+            if term and term < self.term:
+                return 409, {"ok": False, "stale": True, "term": self.term,
+                             "leader": self._leader_public_locked()}
+            role = self.role
+            leader_url = self.leader_url
+            forward_term = self.term
+        if role != "leader" and leader_url and not body.get("forwarded"):
+            fwd = dict(body)
+            fwd["forwarded"] = True
+            fwd["term"] = forward_term
+            code, resp = http_json(str(leader_url).rstrip("/") + "/api/cluster/event",
+                                   "POST", fwd, 1.0, self.config.token)
+            if code == 200 and isinstance(resp, dict):
+                ev = resp.get("event")
+                if isinstance(ev, dict):
+                    with self.lock:
+                        self._merge_event_locked(ev)
+                        self._mark_dirty_locked()
+                return 200, {"ok": True, "forwarded": True, "event": ev}
+        with self.lock:
+            ev = self._emit_locked(etype, task=task, data=data,
+                                   message=f"repo.updated {task}".strip())
+            self._persist_locked()
+        return 200, {"ok": True, "forwarded": False, "event": ev}
+
     def handle_seed(self, body: dict) -> tuple[int, dict]:
         raw = str(body.get("url") or body.get("seed") or "").strip()
         if not raw:
@@ -1909,6 +2190,13 @@ class Cluster:
 
     def release_lease(self, tid: str) -> dict:
         code, body = self.handle_release({"task": tid})
+        if code != 200 or not isinstance(body, dict):
+            raise ClusterError(str((body or {}).get("error") or f"HTTP {code}"))
+        return body
+
+    def publish_event(self, etype: str, task: str = "", data: dict | None = None) -> dict:
+        code, body = self.handle_event({"type": etype, "task": task,
+                                        "data": data or {}})
         if code != 200 or not isinstance(body, dict):
             raise ClusterError(str((body or {}).get("error") or f"HTTP {code}"))
         return body
@@ -2019,6 +2307,11 @@ def build_handler(cluster: Cluster):
             if path == "/api/cluster/wait":
                 self._send(200, {"ok": True, "state": cluster.handle_wait(query)})
                 return
+            if path == "/api/cluster/sync":
+                agent = cluster.sync_agent
+                self._send(200, {"ok": True,
+                                 "sync": agent.status() if agent else {"enabled": False}})
+                return
             if path == "/api/cluster/config":
                 cfg = cluster.config
                 self._send(200, {"ok": True, "cluster_id": cfg.cluster_id,
@@ -2055,6 +2348,8 @@ def build_handler(cluster: Cluster):
                     code, payload = cluster.handle_lease(body)
                 elif path == "/api/cluster/release":
                     code, payload = cluster.handle_release(body)
+                elif path == "/api/cluster/event":
+                    code, payload = cluster.handle_event(body)
                 elif path == "/api/cluster/seed":
                     code, payload = cluster.handle_seed(body)
                 elif path == "/api/cluster/discover":
@@ -2095,6 +2390,8 @@ def _config_from_args(args) -> Config:
         seeds=getattr(args, "seed", None),
         token=getattr(args, "token", None),
         lease_grace=getattr(args, "lease_grace", None),
+        electable=(False if getattr(args, "no_elect", False) else None),
+        sync_enabled=(False if getattr(args, "no_sync", False) else None),
         hive_dir=getattr(args, "dir", None),
     )
 
@@ -2160,7 +2457,8 @@ def _status_line(snap: dict, running: bool) -> str:
         lines.append(
             f"  {str(n.get('status', '?')):<7} {str(n.get('name') or n.get('id'))[:24]:<24}"
             f" {str(n.get('role') or ''):<8} term={n.get('term', 0):<3}"
-            f" {n.get('url') or ''}")
+            f" {n.get('url') or ''}"
+            f"{'  observer' if n.get('electable') is False else ''}")
     return "\n".join(lines)
 
 
@@ -2217,6 +2515,10 @@ def _spawn_background(config: Config, args) -> int:
             "--name", str(config.name)]
     if config.advertise:
         argv += ["--advertise", str(config.advertise)]
+    if not config.electable:
+        argv += ["--no-elect"]
+    if not config.sync_enabled:
+        argv += ["--no-sync"]
     if not config.discover:
         argv += ["--no-discover"]
     for seed in config.seeds:
@@ -2478,6 +2780,32 @@ def run_cli(args) -> int:
                       f"{n.get('url') or ''}")
         return 0
 
+    if action == "sync":
+        health = _local_health(config)
+        if not health:
+            print("集群未运行", file=sys.stderr)
+            return 1
+        code, body = http_json(
+            f"http://127.0.0.1:{config.port}/api/cluster/sync",
+            timeout=1.5, token=config.token)
+        sync = (body or {}).get("sync") if isinstance(body, dict) else None
+        if code != 200 or not isinstance(sync, dict):
+            print(f"读取同步状态失败：HTTP {code}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            _print_json(sync)
+        else:
+            print(f"代码同步：{'开启' if sync.get('enabled') else '关闭'}"
+                  f"（{'运行中' if sync.get('running') else '未运行'}）")
+            print(f"最近一次：{sync.get('last_run') or '-'}")
+            if sync.get("last_error"):
+                print(f"最近错误：{sync['last_error']}")
+            for name, rec in sorted((sync.get("repos") or {}).items()):
+                rec = rec if isinstance(rec, dict) else {}
+                print(f"  {name:<12} {str(rec.get('status') or '-'):<14} "
+                      f"{str(rec.get('sha') or '')[:12]:<12} {rec.get('path') or ''}")
+        return 0
+
     if action == "events":
         if not snap:
             print("集群未运行", file=sys.stderr)
@@ -2519,7 +2847,7 @@ def add_parser(sub) -> None:
         help="常驻集群：自动发现/注册/主节点选举（类 OSPF；git 仍是唯一真相）")
     p.add_argument("action", nargs="?", default="status",
                    choices=["serve", "start", "stop", "restart", "ensure",
-                            "status", "peers", "events", "join", "leave",
+                            "status", "peers", "events", "sync", "join", "leave",
                             "discover", "watch"])
     p.add_argument("seed_url", nargs="?", help="join 的目标（HOST:PORT 或 URL）")
     p.add_argument("--port", type=int, default=None,
@@ -2538,6 +2866,10 @@ def add_parser(sub) -> None:
                    help="共享 token（也可用 $HIVE_CLUSTER_TOKEN；跨机必配）")
     p.add_argument("--lease-grace", type=float, default=None,
                    help="新主上任后租约恢复宽限秒数（默认 120）")
+    p.add_argument("--no-elect", action="store_true",
+                   help="observer：不参选、不投票（verify-only 机器用）")
+    p.add_argument("--no-sync", action="store_true",
+                   help="关闭本机 repo.updated 代码同步")
     p.add_argument("--since", type=int, default=0, help="events/watch 的起始序号")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=lambda a: run_cli(a))

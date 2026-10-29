@@ -14,6 +14,7 @@ import re
 
 import pytest
 
+import hive
 from conftest import HIVE, sh
 
 
@@ -137,3 +138,65 @@ def test_orchestrate_iterations(world, fake_cmd):
     assert p.returncode == 0, p.stdout + p.stderr
     ticks = [l for l in p.stdout.splitlines() if l.strip()]
     assert len(ticks) == 2, ticks
+
+
+# --------------------------------------------------------------------------- #
+# P0 leader gate
+# --------------------------------------------------------------------------- #
+def _gate(role: str, leader_id: str = "me", term: int = 7) -> dict:
+    return {"role": role, "term": term,
+            "self": {"id": "me", "name": "me"},
+            "leader": {"id": leader_id, "name": leader_id} if leader_id else None}
+
+
+def test_orchestrate_follower_skips_writes(world, fake_cmd, monkeypatch):
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
+    world.add_task("T-0001")
+
+    monkeypatch.setattr(hive, "cluster_state", lambda: _gate("follower", "other"))
+    h = hive.Hive(str(world.hive1))
+    h.cmd_orchestrate(once=True, dispatch=True, watchdog=True, land=False,
+                      sync=False, doctor=False)
+
+    assert world.card("T-0001")["state"] == "ready"
+    assert not world.card("T-0001").get("owner")
+
+
+def test_orchestrate_no_leader_skips_writes(world, fake_cmd, monkeypatch):
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
+    world.add_task("T-0001")
+
+    monkeypatch.setattr(hive, "cluster_state", lambda: _gate("candidate", ""))
+    h = hive.Hive(str(world.hive1))
+    h.cmd_orchestrate(once=True, dispatch=True, watchdog=True, land=False,
+                      sync=False, doctor=False)
+
+    assert world.card("T-0001")["state"] == "ready"
+
+
+def test_orchestrate_leader_dispatches(world, fake_cmd, monkeypatch):
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd,
+                    repos={"hive": world.code_clone("fb")})
+    world.add_task("T-0001", repo="hive")
+
+    monkeypatch.setattr(hive, "cluster_state", lambda: _gate("leader"))
+    monkeypatch.setattr(hive.Hive, "_leader_still", lambda self, term: True)
+    h = hive.Hive(str(world.hive1))
+    h.cmd_orchestrate(once=True, dispatch=True, watchdog=False, land=False,
+                      sync=False, doctor=False)
+
+    assert world.card("T-0001")["owner"] == "fb"
+
+
+def test_orchestrate_lost_leader_stops_writes(world, fake_cmd, monkeypatch):
+    world.add_agent("fb", "exec", caps=["freebsd"], command=fake_cmd)
+    world.add_task("T-0001")
+
+    monkeypatch.setattr(hive, "cluster_state", lambda: _gate("leader"))
+    monkeypatch.setattr(hive.Hive, "_leader_still", lambda self, term: False)
+    h = hive.Hive(str(world.hive1))
+    h.cmd_orchestrate(once=True, dispatch=True, watchdog=False, land=False,
+                      sync=False, doctor=False)
+
+    assert world.card("T-0001")["state"] == "ready"
+    assert not world.card("T-0001").get("owner")
