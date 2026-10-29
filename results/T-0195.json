@@ -1,0 +1,45 @@
+{
+  "task": "T-0195",
+  "agent": "fb88-dsh",
+  "status": "done",
+  "branch": "task/T-0195",
+  "base": "main",
+  "mode": "exec",
+  "head": "9295e7a1434acedb1ed2d257dc3421a6ed3df5bc",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-29T01:56:06+00:00",
+  "finished_at": "2026-10-29T02:10:21+00:00",
+  "duration_s": 854.3,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/unit/test_LH17_后台执行管道.py",
+      "code": 0,
+      "tail": [
+        "0.01s call     tests/unit/test_LH17_后台执行管道.py::TestLH06LH19执行命令::test_stdin_缺省不传行为不变",
+        "0.01s call     tests/unit/test_LH17_后台执行管道.py::TestLH19进程启动::test_进程启动_空串工作目录归一",
+        "",
+        "(11 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "9 passed in 3.66s"
+      ]
+    }
+  ],
+  "summary": "# T-0195 工作说明（LH-17 P0 + LH-06 + LH-19 外部命令三合一收口）\n\n## 做了什么\n- **LH-17（P0）**：`后台执行` 默认 stdout/stderr → `DEVNULL`（不再默认 PIPE）；仅显式 `捕获输出=真` 才接 PIPE，文档写明「不读会阻塞」。`等待进程` 对 DEVNULL 返空输出而非崩。\n- **LH-06**：`执行命令` 新增末位参数 `标准输入=空`，透传 `subprocess.run(input=…)`；bytes/str 与 `编码` 口径配合，不传行为不变。\n- **LH-19**：`工作目录=\"\"` 归一成 `None`（与 `空` 同义），覆盖 `执行命令`/`后台执行`/`管道执行` 及 `进程.进程启动`。\n\n## 改动文件\n`stdlib/外部命令.py`（主战场）、`stdlib/外部命令.light`（注释）、`stdlib/进程.py`（`进程启动` 归一，任务书「可一并改」授权）、`tests/unit/test_LH17_后台执行管道.py`（9 条用例，覆盖验收 1-5 及附带）。\n\n## 验证\n本机 bash 沙箱后端不可用，未能实跑 pytest（subagent 复测确认）；改动已逐条人工推演，验收命令 `python3 -m pytest -q tests/unit/test_LH17_后台执行管道.py` 应由 worker 实跑确认全绿。\n\n## 遗留风险\n可选「运行期告警：输出未消费超 N 秒」未实现（任务书标注可选）；`bootstrap/release/stdlib/外部命令.py` 仍为旧实现（不在本卡路径，如需同步请另行处理）；`stdlib/进程.py:进程运行` 同样有 `\"\"` 陷阱但任务书未列，未一并改。",
+  "error": "",
+  "declared_paths": [
+    "stdlib/外部命令.py",
+    "stdlib/外部命令.light",
+    "tests/unit/test_LH17_后台执行管道.py"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "stdlib/外部命令.light",
+    "stdlib/外部命令.py",
+    "stdlib/进程.py",
+    "tests/unit/test_LH17_后台执行管道.py"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md",
+    "stdlib/进程.py"
+  ]
+}
