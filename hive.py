@@ -577,6 +577,10 @@ def store_release(tid: str, agent: str, requeue: bool = True) -> dict | None:
         return None
 
 
+def store_assign(tid: str, agent: str) -> dict:
+    return store_call("assign", {"task": tid, "agent": agent})
+
+
 def store_result(tid: str, agent: str, lease_id: str,
                  result: dict) -> dict | None:
     try:
@@ -1107,12 +1111,27 @@ class Hive:
         out.append(f"results/{tid}.json")
         return out
 
+    def _overlay_store_state(self, data: dict) -> dict:
+        """store 模式下用运行时 state/owner/retries 覆盖 Git 卡面。"""
+        if claim_backend() != "store":
+            return data
+        store = local_store()
+        if store is None:
+            return data
+        row = store.task(str(data.get("id") or ""))
+        if not row:
+            return data
+        for key in ("state", "owner", "retries"):
+            if row.get(key) not in (None, ""):
+                data[key] = row[key]
+        return data
+
     def cards(self) -> dict[str, dict]:
         out = {}
         for p in sorted((self.dir / "tasks").glob("T-*.md")):
             data, body = parse_card(p)
             data["_body"], data["_path"] = body, p
-            out[data["id"]] = data
+            out[data["id"]] = self._overlay_store_state(data)
         return out
 
     def card(self, tid: str) -> dict:
@@ -1121,7 +1140,7 @@ class Hive:
             raise HiveError(f"没有任务 {tid}")
         data, body = parse_card(p)
         data["_body"], data["_path"] = body, p
-        return data
+        return self._overlay_store_state(data)
 
     def save_card(self, data: dict, body: str | None = None) -> None:
         p = data["_path"]
@@ -1165,6 +1184,10 @@ class Hive:
 
     # -- 命令 -------------------------------------------------------------- #
     def cmd_assign(self, tid: str, agent: str) -> None:
+        if claim_backend() == "store":
+            store_assign(tid, agent)
+            log(f"{tid} 已分派给 {agent}（store）")
+            return
         self._assign_local(tid, agent)
         self.commit_and_push(f"assign {tid} -> {agent}",
                              self._card_paths(tid, agent))
@@ -1814,6 +1837,11 @@ class Hive:
             print(f"  skip {tid}（不派）: {reason}")
 
         if apply and plan:
+            if claim_backend() == "store":
+                for c, n, _r in plan:
+                    store_assign(c["id"], n)
+                log(f"已分派 {len(plan)} 张卡（store；不写 Git assign）")
+                return len(plan)
             for c, n, _r in plan:
                 self._assign_local(c["id"], n)
             summary = ", ".join(f"{c['id']}->{n}" for c, n, _r in plan)
@@ -3206,6 +3234,27 @@ class Worker:
 
     # -- 队列 -------------------------------------------------------------- #
     def pending(self) -> list[tuple[str, dict]]:
+        if claim_backend() == "store":
+            store = local_store()
+            if store is None:
+                return []
+            cards = self.h.cards()
+            out = []
+            for tid, row in sorted(store.tasks().items()):
+                if row.get("owner") != self.name:
+                    continue
+                if row.get("state") not in ("assigned", "claimed"):
+                    continue
+                if self.h.result_info(tid):
+                    continue
+                card = cards.get(tid)
+                if not card or card.get("state") in ("done",) + HANDOFF_STATES:
+                    continue
+                deps = card.get("depends_on") or []
+                if any(not self._dep_done(d) for d in deps):
+                    continue
+                out.append((tid, card))
+            return out
         inbox = self.dir / "inbox" / self.name
         if not inbox.is_dir():
             return []

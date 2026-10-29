@@ -514,3 +514,35 @@ def test_worker_claim_store_backend(world, cluster_factory, monkeypatch, tmp_pat
     claim = c.store.claim_info("T-0001")
     assert claim and claim["owner"] == "fb", claim
     assert world.refs("refs/heads/claim/T-0001") == []
+
+
+def test_store_dispatch_assigns_without_git(world, cluster_factory,
+                                             monkeypatch, tmp_path):
+    """P2b：store 模式下 dispatch 直接 store assign，Worker.pending 不依赖 Git inbox。"""
+    world.add_agent("fb", "exec", caps=["freebsd"], command="true",
+                    repos={"hive": world.code_clone("fb")})
+    world.add_task("T-0001", repo="hive")
+    c = cluster_factory("a", hive_dir=world.hive1, store_enabled=True,
+                        sync_enabled=False)
+    assert wait_until(lambda: c.snapshot().get("role") == "leader", timeout=6)
+    c.store.ingest_cards(hive.Hive(str(world.hive1)).cards())
+
+    monkeypatch.setenv("HIVE_CLAIM_BACKEND", "store")
+    monkeypatch.setenv("HIVE_STORE_PATH", str(c.config.store_path))
+    monkeypatch.setenv("HIVE_CLUSTER_PORT", str(c.port))
+    monkeypatch.setenv("HIVE_CLUSTER_STATE", str(c.config.state_dir))
+    monkeypatch.setenv("HIVE_CLUSTER_ALLOW_TEST", "1")
+
+    h = hive.Hive(str(world.hive1))
+    h.cmd_dispatch(apply=True, only_agent="fb")
+    row = c.store.task("T-0001")
+    assert row["state"] == "assigned" and row["owner"] == "fb", row
+    # Git 卡面没有 assign（store 模式不再写 owner/state）
+    assert world.card("T-0001")["state"] == "ready"
+    assert world.card("T-0001")["owner"] in (None, "")
+
+    w = hive.Worker(str(world.hive1), "fb",
+                    hive_state=str(tmp_path / "worker-state"))
+    assert any(tid == "T-0001" for tid, _ in w.pending())
+    assert w.claim("T-0001") is True
+    assert c.store.claim_info("T-0001")["owner"] == "fb"
