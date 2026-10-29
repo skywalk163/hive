@@ -773,6 +773,9 @@ class HiveMcp:
     def t_result(self, a: dict) -> dict:
         tid = a["task_id"]
         res = self.hive_view().result_info(tid)
+        if not res and self.cache is not None:
+            # 缓存最多落后一个刷新周期；刚 submit 完立刻查结果时兜底读一次真仓。
+            res = self.hive().result_info(tid)
         if not res:
             return err(f"{tid} 还没有结果")
         v = _verify_verdict(res.get("verify") or [])

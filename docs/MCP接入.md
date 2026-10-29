@@ -296,7 +296,7 @@ python3 -m pytest tests/test_mcp.py -q
 | 工具数（worker） | 14 |
 | 启动行（stderr） | `hive mcp: agent=raccoon-win role=worker dir=C:\Users\skywalk\.hive\clones\mcp-raccoon-win` |
 | `hive_whoami` 的 `hive_dir` | `C:\Users\skywalk\.hive\clones\mcp-raccoon-win` |
-| 注册后客户端日志 | `mcp/ready count=15`（系统 1 个 + hive 14 个） |
+| 注册后客户端日志 | `mcp/ready count=16`（系统 1 个 + hive 15 个） |
 
 **自检：`hive_whoami` 返回的 `hive_dir` 必须是 `~/.hive/clones/mcp-<agent>`。**
 如果它指向你正在改代码的主工作区，立刻停手——MCP 每次工具调用前都会
@@ -304,7 +304,7 @@ python3 -m pytest tests/test_mcp.py -q
 
 ### 11.3 工具何时出现
 
-配置写进 `mcp.json` 后**不保证当场生效**：实测本会话内热加载没把 14 个工具注册进来，
+配置写进 `mcp.json` 后**不保证当场生效**：实测本会话内热加载没把 15 个工具注册进来，
 重启客户端后才有（日志出现 `mcp/ready count=<原数+14>`）。
 
 判断成功的标准，按从便宜到贵的顺序：
