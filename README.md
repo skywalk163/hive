@@ -75,6 +75,8 @@ python3 ~/hive/hive.py --dir ~/hive cluster sync      # 本机代码同步状态
 - verify-only / GUI 机器用 `cluster start --no-elect` 做 observer，只观察不参选。
 - **P0 起进度默认不写 Git**：`HIVE_STATUS_GIT=auto` 只在里程碑且集群不可用时兜底；
   land 后各机按 `repo.updated` 自动 `ff-only` 同步主检出。
+- **P1 起 `hive daemon` 默认带本机 MCP HTTP**：`127.0.0.1:8790`，一个 agent 一个 token；
+  `hive agent enroll --name <agent>` 生成 token 和客户端配置。
 - 细节、API、选主/任期/化身号/宽限期的取舍：见 [docs/集群服务.md](docs/集群服务.md)。
 
 ## 2. 登记机器

@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 
@@ -4034,7 +4034,7 @@ def cmd_dispatch(args) -> None:
 
 def cmd_mcp(args) -> int:
     """启动 MCP server（stdio）或 stdio→hived 桥。"""
-    if getattr(args, "connect", False):
+    if getattr(args, "connect", False) or getattr(args, "action", None) == "connect":
         import mcp_bridge
         return mcp_bridge.serve_stdio(args.url, args.token)
     import mcp_server
@@ -4697,6 +4697,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_claim)
 
     s = sub.add_parser("mcp", help="启动 MCP server（stdio），让 agent 通过 MCP 查/领/交/终止任务")
+    s.add_argument("action", nargs="?", default=None, choices=["connect"],
+                   help="connect=连接到本机 hived 8790（stdio 桥）")
     s.add_argument("--agent", default=os.environ.get("HIVE_AGENT", ""),
                    help="以哪个 agent 的身份运行（默认 $HIVE_AGENT）")
     s.add_argument("--dir", dest="mcp_dir", default=None,
@@ -4707,6 +4709,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="worker=只能操作自己的卡；controller=总控，会改动 main")
     s.add_argument("--connect", action="store_true",
                    help="不启 stdio server，改为连接本机 hived 的 8790（stdio 桥）")
+    s.add_argument("--stdio", action="store_true",
+                   help="与 connect 一起用（兼容文档里的 hive mcp connect --stdio）")
     s.add_argument("--url", default=os.environ.get("HIVE_MCP_URL",
                                                    "http://127.0.0.1:8790/mcp"),
                    help="--connect 的目标 URL")

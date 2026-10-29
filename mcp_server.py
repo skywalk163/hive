@@ -1008,8 +1008,11 @@ class McpServer:
         params = msg.get("params") or {}
 
         if method == "initialize":
+            requested = params.get("protocolVersion") if isinstance(params, dict) else None
+            version = (requested if requested in ("2025-03-26", "2024-11-05")
+                       else self.protocol_version)
             return self.result(rid, {
-                "protocolVersion": self.protocol_version,
+                "protocolVersion": version,
                 "capabilities": {"tools": {}},
                 "serverInfo": SERVER_INFO,
                 "instructions": (

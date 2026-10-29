@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.12.0 — 2026-10-29
+
+### Added
+
+- **P1 `hived` 本机 MCP HTTP 入口**：`hive daemon` 是 `hive cluster` 的别名，默认在
+  `127.0.0.1:8790/mcp` 起 Streamable HTTP；`hive cluster start --mcp` 也可显式开启。
+  一个进程服务本机多个 agent，读工具走只读缓存，写工具仍走现有 Git/claim。
+- **`hive agent enroll/revoke` + 本机 token**：token 只存
+  `~/.hive/cluster/mcp_tokens.json`（SHA-256，0600），不进协调仓；
+  `enroll` 直接打印 `mcpServers` 配置（URL + Bearer token）。
+- **只读缓存 `mcp_cache.py`**：独立 read clone 每 2s 解析任务卡/agent/in-flight
+  claim/result；每 10s fetch/reset 一次。MCP 读工具不再每次起 git 子进程，也不阻塞
+  写 clone。
+- **stdio 桥 `hive mcp --connect`**：给只支持 stdio 的客户端转发到 8790；
+  原 `hive mcp --agent` 独立 stdio server 保留。
+- **端口规划**：8790 正式分配给 MCP HTTP（唯一来源 `hive_ports.py`），
+  预留段改为 8791–8798。
+- **测试**：`tests/test_mcp_http.py`（token/initialize/tools/list/tools/call）、
+  cluster 内嵌 MCP 启动、`tests/test_ports.py` 更新。
+
+### Changed
+
+- **P1 边界**：claim/lease 仍以 Git 为真相；`hived` 只负责本机入口、缓存和 token。
+  store 控制面仍是 P2。
+- `hive cluster` 默认不启 MCP（保持旧行为）；`hive daemon` 默认启，避免已有集群
+  脚本突然多监听一个端口。
+
 ## 0.11.0 — 2026-10-29
 
 ### Added

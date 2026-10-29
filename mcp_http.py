@@ -43,8 +43,10 @@ class McpHttpService:
         self.bind = bind
         self.state_dir = Path(state_dir).expanduser() if state_dir else (
             Path.home() / ".hive" / "cluster")
+        env_tokens = (os.environ.get("HIVE_MCP_TOKENS") or "").strip()
         self.token_path = Path(token_path).expanduser() if token_path else (
-            self.state_dir / "mcp_tokens.json")
+            Path(env_tokens).expanduser() if env_tokens
+            else self.state_dir / "mcp_tokens.json")
         self.write_dir = Path(write_dir).expanduser() if write_dir else (
             Path.home() / ".hive" / "clones" / "mcp-hived")
         self.read_dir = Path(read_dir).expanduser() if read_dir else (
@@ -66,6 +68,8 @@ class McpHttpService:
         return f"http://{host}:{self.port}/mcp"
 
     def start(self) -> None:
+        if self._stop.is_set():
+            return
         for src, dst, label in ((self.hive_dir, self.write_dir, "write"),
                                 (self.hive_dir, self.read_dir, "read")):
             try:
@@ -79,6 +83,8 @@ class McpHttpService:
             self.last_error = f"cache: {exc}"
             self._log(f"mcp: 缓存启动失败（继续）: {exc}")
 
+        if self._stop.is_set():
+            return
         handler, server_cls = _build_handler(self)
         try:
             self._server = server_cls((self.bind, self.port), handler)

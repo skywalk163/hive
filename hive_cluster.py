@@ -70,12 +70,16 @@ try:
         CLUSTER_HTTP_ENV as CLUSTER_PORT_ENV,
         CLUSTER_DISCOVERY_PORT as DEFAULT_DISCOVERY_PORT,
         CLUSTER_DISCOVERY_ENV as CLUSTER_DISCOVERY_ENV,
+        MCP_HTTP_PORT as DEFAULT_MCP_PORT,
+        MCP_HTTP_ENV as MCP_PORT_ENV,
     )
 except ImportError:  # pragma: no cover
     DEFAULT_PORT = 8788
     CLUSTER_PORT_ENV = "HIVE_CLUSTER_PORT"
     DEFAULT_DISCOVERY_PORT = 8789
     CLUSTER_DISCOVERY_ENV = "HIVE_CLUSTER_DISCOVERY_PORT"
+    DEFAULT_MCP_PORT = 8790
+    MCP_PORT_ENV = "HIVE_MCP_PORT"
 
 DEFAULT_CLUSTER_ID = "hive"
 EVENT_LIMIT = 500
@@ -304,10 +308,10 @@ class Config:
             self.mcp_enabled = bool(kw.get("mcp_enabled"))
         mcp_port = kw.get("mcp_port")
         if mcp_port is None:
-            mcp_port = os.environ.get("HIVE_MCP_PORT")
+            mcp_port = os.environ.get(MCP_PORT_ENV)
         if mcp_port is None:
             mcp_port = saved.get("mcp_port")
-        self.mcp_port = int(mcp_port if mcp_port is not None else 8790)
+        self.mcp_port = int(mcp_port if mcp_port is not None else DEFAULT_MCP_PORT)
         self.mcp_bind = str(
             kw.get("mcp_bind") or os.environ.get("HIVE_MCP_BIND")
             or saved.get("mcp_bind") or "127.0.0.1")
@@ -891,7 +895,9 @@ class Cluster:
                     write_dir=self.config.mcp_write_dir,
                     read_dir=self.config.mcp_read_dir,
                 )
-                self.mcp_service.start()
+                # clone/缓存可能慢，别让 hived 的集群启动等它；后台起，失败只影响 MCP。
+                threading.Thread(target=self.mcp_service.start,
+                                 name="hive-mcp-start", daemon=True).start()
             except Exception as exc:  # noqa: BLE001  MCP 是可选入口
                 _log(f"mcp: 启动失败（忽略）: {exc}")
 
@@ -2819,9 +2825,17 @@ def run_cli(args) -> int:
     snap, running = _local_state(config)
     if action == "status":
         if getattr(args, "json", False):
-            _print_json({"running": running, "state": snap})
+            health = _local_health(config) or {}
+            _print_json({"running": running, "state": snap,
+                         "mcp": health.get("mcp") or {}})
         else:
             print(_status_line(snap, running))
+            health = _local_health(config) or {}
+            mcp = health.get("mcp") or {}
+            if mcp:
+                print(f"MCP HTTP {mcp.get('url') or '-'}  "
+                      f"{'运行中' if mcp.get('enabled') else '未启用'}"
+                      + (f"  ({mcp.get('last_error')})" if mcp.get("last_error") else ""))
         return 0 if snap is not None else 1
 
     if action == "peers":

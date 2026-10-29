@@ -22,7 +22,10 @@ def _now() -> str:
 
 
 def token_path(path: str | os.PathLike | None = None) -> Path:
-    return Path(path).expanduser() if path else DEFAULT_PATH.expanduser()
+    if path:
+        return Path(path).expanduser()
+    env = (os.environ.get("HIVE_MCP_TOKENS") or "").strip()
+    return Path(env).expanduser() if env else DEFAULT_PATH.expanduser()
 
 
 def _hash(token: str) -> str:
@@ -46,6 +49,10 @@ def load(path: str | os.PathLike | None = None) -> dict:
 def save(data: dict, path: str | os.PathLike | None = None) -> None:
     p = token_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(p.parent, 0o700)
+    except OSError:
+        pass
     tmp = p.with_name(f"{p.name}.tmp.{os.getpid()}")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
                    encoding="utf-8")

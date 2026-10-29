@@ -19,7 +19,8 @@ hive.py 各写各的默认值。集群上线后又多了 HTTP 8788 和 UDP 8789�
   8787  TCP  看板 HTTP（只绑 127.0.0.1，默认不对外）
   8788  TCP  集群 HTTP（节点间注册/心跳/投票/进度）
   8789  UDP  集群广播发现（不是 TCP；只开 TCP 也能用静态 seed）
-  8790-8798  预留给 hive 内部服务，当前不分配
+  8790  TCP  MCP HTTP（hived → agent；只绑 127.0.0.1）
+  8791-8798  预留给 hive 内部服务，当前不分配
   8799  TCP  测试/冒烟专用（ci-smoke / 手工验证，不用于生产）
 
 外部依赖（不归 hive 分配，但排障时会看到）：
@@ -49,10 +50,13 @@ CLUSTER_HTTP_ENV = "HIVE_CLUSTER_PORT"
 CLUSTER_DISCOVERY_PORT = 8789
 CLUSTER_DISCOVERY_ENV = "HIVE_CLUSTER_DISCOVERY_PORT"
 
+MCP_HTTP_PORT = 8790
+MCP_HTTP_ENV = "HIVE_MCP_PORT"
+
 SMOKE_PORT = 8799
 SMOKE_ENV = "SMOKE_PORT"
 
-RESERVED_FIRST = 8790
+RESERVED_FIRST = 8791
 RESERVED_LAST = 8798
 RESERVED_RANGE = (RESERVED_FIRST, RESERVED_LAST)
 
@@ -89,6 +93,8 @@ SPECS = (
              CLUSTER_HTTP_ENV, "注册/心跳/投票/进度/租约；跨机需放行"),
     PortSpec("discovery", "集群广播发现", CLUSTER_DISCOVERY_PORT, "udp", "0.0.0.0",
              CLUSTER_DISCOVERY_ENV, "UDP 广播；仅同网段自动发现用，可关闭"),
+    PortSpec("mcp", "MCP HTTP", MCP_HTTP_PORT, "tcp", "127.0.0.1",
+             MCP_HTTP_ENV, "hived 的本机 MCP 入口；只绑 loopback，不对外"),
     PortSpec("smoke", "测试/冒烟", SMOKE_PORT, "tcp", "127.0.0.1",
              SMOKE_ENV, "ci-smoke 与手工验证专用；不要拿它跑生产服务"),
 )

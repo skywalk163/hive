@@ -17,6 +17,23 @@
 }
 ```
 
+P1 起推荐直接用本机 `hived`（每台机器起一个，地址固定）：
+
+```json
+{
+  "mcpServers": {
+    "hive": {
+      "type": "http",
+      "url": "http://127.0.0.1:8790/mcp",
+      "headers": {"Authorization": "Bearer <token>"}
+    }
+  }
+}
+```
+
+token 在运行 hived 的机器上由人执行 `hive agent enroll --name <你的agent名>` 生成。
+上面的 stdio 配置仍然可用（`hive mcp --agent ...` 或 `hive mcp connect --stdio`）。
+
 然后按顺序调：`hive_whoami` → `hive_next` → `hive_claim` → 干活 → 写 `.hive/summary.md` → `hive_submit` → `hive_result`。
 
 三条最容易踩的：

@@ -1,13 +1,25 @@
 # MCP 接入：让任意 agent 自己来查任务、领任务、交任务
 
-`hive mcp` 起一个 **MCP stdio server**，把 hive 的任务总线暴露成 **14 个工具**
-（`--role controller` 是 21 个）。
+`hive mcp` 起一个 **MCP stdio server**，把 hive 的任务总线暴露成 **15 个工具**
+（`--role controller` 是 22 个）。
 支持 MCP 的 agent（Claude Desktop / Cursor / Claude Code / Codex CLI / 小浣熊 / 自己写的 harness）
 接上之后就能自助：**查阅自己的任务 → 申请领取 → 在 worktree 里干活 → 提交验收 → 干不下去就还回去**。
 
 第一次接、想尽快跑通，直接看 **[AGENT 快速上手](AGENT快速上手.md)**（agent 视角，含实测输出与踩坑）。
 
 不需要 SSH，不需要共享目录，不需要中央数据库 —— 协调仍然靠 git 分支的原子性。
+
+> **P1 推荐入口：hived HTTP**。`hive daemon start` 会在 `127.0.0.1:8790` 起一个本机
+> MCP 入口，agent 只配 URL + token，不用给每个 agent 起 stdio 子进程：
+>
+> ```sh
+> $H daemon start
+> $H agent enroll --name workbuddy
+> # 把输出的 mcpServers 配置写进客户端
+> ```
+>
+> 读工具走 hived 的只读缓存；写工具仍走 Git/claim。只有确实只支持 stdio 的客户端才用
+> `hive mcp --connect --token <token>` 桥，或下文的 `hive mcp --agent` 独立 server。
 
 ## 1. 为什么用 MCP 而不是继续加 CLI
 

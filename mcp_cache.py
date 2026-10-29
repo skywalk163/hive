@@ -90,7 +90,8 @@ class ReadCache:
                     git(["reset", "--hard", "-q", "origin/main"], self.dir)
                     self._last_git = now
                 except HiveError as exc:
-                    # 网络失败就继续用上一版快照；下一次再试。
+                    # 网络失败就继续用上一版快照；10s 后再试，不要每 2s 打一次。
+                    self._last_git = now
                     with self._lock:
                         self._last_error = str(exc).splitlines()[0]
             h = Hive(self.dir)
