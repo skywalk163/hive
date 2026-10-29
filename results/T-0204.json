@@ -1,0 +1,36 @@
+{
+  "task": "T-0204",
+  "agent": "fb88-dsh",
+  "status": "done",
+  "branch": "task/T-0204",
+  "base": "main",
+  "mode": "exec",
+  "head": "3cddb0f90f1e51585bb1adac412b837769f9e82c",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-29T11:14:56+00:00",
+  "finished_at": "2026-10-29T11:43:50+00:00",
+  "duration_s": 1734.3,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_worker_recovery.py tests/test_core.py",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 96%]",
+        "...                                                                      [100%]",
+        "75 passed in 239.00s (0:03:58)"
+      ]
+    }
+  ],
+  "summary": "# T-0204 完成：worker 配置热更新 + worktree 缺失恢复 + 单卡异常兜底\n\n**做了什么**\n1. 新增 `Worker._reload_cfg()`：每次 `pending()`/`claim()` 前重读 `agents/<name>.json`\n   （repos/能力/mode/并发都刷新），不再只认 `__init__` 快照；显式 `--max-concurrency` 覆盖保留。\n2. `run_task` 统一 worktree 重建：缺失就 `git worktree add` 拉到卡的 base；重建失败或\n   `.git` 缺失就 `_block_card`+`_blocked_result` 标 `blocked`，绝不拿旧 cwd 去跑。\n3. `run_tasks` 串行路径加 `_run_task_isolated`（单卡异常只判本卡）；`loop()` 对每张卡\n   claim 加 try/except，并加 `except Exception` 兜底，一张卡意外不再整进程退出。\n\n**改了哪些文件**：`hive.py`（Worker 的 __init__/_reload_cfg/_run_task_isolated/_block_card/\n_blocked_result/pending/claim/run_tasks/run_task/loop）；新建 `tests/test_worker_recovery.py`\n（6 用例：配置热更新 2、worktree 缺失 2、异常兜底 2）。\n\n**验证**：本环境 bash 因沙箱后端不可用而无法执行（workspace-write 与 danger-full-access\n均被拒），pytest 未实际运行，需 worker 跑验收命令确认；已对改动做逐行静态复核。\n\n**遗留风险**：`_block_card` 防御分支未被用例触发；配置热更新只在 pending/claim 触发\n（`cmd_take`→`prepare` 仍用构造时配置，人工取卡场景）；验收命令需 worker 实测。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_worker_recovery.py"
+  ],
+  "changed_files": [
+    "hive.py",
+    "tests/test_worker_recovery.py"
+  ],
+  "out_of_paths": []
+}
