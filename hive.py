@@ -50,7 +50,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.12.0"
+VERSION = "0.13.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 
@@ -491,6 +491,97 @@ def cluster_state() -> dict | None:
         return None
     state = data.get("state")
     return state if isinstance(state, dict) else data
+
+
+CLAIM_BACKEND_ENV = "HIVE_CLAIM_BACKEND"
+STORE_LEASE_MINUTES = 10
+_STORE_CACHE: dict[str, object] = {}
+_CLAIM_BACKEND_CACHE: str | None = None
+_STORE_PATH_CACHE: Path | None = None
+
+
+def claim_backend() -> str:
+    global _CLAIM_BACKEND_CACHE
+    raw = (os.environ.get(CLAIM_BACKEND_ENV) or "").strip().lower()
+    if raw:
+        return "store" if raw == "store" else "git"
+    if _CLAIM_BACKEND_CACHE is None:
+        saved = str(_cluster_saved_config().get("claim_backend") or "git").lower()
+        _CLAIM_BACKEND_CACHE = "store" if saved == "store" else "git"
+    return _CLAIM_BACKEND_CACHE
+
+
+def store_db_path() -> Path:
+    global _STORE_PATH_CACHE
+    raw = (os.environ.get("HIVE_STORE_PATH") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    if _STORE_PATH_CACHE is None:
+        saved = _cluster_saved_config().get("store_path")
+        _STORE_PATH_CACHE = (Path(saved).expanduser() if saved
+                             else cluster_state_dir() / "hive.db")
+    return _STORE_PATH_CACHE
+
+
+def local_store():
+    """本机 SQLite 只读句柄（进程内缓存）；文件不存在返回 None。"""
+    path = store_db_path()
+    if not path.exists():
+        return None
+    key = str(path)
+    obj = _STORE_CACHE.get(key)
+    if obj is None:
+        try:
+            from hive_store import Store
+            obj = Store(path, node_id="local")
+            _STORE_CACHE[key] = obj
+        except Exception:  # noqa: BLE001
+            return None
+    return obj
+
+
+def store_call(action: str, payload: dict, timeout: float = 3.0) -> dict:
+    code, data = _cluster_http("POST", f"store/{action}", payload,
+                               timeout=timeout)
+    if code == 200 and isinstance(data, dict) and data.get("ok"):
+        return data
+    msg = (data or {}).get("error") if isinstance(data, dict) else ""
+    raise HiveError(msg or f"store {action} 失败（集群不可用/无主，HTTP {code}）")
+
+
+def store_claim(tid: str, agent: str, lease_minutes: int) -> dict:
+    return store_call("claim", {
+        "task": tid, "agent": agent, "lease_minutes": int(lease_minutes),
+        "host": os.uname().nodename if hasattr(os, "uname")
+        else os.environ.get("COMPUTERNAME", ""),
+    })
+
+
+def store_lease(tid: str, agent: str, lease_id: str, minutes: int) -> dict:
+    return store_call("lease", {"task": tid, "agent": agent,
+                                "lease_id": lease_id, "minutes": int(minutes)})
+
+
+def store_release(tid: str, agent: str, requeue: bool = True) -> dict | None:
+    info = None
+    try:
+        store = local_store()
+        info = store.claim_info(tid) if store else None
+    except Exception:  # noqa: BLE001
+        info = None
+    lease_id = str((info or {}).get("lease_id") or "")
+    try:
+        return store_call("release", {"task": tid, "agent": agent,
+                                      "lease_id": lease_id, "requeue": requeue})
+    except HiveError:
+        return None
+
+
+def store_close(tid: str, done: bool = True, note: str = "") -> dict | None:
+    try:
+        return store_call("close", {"task": tid, "done": bool(done), "note": note})
+    except HiveError:
+        return None
 
 
 def cluster_ensure(hive_dir=None) -> bool:
@@ -1031,6 +1122,16 @@ class Hive:
         return json.loads(p.read_text(encoding="utf-8"))
 
     def claim_info(self, tid: str):
+        if claim_backend() == "store":
+            store = local_store()
+            if store is not None:
+                claim = store.claim_info(tid)
+                if not claim:
+                    return None
+                out = dict(claim)
+                out["agent"] = out.get("owner") or ""
+                out["lease_until"] = iso(float(out.get("lease_until") or 0))
+                return out
         return read_ref_file(self.dir, f"origin/claim/{tid}", f"claims/{tid}.json")
 
     def status_info(self, tid: str):
@@ -1117,7 +1218,10 @@ class Hive:
                     log(f"已删除分支 {ref}")
                 else:
                     log(f"删不掉 {ref}（可能受保护），保留不影响结果")
-        cluster_release_lease(tid)
+        if claim_backend() == "store":
+            store_close(tid, done=bool(done), note=note)
+        else:
+            cluster_release_lease(tid)
         log(f"{tid} 已{'关闭（完成）' if done else '关闭（作废，卡面 state=closed）'}")
 
     def cmd_reopen(self, tid: str, reason: str = "", who: str = "controller") -> None:
@@ -2266,8 +2370,11 @@ class Hive:
             raise HiveError(f"{tid} 已被 {holder} 领取，抢不到")
 
         # 锁到手之后才写入 assigned/owner 和 inbox；claim 失败时这里根本不会执行。
-        self._assign_local(tid, agent)
-        self.commit_and_push(f"take {tid} -> {agent}", self._card_paths(tid, agent))
+        # store 模式不再把 assign 写回 Git（P2 的预算），卡面在 close 时一次性落最终态。
+        if claim_backend() != "store":
+            self._assign_local(tid, agent)
+            self.commit_and_push(f"take {tid} -> {agent}",
+                                 self._card_paths(tid, agent))
 
         if not (wt / ".hive" / "task.md").exists():
             w.prepare(tid)
@@ -2286,7 +2393,8 @@ class Hive:
         card = self.card(tid)
         if self.result_info(tid):
             raise HiveError(f"{tid} 已经有结果")
-        owner = card.get("owner") or ""
+        owner = (card.get("owner")
+                 or (self.claim_info(tid) or {}).get("agent") or "")
         if not owner:
             raise HiveError(f"{tid} 没有 owner，先 take 或 assign")
         cfg = self.agent(owner)
@@ -2365,7 +2473,10 @@ class Hive:
             git(["worktree", "remove", "--force", str(wt)], repo, check=False)
             shutil.rmtree(wt, ignore_errors=True)
 
-        cluster_release_lease(tid)
+        if claim_backend() == "store":
+            store_release(tid, owner, requeue=True)
+        else:
+            cluster_release_lease(tid)
         print(f"{tid} {result['status']} by {owner}（{result['duration_s']}s）"
               f"\nbranch: task/{tid}  head: {head}\n"
               f"verify: " + ", ".join(f"{v['code']}" for v in verify), flush=True)
@@ -2707,6 +2818,9 @@ class Hive:
         否则一张注定失败的卡会被判死→重派→判死无限循环，常驻的 orchestrate 会一直烧 agent。
         人工显式 `hive retry` 不受此限（那是人在明确要求重跑）。
         """
+        if claim_backend() == "store":
+            info = self.claim_info(tid) or {}
+            store_release(tid, str(info.get("agent") or ""), requeue=True)
         if rev_parse(self.dir, f"origin/claim/{tid}"):
             git_net(["push", "origin", f":refs/heads/claim/{tid}"], self.dir,
                     check=False)
@@ -3115,6 +3229,20 @@ class Worker:
           HIVE_CLAIM_MAX_RETRIES 控制，超了抛 HiveError（绝不无限退避）；
         * push 的原子性完全不动：仍然是普通 push，非快进拒绝就是拒绝，绝不 force。
         """
+        if claim_backend() == "store":
+            info = self.h.claim_info(tid)
+            holder = _claim_holder(info)
+            if holder and holder != self.name:
+                log(f"{tid} 已被 {holder} 领取，不重试")
+                return False
+            try:
+                out = store_claim(tid, self.name, STORE_LEASE_MINUTES)
+                log(f"{tid} store 领取成功（lease {out.get('claim', {}).get('lease_id', '')[:8]}）")
+                return True
+            except HiveError as exc:
+                log(f"{tid} store 领取失败：{exc}")
+                return False
+
         cfg = claim_backoff_config()
         info = self.h.claim_info(tid)
         holder = _claim_holder(info)
@@ -3221,7 +3349,8 @@ class Worker:
         （否则健康的长任务会被错杀）。best-effort：刷新失败只 log，不打断任务。
         """
         stop = threading.Event()
-        lease = int(self.h.card(tid).get("lease_minutes") or 180)
+        lease = (STORE_LEASE_MINUTES if claim_backend() == "store"
+                 else int(self.h.card(tid).get("lease_minutes") or 180))
         interval = max(5, lease // 3) * 60  # 秒
         t = threading.Thread(target=self._heartbeat_loop, args=(tid, interval, stop),
                             name=f"hb-{tid}", daemon=True)
@@ -3237,8 +3366,11 @@ class Worker:
             stop.set()
             t.join(timeout=5)
             sp.join(timeout=5)
-            # 任务已结束（成功/失败/异常都算），撤销集群里的建议性租约
-            cluster_release_lease(tid)
+            # 任务已结束（成功/失败/异常都算），撤销租约
+            if claim_backend() == "store":
+                store_release(tid, self.name, requeue=True)
+            else:
+                cluster_release_lease(tid)
 
     def _heartbeat_loop(self, tid: str, interval: int, stop: threading.Event) -> None:
         while not stop.wait(interval):
@@ -3249,6 +3381,16 @@ class Worker:
 
     def _refresh_lease(self, tid: str) -> None:
         """续租：把 claim 的 lease_until 往前推。父提交必须是当前 claim 分支才能快进。"""
+        if claim_backend() == "store":
+            info = self.h.claim_info(tid)
+            if not isinstance(info, dict) or info.get("agent") != self.name:
+                return
+            try:
+                store_lease(tid, self.name, str(info.get("lease_id") or ""),
+                            STORE_LEASE_MINUTES)
+            except HiveError as exc:
+                log(f"{tid} store 续租失败（忽略）: {exc}")
+            return
         info = self.h.claim_info(tid)
         if not isinstance(info, dict) or info.get("agent") != self.name:
             return  # 没 claim 或不是自己的，no-op
@@ -4753,6 +4895,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="MCP HTTP 端口（默认 8790）")
     s.add_argument("--mcp-bind", default=None,
                    help="MCP 绑定地址（默认 127.0.0.1）")
+    s.add_argument("--store", action="store_true",
+                   help="启用本地 SQLite store（P2）")
+    s.add_argument("--no-store", action="store_true", help="关闭 store")
+    s.add_argument("--claim-backend", choices=["git", "store"], default=None,
+                   help="claim 走 Git（默认）或 store（P2）")
     s.add_argument("--since", type=int, default=0, help="events/watch 的起始序号")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_cluster)

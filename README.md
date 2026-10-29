@@ -77,6 +77,8 @@ python3 ~/hive/hive.py --dir ~/hive cluster sync      # 本机代码同步状态
   land 后各机按 `repo.updated` 自动 `ff-only` 同步主检出。
 - **P1 起 `hive daemon` 默认带本机 MCP HTTP**：`127.0.0.1:8790`，一个 agent 一个 token；
   `hive agent enroll --name <agent>` 生成 token 和客户端配置。
+- **P2a 起可选 store 控制面**：`--store --claim-backend store`（实验）；默认仍是 Git claim，
+  dispatch/result 归档等 P2b 再迁。
 - 细节、API、选主/任期/化身号/宽限期的取舍：见 [docs/集群服务.md](docs/集群服务.md)。
 
 ## 2. 登记机器
@@ -342,6 +344,6 @@ python3 ~/hive/hive.py --dir ~/hive mcp --agent workbuddy
 - [Gitea 接入](docs/Gitea接入.md)：私有仓、host-scoped 凭据 helper、T-0001 冒烟记录
 - [chroot GUI agent](docs/CHROOT_GUI_AGENTS.md)：小浣熊 / WorkBuddy 的完整接法
 - [MCP 接入](docs/MCP接入.md)：让任意 agent 通过 MCP 查/领/交/终止任务
-- [集群架构 v3.1](docs/集群架构-v3.1.md)：目标架构（P0/P1 已落地，P2 待做）：hived、本地副本、OSPF 式自适应、Git 里程碑
+- [集群架构 v3.1](docs/集群架构-v3.1.md)：目标架构（P0/P1 + P2a 已落地，P2b 待做）：hived、本地副本、OSPF 式自适应、Git 里程碑
 - [方案全文](../多机Agent协同开发方案.md)
 - [CHANGELOG](CHANGELOG.md)

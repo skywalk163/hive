@@ -315,6 +315,21 @@ class Config:
         self.mcp_bind = str(
             kw.get("mcp_bind") or os.environ.get("HIVE_MCP_BIND")
             or saved.get("mcp_bind") or "127.0.0.1")
+        if kw.get("store_enabled") is None:
+            self.store_enabled = _env_bool("HIVE_STORE",
+                                           bool(saved.get("store_enabled", False)))
+        else:
+            self.store_enabled = bool(kw.get("store_enabled"))
+        self.claim_backend = str(
+            kw.get("claim_backend") or os.environ.get("HIVE_CLAIM_BACKEND")
+            or saved.get("claim_backend") or "git").strip().lower()
+        if self.claim_backend not in ("git", "store"):
+            self.claim_backend = "git"
+        self.store_path = Path(
+            kw.get("store_path") or os.environ.get("HIVE_STORE_PATH")
+            or saved.get("store_path")
+            or (self.state_dir / "hive.db")
+        ).expanduser()
         self.mcp_write_dir = Path(
             kw.get("mcp_write_dir") or os.environ.get("HIVE_MCP_WRITE_DIR")
             or saved.get("mcp_write_dir")
@@ -388,6 +403,9 @@ class Config:
             "mcp": bool(self.mcp_enabled),
             "mcp_port": self.mcp_port,
             "mcp_bind": self.mcp_bind,
+            "store_enabled": bool(self.store_enabled),
+            "claim_backend": self.claim_backend,
+            "store_path": str(self.store_path),
             "mcp_write_dir": str(self.mcp_write_dir),
             "mcp_read_dir": str(self.mcp_read_dir),
         })
@@ -811,6 +829,7 @@ class Cluster:
         self.discovery: Discovery | None = None
         self.sync_agent: RepoSyncAgent | None = None
         self.mcp_service = None
+        self.store = None
 
         self.role = "follower"
         self.term = 0
@@ -856,6 +875,14 @@ class Cluster:
         return self._stop.wait(timeout)
 
     def start(self) -> "Cluster":
+        if self.config.store_enabled or self.config.claim_backend == "store":
+            try:
+                from hive_store import Store
+                self.store = Store(self.config.store_path, self.node_id)
+                self._ingest_store_cards()
+            except Exception as exc:  # noqa: BLE001  store 失败不阻止集群起
+                self.store = None
+                _log(f"store: 打开失败（忽略）: {exc}")
         ThreadingHTTPServer.allow_reuse_address = True
         try:
             self._http = ThreadingHTTPServer(
@@ -914,6 +941,19 @@ class Cluster:
                          daemon=True).start()
         return self
 
+    def _ingest_store_cards(self) -> None:
+        if self.store is None:
+            return
+        try:
+            from hive import Hive
+            if not (self.config.hive_dir / ".git").exists():
+                return
+            cards = Hive(self.config.hive_dir).cards()
+            n = self.store.ingest_cards(cards)
+            _log(f"store: 从 Git 摄入 {n} 张卡")
+        except Exception as exc:  # noqa: BLE001
+            _log(f"store: 摄入任务卡失败（忽略）: {exc}")
+
     def stop(self) -> None:
         if self._stop.is_set():
             return
@@ -951,6 +991,12 @@ class Cluster:
             if t.is_alive():
                 t.join(timeout=2.0)
         self._remove_pid()
+        if self.store is not None:
+            try:
+                self.store.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.store = None
         _log(f"节点 {self.config.name} 已停止")
 
     def run_forever(self) -> int:
@@ -1129,6 +1175,7 @@ class Cluster:
             "agents": self._local_agents(),
             "capabilities": [],
             "electable": bool(self.config.electable),
+            "last_store_seq": self.store.last_seq() if getattr(self, "store", None) else 0,
             "hive_dir": str(self.config.hive_dir),
         }
 
@@ -1634,7 +1681,8 @@ class Cluster:
             peers = [rec for nid, rec in self.nodes.items()
                      if nid != self.node_id and nid in voters and rec.get("url")]
             body = {"term": term, "candidate": self._self_node(),
-                    "last_event": self.events[-1]["id"] if self.events else ""}
+                    "last_event": self.events[-1]["id"] if self.events else "",
+                    "last_store_seq": self.store.last_seq() if self.store else 0}
 
         votes = {self.node_id}
         try:
@@ -2034,6 +2082,12 @@ class Cluster:
         if cand.get("electable") is False:
             return 200, {"ok": True, "granted": False, "term": self.term,
                          "reason": "candidate_not_electable"}
+        my_seq = self.store.last_seq() if self.store else 0
+        if int(cand.get("last_store_seq") or 0) < my_seq:
+            return 200, {"ok": True, "granted": False, "term": self.term,
+                         "reason": "store_behind",
+                         "candidate_seq": int(cand.get("last_store_seq") or 0),
+                         "my_seq": my_seq}
         with self.lock:
             if term < self.term:
                 return 200, {"ok": True, "granted": False, "term": self.term,
@@ -2191,6 +2245,134 @@ class Cluster:
             self._persist_locked()
         return 200, {"ok": True, "forwarded": False, "event": ev}
 
+    # -- P2 store：leader 单写 + 同步复制 ---------------------------------- #
+    def _store_op_for(self, action: str, body: dict) -> dict:
+        if self.store is None:
+            raise ClusterError("本节点没有启用 store")
+        from hive_store import StoreError
+        term = int(body.get("term") or self.term)
+        tid = str(body.get("task") or body.get("task_id") or "")
+        agent = str(body.get("agent") or "")
+        op_id = str(body.get("op_id") or "")
+        try:
+            if action == "claim":
+                return self.store.claim(tid, agent, term,
+                                        int(body.get("lease_minutes") or 10),
+                                        str(body.get("host") or ""), op_id)
+            if action == "lease":
+                return self.store.renew(tid, agent, str(body.get("lease_id") or ""),
+                                        term, int(body.get("minutes") or 10), op_id)
+            if action == "release":
+                return self.store.release(tid, agent, str(body.get("lease_id") or ""),
+                                          term, bool(body.get("requeue", True)), op_id)
+            if action == "result":
+                return self.store.result(tid, agent, str(body.get("lease_id") or ""),
+                                         term, dict(body.get("payload") or {}),
+                                         str(body.get("status") or "done"), op_id)
+            if action == "assign":
+                return self.store.assign(tid, agent, term, op_id)
+            if action == "close":
+                return self.store.close(tid, bool(body.get("done", True)),
+                                        str(body.get("note") or ""), term, op_id)
+        except StoreError as exc:
+            raise ClusterError(str(exc)) from exc
+        raise ClusterError(f"未知 store 动作 {action}")
+
+    def _replicate_op(self, op: dict) -> bool:
+        with self.lock:
+            peers = [dict(rec) for nid, rec in self.nodes.items()
+                     if nid != self.node_id and rec.get("url")
+                     and self._node_status_locked(rec) in ("alive", "suspect")]
+            quorum = self._quorum_locked()
+        ok = 1  # 自己已落盘
+        if peers:
+            body = {"op": op, "term": self.term}
+            with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+                futs = [pool.submit(http_json,
+                                    str(p["url"]).rstrip("/") + "/api/cluster/op",
+                                    "POST", body, 1.5, self.config.token)
+                        for p in peers]
+                for fut in as_completed(futs):
+                    try:
+                        code, resp = fut.result()
+                        if code == 200 and isinstance(resp, dict) and resp.get("ok"):
+                            ok += 1
+                    except Exception:  # noqa: BLE001
+                        pass
+        return ok >= quorum
+
+    def handle_store(self, action: str, body: dict) -> tuple[int, dict]:
+        if not isinstance(body, dict):
+            return 400, {"ok": False, "error": "请求体必须是对象"}
+        with self.lock:
+            role = self.role
+            leader_url = self.leader_url
+            term = self.term
+        if role != "leader" and leader_url and not body.get("forwarded"):
+            fwd = dict(body)
+            fwd["forwarded"] = True
+            fwd["term"] = term
+            code, resp = http_json(
+                str(leader_url).rstrip("/") + f"/api/cluster/store/{action}",
+                "POST", fwd, 3.0, self.config.token)
+            if isinstance(resp, dict):
+                resp.setdefault("forwarded", True)
+                return code, resp
+            return 502, {"ok": False, "error": "转发主节点失败"}
+        if role != "leader":
+            return 409, {"ok": False, "error": "没有主节点", "term": self.term}
+        if self.store is None:
+            return 503, {"ok": False, "error": "store 未启用"}
+        try:
+            out = self._store_op_for(action, body)
+        except ClusterError as exc:
+            return 409, {"ok": False, "error": str(exc), "term": self.term}
+        seq = int(out.get("seq") or 0)
+        if seq:
+            ops = self.store.ops_since(seq - 1, 1)
+            if ops:
+                if not self._replicate_op(ops[0]):
+                    return 503, {"ok": False, "code": "E_NO_QUORUM",
+                                 "error": "未达到多数复制，写未确认",
+                                 "term": self.term, **out}
+        return 200, {"ok": True, "term": self.term, **out}
+
+    def handle_store_state(self) -> tuple[int, dict]:
+        if self.store is None:
+            return 503, {"ok": False, "error": "store 未启用"}
+        tasks = self.store.tasks()
+        claims = {}
+        results = {}
+        for tid in tasks:
+            claim = self.store.claim_info(tid)
+            if claim:
+                claims[tid] = claim
+            res = self.store.result_info(tid)
+            if res:
+                results[tid] = res
+        return 200, {"ok": True, "summary": self.store.summary(),
+                     "tasks": tasks, "claims": claims, "results": results}
+
+    def handle_op(self, body: dict) -> tuple[int, dict]:
+        """follower 接收 leader 复制过来的 op；fsync 后返回 ok。"""
+        if not isinstance(body, dict):
+            return 400, {"ok": False, "error": "请求体必须是对象"}
+        op = body.get("op")
+        if not isinstance(op, dict) or not op.get("op_id"):
+            return 400, {"ok": False, "error": "op 缺少 op_id"}
+        term = int(body.get("term") or op.get("term") or 0)
+        with self.lock:
+            if term and term < self.term:
+                return 409, {"ok": False, "stale": True, "term": self.term}
+            if self.store is None:
+                return 503, {"ok": False, "error": "store 未启用"}
+            try:
+                seq = self.store.apply_op(op)
+            except Exception as exc:  # noqa: BLE001
+                return 500, {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            self._persist_locked()
+        return 200, {"ok": True, "seq": seq, "term": self.term}
+
     def handle_seed(self, body: dict) -> tuple[int, dict]:
         raw = str(body.get("url") or body.get("seed") or "").strip()
         if not raw:
@@ -2335,6 +2517,8 @@ def build_handler(cluster: Cluster):
                     "peers": snap["alive"], "quorum": snap["quorum"],
                     "mcp": (cluster.mcp_service.status()
                             if cluster.mcp_service is not None else {"enabled": False}),
+                    "store": (cluster.store.summary()
+                              if cluster.store is not None else {"enabled": False}),
                 })
                 return
             if not self._authorized():
@@ -2368,6 +2552,10 @@ def build_handler(cluster: Cluster):
                 agent = cluster.sync_agent
                 self._send(200, {"ok": True,
                                  "sync": agent.status() if agent else {"enabled": False}})
+                return
+            if path == "/api/cluster/store/state":
+                code, payload = cluster.handle_store_state()
+                self._send(code, payload)
                 return
             if path == "/api/cluster/config":
                 cfg = cluster.config
@@ -2407,6 +2595,11 @@ def build_handler(cluster: Cluster):
                     code, payload = cluster.handle_release(body)
                 elif path == "/api/cluster/event":
                     code, payload = cluster.handle_event(body)
+                elif path == "/api/cluster/op":
+                    code, payload = cluster.handle_op(body)
+                elif path.startswith("/api/cluster/store/"):
+                    code, payload = cluster.handle_store(
+                        path.rsplit("/", 1)[-1], body)
                 elif path == "/api/cluster/seed":
                     code, payload = cluster.handle_seed(body)
                 elif path == "/api/cluster/discover":
@@ -2455,6 +2648,9 @@ def _config_from_args(args) -> Config:
                   else (True if getattr(args, "command", "") == "daemon" else None))),
         mcp_port=getattr(args, "mcp_port", None),
         mcp_bind=getattr(args, "mcp_bind", None),
+        store_enabled=(True if getattr(args, "store", False)
+                       else (False if getattr(args, "no_store", False) else None)),
+        claim_backend=getattr(args, "claim_backend", None),
         hive_dir=getattr(args, "dir", None),
     )
 
@@ -2585,6 +2781,10 @@ def _spawn_background(config: Config, args) -> int:
     if config.mcp_enabled:
         argv += ["--mcp", "--mcp-port", str(config.mcp_port),
                  "--mcp-bind", str(config.mcp_bind)]
+    if config.store_enabled:
+        argv += ["--store"]
+    if config.claim_backend == "store":
+        argv += ["--claim-backend", "store"]
     if not config.discover:
         argv += ["--no-discover"]
     for seed in config.seeds:
@@ -2836,6 +3036,11 @@ def run_cli(args) -> int:
                 print(f"MCP HTTP {mcp.get('url') or '-'}  "
                       f"{'运行中' if mcp.get('enabled') else '未启用'}"
                       + (f"  ({mcp.get('last_error')})" if mcp.get("last_error") else ""))
+            store = health.get("store") or {}
+            if store and "tasks" in store:
+                print(f"store {store.get('path') or '-'}  tasks={store.get('tasks')} "
+                      f"claims={store.get('claims')} results={store.get('results')} "
+                      f"last_seq={store.get('last_seq')}")
         return 0 if snap is not None else 1
 
     if action == "peers":
@@ -2951,6 +3156,11 @@ def add_parser(sub) -> None:
                    help="MCP HTTP 端口（默认 8790）")
     p.add_argument("--mcp-bind", default=None,
                    help="MCP 绑定地址（默认 127.0.0.1）")
+    p.add_argument("--store", action="store_true",
+                   help="启用本地 SQLite store（P2）")
+    p.add_argument("--no-store", action="store_true", help="关闭 store")
+    p.add_argument("--claim-backend", choices=["git", "store"], default=None,
+                   help="claim 走 Git（默认）或 store（P2）")
     p.add_argument("--since", type=int, default=0, help="events/watch 的起始序号")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=lambda a: run_cli(a))

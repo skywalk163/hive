@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hive import (  # noqa: E402
     DEFAULT_STATE, HANDOFF_STATES, IDENT, PRIORITY_ORDER, VERSION, Hive,
     HiveError, Worker,
-    _claim_holder, _verify_verdict, commit_file_to_ref, git, iso, now,
+    _claim_holder, _verify_verdict, claim_backend, commit_file_to_ref, git, iso, now,
     parse_iso, rev_parse,
 )
 try:  # T-0186 的纯逻辑模块；残缺部署（只拷 hive.py）时该工具报错而非整体崩
@@ -617,9 +617,10 @@ class HiveMcp:
             return err(f"{tid} 已被 {holder} 领取，抢不到")
 
         # 锁到手之后才写 owner/state；抢锁失败时这里根本不会执行，
-        # 所以不可能留下半 assigned 的卡。
-        h._assign_local(tid, self.agent)
-        h.commit_and_push(f"take {tid} -> {self.agent} (via mcp)")
+        # 所以不可能留下半 assigned 的卡。store 模式不再写 Git assign。
+        if claim_backend() != "store":
+            h._assign_local(tid, self.agent)
+            h.commit_and_push(f"take {tid} -> {self.agent} (via mcp)")
 
         wt = self.worktree(w.cfg, tid)
         if not (wt / ".hive" / "task.md").exists():
@@ -642,7 +643,8 @@ class HiveMcp:
         card = h.card(tid)
         if h.result_info(tid):
             return err(f"{tid} 已经有结果（要重跑先用 hive_retry / 让总控 retry）")
-        owner = card.get("owner") or ""
+        owner = (card.get("owner")
+                 or (h.claim_info(tid) or {}).get("agent") or "")
         if owner != self.agent:
             return err(f"{tid} 不归我（owner={owner or '无'}），只能提交自己的卡",
                        hint=f"先 hive_claim(task_id=\"{tid}\") 把它领过来")

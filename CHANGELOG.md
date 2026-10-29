@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.13.0 — 2026-10-29
+
+### Added
+
+- **P2a 控制面 store**：`hive_store.py` 用 SQLite WAL 保存
+  `tasks/claims/results/ops`；每节点一份全量副本，leader 单写、op 复制、follower
+  fsync 后 ACK。claim 是 leader 上的 CAS，带 `lease_id/lease_seq/term`。
+- **集群 store API**：`/api/cluster/store/{claim,lease,release,result,assign,close}`、
+  `GET /api/cluster/store/state`、内部复制 `/api/cluster/op`；follower 自动转发 leader。
+- **选主限制**：投票人拒绝 `last_store_seq` 落后的候选人，避免新主缺已复制的 op。
+- **`claim_backend=store`**：`hive cluster/daemon --store --claim-backend store` 或
+  `HIVE_STORE=1 HIVE_CLAIM_BACKEND=store`。Worker 的 claim/续租/释放、`Hive.claim_info`、
+  `take`/MCP claim 的 Git assign 都切到 store；默认仍是 `git`，可随时回滚。
+- **测试**：`tests/test_store.py`（CAS/幂等/复制回放）、store 复制/选主限制/
+  Worker store claim 集成；端口/文档同步。
+
+### Changed
+
+- **P2a 边界**：dispatch/assign 的完整迁移、result 归档、coordinator 进 hived 仍属 P2b；
+  当前 store 模式是实验性的，默认不启用。
+
 ## 0.12.0 — 2026-10-29
 
 ### Added

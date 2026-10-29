@@ -430,3 +430,87 @@ def test_observer_does_not_elect(cluster_factory):
 
     nb = wait_until(_sees_b, timeout=4)
     assert nb is not None and nb.get("electable") is False
+
+
+def test_store_claim_replicates_and_failover(cluster_factory):
+    """P2a：leader CAS + 复制到 follower；leader 挂后新主仍看得到 claim。"""
+    a = cluster_factory("a", store_enabled=True)
+    b = cluster_factory("b", seeds=[a.url], store_enabled=True)
+    c = cluster_factory("c", seeds=[a.url], store_enabled=True)
+    for node in (a, b, c):
+        node.store.ingest_cards({"T-0001": {"id": "T-0001", "state": "ready",
+                                           "owner": "", "title": "t",
+                                           "lease_minutes": 10}})
+    assert wait_until(lambda: a.snapshot().get("role") == "leader", timeout=6)
+    assert wait_until(lambda: a.snapshot().get("alive") == 3, timeout=6)
+
+    code, resp = hc.http_json(a.url.rstrip("/") + "/api/cluster/store/claim",
+                              "POST", {"task": "T-0001", "agent": "A",
+                                       "lease_minutes": 10, "term": a.term},
+                              timeout=4.0)
+    assert code == 200 and resp.get("ok"), resp
+    lease = resp["claim"]["lease_id"]
+
+    def _both_see():
+        for n in (b, c):
+            claim = n.store.claim_info("T-0001")
+            if not claim or claim.get("owner") != "A":
+                return False
+        return True
+
+    assert wait_until(_both_see, timeout=6)
+    assert b.store.claim_info("T-0001")["lease_id"] == lease
+
+    # 第二名抢同一张卡：leader 立即拒绝，不复制
+    code, resp = hc.http_json(a.url.rstrip("/") + "/api/cluster/store/claim",
+                              "POST", {"task": "T-0001", "agent": "B",
+                                       "lease_minutes": 10, "term": a.term},
+                              timeout=4.0)
+    assert code == 409 and not resp.get("ok"), resp
+
+    # 主节点挂掉，剩两台选新主；已复制的 claim 仍在
+    a.stop()
+    assert wait_until(lambda: b.snapshot().get("role") == "leader"
+                      or c.snapshot().get("role") == "leader", timeout=8)
+    leader = b if b.snapshot().get("role") == "leader" else c
+    assert leader.store.claim_info("T-0001")["owner"] == "A"
+
+
+def test_store_election_restriction(cluster_factory):
+    """P2a：候选人的 store seq 落后时不能当选。"""
+    c = cluster_factory("a", store_enabled=True)
+    c.store.ingest_cards({"T-0001": {"id": "T-0001", "state": "ready"}})
+    c.store.claim("T-0001", "A", term=c.term, lease_minutes=10)
+    assert c.store.last_seq() >= 1
+
+    code, resp = c.handle_vote({
+        "term": c.term + 1,
+        "candidate": {"id": "behind", "electable": True,
+                      "incarnation": 1, "last_store_seq": 0},
+    })
+    assert code == 200
+    assert resp.get("granted") is False
+    assert resp.get("reason") == "store_behind", resp
+
+
+def test_worker_claim_store_backend(world, cluster_factory, monkeypatch, tmp_path):
+    """claim_backend=store：Worker.claim 走 leader CAS，不再 push Git claim 分支。"""
+    world.add_agent("fb", mode="manual")
+    world.add_task("T-0001", repo="light")
+    c = cluster_factory("a", hive_dir=world.hive1, store_enabled=True,
+                        sync_enabled=False)
+    assert wait_until(lambda: c.snapshot().get("role") == "leader", timeout=6)
+    c.store.ingest_cards(hive.Hive(str(world.hive1)).cards())
+
+    monkeypatch.setenv("HIVE_CLAIM_BACKEND", "store")
+    monkeypatch.setenv("HIVE_STORE_PATH", str(c.config.store_path))
+    monkeypatch.setenv("HIVE_CLUSTER_PORT", str(c.port))
+    monkeypatch.setenv("HIVE_CLUSTER_STATE", str(c.config.state_dir))
+    monkeypatch.setenv("HIVE_CLUSTER_ALLOW_TEST", "1")
+
+    w = hive.Worker(str(world.hive1), "fb",
+                    hive_state=str(tmp_path / "worker-state"))
+    assert w.claim("T-0001") is True
+    claim = c.store.claim_info("T-0001")
+    assert claim and claim["owner"] == "fb", claim
+    assert world.refs("refs/heads/claim/T-0001") == []
