@@ -1432,6 +1432,18 @@ class Hive:
         except ValueError:
             return 60
 
+    def dispatch_repos(self) -> set[str]:
+        """允许被 dispatch 的代码仓白名单。
+
+        默认只有 `hive`（其它代码仓的 worktree/合并约定还没收口，见 T-0101/T-0133）。
+        需要派别的仓时显式开：`HIVE_DISPATCH_REPOS=hive,light`。
+        写成方法而不是模块级常量，方便测试用环境变量钉住。
+        """
+        raw = (os.environ.get("HIVE_DISPATCH_REPOS") or "").strip()
+        if not raw:
+            return {"hive"}
+        return {r.strip() for r in raw.split(",") if r.strip()}
+
     def _assign_local(self, tid: str, agent: str) -> None:
         self.agent(agent)  # 校验已登记
         card = self.card(tid)
@@ -1496,10 +1508,15 @@ class Hive:
                 skipped.append((c["id"], f"超出本次 --limit {limit}"))
                 continue
             repo = c.get("repo") or ""
-            # 现阶段只派 hive 仓：其它代码仓的 worktree/合并约定还没收口
-            if repo != "hive":
+            # 派发白名单：默认只有 hive 仓（其它代码仓的 worktree/合并约定还没收口）。
+            # 要用别的仓（如 light 的语言缺陷修复），显式开：
+            #   HIVE_DISPATCH_REPOS=hive,light hive dispatch --apply
+            # 卡片所在仓仍必须被某个 agent 登记过，否则 _assign 那层会挡住。
+            if repo not in self.dispatch_repos():
                 skipped.append(
-                    (c["id"], f"非 hive 仓任务暂不派发（repo={repo or '未填'}）"))
+                    (c["id"],
+                     f"仓 {repo or '未填'} 不在派发白名单（当前 {','.join(sorted(self.dispatch_repos()))}；"
+                     f"用 HIVE_DISPATCH_REPOS 扩展）"))
                 continue
             missing = [d for d in (c.get("depends_on") or []) if not self.dep_done(d)]
             if missing:

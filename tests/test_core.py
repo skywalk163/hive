@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
@@ -99,15 +100,48 @@ def test_dispatch_concurrency(world, fake_cmd):
 
 
 def test_dispatch_non_hive_rejected(world, fake_cmd):
-    """现阶段只派 hive 仓任务，其它仓明确拒绝而不是静默跳过。"""
-    world.add_agent("fb", "exec", command=fake_cmd)
+    """默认只派 hive 仓；其它仓要被明确拒绝（点名白名单），而不是静默跳过。"""
+    world.add_agent("fb", "exec", command=fake_cmd,
+                    repos={"light": world.code_clone("fb")})
     world.add_task("T-0001", repo="light")
 
     out = world.hive_json("dispatch", "--dry-run")
     assert out["plan"] == [], out
     reasons = {s["task"]: s["reason"] for s in out["skipped"]}
-    assert "非 hive 仓任务暂不派发" in reasons["T-0001"], out
+    assert "不在派发白名单" in reasons["T-0001"], out
+    assert "HIVE_DISPATCH_REPOS" in reasons["T-0001"], out
     assert world.card("T-0001")["owner"] is None
+
+
+def test_dispatch_other_repo_allowed_by_whitelist(world, fake_cmd):
+    """HIVE_DISPATCH_REPOS 显式开白名单后，登记过该仓的 agent 可以领该仓的卡。
+
+    这是「给 light 仓出语言缺陷修复卡」的唯一入口：默认行为不变，
+    只有显式开了白名单才跨仓派发。
+    """
+    world.add_agent("fb", "exec", command=fake_cmd,
+                    repos={"light": world.code_clone("fb")})
+    world.add_task("T-0001", repo="light")
+
+    p = world.hive("dispatch", "--dry-run", "--json",
+                   env={**os.environ, "HIVE_DISPATCH_REPOS": "hive,light"})
+    out = json.loads(p.stdout)
+    assert len(out["plan"]) == 1, out
+    assert out["plan"][0]["task"] == "T-0001", out
+
+
+def test_dispatch_whitelist_does_not_bypass_repo_registration(world, fake_cmd):
+    """开了白名单但 agent 没登记该仓 → 仍然不派（仓不匹配兜底）。"""
+    world.add_agent("fb", "exec", command=fake_cmd,
+                    repos={"hive": world.code_clone("fb")})
+    world.add_task("T-0001", repo="light")
+
+    p = world.hive("dispatch", "--dry-run", "--json",
+                   env={**os.environ, "HIVE_DISPATCH_REPOS": "hive,light"})
+    out = json.loads(p.stdout)
+    assert out["plan"] == [], out
+    reasons = {s["task"]: s["reason"] for s in out["skipped"]}
+    assert "仓不匹配" in reasons["T-0001"], out
 
 
 # --------------------------------------------------------------------------- #
