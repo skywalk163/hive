@@ -994,6 +994,7 @@ class Cluster:
         self._election_inflight = False
         self._peer_errors: dict[str, float] = {}
         self._expired_reported: set[str] = set()
+        self._last_store_sync = 0.0
 
         self.port = config.port
         self.advertise_host = config.advertise or (
@@ -2033,6 +2034,12 @@ class Cluster:
                 if (self.leader_lease_until and _now() > self.leader_lease_until
                         and self.role != "leader"):
                     self._clear_leader_locked("心跳超时")
+        target = int((resp or {}).get("store_commit_seq") or 0) if isinstance(resp, dict) else 0
+        if (self.store is not None and target > self.store.commit_seq()
+                and _now() - self._last_store_sync >= 5):
+            self._last_store_sync = _now()
+            threading.Thread(target=self._store_catch_up, args=(leader_url,),
+                             name="hive-store-catchup", daemon=True).start()
 
     def _peer_heartbeat(self, peers: list[dict], body: dict) -> None:
         """跟随者之间的状态交换（发现 + 活跃度 + 进度/租约的旁路同步）。"""
@@ -2284,6 +2291,8 @@ class Cluster:
                 "progress": copy.deepcopy(self.progress),
                 "leases": copy.deepcopy(self.leases),
                 "generation": self.generation,
+                "store_commit_seq": (self.store.commit_seq()
+                                     if self.store is not None else 0),
             }
 
     def handle_vote(self, body: dict) -> tuple[int, dict]:

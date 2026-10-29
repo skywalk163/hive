@@ -204,7 +204,7 @@ class Store:
             raise StoreError("snapshot 不是对象")
         commit = int(snap.get("commit_seq") or 0)
         with self._lock:
-            if commit <= self.commit_seq():
+            if commit < self.commit_seq():
                 return self.commit_seq()
             self._db.execute("BEGIN IMMEDIATE")
             try:

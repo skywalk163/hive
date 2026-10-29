@@ -159,3 +159,13 @@ def test_compact_snapshot_import(tmp_path):
     assert b.commit_seq() == 1
     assert b.claim_info("T-0001")["owner"] == "A"
     assert b.task("T-0001")["state"] == "running"
+
+
+def test_snapshot_without_ops_still_imports_tasks(tmp_path):
+    a = Store(tmp_path / "snap-zero-a.db", "a")
+    a.ingest_cards({"T-0001": _card()})
+    snap = a.snapshot()
+    assert snap["commit_seq"] == 0
+    b = Store(tmp_path / "snap-zero-b.db", "b")
+    b.import_snapshot(snap)
+    assert b.task("T-0001")["title"] == "t"
