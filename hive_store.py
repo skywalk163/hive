@@ -462,6 +462,9 @@ class Store:
                                  (str(op.get("task_id") or ""),))
             else:
                 self._upsert_claim(payload.get("claim"))
+        if payload.get("clear_result"):
+            self._db.execute("DELETE FROM results WHERE task_id=?",
+                             (str(op.get("task_id") or ""),))
         if "result" in payload:
             self._upsert_result(payload.get("result"))
         archive = payload.get("archive")
@@ -646,6 +649,23 @@ class Store:
             op = {"op_id": op_id or uuid.uuid4().hex, "type": "assign",
                   "task_id": tid, "term": int(term), "ts": _iso(),
                   "payload": {"task": task}}
+            op["seq"] = self.apply_op(op) if commit else self.stage_op(op)
+            return {"ok": True, "task": task, "seq": op["seq"]}
+
+    def retry(self, tid: str, agent: str = "", term: int = 0, op_id: str = "",
+              commit: bool = True, clear_result: bool = True) -> dict:
+        with self._lock:
+            task = dict(self.task(tid) or {"id": tid})
+            task.update({"state": "assigned" if agent else "ready",
+                         "owner": agent, "updated": _iso()})
+            try:
+                task["retries"] = int(task.get("retries") or 0) + 1
+            except (TypeError, ValueError):
+                task["retries"] = 1
+            op = {"op_id": op_id or uuid.uuid4().hex, "type": "retry",
+                  "task_id": tid, "term": int(term), "ts": _iso(),
+                  "payload": {"task": task, "claim": None,
+                              "clear_result": bool(clear_result)}}
             op["seq"] = self.apply_op(op) if commit else self.stage_op(op)
             return {"ok": True, "task": task, "seq": op["seq"]}
 

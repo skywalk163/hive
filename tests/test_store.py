@@ -169,3 +169,16 @@ def test_snapshot_without_ops_still_imports_tasks(tmp_path):
     b = Store(tmp_path / "snap-zero-b.db", "b")
     b.import_snapshot(snap)
     assert b.task("T-0001")["title"] == "t"
+
+
+def test_retry_clears_result_and_claim(tmp_path):
+    s = Store(tmp_path / "retry.db", "n")
+    s.ingest_cards({"T-0001": _card()})
+    c = s.claim("T-0001", "A", term=1, lease_minutes=10)
+    s.result("T-0001", "A", c["claim"]["lease_id"], term=1,
+             payload={"status": "failed"})
+    s.retry("T-0001", "A", term=1)
+    assert s.result_info("T-0001") is None
+    assert s.claim_info("T-0001") is None
+    assert s.task("T-0001")["state"] == "assigned"
+    assert s.task("T-0001")["owner"] == "A"

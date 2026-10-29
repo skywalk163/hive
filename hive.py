@@ -577,6 +577,10 @@ def store_release(tid: str, agent: str, requeue: bool = True) -> dict | None:
         return None
 
 
+def store_retry(tid: str, agent: str = "") -> dict:
+    return store_call("retry", {"task": tid, "agent": agent})
+
+
 def store_assign(tid: str, agent: str) -> dict:
     return store_call("assign", {"task": tid, "agent": agent})
 
@@ -2708,8 +2712,10 @@ class Hive:
     def cmd_retry(self, tid: str, agent: str | None = None, fresh: bool = False) -> None:
         card = self.card(tid)
         if claim_backend() == "store":
-            info = self.claim_info(tid) or {}
-            store_release(tid, str(info.get("agent") or ""), requeue=True)
+            target = agent or card.get("owner") or ""
+            store_retry(tid, target)
+            log(f"{tid} 已重试（store；结果/租约已清）")
+            # 继续走下面的 Git 清理/卡面 assigned，保证 res 分支和旧结果也撤掉。
         if fresh:
             card["fresh"] = True
         self.fetch()

@@ -2507,6 +2507,10 @@ class Cluster:
             if action == "archive":
                 return self.store.mark_archived(
                     tid, str(body.get("sha") or ""), op_id, term, commit=False)
+            if action == "retry":
+                return self.store.retry(
+                    tid, agent, term, op_id, commit=False,
+                    clear_result=bool(body.get("clear_result", True)))
         except StoreError as exc:
             raise ClusterError(str(exc)) from exc
         raise ClusterError(f"未知 store 动作 {action}")
