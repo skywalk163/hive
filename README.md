@@ -77,8 +77,8 @@ python3 ~/hive/hive.py --dir ~/hive cluster sync      # 本机代码同步状态
   land 后各机按 `repo.updated` 自动 `ff-only` 同步主检出。
 - **P1 起 `hive daemon` 默认带本机 MCP HTTP**：`127.0.0.1:8790`，一个 agent 一个 token；
   `hive agent enroll --name <agent>` 生成 token 和客户端配置。
-- **P2a 起可选 store 控制面**：`--store --claim-backend store`（实验）；默认仍是 Git claim，
-  dispatch/result 归档等 P2b 再迁。
+- **P2a/P2b 可选 store 控制面**：`--store --claim-backend store`（实验）；claim/lease、
+  dispatch/assign、result accepted/archive 已接，默认仍是 Git claim，可随时回滚。
 - 细节、API、选主/任期/化身号/宽限期的取舍：见 [docs/集群服务.md](docs/集群服务.md)。
 
 ## 2. 登记机器

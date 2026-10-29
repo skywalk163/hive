@@ -119,3 +119,25 @@ def test_stage_commit_truncate(tmp_path):
     assert s2.truncate_uncommitted() == 0
     assert s2.last_seq() == 0
     assert s2.claim_info("T-0001") is None
+
+
+def test_archive_agent_writes_git_and_marks(world, tmp_path):
+    from types import SimpleNamespace
+    from hive_cluster import ArchiveAgent
+    from hive import Hive
+
+    world.add_agent("fb", mode="manual")
+    world.add_task("T-0001", repo="light")
+    s = Store(tmp_path / "archive.db", "n")
+    s.ingest_cards(Hive(str(world.hive1)).cards())
+    c = s.claim("T-0001", "fb", term=1, lease_minutes=10)
+    s.result("T-0001", "fb", c["claim"]["lease_id"], term=1,
+             payload={"task": "T-0001", "status": "done", "agent": "fb",
+                      "head": "abc", "summary": "ok"})
+    fake = SimpleNamespace(config=SimpleNamespace(hive_dir=world.hive1),
+                           store=s, role="leader")
+    n = ArchiveAgent(fake).tick()
+    assert n == 1
+    assert world.refs("refs/heads/res/T-0001")
+    res = s.result_info("T-0001")
+    assert res["archived_at"]

@@ -320,6 +320,11 @@ class Config:
                                            bool(saved.get("store_enabled", False)))
         else:
             self.store_enabled = bool(kw.get("store_enabled"))
+        if kw.get("coordinator_enabled") is None:
+            self.coordinator_enabled = _env_bool(
+                "HIVE_COORDINATOR", bool(saved.get("coordinator", False)))
+        else:
+            self.coordinator_enabled = bool(kw.get("coordinator_enabled"))
         self.claim_backend = str(
             kw.get("claim_backend") or os.environ.get("HIVE_CLAIM_BACKEND")
             or saved.get("claim_backend") or "git").strip().lower()
@@ -404,6 +409,7 @@ class Config:
             "mcp_port": self.mcp_port,
             "mcp_bind": self.mcp_bind,
             "store_enabled": bool(self.store_enabled),
+            "coordinator": bool(self.coordinator_enabled),
             "claim_backend": self.claim_backend,
             "store_path": str(self.store_path),
             "mcp_write_dir": str(self.mcp_write_dir),
@@ -811,6 +817,129 @@ class RepoSyncAgent:
         return ""
 
 
+class ArchiveAgent:
+    """P2b：把 store 里 accepted 的结果补归档到 Git res/<tid>。
+
+    正常 submit 已经写了 Git，这里多数时候只是 mark_archived；只有“store 有结果、
+    Git 没有”（例如 worker 在 push 前挂了）才真正补写。只在 leader 跑，避免重复。
+    """
+
+    def __init__(self, cluster):
+        self.cluster = cluster
+        self.config = cluster.config
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.last_run = 0.0
+        self.last_error = ""
+
+    def start(self) -> None:
+        if self.cluster.store is None:
+            return
+        self._thread = threading.Thread(target=self._loop, name="hive-archive",
+                                        daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=3)
+
+    def status(self) -> dict:
+        store = self.cluster.store
+        return {"running": bool(self._thread and self._thread.is_alive()),
+                "last_run": _iso(self.last_run) if self.last_run else "",
+                "last_error": self.last_error,
+                "pending": len(store.pending_results()) if store else 0}
+
+    def _loop(self) -> None:
+        while not self._stop.wait(10):
+            if self.cluster.role != "leader" or self.cluster.store is None:
+                continue
+            try:
+                self.tick()
+                self.last_run = _now()
+                self.last_error = ""
+            except Exception as exc:  # noqa: BLE001
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                _log(f"archive: 本轮失败（忽略）: {self.last_error}")
+
+    def tick(self) -> int:
+        from hive import Hive, commit_file_to_ref
+        store = self.cluster.store
+        if store is None:
+            return 0
+        h = Hive(self.config.hive_dir)
+        n = 0
+        for res in store.pending_results():
+            tid = str(res.get("task_id") or "")
+            if not tid:
+                continue
+            git_res = h.result_info(tid)
+            if isinstance(git_res, dict):
+                store.mark_archived(tid, str(git_res.get("head") or ""))
+                n += 1
+                continue
+            payload = res.get("payload")
+            if not isinstance(payload, dict) or not payload:
+                continue
+            try:
+                commit_file_to_ref(
+                    h.dir, f"results/{tid}.json",
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    f"res/{tid}", "origin/main",
+                    f"result {tid}: archived from store", force=True)
+                store.mark_archived(tid, str(payload.get("head") or ""))
+                n += 1
+            except Exception as exc:  # noqa: BLE001
+                self.last_error = f"{tid}: {exc}"
+        return n
+
+
+class CoordinatorAgent:
+    """P2b：leader 在 hived 内跑单轮 orchestrate；默认关闭，避免和外部 orchestrate 重复。"""
+
+    def __init__(self, cluster, interval: float = 30.0):
+        self.cluster = cluster
+        self.config = cluster.config
+        self.interval = max(5.0, float(interval))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.last_run = 0.0
+        self.last_error = ""
+
+    def start(self) -> None:
+        if not self.config.coordinator_enabled:
+            return
+        self._thread = threading.Thread(target=self._loop, name="hive-coordinator",
+                                        daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def status(self) -> dict:
+        return {"enabled": bool(self.config.coordinator_enabled),
+                "running": bool(self._thread and self._thread.is_alive()),
+                "last_run": _iso(self.last_run) if self.last_run else "",
+                "last_error": self.last_error}
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            if self.cluster.role != "leader":
+                continue
+            try:
+                from hive import Hive
+                h = Hive(self.config.hive_dir)
+                h.cmd_orchestrate(once=True, interval=int(self.interval))
+                self.last_run = _now()
+                self.last_error = ""
+            except Exception as exc:  # noqa: BLE001
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                _log(f"coordinator: 本轮失败（忽略）: {self.last_error}")
+
+
 class Cluster:
     def __init__(self, config: Config):
         self.config = config
@@ -830,6 +959,8 @@ class Cluster:
         self.sync_agent: RepoSyncAgent | None = None
         self.mcp_service = None
         self.store = None
+        self.archive_agent: ArchiveAgent | None = None
+        self.coordinator_agent: CoordinatorAgent | None = None
 
         self.role = "follower"
         self.term = 0
@@ -880,9 +1011,14 @@ class Cluster:
                 from hive_store import Store
                 self.store = Store(self.config.store_path, self.node_id)
                 self._ingest_store_cards()
+                self.archive_agent = ArchiveAgent(self)
+                self.archive_agent.start()
             except Exception as exc:  # noqa: BLE001  store 失败不阻止集群起
                 self.store = None
                 _log(f"store: 打开失败（忽略）: {exc}")
+        if self.config.coordinator_enabled:
+            self.coordinator_agent = CoordinatorAgent(self)
+            self.coordinator_agent.start()
         ThreadingHTTPServer.allow_reuse_address = True
         try:
             self._http = ThreadingHTTPServer(
@@ -997,6 +1133,16 @@ class Cluster:
                 self.cond.notify_all()
         except Exception as exc:  # noqa: BLE001 停止路径尽力而为
             _log(f"停止时保存状态失败（忽略）：{exc}")
+        if self.coordinator_agent is not None:
+            try:
+                self.coordinator_agent.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        if self.archive_agent is not None:
+            try:
+                self.archive_agent.stop()
+            except Exception:  # noqa: BLE001
+                pass
         if self.mcp_service is not None:
             try:
                 self.mcp_service.stop()
@@ -2640,6 +2786,11 @@ def build_handler(cluster: Cluster):
                             if cluster.mcp_service is not None else {"enabled": False}),
                     "store": (cluster.store.summary()
                               if cluster.store is not None else {"enabled": False}),
+                    "archive": (cluster.archive_agent.status()
+                                if cluster.archive_agent is not None else {"running": False}),
+                    "coordinator": (cluster.coordinator_agent.status()
+                                    if cluster.coordinator_agent is not None
+                                    else {"enabled": False}),
                 })
                 return
             if not self._authorized():
@@ -2789,6 +2940,8 @@ def _config_from_args(args) -> Config:
         store_enabled=(True if getattr(args, "store", False)
                        else (False if getattr(args, "no_store", False) else None)),
         claim_backend=getattr(args, "claim_backend", None),
+        coordinator_enabled=(True if getattr(args, "coordinator", False)
+                             else None),
         hive_dir=getattr(args, "dir", None),
     )
 
@@ -2936,6 +3089,8 @@ def _spawn_background(config: Config, args) -> int:
         argv += ["--store"]
     if config.claim_backend == "store":
         argv += ["--claim-backend", "store"]
+    if config.coordinator_enabled:
+        argv += ["--coordinator"]
     if not config.discover:
         argv += ["--no-discover"]
     for seed in config.seeds:
@@ -3312,6 +3467,8 @@ def add_parser(sub) -> None:
     p.add_argument("--no-store", action="store_true", help="关闭 store")
     p.add_argument("--claim-backend", choices=["git", "store"], default=None,
                    help="claim 走 Git（默认）或 store（P2）")
+    p.add_argument("--coordinator", action="store_true",
+                   help="leader 在 hived 内跑单轮 orchestrate（P2b；默认关）")
     p.add_argument("--since", type=int, default=0, help="events/watch 的起始序号")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=lambda a: run_cli(a))

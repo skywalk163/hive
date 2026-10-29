@@ -4970,6 +4970,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-store", action="store_true", help="关闭 store")
     s.add_argument("--claim-backend", choices=["git", "store"], default=None,
                    help="claim 走 Git（默认）或 store（P2）")
+    s.add_argument("--coordinator", action="store_true",
+                   help="leader 在 hived 内跑单轮 orchestrate（P2b；默认关）")
     s.add_argument("--since", type=int, default=0, help="events/watch 的起始序号")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_cluster)

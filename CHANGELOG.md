@@ -16,9 +16,19 @@
   发 commit；`commit_seq` 作为选举限制和新主截断未提交尾部的依据。新增
   `/api/cluster/op/since` 追平接口，节点注册后自动从 leader 拉已提交 op。
 
+- **P2b：dispatch/assign 进 store**：`cmd_dispatch`/`cmd_assign` 在 store 模式直接
+  `store assign`，不再写 Git owner/inbox；`Worker.pending` 从 store 查 assigned/claimed，
+  `Hive.cards/card` 用 store 运行时字段覆盖 Git 卡面。
+- **P2b：ArchiveWorker + coordinator**：leader 的 `ArchiveAgent` 把 store accepted result
+  补归档到 Git `res/<tid>` 并标 `archived_at`；`--coordinator`/`HIVE_COORDINATOR=1` 可在
+  hived 内每 30s 跑一轮 orchestrate（默认关闭，避免和外部 orchestrate 重复）。
+- **P2b：两阶段提交 + commit_index**：prepare 多数 → leader commit → follower commit；
+  `commit_seq` 用于选主限制和新主截断；`/api/cluster/op/since` 用于重连追平。
+
 ### Changed
 
-- **P2b 仍未完成**：dispatch/assign 全量迁移、ArchiveWorker 归档状态机、coordinator 进 hived。
+- **P2b 边界**：dispatch/assign/result accepted/archive/commit_index 已接；op log 压缩、
+  snapshot、极端分区回滚、真四客户端压测仍待补。
 
 ## 0.13.0 — 2026-10-29
 

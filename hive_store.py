@@ -157,7 +157,10 @@ class Store:
             claims = self._db.execute(
                 "SELECT COUNT(*) AS n FROM claims WHERE state='active'").fetchone()["n"]
             results = self._db.execute("SELECT COUNT(*) AS n FROM results").fetchone()["n"]
+            pending = self._db.execute(
+                "SELECT COUNT(*) AS n FROM results WHERE archived_at=''").fetchone()["n"]
             return {"tasks": int(tasks), "claims": int(claims), "results": int(results),
+                    "archive_pending": int(pending),
                     "last_seq": self.last_seq(), "commit_seq": self.commit_seq(),
                     "node": self.node_id, "path": str(self.path)}
 
@@ -178,6 +181,21 @@ class Store:
             row = self._db.execute("SELECT * FROM results WHERE task_id=?",
                                    (str(tid),)).fetchone()
             return self._result_row(row) if row else None
+
+    def pending_results(self, limit: int = 100) -> list[dict]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM results WHERE archived_at='' ORDER BY accepted_at LIMIT ?",
+                (int(limit),)).fetchall()
+            return [self._result_row(r) for r in rows]
+
+    def mark_archived(self, tid: str, sha: str = "") -> bool:
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE results SET archived_at=?, archive_sha=? "
+                "WHERE task_id=? AND archived_at=''",
+                (_iso(), str(sha or ""), str(tid)))
+            return cur.rowcount > 0
 
     def tasks(self) -> dict[str, dict]:
         with self._lock:
