@@ -1,0 +1,33 @@
+{
+  "task": "T-0193",
+  "agent": "fb88-dsh",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0193",
+  "base": "main",
+  "head": "2b50abd516cdd17fadf07706b43811834fea888f",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-29T09:47:19+08:00",
+  "finished_at": "2026-10-29T09:47:19+08:00",
+  "duration_s": 0.8,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_sync_repos.py tests/test_core.py",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 93%]",
+        ".....                                                                    [100%]",
+        "77 passed in 125.13s (0:02:05)"
+      ]
+    }
+  ],
+  "summary": "# T-0193 主控与开发机的代码仓自动同步：orchestrate 加 sync 阶段 + hive sync-repos 子命令\n\n## 做了什么\n\n1. **新子命令 `hive sync-repos`**（hive.py，`_sync_one_repo` 单仓内核 + `cmd_sync_repos` 汇总）：\n   - 对 `Hive.repos()` 的每个本机路径执行 `git fetch --prune origin` + `git merge --ff-only origin/main`（或 origin/master）；\n   - 每仓打印一行结果；`--repo <name>` 只同步指定仓；`--json` 输出结构化 `{\"results\": [...]}`；\n   - `quiet=True` 不打印（orchestrate 复用，只返回结构）。\n2. **orchestrate 加 sync 阶段**：每轮 tick 顺序变为 看门狗 → 分派 → 合入 → **sync-repos** → 体检；\n   默认开启，`--no-sync` 可关；sync 抛 HiveError 被本轮 catch 住，不中断循环；\n   tick 摘要与 `--json` 输出都带 `synced` 计数。\n\n状态口径（`status` 字段）：`up-to-date` / `fast-forwarded`（带 sha）/ `diverged`（带 reason，可选 dirty）/ `unreachable` / `missing` / `no-remote`。\n\n## 安全边界（红线核对）\n\n- **只快进**：`fetch` + `merge --ff-only`，绝不用 `reset --hard` / `--force` / `--no-verify`；\n- **不自动解冲突**：ff 失败只列 git 的拒绝原因并跳过该仓，本机未提交改动原样保留（git 自己拒绝会覆盖它们的 merge）；\n- **不推代码**：sync 是只读同步，不做任何卡片写操作，本地领先由 land / 正常流程处理；\n- **网络操作走 `git_net`**：带 `HIVE_NET_TIMEOUT` 超时，远端不可达明确报「远端不可达」而不是静默跳过；\n- **不动** dashboard/、conflict.py、dispatch_prompt.py、dispatch_tracking.py、pending_matcher.py；\n- **不改** land / watchdog / dispatch 的既有行为与退出码（本提交 diff 只覆盖 hive.py 与 tests/test_sync_repos.py）。\n\n## 验证\n\n- `python3 -m pytest -q tests/test_sync_repos.py` → **10 passed**\n- 卡面 verify：`python3 -m pytest -q tests/test_sync_repos.py tests/test_core.py` → **77 passed**（10 sync + 67 core；同一条命令在重建后的 worktree 复跑 3 次全绿）\n- 全量 `python3 -m pytest -q`（worktree task/T-0193 分支）→ **466 passed**\n- `check.sh`（编译 + 全量 pytest + selftest.py）→ **PASS**\n\n## 手工演示（卡面验收要求）\n\n三个本地 clone，同轮呈现三种状态（/tmp/sync-demo-4，协调仓登记 demo-latest / demo-behind / demo-diverged）：\n\n```\n=== hive sync-repos（人工输出，三种状态同轮） ===\ndemo-behind: 快进到 550f58f29382\ndemo-diverged: 落后但无法快进（hint: Diverging branches can't be fast-forwarded, you need to either:）\ndemo-latest: 已最新\nrc=0\n```\n\n```\n=== hive sync-repos --json ===\n{\n  \"results\": [\n    {\"repo\": \"demo-behind\",   \"path\": \"/tmp/sync-demo-4/behind\",   \"status\": \"up-to-date\"},\n    {\"repo\": \"demo-diverged\", \"path\": \"/tmp/sync-demo-4/diverged\", \"status\": \"diverged\",\n     \"reason\": \"hint: Diverging branches can't be fast-forwarded, you need to either:\"},\n    {\"repo\": \"demo-latest\",   \"path\": \"/tmp/sync-demo-4/latest\",   \"status\": \"up-to-date\"}\n  ]\n}\n```\n\n演示后现场核对：`behind` 被快进到 origin/main（550f58f）、`latest` 未被动、\n`diverged` 跳过且本地提交 `3f18fd3 local-only` 与 `local.txt` 原样保留。\n\n## 过程说明（为什么有一次 failed 记录）\n\n- 本卡先由 worker（fb88-dsh exec 模式）跑了一轮：verify 卡面原写 `python`，fb98 无\n  `python` 裸名 → exit 127 → result failed（旧结果，已在 retry 时清掉）。\n- 卡面 verify 已由总控单独提交修正为 `python3`（f3d8888，lesson T-0114 同型，不在本卡 paths 内）。\n- 中途一次 submit 的 verify 出现 `27 passed, 50 errors`：当时 worker 与手工 submit\n  在同一个 worktree 上并发（worker 重建 worktree 删掉了 summary.md），属于并发冲突\n  而非代码问题；复跑同一条命令（直接 / /bin/sh -c / 重建 worktree 后）均 77 passed。\n\n## 没做 / 风险\n\n- sync 不同步协调仓自身（`hive.py --dir` 的那个仓）——它有自己的 `sync_main()` 守卫，本卡范围外；\n- `repos()` 同名仓去重：多台机器登记同一仓名时只取本机（host 匹配）或首个存在的路径，\n  与既有 dispatch/land 同一套口径，本卡未改。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_sync_repos.py"
+  ],
+  "changed_files": [],
+  "out_of_paths": []
+}
