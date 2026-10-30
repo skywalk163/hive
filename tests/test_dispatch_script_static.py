@@ -31,6 +31,10 @@ PS1 = WIN / "dispatch-agent.ps1"
 AHK = WIN / "dispatch-agent.ahk"
 SAMPLE = WIN / "dispatch-agents.sample.json"
 
+#: T-0208：看板常驻部分 —— 托盘视图（windows/tray.ahk）与常驻入口脚本（scripts/）。
+TRAY = WIN / "tray.ahk"
+AUTOSTART = ROOT / "scripts" / "install-autostart.ps1"
+
 #: 卡面点名的六个 agent 名。实现区（去注释后）一个都不许出现。
 AGENT_NAMES = (
     "trae-win",
@@ -506,3 +510,163 @@ def test_notes_exit_code_table_lists_5_and_6():
 
     assert re.search(r"5\s*剪贴板", notes), ".NOTES 的退出码表缺 5（剪贴板）"
     assert re.search(r"6\s*回读", notes), ".NOTES 的退出码表缺 6（回读未命中）"
+
+
+# --- 8. T-0208：看板常驻部分（日志轮转 / 单实例守护 / 系统托盘） ----------- #
+
+def test_t0208_scripts_are_utf8_with_bom():
+    """看板常驻脚本同样是**带 BOM 的 UTF-8 中文脚本**（理由同第 6 节）。
+
+    `install-autostart.ps1` 原来是无 BOM 的 ASCII，T-0208 起写进了中文提示；
+    `tray.ahk` 是新建的中文 AHK 源文件。两者一旦丢 BOM，PS 5.1 / AHK v2 会按 ANSI
+    解码，中文变乱码、甚至解析不过去 —— 所以钉住。
+    """
+    for path in (TRAY, AUTOSTART):
+        raw = path.read_bytes()
+
+        assert raw.startswith(codecs.BOM_UTF8), f"{path.name} 缺 UTF-8 BOM，会按 ANSI 解码"
+        text = raw[len(codecs.BOM_UTF8):].decode("utf-8")
+        assert any(ord(ch) > 127 for ch in text), f"{path.name} 里没有中文，这条断言是空转"
+
+
+def test_log_rotation_daily_file_with_age_and_size_caps():
+    """日志必须按天一份，且有「天数上限」与「单文件大小上限」两道闸。
+
+    看板是常驻的：没有轮转，日志会把用户磁盘慢慢写满，而且没人会立刻发现。断言的是
+    口径本身（文件名带日期 / LogDays 默认 7 / 超期清理 / 大小上限），不是某一行的写法。
+    """
+    src = _read(AUTOSTART)
+
+    assert re.search(r"'hive-'\s*\+\s*\(Get-Date\s+-Format\s+'yyyyMMdd'\)", src), (
+        "日志文件名要带 yyyyMMdd（按天切分）"
+    )
+    assert re.search(r"\$LogDays\s*=\s*7", src), "天数上限默认 7"
+    assert re.search(r"AddDays\(-1\s*\*\s*\$LogDays\)", src), "要按 LogDays 算过期阈值"
+    assert re.search(r"\$MaxLogMB\s*=\s*5", src), "单文件大小上限默认 5 MB"
+    assert re.search(r"1MB\s*\*\s*\$MaxLogMB", src), "大小轮转要按 MB 上限判定"
+    assert "Add-Content" in src, "写日志必须是追加（Add-Content），不是覆盖"
+    # 追加必须显式钉 UTF-8：PS 5.1 的 Add-Content 默认按 ANSI（简体中文机器上 GBK）落盘，
+    # 看板 stdout 经 cmd >> 进来却是 UTF-8 —— 不钉编码，本脚本自己写下的中文行就是乱码。
+    assert re.search(r"Add-Content[^\r\n]*-Encoding\s+UTF8", src), (
+        "日志追加要 -Encoding UTF8：PS 5.1 默认 ANSI，会把中文行写成乱码"
+    )
+    assert re.search(r">>\s*\"", src), "追加要走 cmd 的 >> 重定向"
+
+    # 关键：追加**不能**用 -RedirectStandardOutput —— 真机实测它每次都把文件截断重写
+    #（先后写 FIRST / SECOND，文件里只剩 SECOND），「按天追加」就废了。
+    # 只在实现区查（注释里出现这个词是在解释为什么不用它）。
+    impl = _strip_comments(src)
+    assert not re.search(r"-RedirectStandardOutput", impl), (
+        "日志追加不许用 -RedirectStandardOutput：它会截断文件，按天追加失效"
+    )
+
+
+def test_stop_is_pid_scoped_and_prints_the_list_first():
+    """停进程必须按 PID（禁 /IM、禁 Stop-Process），且先亮清单再动手。
+
+    按映像名批量杀（`/IM python.exe`）会连别的 python 一起杀掉；`| Stop-Process` 同理。
+    「先打印要停的进程清单」是给人一次反悔机会 —— 列出来的不是想停的那个，就 Ctrl-C。
+    """
+    src = _read(AUTOSTART)
+
+    assert "Stop-Process" not in src, "不许用 Stop-Process（要按 PID 精确杀）"
+    # 只在实现区查 /IM：注释里出现「不用 /IM」是在解释为什么不用它，不算犯规。
+    impl = _strip_comments(src)
+    assert not re.search(r"\|\s*Stop-Process", impl), "不许管道进 Stop-Process"
+    assert "/IM" not in impl, "不许用 taskkill /IM 按映像名批量杀"
+    assert re.search(r"taskkill\s+/PID\s+", src), "停止必须走 taskkill /PID"
+    assert re.search(r"将停止以下进程", src), "动手前要打印将停止的进程清单"
+    # 按实现区判先后：注释里提到 taskkill（例如解释「停止日志要写在 taskkill 之后」）不算犯规。
+    assert impl.index("将停止以下进程") < impl.index("taskkill"), "清单必须在 taskkill 之前出现"
+
+
+def test_single_instance_guard_yields_instead_of_starting_a_second():
+    """重复启动必须让出（返回 0 且不拉第二个），判定要按 pid + 端口双通道。
+
+    只看 pid 文件会在「pid 文件被删/残留」时误判；只看端口会在端口还没起来时误判。
+    两条都要有，而且「已在跑」与「端口被占」都必须**不启动**、直接返回。
+    """
+    src = _read(AUTOSTART)
+
+    assert re.search(r"单实例守护", src), "要有明确的「单实例守护」语义"
+    assert re.search(r"function\s+Get-HiveProcId", src), "要能读 pid 文件"
+    assert re.search(r"function\s+Test-HiveProcAlive", src), "要按 PID 判活"
+    assert re.search(r'tasklist\s+/FI\s+"PID eq', src), "判活要按 PID 精确问"
+    assert re.search(r"function\s+Test-HivePortBusy", src), "要能探端口上是否有看板在服务"
+    assert "TcpClient" in src, (
+        "端口占用要按 TCP 连通性判：只看 HTTP 200 会漏掉「状态文件还没生成」的看板（它返 503，"
+        "却已经在服务了），于是又拉出第二个实例"
+    )
+    assert re.search(r"/api/status", src), "探活要用看板的只读接口兜底"
+    # 两条让出分支都要在：进程已活 / 端口被占
+    assert re.search(r"已在运行[\s\S]{0,80}?单实例守护", src), "「已在跑」要说明单实例守护并不启动"
+    assert re.search(r"端口[\s\S]{0,80}?单实例守护", src), "「端口被占」要说明并不启动"
+
+
+def test_autostart_never_pops_a_window():
+    """常驻部分的「不打扰」= 不额外制造窗口。
+
+    拉起看板必须隐藏窗口，计划任务也必须以 `-WindowStyle Hidden` 起 PowerShell；
+    脚本不许自动开浏览器（开浏览器就是一个新窗口，而且没人要它开）。
+    """
+    src = _read(AUTOSTART)
+
+    assert re.search(r"-WindowStyle\s+Hidden", src), "拉起子进程要隐藏窗口"
+    assert src.count("-WindowStyle Hidden") >= 2, "计划任务与 cmd 包装都要隐藏"
+    assert "Start-Process" in src, "看板要靠 Start-Process 拉起（隐藏窗口）"
+    assert not re.search(r"(?i)\bInvoke-Item\b", src), "不许用 Invoke-Item 弹资源管理器/浏览器"
+    assert not re.search(r"(?i)Start-Process\s+[\"']https?", src), "不许自动打开浏览器"
+
+
+def test_tray_is_readonly_and_delegates_actions():
+    """托盘只读接口、只委托入口脚本；自己绝不杀进程、绝不重复实现启动逻辑。
+
+    托盘层一旦自己 taskkill，就会和 install-autostart.ps1 的单实例判定打架 ——
+    两边都以为自己做对了，症状是「有时候一个看板，有时候两个」，谁都查不出是谁干的。
+    """
+    src = _read(TRAY)
+
+    assert re.search(r"#Requires\s+AutoHotkey\s+v2", src), "托盘必须声明 AHK v2"
+    assert "#SingleInstance Force" in src, "托盘自己也要单实例（别点两次就两个图标）"
+    for url in ("/api/status", "/api/cluster/health"):
+        assert url in src, f"状态要取自看板的只读接口 {url}"
+    assert "install-autostart.ps1" in src, "启动/停止要委托给唯一入口脚本"
+    assert re.search(r"RegExMatch\(\s*health\s*,", src), "主节点名要从 health 里取"
+    for forbidden in ("taskkill", "Stop-Process", "ProcessClose", "WinKill"):
+        assert forbidden not in src, f"托盘不许自己杀进程：{forbidden}"
+    for item in ("状态：", "启动", "停止", "打开看板", "打开日志", "退出"):
+        assert item in src, f"托盘菜单缺「{item}」"
+
+
+def test_log_rotation_and_lifecycle_lines_avoid_the_locked_file_window():
+    """轮转与生命周期日志必须避开「日志文件正被看板进程占用」的那个窗口。
+
+    真机实测（独立 `USERPROFILE` + 备用端口冷启动，2026-10-30）：看板是用
+    `cmd /s /c "… >> 日志"` 拉起来的，cmd 用**不共享写**的方式一直开着日志文件；此后
+    `Move-Item` 改名与 `Add-Content` 追加都会抛 IOException，而本脚本的
+    `$ErrorActionPreference = 'Stop'` 会把异常升级成终止错误。实测后果有两条，都很隐蔽：
+
+    * `-Start`：名字没轮成，启动流程还断在写日志那一步（pid 写下了、成功提示没打印出来）；
+    * `-Stop`：异常发生在 `taskkill` **之前**，于是**进程根本没被杀掉**，看着像"停过了"。
+
+    所以钉住三条口径：轮转排在拉起之前、启动行写在拉起之前、停止行写在 taskkill 之后，
+    且两处写操作都自带 try/catch —— 写日志失败不许把启动 / 停止带停。
+    """
+    src = _read(AUTOSTART)
+    impl = _strip_comments(src)
+
+    # 1) 轮转必须排在拉起之前（按调用点查，不按函数定义查）
+    assert "Rotate-HiveLog $logPath" in impl, "要在拉起看板之前显式调用日志轮转"
+    assert impl.index("Rotate-HiveLog $logPath") < impl.index("Start-Process"), (
+        "Rotate-HiveLog 必须排在 Start-Process 之前：拉起之后日志文件就被 cmd 占着，Move-Item 改不了名"
+    )
+
+    # 2) 停止行必须排在 taskkill 之后（否则异常会让 taskkill 执行不到）
+    assert impl.index("taskkill /PID") < impl.index("停止看板 pid="), (
+        "停止日志要写在 taskkill 之后：进程活着时它占着日志文件，先写就抛异常，taskkill 根本轮不到"
+    )
+
+    # 3) 两处写操作都要自带兜底，不让 IOException 把流程带走
+    for marker in ("日志轮转跳过", "日志追加跳过"):
+        assert marker in impl, f"缺少兜底分支：{marker}"
+    assert impl.count("catch {") >= 2, "轮转与追加都要有 catch 兜底"
