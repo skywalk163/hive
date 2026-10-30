@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.15.0 — 2026-10-30
+
+> 这一版回应的是「纯 Git 模型在实战里暴露的三个缺口」：易失的租约状态、Windows 的
+> 平台不确定性、以及「合并」这一步的人工摩擦。全部改动都保持 **git 仍是唯一真相**。
+
+### Added
+
+- **租约 fencing token + 本地留底**（`docs/租约与fencing.md`）：
+  - 每次领取生成唯一 `lease_id` 并把 `fence` 推进一格（写进 `claim/<tid>` 分支和任务卡）；
+  - `Worker._write_result` 推送前对账（claim 存在？还是我？lease_id 一致？），
+    不匹配抛 `LeaseFenced`，**整条丢弃、不覆盖**；失败路径同样受控；
+  - 回收/重派（watchdog、`retry`、`unassign`）推进卡面 `fence`，`land`/`status`/`doctor`
+    据此识别「过期租约写入的结果」并拒绝合入（`plan.status = "fenced"`）；
+  - 本机留底 `~/.hive/leases/<tid>.json`（0600、原子写），`HIVE_LEASE_DIR` 可覆盖；
+  - 新命令 `hive lease list/show/clear`；`hive status --json` 增 `lease_id` / `fence` /
+    `claim_fence` / `result_fence` / `fenced` 字段。
+- **PR 自动化（可选）**（`docs/PR自动化.md`）：新模块 `hive_pr.py`（仅标准库）+
+  `hive work --pr`、`hive submit --pr`、`hive pr <tid> [--dry-run] [--provider]`。
+  推送 `task/<tid>` 且 verify 全绿后向 Gitea/GitLab 创建（或复用）PR；
+  token 走环境变量/`~/.config/hive/gitea.env`，日志与异常一律脱敏；
+  失败只记 `result["pr"]["error"]`，不影响任务结论。GitHub 明确提示用 `gh pr create`。
+- **看板写操作鉴权 + 审计**（`docs/看板写操作与鉴权.md`）：`serve.py --auth auto|on|off`
+  （默认 `auto`：非回环绑定才要 token）；复用 `mcp_auth` 的 token 表，
+  `POST /api/login` 换成 HttpOnly cookie；`close`/`reopen` 限 controller 角色；
+  每次写操作追加一行到 `dashboard/audit.log`（成功/失败/未鉴权都记）。
+  前端顶栏新增「登录」按钮（`#login-btn`）。
+- **Windows verify 官方基准**（`docs/windows-baseline.md` + `windows/verify-smoke.ps1`）：
+  真机一键 17 项判据（工具链、init/assign/work、UTF-8 往返、只读不产出 task 分支、
+  红灯 verify 退出码、fencing 拒绝过期写入、close 归档）。实测 **17/17 PASS**
+  （Win10 19045 / Python 3.14.7 / Git 2.55.0）。
+- **`hive_compat.py`：verify 的 POSIX 垫片**：Windows 上把 `true` / `false` /
+  `test -e|-f|-d|-s|-r` / 整数比较转成等价判断；未知写法原样交给 shell，绝不猜成功。
+  `HIVE_COMPAT=0` 关闭。修复了「同一张卡在 FreeBSD 绿、在 Windows 必然红」的跨平台断层。
+- **集群默认化**：`hive init --cluster` 顺手拉起本机集群；`hive work` 默认拉起
+  （`--no-cluster` 或 `HIVE_CLUSTER_AUTOSTART=0` 关闭），多机最终一致性窗口从分钟级到秒级。
+
+### Changed
+
+- `hive init` 会一并复制 `hive_pr.py` / `hive_compat.py`（缺模块时相关功能给出可操作的错误）。
+- `run()`：**给了 stdin 就走二进制**。以前 `text=True` 在 Windows 上会把送进
+  `git hash-object -w --stdin` 的 `\n` 改写成 `\r\n`，同一份结果 JSON 在 Windows 与
+  Linux 上刷出的 blob 字节不同（跨平台 diff / 校验全乱）。输出侧仍自解 UTF-8。
+- `tests/conftest.py`：子进程夹具统一 UTF-8（`encoding="utf-8"` + `PYTHONIOENCODING`），
+  修掉 Windows 上「中文输出 → UnicodeDecodeError → stdout=None → json 爆栈」的假失败；
+  同时把 `HIVE_LEASE_DIR` 隔离开，别把测试卡的租约留底写进开发机 `~/.hive`。
+
+### Fixed
+
+- **fencing 不该误伤「本就没 claim」的人工链路**：claim 分支不存在时，只有**本地有我这份
+  租约留底**才判 `LeaseFenced`；总控 `assign` 后由 worker/人工直接跑（从未 claim）仍允许写结果，
+  结果标 `lease: "missing"` 便于事后分辨。
+- **`hive pr --dry-run` 不再要求 token**：它只是「看看会发什么」，没配 token 的机器也能用；
+  dry-run 结果里带 `api` 与 `request`（method/url/head/base/title）。
+- **并发探针的时序缺陷**（`tests/test_worker_parallel.py`）：Windows 上 worker 的启动阶段
+  （fetch / worktree add / 写 task.md）走进程内 git 锁是串行的，1 秒的探针在第一张卡退出后
+  第二张才进 agent，峰值必然测成 1。探针睡 4 秒后稳定测到 2；被测逻辑未改。
+- **平台相关的测试口径**：`test_same_bytes_would_have_crashed_without_errors` 不再依赖
+  「子进程解码异常会不会冒泡」（Windows 上线程异常只留 warning），改为直接对同一批字节做
+  严格解码；`test_repos_falls_back_when_no_path_exists` 按 `Path` 规范化后比较，
+  不再把 `/also/missing` 与 `\also\missing` 当成回归。
+- Windows 上 `cmd /c` 与 `cmd.exe /c` 的引号差异、PowerShell 5.1 传参吞引号
+  （都固化进基准脚本，见 `docs/windows-baseline.md` §3）。
+
 ## 0.14.0 — 2026-10-29
 
 ### Added

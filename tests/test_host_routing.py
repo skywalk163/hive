@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -72,7 +73,10 @@ def test_repos_falls_back_when_no_path_exists(tmp_path):
     _write_agent(tmp_path, "a", "another-machine", "/no/such/hive")
     _write_agent(tmp_path, "b", H.current_host(), "/also/missing")
     repos = H.Hive(str(tmp_path)).repos()
-    assert str(repos["hive"]) in {"/no/such/hive", "/also/missing"}
+    # hive 会把登记路径规整成 Path：Windows 上 "/also/missing" 会变成
+    # "\also\missing"。按规范化后比较，别把平台差异当成逻辑回归。
+    assert os.fspath(repos["hive"]) in {os.fspath(Path("/no/such/hive")),
+                                        os.fspath(Path("/also/missing"))}
 
 
 def test_dispatch_only_host(world):

@@ -272,6 +272,7 @@
     el.auto = document.getElementById('auto-refresh');
     el.refresh = document.getElementById('refresh-now');
     el.loadFile = document.getElementById('load-file');
+  el.login = document.getElementById('login-btn');
     el.fileInput = document.getElementById('file-input');
     el.theme = document.getElementById('theme-toggle');
     el.overlay = document.getElementById('overlay');
@@ -1200,6 +1201,9 @@
       el.fileInput.value = '';
     });
 
+    // 登录：写操作需要 token 时，把 token 换成一个 HttpOnly cookie（不在页面里留明文）
+    if (el.login) el.login.addEventListener('click', loginWithToken);
+
     el.overlay.addEventListener('click', closeDrawer);
 
     // 设置弹窗：齿轮按钮 + 遮罩点击关闭 + Esc 关闭
@@ -1654,6 +1658,35 @@
     return override ||
       ({ close: '关闭作废', retry: '重试', unassign: '退回待领取',
          reopen: '重开' })[action] || action;
+  }
+
+  /** 登录：token → POST /api/login → 服务端写 HttpOnly cookie，后续写操作自动带上。 */
+  function loginWithToken() {
+    var token = window.prompt(
+      '写操作需要 token（hive agent enroll <controller> 生成，或用 hive_whoami 里那份）。\n' +
+      'token 只会换成 cookie，不在页面里存明文。\n\n粘贴 token：', '');
+    if (token === null) return;
+    token = token.trim();
+    if (!token) return;
+    flash('正在校验 token …');
+    fetch('/api/login', {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ token: token })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, j: j }; }); })
+      .then(function (res) {
+        if (res.j && res.j.ok) {
+          flash('已登录：' + (res.j.agent || '') + '（' + (res.j.role || '') + '）', false);
+          if (el.login) {
+            el.login.textContent = '已登录：' + (res.j.agent || '');
+            el.login.title = '角色：' + (res.j.role || '') + '（换 token 再点一次）';
+          }
+        } else {
+          flash('登录失败：' + ((res.j && res.j.error) || ('HTTP ' + res.status)), true);
+        }
+      })
+      .catch(function (e) { flash('登录请求失败：' + e.message, true); });
   }
 
   // 调用后端 /api/task（后端再调用 hive CLI 真正执行）

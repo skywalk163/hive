@@ -58,6 +58,9 @@
       <label class="switch"><input type="checkbox" id="auto-refresh" checked /><span>自动刷新</span></label>
       <button type="button" class="btn" id="refresh-now">刷新</button>
       <button type="button" class="btn" id="load-file">载入 JSON</button>
+      <!-- 写操作鉴权：本机回环绑定时后端免鉴权，这里显示「本机直连」；
+           绑到 0.0.0.0 后需要 token（hive agent enroll <controller> 生成） -->
+      <button type="button" class="btn" id="login-btn" title="写操作需要 token 时在这里登录">登录</button>
       <button type="button" class="btn icon" id="theme-toggle" title="切换深色 / 浅色" aria-label="切换深色 / 浅色">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
           <circle cx="12" cy="12" r="4.2" />

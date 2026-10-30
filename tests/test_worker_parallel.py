@@ -103,8 +103,11 @@ def test_max_concurrency_throttles_and_collects_all(world, tmp_path):
                        verify=[f"{sys.executable} -c pass"])
         world.hive("assign", tid, "--agent", "w1")
 
+    # 探针要睡足够久：worker 的启动阶段（fetch / worktree add / 写 task.md）走
+    # 进程内 git 锁是串行的，Windows 上常常超过 1 秒。睡 1 秒时第一张卡已经退了，
+    # 第二张才进 agent，峰值必然测成 1 —— 那是夹具有时序缺陷，不是池不并发。
     proc = _run_worker(world, "w1", max_concurrency=2, tmp_path=tmp_path,
-                       extra_env={"PROBE_LOG": str(events), "PROBE_SLEEP": "1.0"})
+                       extra_env={"PROBE_LOG": str(events), "PROBE_SLEEP": "4.0"})
     assert proc.returncode == 0, proc.stderr
 
     assert events.exists(), "假 agent 没被调用，并发根本没跑起来"

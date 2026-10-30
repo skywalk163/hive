@@ -207,6 +207,12 @@ tmux new -s hive-fb88 -d "python3 hive/hive.py --dir hive work --agent fb88-dsh 
 ```powershell
 # Windows：计划任务 / 开机启动，登录后常驻
 python3 hive\hive.py --dir hive work --agent win10 --interval 60
+
+# 推送 task/<tid> 后自动开 PR（Gitea/GitLab，见 docs/PR自动化.md）
+python3 hive\hive.py --dir hive work --agent win10 --pr
+
+# 不想要本机集群的秒级同步（默认会拉起），加 --no-cluster
+python3 hive\hive.py --dir hive work --agent win10 --no-cluster
 ```
 
 `scripts/` 下有两个省事的壳：`start-worker.sh <agent>`（自动把 `OPENAI_API_KEY`
@@ -245,12 +251,18 @@ python3 hive/hive.py --dir hive result T-0101      # 看摘要
 python3 hive/hive.py --dir hive retry  T-0101      # 失败重跑（清结果+租约，续用原分支）
 python3 hive/hive.py --dir hive retry  T-0101 --fresh  # 从 main 重来
 python3 hive/hive.py --dir hive gc --minutes 180   # 回收跑飞的租约
+python3 hive/hive.py --dir hive lease list         # 本机租约留底（lease_id / fence）
 python3 hive/hive.py --dir hive prune              # 清代码仓里已合并的 task/verify 分支（dry-run）
 python3 hive/hive.py --dir hive close T-0101 --note "已 land 合入"
+
+# PR 自动化（可选）：建 / 补 / 预览
+python3 hive/hive.py --dir hive pr T-0101
+python3 hive/hive.py --dir hive pr T-0101 --dry-run
 
 # 不跑 worker 的人工链路（GUI agent 场景，与该 agent 的 worker 二选一）
 python3 hive/hive.py --dir hive take   T-0101 --agent workbuddy
 python3 hive/hive.py --dir hive submit T-0101
+python3 hive/hive.py --dir hive submit T-0101 --pr   # 提交后顺手开 PR
 ```
 
 `land` 是最后一步的自动化：在**临时 worktree** 里真跑一遍 merge（不是靠 `merge-tree` 猜），
@@ -320,17 +332,24 @@ chroot 里的小浣熊 / WorkBuddy 的完整接法（共享 `/home`、manual wor
 接上后它就能自己查卡/领卡/交了，不用人喂；流程见
 [AGENT 快速上手](docs/AGENT快速上手.md)。
 
-## 8. 限制（有意为之，v0.3.0）
+## 8. 限制（有意为之）
 
 - 一个 worker 串行跑任务；要并行就在同一台机器起多个 worker + 多个 agent 名（`max_concurrency` 只影响 dispatch 的分配）。
 - `dispatch` 的并发锁粒度是 **paths 不是 repo**：同一个仓里改互不相干目录的卡可以同时派给不同 agent；
   paths 重叠（含父子目录）或没声明 paths 的卡才互相排队，上限 `--max-per-repo`（默认 1）。
 - claim/res 是分支，只在进行中存在；`close` 会归档结果并删分支。
-- 没有内置 PR 创建、没有自动合并到 main；合并留给人或总控用 git 做，`close` 只做验收归档。
-- 看板是只读的；写操作（`take` / `submit` / `close` / `retry`）走 CLI。
+- 没有自动合并到 main；合并留给人（review PR）或总控用 `land` 做。PR 自动化是**可选**的
+  （`work --pr` / `submit --pr` / `hive pr`，只支持 Gitea/GitLab，不碰 GitHub）。
+- 看板的写操作**默认只在回环绑定下可用**；暴露到内网必须配 token（`hive agent enroll`），
+  每次写操作落 `dashboard/audit.log`。见 [`docs/看板写操作与鉴权.md`](docs/看板写操作与鉴权.md)。
 - 任务卡 frontmatter 只支持标量和标量列表，够用就好。
 - 自建裸仓建议关掉 `receive.autogc` + `gc.auto`，夜间手动 gc；原因见 `docs/操作手册.md` §8。
-- Windows 引导脚本只在 PowerShell 7 上验证过语法和 dry-run，没在真机跑过；国产 GUI agent 没有 CLI，走 `manual`。
+- 国产 GUI agent 没有 CLI，走 `manual`。
+- 纯 Git 租约靠 **lease_id + fence** 兜住「旧 worker 复活」：过期写入会被拒，事后 `land`
+  也会识别过期结果。见 [`docs/租约与fencing.md`](docs/租约与fencing.md)。
+- Windows 作为 **verify 验收机**已有可重复的官方基准（`windows/verify-smoke.ps1`，
+  真机 17/17 通过），见 [`docs/windows-baseline.md`](docs/windows-baseline.md)；
+  GUI 客户端的 MCP 粘贴仍是 best-effort。
 
 ## 9. 自测
 
@@ -422,6 +441,10 @@ python3 hive/hive.py mcp --agent workbuddy --dir hive
 - [迁移指南](docs/迁移指南.md)：从聊天里手工分发迁到蜂巢
 - [多机并行开发](docs/多机并行开发.md)：多台机器 + 多个 agent 并行的部署、host 路由、防冲突、合流
 - [Windows 接入](windows/README.md)：bootstrap.ps1 + 计划任务
+- [Windows verify 基准](docs/windows-baseline.md)：真机可重复的「已验证」判据（`windows/verify-smoke.ps1`）
+- [租约与 fencing](docs/租约与fencing.md)：lease_id / fence、本地留底、旧 worker 复活的拦截
+- [PR 自动化](docs/PR自动化.md)：`work --pr` / `submit --pr` / `hive pr`（Gitea/GitLab）
+- [看板写操作与鉴权](docs/看板写操作与鉴权.md)：token、角色、审计日志
 - [Gitea 接入](docs/Gitea接入.md)：私有仓、host-scoped 凭据 helper、T-0001 冒烟记录
 - [chroot GUI agent](docs/CHROOT_GUI_AGENTS.md)：小浣熊 / WorkBuddy 的完整接法
 - [MCP 接入](docs/MCP接入.md)：让任意 agent 通过 MCP 查/领/交/终止任务

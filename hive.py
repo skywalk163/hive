@@ -44,13 +44,14 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.14.0"
+VERSION = "0.15.0"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 
@@ -107,6 +108,9 @@ TASK_FIELDS = [
     # T-0188 追加到列表末尾（不动已有顺序）：避免所有旧卡被大面积重写。
     # 推送（dispatch-mark）与真正分派（assign）是两个动作，所以这是可选的派生字段。
     "dispatched_to", "dispatched_at",
+    # T-0206 追加：租约 fencing 序号。每次回收/重派 +1，结果里带上写入时的 fence，
+    # land/close 用它识别「旧 worker 复活后写进来的过期结果」。
+    "fence",
 ]
 
 # 文件级锁（任务卡 `locks` 字段）的判定在 conflict.py。放 try 里是因为 hive.py 允许被
@@ -210,6 +214,16 @@ class HiveError(Exception):
     pass
 
 
+class LeaseFenced(HiveError):
+    """租约已被回收 / 被别的 agent 接管：本次结果写入被 fencing 拒绝。
+
+    纯 Git 模型里，claim/<tid> 分支的原子 push 决定「谁在跑」，但一个卡住的旧
+    worker 可能在租约被回收、卡已被重新领取之后才醒来写结果。仅靠 res 分支的
+    force push 是拦不住的（它会顶掉别人的结果）。所以提交结果前必须用**当前
+    claim 的 lease_id** 做一次 fencing 校验；不匹配就整条结果拒收，而不是覆盖。
+    """
+
+
 def run(cmd, cwd=None, check=True, input=None, timeout=None, shell=False, env=None):
     # 钉死 utf-8，别让编码跟着 locale 跑（T-0143）。
     #
@@ -222,12 +236,27 @@ def run(cmd, cwd=None, check=True, input=None, timeout=None, shell=False, env=No
     # 两侧一起收口：encoding 保证写进去的永远是 UTF-8（治本，跨平台同一份编码），
     # errors 保证读进来的非法字节只替换不抛异常（兜底，最坏显示 U+FFFD，而不是
     # 整个看板消失）。所有外部命令都走这一个出口，所以只改这里。
+    # 注意：stdin 绝对不能走 text=True。Windows 的文本模式会把送进去的
+    # \n 改写成 \r\n，于是 `git hash-object -w --stdin` 落盘的 blob 里多出
+    # CR —— 同一份 JSON 在 Windows 上和 Linux 上字节不同，跨平台 diff 全乱。
+    # 给了 input 就走二进制 stdin，输出侧自己按 UTF-8 解码。
+    raw_input = input.encode("utf-8") if isinstance(input, str) else input
     try:
-        p = subprocess.run(
-            cmd, cwd=str(cwd) if cwd else None, text=True, input=input,
-            capture_output=True, timeout=timeout, shell=shell, env=env,
-            encoding="utf-8", errors="replace",
-        )
+        if raw_input is None:
+            p = subprocess.run(
+                cmd, cwd=str(cwd) if cwd else None, text=True, input=None,
+                capture_output=True, timeout=timeout, shell=shell, env=env,
+                encoding="utf-8", errors="replace",
+            )
+        else:
+            p = subprocess.run(
+                cmd, cwd=str(cwd) if cwd else None, text=False, input=raw_input,
+                capture_output=True, timeout=timeout, shell=shell, env=env,
+            )
+            p = subprocess.CompletedProcess(
+                p.args, p.returncode,
+                (p.stdout or b"").decode("utf-8", "replace"),
+                (p.stderr or b"").decode("utf-8", "replace"))
     except subprocess.TimeoutExpired:
         # timeout=None 永远不会走到这里；一旦设了超时，就必须把「挂住」变成
         # 一条人能看懂、能行动的 HiveError，而不是无限等或裸 TimeoutExpired。
@@ -604,6 +633,34 @@ def store_close(tid: str, done: bool = True, note: str = "") -> dict | None:
         return None
 
 
+# --------------------------------------------------------------------------- #
+# verify 执行：Windows 上给 POSIX 惯用法垫一层（hive_compat.py）
+# --------------------------------------------------------------------------- #
+
+def verify_command(cmd: str) -> str:
+    """返回真正要执行的命令行：Windows 上把 `true` / `test -f` 转成等价判断。
+
+    只在 `hive_compat.should_wrap` 认得时才改写（未知写法原样交给 shell），
+    且在非 Windows 上永远原样返回——FreeBSD/Linux 的口径一个字节都不动。
+    需要关掉（怀疑垫片干扰）：`HIVE_COMPAT=0`。
+    """
+    text = str(cmd or "")
+    if str(os.environ.get("HIVE_COMPAT", "1")).lower() in ("0", "false", "no", "off"):
+        return text
+    try:
+        import hive_compat
+    except ImportError:
+        return text
+    return hive_compat.rewrite(text) if hive_compat.should_wrap(text) else text
+
+
+def run_verify(cmd: str, cwd, timeout: int = 1800):
+    """跑一条 verify 命令，返回 subprocess.CompletedProcess（stdout/stderr 都在）。
+
+    与直接 `run(cmd, shell=True)` 的差别只有一处：多经过 :func:`verify_command`。
+    """
+    return run(verify_command(cmd), cwd=cwd, check=False, shell=True, timeout=timeout)
+
 def cluster_ensure(hive_dir=None) -> bool:
     """给常驻 worker/总控用：本机没有集群就静默拉起。"""
     if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("HIVE_TESTING"):
@@ -673,6 +730,91 @@ def _cleanup_claim_artifacts(hive_dir, tid: str) -> None:
         root.rmdir()  # 只在空目录时成功；还有别的卡的状态就不动
     except OSError:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# 租约本地留底（fencing 的第二道防线）
+#
+# Git 上的 claim/<tid> 分支是权威，但它是**易失的**：gc / watchdog / 关机重启都可能
+# 让一个旧 worker 在「自己以为还持有租约」的状态下醒来。把每次 claim 的 lease_id +
+# fence 同步写一份到本机（~/.hive/leases/<tid>.json），带来两个能力：
+#   1) 结果写入前可以拿本地记录和远端 claim 对账，不匹配就拒收（LeaseFenced）；
+#   2) `hive lease` 能在断网/分支被删时回答「我上次领的是哪一版租约」。
+# 文件只存本机，不进协调仓、不随 Git 同步；写入用临时文件 + os.replace 原子替换。
+# --------------------------------------------------------------------------- #
+
+def lease_dir() -> Path:
+    """本地租约留底目录（HIVE_LEASE_DIR 可覆盖，测试/多实例隔离用）。"""
+    env = (os.environ.get("HIVE_LEASE_DIR") or "").strip()
+    return (Path(env).expanduser() if env else DEFAULT_STATE / "leases")
+
+
+def _lease_path(tid: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(tid or "")) or "_"
+    return lease_dir() / f"{safe}.json"
+
+
+def _host_label() -> str:
+    return (os.uname().nodename if hasattr(os, "uname")
+            else os.environ.get("COMPUTERNAME", ""))
+
+
+def save_local_lease(tid: str, payload: dict) -> bool:
+    """原子写本地租约留底；best-effort，失败只返回 False（绝不影响领卡）。"""
+    if not tid:
+        return False
+    data = dict(payload or {})
+    data.update({"task": tid, "host": data.get("host") or _host_label(),
+                 "saved_at": iso()})
+    path = _lease_path(tid)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def load_local_lease(tid: str) -> dict | None:
+    try:
+        data = json.loads(_lease_path(tid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def clear_local_lease(tid: str) -> None:
+    """删掉本地留底（close / 回收 / 重开后调用；目录里没有也不报错）。"""
+    try:
+        _lease_path(tid).unlink()
+    except OSError:
+        pass
+
+
+def local_leases() -> dict[str, dict]:
+    """列出本机所有留底，按 claimed_at 倒序（给 `hive lease list` 用）。"""
+    out: dict[str, dict] = {}
+    try:
+        paths = sorted(lease_dir().glob("*.json"))
+    except OSError:
+        return out
+    for p in paths:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            out[str(data.get("task") or p.stem)] = data
+    return dict(sorted(out.items(),
+                       key=lambda kv: str(kv[1].get("claimed_at") or ""),
+                       reverse=True))
 
 
 def _net_remote(args) -> str:
@@ -1261,6 +1403,7 @@ class Hive:
             store_close(tid, done=bool(done), note=note)
         else:
             cluster_release_lease(tid)
+        clear_local_lease(tid)
         log(f"{tid} 已{'关闭（完成）' if done else '关闭（作废，卡面 state=closed）'}")
 
     def cmd_reopen(self, tid: str, reason: str = "", who: str = "controller") -> None:
@@ -1282,6 +1425,9 @@ class Hive:
             if rev_parse(self.dir, f"origin/{ref}"):
                 git_net(["push", "origin", f":refs/heads/{ref}"], self.dir, check=False)
                 log(f"已删除 {ref}")
+        claim = self.claim_info(tid) or {}
+        self._bump_fence(card, claim)
+        clear_local_lease(tid)
         archived = self.dir / "results" / f"{tid}.json"
         extra = ""
         if archived.exists():
@@ -1309,6 +1455,32 @@ class Hive:
             raise HiveError(f"本地代码仓不可用: {path}")
         return path
 
+    @staticmethod
+    def _fence_of(info) -> int:
+        try:
+            return max(0, int((info or {}).get("fence") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _bump_fence(self, card: dict, claim: dict | None = None) -> int:
+        """回收/重派时把卡的 fence 推进一格：旧 result 的 fence 从此小于卡面值。
+
+        没有这一步，旧 worker 在「校验通过 → 真正 push」的窗口里写进来的结果就
+        无法事后分辨；有了单调 fence，land 一定能认出并拒绝它。
+        """
+        nxt = max(self._fence_of(card), self._fence_of(claim)) + 1
+        card["fence"] = nxt
+        return nxt
+
+    def result_fenced(self, card: dict, res: dict | None) -> bool:
+        """结果是不是「过期租约」写的：res.fence < card.fence 即判定为过期。"""
+        if not isinstance(res, dict) or res.get("fence") is None:
+            return False
+        try:
+            return int(res["fence"]) < self._fence_of(card)
+        except (TypeError, ValueError):
+            return False
+
     def landable(self) -> list[str]:
         """可以合入的卡：结果是 done、verify 全绿、还没 close、依赖都已 close。"""
         cards = self.cards()
@@ -1318,6 +1490,8 @@ class Hive:
                 continue
             res = self.result_info(tid)
             if not res or res.get("status") != "done":
+                continue
+            if self.result_fenced(c, res):
                 continue
             if any(v.get("code") for v in (res.get("verify") or [])):
                 continue
@@ -1349,6 +1523,12 @@ class Hive:
             return plan
         if res.get("status") != "done":
             plan["problems"].append(f"结果是 {res.get('status')!r}，不是 done")
+            return plan
+        if self.result_fenced(card, res):
+            plan["problems"].append(
+                f"结果由过期租约写入（fence {res.get('fence')} < 卡面 "
+                f"{self._fence_of(card)}），拒绝合入；请 retry 让当前持有者重跑")
+            plan["status"] = "fenced"
             return plan
         bad = [str(v.get("cmd")) for v in (res.get("verify") or []) if v.get("code")]
         if bad:
@@ -2094,6 +2274,11 @@ class Hive:
                 errors.append(f"结果 {tid} status={data.get('status')!r} 非法")
             if data.get("status") == "done" and any(v.get("code") for v in data.get("verify") or []):
                 errors.append(f"结果 {tid} 标了 done 但 verify 有非零退出码")
+            card = cards.get(tid)
+            if card is not None and self.result_fenced(card, data):
+                warns.append(
+                    f"结果 {tid} 由过期租约写入（fence {data.get('fence')} < "
+                    f"卡面 {self._fence_of(card)}），land 会拒绝；请 retry")
 
         inbox = self.dir / "inbox"
         if inbox.is_dir():
@@ -2431,7 +2616,8 @@ class Hive:
               f"\n（如果这个 agent 的 worker 正在跑，它会自动接手，不用再 submit）\n",
               flush=True)
 
-    def cmd_submit(self, tid: str, keep: bool = False, note: str = "") -> None:
+    def cmd_submit(self, tid: str, keep: bool = False, note: str = "",
+                   pr: bool = False) -> None:
         """人工提交：commit + push + verify + 写结果，不依赖 worker 在跑。"""
         self.fetch()
         card = self.card(tid)
@@ -2441,6 +2627,21 @@ class Hive:
                  or (self.claim_info(tid) or {}).get("agent") or "")
         if not owner:
             raise HiveError(f"{tid} 没有 owner，先 take 或 assign")
+        # fencing：人工提交同样不能覆盖别人的租约。没有 claim 时保留兼容
+        # （历史用法：assign 后直接改完提交），但结果会标记 lease=missing。
+        claim = self.claim_info(tid) or {}
+        if claim.get("agent") and claim.get("agent") != owner:
+            raise HiveError(
+                f"{tid} 的租约属于 {claim.get('agent')}，不是 {owner}；"
+                f"拒绝提交（先 unassign/retry，或等当前租约过期）")
+        local = load_local_lease(tid) or {}
+        if (claim.get("lease_id") and local.get("lease_id")
+                and claim.get("lease_id") != local.get("lease_id")):
+            raise HiveError(
+                f"{tid} 的租约已被接管（lease_id 不匹配），拒绝提交；"
+                f"如确认是人工接手，先删除 {_lease_path(tid)} 再试")
+        if not claim:
+            log(f"警告：{tid} 没有有效 claim 分支，按人工提交继续（结果标记 lease=missing）")
         cfg = self.agent(owner)
         repo_path = (cfg.get("repos") or {}).get(card.get("repo") or "")
         if not repo_path:
@@ -2475,7 +2676,7 @@ class Hive:
 
         verify = []
         for cmd in (card.get("verify") or []):
-            p = run(cmd, cwd=wt, check=False, shell=True, timeout=1800)
+            p = run_verify(cmd, cwd=wt)
             verify.append({"cmd": cmd, "code": p.returncode,
                            "tail": (p.stdout + p.stderr).strip().splitlines()[-5:]})
             log(f"{tid} 验证 {p.returncode}: {cmd}")
@@ -2489,7 +2690,6 @@ class Hive:
         else:
             summary = "（人工 submit，未写 summary）"
 
-        claim = self.claim_info(tid) or {}
         started = claim.get("claimed_at") or iso()
         try:
             duration = (now() - parse_iso(started)).total_seconds()
@@ -2506,14 +2706,26 @@ class Hive:
             "declared_paths": card.get("paths") or [],
             "changed_files": changed, "out_of_paths": oop,
         }
+        if claim.get("lease_id"):
+            result["lease_id"] = claim["lease_id"]
+        if claim.get("fence") is not None:
+            result["fence"] = claim["fence"]
+        if not claim:
+            result["lease"] = "missing"
+        if pr and ok:
+            result["pr"] = self.open_pr_for(tid, card, result, repo)
+            log(f"{tid} PR: " + (result["pr"].get("url")
+                                 or result["pr"].get("error") or "已处理"))
         commit_file_to_ref(
             self.dir, f"results/{tid}.json",
             json.dumps(result, ensure_ascii=False, indent=2),
             f"res/{tid}", "origin/main",
             f"result {tid}: {result['status']} by {owner} (manual)", force=True,
         )
+        if claim:
+            save_local_lease(tid, {**claim, "submitted_at": iso(),
+                                   "result_status": result["status"]})
         if claim_backend() == "store":
-            claim = self.claim_info(tid) or {}
             store_result(tid, owner, str(claim.get("lease_id") or ""), result)
 
         if not keep:
@@ -2527,6 +2739,26 @@ class Hive:
         print(f"{tid} {result['status']} by {owner}（{result['duration_s']}s）"
               f"\nbranch: task/{tid}  head: {head}\n"
               f"verify: " + ", ".join(f"{v['code']}" for v in verify), flush=True)
+
+    def open_pr_for(self, tid: str, card: dict, result: dict,
+                    repo: Path | str | None = None,
+                    dry_run: bool = False) -> dict:
+        """给已推送的 task/<tid> 建 PR；任何失败都收敛成 {error}，绝不打断任务。"""
+        try:
+            import hive_pr   # 延迟导入：没有 PR 需求的部署不需要这个模块
+        except ImportError:
+            return {"error": "缺少 hive_pr.py（把模块放到 hive.py 同目录）"}
+        try:
+            if repo is None:
+                repo = self.code_repo(card.get("repo") or "")
+            return hive_pr.create_pr(
+                repo, tid, head=f"task/{tid}",
+                base=card.get("base") or "main",
+                title=hive_pr.build_title(tid, card),
+                body=hive_pr.build_body(tid, card, result), dry_run=dry_run)
+        except Exception as exc:  # noqa: BLE001  PR 是附加动作，绝不判任务失败
+            log(f"{tid} 建 PR 失败（不影响任务）: {exc}")
+            return {"error": str(exc)}
 
     # -- 审计 -------------------------------------------------------------- #
     def cmd_audit(self, tid: str | None = None, all_cards: bool = False,
@@ -2627,6 +2859,14 @@ class Hive:
                 "claim_agent": claim.get("agent") or "",
                 "claimed_at": claim.get("claimed_at") or "",
                 "lease_until": lease_until or "",
+                "lease_id": claim.get("lease_id") or "",
+                # 卡面 fence 只在回收/重派时推进；刚被领取时答案在 claim 里。
+                # 看板要的是"当前生效的 fencing 序号"，取两者较大值。
+                "fence": max(int(c.get("fence") or 0),
+                             Hive._fence_of(claim)),
+                "claim_fence": Hive._fence_of(claim),
+                "result_fence": res.get("fence"),
+                "fenced": self.result_fenced(c, res),
                 "stale": stale,
                 "result": res.get("status", ""),
                 "result_status": res.get("status", ""),
@@ -2719,11 +2959,14 @@ class Hive:
         if fresh:
             card["fresh"] = True
         self.fetch()
+        claim = self.claim_info(tid) or {}
         for ref in (f"res/{tid}", f"claim/{tid}"):
             if rev_parse(self.dir, f"origin/{ref}"):
                 git_net(["push", "origin", f":refs/heads/{ref}"], self.dir,
                         check=False)
                 log(f"已删除 {ref}")
+        self._bump_fence(card, claim)
+        clear_local_lease(tid)
         card["state"] = "assigned"
         if agent:
             card["owner"] = agent
@@ -2769,11 +3012,14 @@ class Hive:
         old_owner = card.get("owner") or ""
         if card.get("state") in ("done", "closed"):
             raise HiveError(f"{tid} 已是 {card.get('state')}，无法退回未分配")
+        claim = self.claim_info(tid) or {}
         # 清掉 claim / res 分支，让原 agent 失去租约，否则它还会续跑
         for ref in (f"res/{tid}", f"claim/{tid}"):
             if rev_parse(self.dir, f"origin/{ref}"):
                 git_net(["push", "origin", f":refs/heads/{ref}"], self.dir, check=False)
                 log(f"已删除 {ref}")
+        self._bump_fence(card, claim)
+        clear_local_lease(tid)
         archived = self.dir / "results" / f"{tid}.json"
         if archived.exists():
             archived.unlink()  # 重新入队时把归档也撤掉，否则 worker 会以为已完成
@@ -2870,9 +3116,9 @@ class Hive:
         否则一张注定失败的卡会被判死→重派→判死无限循环，常驻的 orchestrate 会一直烧 agent。
         人工显式 `hive retry` 不受此限（那是人在明确要求重跑）。
         """
+        claim = self.claim_info(tid) or {}
         if claim_backend() == "store":
-            info = self.claim_info(tid) or {}
-            store_release(tid, str(info.get("agent") or ""), requeue=True)
+            store_release(tid, str(claim.get("agent") or ""), requeue=True)
         if rev_parse(self.dir, f"origin/claim/{tid}"):
             git_net(["push", "origin", f":refs/heads/claim/{tid}"], self.dir,
                     check=False)
@@ -2880,6 +3126,10 @@ class Hive:
         if archived.exists():
             archived.unlink()  # 重新入队时把归档也撤掉，否则 worker 会以为已完成
         card = self.card(tid)
+        # fencing：回收即作废旧租约，卡面 fence 必须严格大于旧 claim 的 fence。
+        # 旧 worker 复活后写的结果（带旧 fence）在 land 时会被明确拒绝。
+        self._bump_fence(card, claim)
+        clear_local_lease(tid)
         if self._retries_left(card) <= 0:
             used = card.get("retries") or 0
             mx = self._max_retries(card)
@@ -3210,7 +3460,8 @@ class Hive:
 
 class Worker:
     def __init__(self, hive_dir: str, agent_name: str, keep_worktree=False,
-                 hive_state: str | None = None, max_concurrency: int | None = None):
+                 hive_state: str | None = None, max_concurrency: int | None = None,
+                 open_pr: bool = False):
         self.h = Hive(hive_dir)
         self.dir = self.h.dir
         self.name = agent_name
@@ -3239,6 +3490,10 @@ class Worker:
             raise HiveError(f"agent {agent_name} 没配置 command（或设 mode: verify / manual）")
         # 本机各任务的进度缓存，供心跳重推与里程碑更新（不上报就没人知道在干什么）
         self._status: dict[str, dict] = {}
+        # 本次进程持有的租约（lease_id/fence）；fencing 校验与心跳复用同一份
+        self._lease: dict[str, dict] = {}
+        # 推送 task/<tid> 后是否自动建 PR（--pr；失败只记 result["pr"]，不影响任务）
+        self.open_pr = bool(open_pr)
 
     # -- 配置热更新（T-0204） --------------------------------------------- #
     def _reload_cfg(self) -> dict:
@@ -3359,10 +3614,18 @@ class Worker:
         lease = int(self.h.card(tid).get("lease_minutes") or 180)
         claimed_at = iso()
         lease_until = iso(now() + timedelta(minutes=lease))
+        # fencing token：每次领取生成唯一 lease_id，并把卡面 fence 推进一格。
+        # 结果里带上它；旧 worker 的 lease_id 对不上当前 claim 时，写入直接被拒。
+        card = self.h.card(tid)
+        fence = Hive._fence_of(card) + 1
+        lease_id = uuid.uuid4().hex
         payload = json.dumps({
             "task": tid, "agent": self.name,
             "claimed_at": claimed_at,
             "lease_until": lease_until,
+            "lease_id": lease_id,
+            "fence": fence,
+            "backend": "git",
             "host": os.uname().nodename if hasattr(os, "uname") else os.environ.get("COMPUTERNAME", ""),
         }, ensure_ascii=False, indent=2)
 
@@ -3438,12 +3701,16 @@ class Worker:
                 # 半成品；远端失败 push 本身不会改任何引用。
                 _cleanup_claim_artifacts(self.dir, tid)
             else:
-                # git 抢锁成功后，把租约广播给本机集群（建议性、best-effort）。
+                # git 抢锁成功后：本地留底 + 广播给本机集群（建议性、best-effort）。
                 # 集群没起时这里只是多一次 0.8s 内的连接失败，不影响 claim。
+                rec = json.loads(payload)
+                self._lease[tid] = rec
+                save_local_lease(tid, rec)
                 cluster_publish_lease({
                     "task": tid, "agent": self.name,
                     "host": self.cfg.get("host") or current_host(),
                     "claimed_at": claimed_at, "lease_until": lease_until,
+                    "lease_id": lease_id, "fence": fence,
                 })
 
     # -- 租约心跳 ---------------------------------------------------------- #
@@ -3498,10 +3765,20 @@ class Worker:
                 log(f"{tid} store 续租失败（忽略）: {exc}")
             return
         info = self.h.claim_info(tid)
-        if not isinstance(info, dict) or info.get("agent") != self.name:
-            return  # 没 claim 或不是自己的，no-op
+        if not isinstance(info, dict) or not info.get("agent"):
+            log(f"{tid} 租约已被回收（claim 分支不存在），停止续租")
+            return
+        if info.get("agent") != self.name:
+            log(f"{tid} 租约已被 {info.get('agent')} 接管，停止续租")
+            return
         lease = int(self.h.card(tid).get("lease_minutes") or 180)
         payload = dict(info)
+        local = self._lease.get(tid) or load_local_lease(tid) or {}
+        if not payload.get("lease_id"):
+            payload["lease_id"] = local.get("lease_id") or uuid.uuid4().hex
+        if payload.get("fence") is None:
+            payload["fence"] = local.get("fence") or (Hive._fence_of(
+                self.h.card(tid)) + 1)
         payload["lease_until"] = iso(now() + timedelta(minutes=lease))
         payload["refreshed_at"] = iso()
         self.h.fetch()
@@ -3510,11 +3787,15 @@ class Worker:
             json.dumps(payload, ensure_ascii=False, indent=2),
             f"claim/{tid}", f"origin/claim/{tid}",
             f"lease {tid} by {self.name}")
+        self._lease[tid] = payload
+        save_local_lease(tid, payload)
         cluster_publish_lease({
             "task": tid, "agent": self.name,
             "host": info.get("host") or self.cfg.get("host") or current_host(),
             "claimed_at": info.get("claimed_at") or iso(),
             "lease_until": payload["lease_until"],
+            "lease_id": payload.get("lease_id"),
+            "fence": payload.get("fence"),
         })
 
     # -- 任务进度主动上报（agent -> hive）-------------------------------- #
@@ -3841,7 +4122,7 @@ class Worker:
                                  f"{len(card.get('verify') or [])} 条验收命令"))
         if not blocked:
             for cmd in (card.get("verify") or []):
-                p = run(cmd, cwd=wt, check=False, shell=True, timeout=1800)
+                p = run_verify(cmd, cwd=wt)
                 verify.append({"cmd": cmd, "code": p.returncode,
                                "tail": (p.stdout + p.stderr).strip().splitlines()[-5:]})
                 log(f"{tid} 验证 {p.returncode}: {cmd}")
@@ -3880,6 +4161,10 @@ class Worker:
             "declared_paths": card.get("paths") or [],
             "changed_files": changed, "out_of_paths": oop,
         }
+        if self.open_pr and ok and not verify_only:
+            result["pr"] = self.h.open_pr_for(tid, card, result, repo)
+            log(f"{tid} PR: " + (result["pr"].get("url")
+                                 or result["pr"].get("error") or "已处理"))
         self._write_result(tid, result)
         self.set_status(tid, state=result["status"], progress=100, step="完成",
                         message=(result.get("error") or result["status"]))
@@ -3946,7 +4231,12 @@ class Worker:
             "timed_out": False, "started_at": iso(), "finished_at": iso(),
             "duration_s": 0, "verify": [], "summary": error, "error": error,
         }
-        self._write_result(tid, result)
+        try:
+            self._write_result(tid, result)
+        except LeaseFenced as exc:
+            # 租约已被接管：这条失败结果也不许覆盖别人的结果，只在本地留痕。
+            log(f"{tid} 失败结果被 fencing 拒绝（{exc}），不写远端")
+            result["fenced"] = str(exc)
         (self.state / "done" / tid).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
         log(f"{tid} 失败: {error}")
         return result
@@ -3982,15 +4272,62 @@ class Worker:
         return result
 
     def _write_result(self, tid: str, result: dict) -> None:
+        """写结果到 res/<tid>：先做租约 fencing，再 force-with-lease 推送。
+
+        fencing 是纯 Git 模型缺的那道确定性防线：租约被回收/接管后，旧 worker
+        即使进程还活着、手里还有 worktree，也不许把结果盖到新持有者头上。
+        校验用**远端当前 claim** 与本地留底的 lease_id 对账，不匹配抛 LeaseFenced。
+        """
+        lease = self._assert_lease(tid)
+        for key in ("lease_id", "fence"):
+            if result.get(key) in (None, "") and lease.get(key) not in (None, ""):
+                result[key] = lease[key]
         commit_file_to_ref(
             self.dir, f"results/{tid}.json",
             json.dumps(result, ensure_ascii=False, indent=2),
             f"res/{tid}", "origin/main",
             f"result {tid}: {result['status']} by {self.name}", force=True,
         )
+        if lease.get("lease_id") or lease.get("fence") is not None:
+            save_local_lease(tid, {**lease, "submitted_at": iso(),
+                                   "result_status": result.get("status") or ""})
+        elif result.get("lease") != "missing":
+            result["lease"] = "missing"
         if claim_backend() == "store":
             claim = self.h.claim_info(tid) or {}
             store_result(tid, self.name, str(claim.get("lease_id") or ""), result)
+
+    def _assert_lease(self, tid: str) -> dict:
+        """确认「现在这个 claim 还是我的、且是我这一版租约」。
+
+        返回远端 claim 的完整 payload（供结果落 lease_id/fence）。失败抛
+        LeaseFenced —— 调用方必须把这次写入当成整条丢弃，而不是覆盖重试。
+        """
+        mine = self._lease.get(tid) or load_local_lease(tid) or {}
+        if claim_backend() != "store":
+            self.h.fetch()
+        info = self.h.claim_info(tid)
+        if not isinstance(info, dict) or not info.get("agent"):
+            # claim 分支不存在有两种完全不同的情况：
+            #   1) 我手里有这台机器的租约留底 → 说明**我**持有的租约被回收了，
+            #      这正是「旧 worker 复活」，必须拒写（否则会覆盖新持有者）；
+            #   2) 本就没 claim（总控 assign 后由 worker/人工直接跑）→ 旧行为允许，
+            #      结果标 lease=missing 便于事后分辨，不算 fencing 失败。
+            if str(mine.get("lease_id") or "") or mine.get("agent") == self.name:
+                raise LeaseFenced(
+                    f"{tid} 的 claim 分支已不存在（本机持有的租约被回收/关闭）")
+            return {"lease": "missing", "task": tid}
+        holder = str(info.get("agent") or "")
+        if holder != self.name:
+            raise LeaseFenced(f"{tid} 已被 {holder} 接管（本机 {self.name}）")
+        my_id = str(mine.get("lease_id") or "")
+        cur_id = str(info.get("lease_id") or "")
+        if my_id and cur_id and my_id != cur_id:
+            raise LeaseFenced(
+                f"{tid} lease_id 不匹配（本地 {my_id[:8]} ≠ 远端 {cur_id[:8]}）")
+        if my_id and not cur_id:
+            raise LeaseFenced(f"{tid} 远端 claim 缺 lease_id，无法确认是本进程租约")
+        return info
 
     # -- 主循环 ------------------------------------------------------------ #
     def loop(self, once=False, interval=30) -> None:
@@ -4048,7 +4385,7 @@ def cmd_init(args) -> None:
     # 伴侣模块（集群、冲突判定、派发渲染）有就一起带上；缺了也不影响主流程。
     here = Path(__file__).resolve().parent
     for name in ("hive.py", "hive_ports.py", "hive_cluster.py",
-                 "conflict.py", "dispatch_prompt.py"):
+                 "hive_pr.py", "hive_compat.py", "conflict.py", "dispatch_prompt.py"):
         src = here / name
         dst = d / name
         if src.exists() and not dst.exists():
@@ -4079,6 +4416,15 @@ def cmd_init(args) -> None:
             git(["remote", "add", "origin", args.remote], d)
         git_net(["push", "-u", "origin", "main"], d)
     log(f"协调仓库就绪: {d}")
+    # 集群从「可选」提升为「默认推荐」：init 显式 --cluster 就顺手拉起。
+    # worker 侧则默认拉起（hive work 可 --no-cluster 关），这样多机协作的
+    # 最终一致性窗口从分钟级（等下一次 git push）降到秒级。
+    if getattr(args, "cluster", False):
+        if cluster_ensure(d):
+            log("本机集群已拉起（hive cluster status 看主节点/在线节点）")
+        else:
+            log("集群没起来（缺 hive_cluster.py 或被 HIVE_CLUSTER_AUTOSTART=0 关掉）；"
+                "不影响 init 结果")
 
 
 def cmd_agent(args) -> None:
@@ -4346,7 +4692,63 @@ def cmd_take(args) -> None:
 
 
 def cmd_submit(args) -> None:
-    Hive(args.dir).cmd_submit(args.task, args.keep, args.note or "")
+    Hive(args.dir).cmd_submit(args.task, args.keep, args.note or "",
+                              pr=getattr(args, "pr", False))
+
+
+def cmd_pr(args) -> int:
+    """手动建 PR（worker `--pr` 之外的人工入口）。"""
+    try:
+        import hive_pr
+    except ImportError as exc:  # 缺模块时给出可操作的错误，而不是 traceback
+        raise HiveError(
+            "找不到 hive_pr.py（PR 自动化需要它和 hive.py 同目录；"
+            "老仓库请重新跑一次 `hive init` 或手工拷贝）") from exc
+    h = Hive(args.dir)
+    tid = args.task
+    card = h.card(tid)
+    result = h.result_info(tid) or {}
+    repo = args.repo_path or h.code_repo(card.get("repo") or "")
+    res = hive_pr.create_pr(
+        repo, tid, head=args.head or f"task/{tid}",
+        base=args.base or (card.get("base") or "main"),
+        title=args.title or hive_pr.build_title(tid, card),
+        body=args.body or hive_pr.build_body(tid, card, result),
+        provider=args.provider, dry_run=args.dry_run)
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+    else:
+        print(hive_pr.format_result(res, tid))
+    return 0 if (res.get("url") or res.get("dry_run")) else 1
+
+
+def cmd_lease(args) -> int:
+    """查看/清理本机租约留底（fencing 的第二道防线）。"""
+    action = getattr(args, "action", "list") or "list"
+    if action == "clear":
+        clear_local_lease(args.task or "*")
+        log(f"已清掉本机租约留底 {args.task or '（全部）'}")
+        return 0
+    if action == "show" and not args.task:
+        raise HiveError("lease show 需要任务号")
+    data = local_leases()
+    if args.task:
+        only = load_local_lease(args.task)
+        data = {args.task: only} if only else {}
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+    if not data:
+        print(f"本机没有租约留底（{lease_dir()}）")
+        return 0
+    print(f"{'任务':<10} {'agent':<16} {'fence':>5} {'lease_id':<10} "
+          f"{'lease_until':<22}")
+    for tid, rec in data.items():
+        print(f"{tid:<10} {str(rec.get('agent') or ''):<16} "
+              f"{rec.get('fence', '-'):>5} "
+              f"{str(rec.get('lease_id') or '')[:8]:<10} "
+              f"{str(rec.get('lease_until') or ''):<22}")
+    return 0
 
 
 def cmd_dispatch(args) -> None:
@@ -4542,11 +4944,12 @@ def cmd_claim(args) -> None:
 
 
 def cmd_work(args) -> None:
-    # worker 是那台机器上的常驻执行者；顺手把本机集群带起来，其他机器才能
-    # 实时看到这台机器的进度/租约（集群是可选件，起不来不影响 worker）。
-    cluster_ensure(args.dir)
+    # worker 是那台机器上的常驻执行者；默认顺手把本机集群带起来，其他机器才能
+    # 实时看到这台机器的进度/租约。集群起不来不影响 worker（--no-cluster 可关）。
+    if not getattr(args, "no_cluster", False):
+        cluster_ensure(args.dir)
     w = Worker(args.dir, args.agent, keep_worktree=args.keep, hive_state=args.state_dir,
-               max_concurrency=args.max_concurrency)
+               max_concurrency=args.max_concurrency, open_pr=getattr(args, "pr", False))
     w.loop(once=args.once, interval=args.interval)
 
 
@@ -4786,6 +5189,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("init", help="初始化协调仓库")
     s.add_argument("--remote", help="git 远端 URL")
+    s.add_argument("--cluster", action="store_true",
+                   help="顺便拉起本机集群（秒级同步进度/租约；也可事后 hive cluster start）")
     s.set_defaults(func=cmd_init)
 
     s = sub.add_parser("agent", help="登记 / 查看 agent")
@@ -4845,7 +5250,29 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.add_argument("--keep", action="store_true", help="保留 worktree")
     s.add_argument("--note", help="没有 summary.md 时的说明")
+    s.add_argument("--pr", action="store_true",
+                   help="verify 全绿后向 Gitea/GitLab 自动建 PR（失败不影响提交）")
     s.set_defaults(func=cmd_submit)
+
+    s = sub.add_parser("pr", help="给已推送的 task/<tid> 建 PR（Gitea/GitLab，可附着结果）")
+    s.add_argument("task")
+    s.add_argument("--head", help="源分支（默认 task/<task>）")
+    s.add_argument("--base", help="目标分支（默认取任务卡 base，缺省 main）")
+    s.add_argument("--title")
+    s.add_argument("--body")
+    s.add_argument("--provider", choices=["gitea", "gitlab", "github", "none"],
+                   help="覆盖平台推断（github 请用 gh pr create）")
+    s.add_argument("--repo-path", help="代码仓本地路径（默认按任务卡的 repo 找）")
+    s.add_argument("--dry-run", action="store_true", help="只显示将创建的 PR")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_pr)
+
+    s = sub.add_parser("lease", help="查看/清理本机租约留底（fencing token）")
+    s.add_argument("action", nargs="?", default="list",
+                   choices=["list", "show", "clear"])
+    s.add_argument("task", nargs="?", help="只看/清理这一张卡")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_lease)
 
     s = sub.add_parser("dispatch", help="自动分派（能力/负载/依赖/paths 冲突感知）")
     s.add_argument("--apply", action="store_true", help="真正写入；默认 dry-run")
@@ -5131,6 +5558,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--state-dir")
     s.add_argument("--max-concurrency", type=int, default=None,
                    help="worker 内并行跑卡的上限（默认取 agent 配置 max_concurrency）")
+    s.add_argument("--pr", action="store_true",
+                   help="推送 task/<tid> 后自动向 Gitea/GitLab 建 PR（失败不影响任务）")
+    s.add_argument("--no-cluster", action="store_true",
+                   help="不自动拉起本机集群（默认会拉起，秒级同步进度/租约）")
     s.set_defaults(func=cmd_work)
     return p
 

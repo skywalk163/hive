@@ -95,15 +95,24 @@ def test_non_utf8_result_blob_is_still_readable(tmp_path):
 
 
 def test_same_bytes_would_have_crashed_without_errors(tmp_path):
-    """证明上一条是真守卫：同样的字节，按 UTF-8 严格解码必然炸。"""
+    """证明上一条是真守卫：同样的字节，严格按 UTF-8 解码必然炸。
+
+    为什么不在 subprocess 上调 raises(UnicodeDecodeError)：解码发生在子进程的
+    读取线程里，POSIX 上它会传播回来，Windows 上却只留一条
+    PytestUnhandledThreadExceptionWarning（线程异常不冒泡），于是"同样的字节
+    必然炸"这件事在 Windows 上测不出来。改成直接对 blob 做严格解码：断言对象
+    还是同一批字节，平台差异不参与判定。
+    """
     repo = _make_repo(tmp_path)
     raw = json.dumps(SAMPLE, ensure_ascii=False, indent=2).encode("gbk")
-    ref = _put_result_blob(repo, "T-0142", raw)
+    _put_result_blob(repo, "T-0142", raw)
 
     with pytest.raises(UnicodeDecodeError):
-        subprocess.run(["git", "show", f"{ref}:results/T-0142.json"],
-                       cwd=str(repo), text=True, encoding="utf-8",
-                       capture_output=True, check=True)
+        raw.decode("utf-8")
+
+    # 反证：同一批字节用 errors="replace" 能读出骨架（这正是 run() 的兜底）
+    relaxed = raw.decode("utf-8", "replace")
+    assert "T-0142" in relaxed and "\ufffd" in relaxed
 
 
 def test_unreadable_bytes_are_replaced_not_dropped(tmp_path):

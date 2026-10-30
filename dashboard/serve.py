@@ -102,6 +102,73 @@ def hive_argv(*args):
 TASK_ACTIONS = ("close", "retry", "unassign", "reopen")  # 看板按钮暴露的操作
 TID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")  # 任务号允许字符
 
+# ---- 写操作鉴权（复用 mcp_auth 的本机 token 表）----
+#
+# 看板默认只听 127.0.0.1：本机就是身份边界，写操作直接放行（与老行为一致，
+# 不至于一升级就所有按钮 401）。一旦 --host 0.0.0.0（让别的机器/手机看），
+# 写操作**必须**带 token，否则只能读。判定口径：
+#   * HIVE_DASH_AUTH=off   显式关闭（自建内网也接受风险时用）
+#   * HIVE_DASH_AUTH=on     任何来源都要 token
+#   * HIVE_DASH_AUTH=auto   默认：非 loopback 绑定 → 要 token
+# token 来源（依次尝试）：Authorization: Bearer / X-Hive-Token / hive_token cookie。
+# cookie 由 POST /api/login 写入（HttpOnly；看板本身还要能读，所以不用 SameSite=None）。
+AUTH_MODE_ENV = "HIVE_DASH_AUTH"
+COOKIE_NAME = "hive_token"
+LOGIN_PATH = "/api/login"
+LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def _auth_mode(bind_host: str) -> str:
+    mode = (os.environ.get(AUTH_MODE_ENV) or "auto").strip().lower()
+    if mode in ("off", "0", "false", "no"):
+        return "off"
+    if mode in ("on", "1", "true", "yes"):
+        return "on"
+    host = (bind_host or "").strip()
+    return "off" if host in LOOPBACK_HOSTS else "on"
+
+
+def _load_mcp_auth():
+    """延迟导入 mcp_auth；缺模块时返回 None（写操作会被拒绝，而不是静默放行）。"""
+    try:
+        import mcp_auth  # noqa: WPS433  同仓模块，按需导入
+    except ImportError:
+        return None
+    return mcp_auth
+
+
+def _resolve_dashboard_token(token: str):
+    """校验 token，返回 {agent, role} 或 None。role 决定能做什么。"""
+    if not token:
+        return None
+    mod = _load_mcp_auth()
+    if mod is None:
+        return None
+    try:
+        return mod.resolve(token)
+    except Exception:  # noqa: BLE001  坏 token 文件不等于我有权限
+        return None
+
+
+def _audit_log_path() -> Path:
+    return BASE_DIR / "audit.log"
+
+
+def append_audit(record: dict) -> None:
+    """把一次写操作记进 dashboard/audit.log（JSON Lines，append-only）。
+
+    为什么单独一个文件而不是混进 status.json：audit 要长期留、要能 grep，
+    而 status.json 是频繁覆盖的派生快照。
+    """
+    row = {"ts": _iso_now(), **record}
+    try:
+        path = _audit_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError as exc:  # pragma: no cover - 磁盘满等极端情况
+        sys.stderr.write("[hive-dashboard] 审计日志写入失败: %s\n" % exc)
+
 # agent 主动上报：HTTP 直推（加速通道）落到这个文件，/api/status 取快照时合并进去
 PUSHED_STATUS_PATH = BASE_DIR / "pushed-status.json"
 
@@ -278,8 +345,11 @@ def render_dispatch(card, agent, fmt, body):
         card, agent=agent or None, output_format=fmt, body=body)
 
 
-def build_handler(status_path):
-    """用闭包把状态文件路径注入请求处理器（避免全局变量）。"""
+def build_handler(status_path, write_auth="off"):
+    """用闭包把状态文件路径注入请求处理器（避免全局变量）。
+
+    ``write_auth`` 为 "on" 时写操作必须带 token；"off" 表示本机回环、放行。
+    """
 
     class HiveHandler(BaseHTTPRequestHandler):
         server_version = "hive-dashboard/1.0"
@@ -337,8 +407,45 @@ def build_handler(status_path):
         def do_HEAD(self):  # noqa: N802
             self.do_GET()
 
+        # ---- 鉴权 ----
+        def client_token(self):
+            """从请求里取 token：Bearer → X-Hive-Token → cookie。"""
+            auth = self.headers.get("Authorization") or ""
+            if auth.lower().startswith("bearer "):
+                return auth[7:].strip()
+            direct = (self.headers.get("X-Hive-Token") or "").strip()
+            if direct:
+                return direct
+            cookie = self.headers.get("Cookie") or ""
+            for part in cookie.split(";"):
+                name, _, value = part.strip().partition("=")
+                if name == COOKIE_NAME and value:
+                    return value.strip()
+            return ""
+
+        def require_write_auth(self):
+            """写操作的统一鉴权；通过返回身份信息，不通过已经回了 401 并返回 None。"""
+            if write_auth == "off":
+                return {"agent": "loopback", "role": "controller", "mode": "off"}
+            who = _resolve_dashboard_token(self.client_token())
+            if not who:
+                self._send_json(401, {
+                    "ok": False, "auth": "required",
+                    "error": "写操作需要 token：hive agent enroll <controller> 拿 token，"
+                             "再在看板右上角「登录」里填；或向后端带 "
+                             "Authorization: Bearer <token>",
+                })
+                return None
+            return who
+
+        def is_controller(self, who) -> bool:
+            return str((who or {}).get("role") or "") in ("controller", "admin")
+
         def do_POST(self):  # noqa: N802
             path = urlparse(self.path).path
+            if path == LOGIN_PATH:
+                self.serve_login()
+                return
             if path == API_CONFIG:
                 self.serve_config_post()
                 return
@@ -349,6 +456,38 @@ def build_handler(status_path):
                 self.serve_push()
                 return
             self._send_json(404, {"error": "未找到资源: %s" % path})
+
+        # ---- /api/login：写入 HttpOnly cookie，后续写操作凭它鉴权 ----
+        def serve_login(self):
+            length = self._read_length()
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": "请求体不是合法 JSON: %s" % exc})
+                return
+            if not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "error": "顶层必须是对象"})
+                return
+            who = _resolve_dashboard_token(str(body.get("token") or "").strip())
+            if not who:
+                append_audit({"action": "login", "ok": False, "source": self.client_address[0],
+                              "detail": "token 无效"})
+                self._send_json(401, {"ok": False, "error": "token 无效或已吊销"})
+                return
+            cookie = ("%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400"
+                      % (COOKIE_NAME, who.get("token") or str(body.get("token")).strip()))
+            append_audit({"action": "login", "ok": True, "agent": who.get("agent"),
+                          "role": who.get("role"), "source": self.client_address[0]})
+            self._send_json(200, {"ok": True, "agent": who.get("agent"),
+                                  "role": who.get("role")},
+                            extra_headers={"Set-Cookie": cookie})
+
+        def _read_length(self) -> int:
+            try:
+                return int(self.headers.get("Content-Length", "0") or 0)
+            except ValueError:
+                return 0
 
         # ---- /api/config：系统只读信息 + 服务端共享看板默认（GET/POST） ----
         def system_info(self):
@@ -734,6 +873,21 @@ def build_handler(status_path):
             if not TID_RE.match(tid):
                 self._send_json(400, {"ok": False, "error": "任务号不合法: %s" % tid})
                 return
+            who = self.require_write_auth()
+            if who is None:
+                append_audit({"action": action, "task": tid, "ok": False,
+                              "source": self.client_address[0], "detail": "未鉴权"})
+                return
+            # close/reopen 是不可逆或半不可逆的运维动作，只许 controller 角色做；
+            # retry/unassign 退回待领取，worker 角色自己做自己的卡也合理。
+            if action in ("close", "reopen") and not self.is_controller(who):
+                self._send_json(403, {
+                    "ok": False,
+                    "error": "%s 需要 controller 角色（当前 %s）"
+                             % (action, who.get("agent") or "?")})
+                append_audit({"action": action, "task": tid, "ok": False,
+                              "agent": who.get("agent"), "detail": "角色不足"})
+                return
 
             note = str(body.get("note") or body.get("reason") or "看板操作")
             argv = hive_argv()
@@ -768,9 +922,13 @@ def build_handler(status_path):
                                      encoding="utf-8", env=PYTHON_ENV,
                                      timeout=HIVE_OP_TIMEOUT)
             except FileNotFoundError:
+                append_audit({"action": action, "task": tid, "ok": False,
+                              "agent": who.get("agent"), "detail": "找不到 hive.py"})
                 self._send_json(500, {"ok": False, "error": "找不到 hive.py: %s" % HIVE_PY})
                 return
             except subprocess.TimeoutExpired:
+                append_audit({"action": action, "task": tid, "ok": False,
+                              "agent": who.get("agent"), "detail": "超时"})
                 self._send_json(504, {"ok": False,
                                       "error": "操作超时（%d 秒）" % HIVE_OP_TIMEOUT})
                 return
@@ -778,9 +936,17 @@ def build_handler(status_path):
             out = (proc.stdout or "").strip()
             err = (proc.stderr or "").strip()
             if proc.returncode != 0:
+                append_audit({"action": action, "task": tid, "ok": False,
+                              "agent": who.get("agent"), "note": note,
+                              "code": proc.returncode,
+                              "detail": (err or out or "")[-300:],
+                              "source": self.client_address[0]})
                 self._send_json(200, {"ok": False, "code": proc.returncode,
                                       "error": (err or out or "命令执行失败")[-600:]})
                 return
+            append_audit({"action": action, "task": tid, "ok": True,
+                          "agent": who.get("agent"), "role": who.get("role"),
+                          "note": note, "source": self.client_address[0]})
             # 成功：重新生成状态文件，让看板即时反映变化
             self._refresh_status()
             self._send_json(200, {"ok": True, "output": out[-600:]})
@@ -819,19 +985,31 @@ def main(argv=None):
                         help="后台定期跑 hive status --json 重生成状态文件（辅通道）")
     parser.add_argument("--refresh-interval", dest="refresh_interval", type=int, default=30,
                         help="--auto-refresh 的间隔秒数（默认 30，最小 5）")
+    parser.add_argument("--auth", choices=["auto", "on", "off"], default=None,
+                        help="写操作鉴权：auto=非回环绑定就要 token（默认）、"
+                             "on=始终要 token、off=关闭（也可用 $HIVE_DASH_AUTH）")
     args = parser.parse_args(argv)
+
+    if args.auth:
+        os.environ[AUTH_MODE_ENV] = args.auth
+    write_auth = _auth_mode(args.host)
 
     status_path = str(Path(args.status).expanduser())
     if args.auto_refresh:
         threading.Thread(target=refresh_loop,
                          args=(status_path, args.refresh_interval), daemon=True).start()
         print("自动刷新: 每 %d 秒重生成状态文件" % max(5, args.refresh_interval))
-    handler = build_handler(status_path)
+    handler = build_handler(status_path, write_auth=write_auth)
     ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((args.host, args.port), handler)
 
     print("http://%s:%d" % ("127.0.0.1" if args.host in ("0.0.0.0", "") else args.host, args.port))
     print("状态文件: %s" % status_path)
+    if write_auth == "off":
+        print("写操作: 免鉴权（本机回环）")
+    else:
+        print("写操作: 需要 token（hive agent enroll <controller> 生成，右上角登录）")
+        print("审计日志: %s" % _audit_log_path())
     sys.stdout.flush()
     try:
         server.serve_forever()

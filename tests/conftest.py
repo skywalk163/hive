@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -15,9 +16,28 @@ HIVE = ROOT / "hive.py"
 FAKE = ROOT / "fake_agent.py"
 
 
+def _tmp_home() -> Path:
+    """每个测试进程一份独立的临时 home（用于租约留底等本机状态）。"""
+    base = Path(tempfile.gettempdir()) / f"hive-test-home-{os.getpid()}"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+def _utf8_env(env=None):
+    """子进程统一 UTF-8：Windows 上 stdout 默认 cp936，中文断言会看到乱码。"""
+    base = {**os.environ, **(env or {})}
+    base.setdefault("PYTHONIOENCODING", "utf-8")
+    base.setdefault("PYTHONUTF8", "1")
+    return base
+
+
 def sh(cmd, cwd=None, check=True, env=None):
+    # encoding 钉死 utf-8：hive.py 全程按 utf-8 写子进程输出（T-0143），而
+    # `text=True` 默认用 locale 编码（Windows 上是 cp936）。看板/统计里只要有中文，
+    # 测试侧的读取线程就会 UnicodeDecodeError → stdout=None → json.loads(None) 炸掉，
+    # 看起来像"业务逻辑坏了"，实际只是测试夹具没对齐编码。
     p = subprocess.run([str(c) for c in cmd], cwd=str(cwd) if cwd else None,
-                       text=True, capture_output=True, env=env)
+                       text=True, capture_output=True, env=_utf8_env(env),
+                       encoding="utf-8", errors="replace")
     if check and p.returncode != 0:
         raise AssertionError(f"命令失败({p.returncode}): {cmd}\n{p.stdout}\n{p.stderr}")
     return p
@@ -41,6 +61,7 @@ class World:
             **os.environ,
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+            "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
         }
         self.code_origin = root / "light.git"
         self.hive_origin = root / "hive.git"
@@ -165,6 +186,9 @@ def _isolate_live_hive_config(monkeypatch):
     """测试不读开发机 ~/.hive 的运行时配置（否则本机跑 store 会把测试带偏）。"""
     monkeypatch.setenv("HIVE_CLAIM_BACKEND", "git")
     monkeypatch.delenv("HIVE_STORE_PATH", raising=False)
+    # 本机租约留底也隔离：worker 测试会写 ~/.hive/leases/<tid>.json，
+    # 不隔离就会把测试卡（T-9xxx）留在开发机的真实租约目录里。
+    monkeypatch.setenv("HIVE_LEASE_DIR", str(_tmp_home() / "leases"))
 
 
 @pytest.fixture()
