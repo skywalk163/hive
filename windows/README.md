@@ -4,9 +4,10 @@
 它经常死机，所以不放在关键路径上，租约短、任务小、死了靠 `gc/retry` 回收。
 
 > `bootstrap.ps1` / `run-worker.ps1` 是 ASCII，兼容 Windows PowerShell 5.1；路径里的中文不会影响执行。
-> `dispatch-agent.ps1` / `dispatch-agent.ahk`（T-0187）例外：它们是**带 UTF-8 BOM 的中文脚本** ——
-> 5.1 对无 BOM 的 .ps1 按 ANSI(cp936) 解码，会破坏中文字符串终止、脚本连解析都过不去；
-> 改这两个文件时**务必保留 BOM**（`.sample.json` 相反，不能带 BOM，否则 `json.loads` 会炸）。
+> `dispatch-agent.ps1` / `dispatch-agent.ahk`（T-0187）、`tray.ahk` 与 `scripts\install-autostart.ps1`（T-0208）
+> 例外：它们是**带 UTF-8 BOM 的中文脚本** —— 5.1 对无 BOM 的 .ps1 按 ANSI(cp936) 解码，会破坏
+> 中文字符串终止、脚本连解析都过不去；AHK v2 对无 BOM 的非 ASCII 源文件同样按 ANSI 读。
+> 改这几个文件时**务必保留 BOM**（`.sample.json` 相反，不能带 BOM，否则 `json.loads` 会炸）。
 
 > **路径约定**：按 README §0，Windows 工作目录是 `G:\dswork`（或 `D:\dswork`），hive 仓放
 > `G:\dswork\hive`。本文早期示例仍按 `C:\hive` 写；要用新布局，给 `bootstrap.ps1` 加
@@ -297,6 +298,79 @@ MCP server 以「一个 agent 的身份」运行，所有写操作只作用在�
 - `netplwiz` 取消“必须输入密码”，或用 Sysinternals **Autologon**；
 - 电源计划设为“从不睡眠”，合盖/关机策略按 VM 设置；
 - 开机后计划任务会拉起 worker，日志在 `C:\hive\logs\worker-win10.log`。
+
+## 3.5 看板常驻部分：日志轮转 / 单实例守护 / 系统托盘（T-0208）
+
+看板是**常驻**的（登录自启、一直开着），所以它得自己解决三件事：日志别把磁盘写满、
+别被重复拉出第二个实例、别动不动弹个窗口打断人。三件事都落在
+`scripts\install-autostart.ps1`（唯一入口）和 `windows\tray.ahk`（托盘视图）里。
+
+### 唯一入口：`scripts\install-autostart.ps1`
+
+托盘和计划任务**都调它**，启动 / 停止 / 状态只有这一处实现 —— 两处实现一分叉，
+「谁又拉起了第二个看板」就查不出肇事者。
+
+| 命令 | 动作 |
+|---|---|
+| `install-autostart.ps1` | 装登录自启计划任务 `HiveDashboard`，并启动看板 |
+| `install-autostart.ps1 -Start` | 启动；**已在跑就直接返回**（不重复拉起） |
+| `install-autostart.ps1 -Stop` | 停止：先打印「将停止以下进程」清单，再 `taskkill /PID <pid> /T /F` |
+| `install-autostart.ps1 -Restart` | 先停后起 |
+| `install-autostart.ps1 -Status` | 只看状态（`运行中` / `未运行` / `端口被占用`），不动任何进程 |
+| `install-autostart.ps1 -Uninstall` | 停掉实例并删除计划任务 |
+
+- **日志轮转**：写到 `%USERPROFILE%\.hive\logs\hive-<yyyyMMdd>.log`，**按天一份、追加写**。
+  - 追加走 `cmd` 的 `>>` 重定向 —— `Start-Process -RedirectStandardOutput` 会把文件**截断重写**，
+    按天追加就废了（真机实测：先后写 `FIRST`、`SECOND`，文件里只剩 `SECOND`）。
+- **大小上限** `-MaxLogMB`（默认 5）：当天日志超限就改名成 `hive-<日期>.log.1`、`.2`……，另开一份。
+    轮转只发生在**拉起看板之前**：拉起后那条 `cmd` 一直开着日志文件（`>>` 不共享写），
+    这时 `Move-Item` 改不了名（真机实测 `MoveFileInfoItemIOError`）。改不动就记一句警告、下次启动再轮，
+    不让轮转把启动流程带崩。
+  - **数量上限** `-LogDays`（默认 7）：每次启动清掉超过 7 天的 `hive-*.log*`；只动 `hive-*`，
+    不碰同目录里 `worker-win10.log` 这类别人的日志。
+  - **生命周期行**：启动行写在「拉起看板之前」、停止行写在「`taskkill` 之后」，两处都自带 `try/catch`。
+    进程活着时它占着日志文件，这时 `Add-Content` 会抛 IOException，而脚本是
+    `$ErrorActionPreference = 'Stop'` —— 真机实测的后果是「启动流程断在写日志那一步」；
+    而 `-Stop` 更糟：异常发生在 `taskkill` 之前，**进程根本没被杀掉**，看着却像「停过了」。
+  - **编码**：追加显式写成 `Add-Content -Encoding UTF8`。PS 5.1 的 `Add-Content` 默认按 ANSI
+    （简体中文机器上是 GBK）落盘，而看板 stdout 经 `>>` 进来的是 UTF-8 —— 不钉编码，脚本自己写下的
+    中文行在日志里就是乱码（真机实测：「启动看板 …」整行变问号方块）。代价是新建的那份当天日志带
+    UTF-8 BOM，读取端按 UTF-8 解即可。
+- **单实例守护**：`-Start` 先判状态，`running`（pid 文件有效且进程在）或 `port-busy`
+  （端口上有看板但不是本脚本拉的）都**直接返回 0**，不启第二个。状态判定：
+  - `running` —— `%USERPROFILE%\.hive\run\dashboard.pid` 里的 pid 还活着（`tasklist /FI "PID eq ..."`）；
+  - `port-busy` —— pid 文件无效，但端口上确实有人在服务：先按 **TCP 连通性**判（有人监听就算占），
+    连不上再退到只读接口 `GET /api/status` 兜底。**不能只看 HTTP 200** —— 看板刚起来、
+    状态文件还没生成时会返 503，那时它其实已经在服务了，只看 200 就会误判成「没在跑」而拉出第二个；
+  - `stopped` —— 端口空着，可以起。
+- **不打扰**：拉看板一律 `-WindowStyle Hidden`（cmd 包装 + python 隐藏），
+  脚本**从不自动打开浏览器**。计划任务也以 `-WindowStyle Hidden` 起 PowerShell。
+
+### 托盘：`windows\tray.ahk`（AutoHotkey v2）
+
+一个托盘图标 + 一个菜单，**不占窗口、不做全屏 TUI**。菜单六项：
+`状态：…` / `启动` / `停止` / `打开看板` / `打开日志` / `退出`，双击图标 = 打开看板。
+
+- 状态文案每 5 秒刷新一次，**只读**看板自己的 HTTP 接口：
+  `GET /api/cluster/health` 取主节点名（`leader.name`，没选出 leader 就退到 `node.name`），
+  `GET /api/status` 数 `"state":"running"` 的条数 → `状态：运行中 · 主节点 X · 在跑 N 张`；
+  两个接口都取不到就显示 `状态：未运行`（不弹错误框、不写日志）。
+- `启动` / `停止` **一律委托** `scripts\install-autostart.ps1`（`-Start` / `-Stop`），
+  托盘这层**绝不自己杀进程**（源码里没有 `taskkill` / `Stop-Process` / `WinKill`）。
+- 前提：装 AutoHotkey v2 —— `winget install --id AutoHotkey.AutoHotkey -e`。
+  本文件是 UTF-8 带 BOM（AHK v2 对无 BOM 的非 ASCII 源文件按 ANSI 读，中文会乱码）。
+
+### 计划任务
+
+登录触发（`schtasks /sc onlogon`，不需要管理员）。任务命令行是
+`powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File <仓库>\scripts\install-autostart.ps1 -Start -Port 8787 -Interval 20`。
+要“开机即启动、不登录也跑”，用 `-RunAsSystem`（需管理员，走 `/sc onstart /ru SYSTEM`）。
+注意 `-tr` 里刻意**不嵌引号**：PS 5.1 给原生程序传含引号的参数会被转义坏（实测退出码 1），
+所以仓库路径不要含空格（脚本会对含空格路径给出警告）。
+
+> 静态守卫见 `tests/test_dispatch_script_static.py` 第 8 节：钉住 BOM、日志轮转的三条口径、
+> 停进程必须按 PID（禁 `/IM`、禁 `Stop-Process`）、轮转与生命周期行必须避开「日志文件正被看板
+> 占用」的那个窗口（否则 `-Stop` 会断在 `taskkill` 之前）、以及托盘只读接口 / 不自己杀进程。
 
 ## 4. 快照与回滚
 
