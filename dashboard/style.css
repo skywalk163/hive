@@ -20,6 +20,9 @@
   --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 6px 16px rgba(16, 24, 40, .06);
   --radius: 10px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  /* 顶栏高度：drawer 用它让位（app.js 会按 .topbar 实际高度覆盖，这里是首帧兜底）。
+     T-0207：抽屉 top 从 0 改成 var(--topbar-h)，不再压住顶栏筛选区。 */
+  --topbar-h: 84px;
 }
 
 [data-theme="dark"] {
@@ -68,7 +71,9 @@ body {
 .topbar {
   position: sticky;
   top: 0;
-  z-index: 20;
+  /* T-0207：20 -> 33。原先抽屉(z31)/遮罩(z30)压过顶栏，右侧筛选区点不到；
+     顶栏提层到 33（仍低于 toast1000 / drop-hint40），抽屉打开时筛选仍可点。 */
+  z-index: 33;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   padding: 10px 14px;
@@ -554,7 +559,8 @@ body {
 
 .drawer {
   position: fixed;
-  top: 0;
+  /* T-0207：top 从 0 改成顶栏高度，抽屉从顶栏下方滑入，不再压住顶栏筛选区。 */
+  top: var(--topbar-h);
   right: 0;
   bottom: 0;
   width: min(560px, 92vw);
@@ -683,7 +689,9 @@ body.dropping .drop-hint { opacity: 1; visibility: visible; }
   border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: var(--shadow);
-  z-index: 32;
+  /* T-0207：32 -> 34。顶栏提到 33 后，设置弹窗要仍高于顶栏，
+     否则居中弹窗的顶边会被 sticky 顶栏盖住、背景遮罩也挡不住顶栏筛选。 */
+  z-index: 34;
   display: flex;
   flex-direction: column;
   overflow: hidden;
