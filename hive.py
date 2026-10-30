@@ -917,6 +917,29 @@ def rev_parse(cwd, ref) -> str | None:
     return p.stdout.strip() if p.returncode == 0 else None
 
 
+def remote_branch_head(repo: Path, ref: str) -> str | None:
+    """`git ls-remote origin refs/heads/<ref>` 取回远端 sha。
+
+    网络失败/超时重试一次（「失败按未推送处理并重试一次」）；两次都失败按
+    「远端无此分支」处理（宁严勿纵：缺检出的代价是假成功，比多报一次失败严重）。
+    返回 None 表示分支不存在或无法确认。
+    """
+    last: HiveError | None = None
+    for _ in range(2):
+        try:
+            p = git_net(["ls-remote", "origin", f"refs/heads/{ref}"], repo,
+                        check=False)
+        except HiveError as e:  # 网络失败/超时：重试一次
+            last = e
+            continue
+        line = (p.stdout or "").strip()
+        if not line:
+            return None  # 命令跑通了但没匹配：分支确实不存在
+        return line.split("\t", 1)[0]
+    log(f"ls-remote {ref} 两次都失败，按未推送处理：{last}")
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # 任务卡：极简 Markdown frontmatter（只支持标量与标量列表）
 # --------------------------------------------------------------------------- #
@@ -969,6 +992,90 @@ def parse_card(path: Path):
         else:
             raise HiveError(f"{path}:{lineno} 无法解析: {line!r}")
     return data, body
+
+
+# --------------------------------------------------------------------------- #
+# 结果闸门（T-0205）：head 没推上来照样记 done 的假成功必须被拦下。
+# --------------------------------------------------------------------------- #
+
+def guard_result_head(repo: Path, tid: str, head: str | None,
+                      allow_empty_diff: bool, changed: list[str],
+                      check_remote: bool = True) -> tuple[bool, str]:
+    """结果闸门：产结果前校验「head 在远端可获取」+「零改动非正常」。
+
+    返回 (ok, error)。ok=False 时调用方必须把结果 status 落成 failed。
+    只用于会产出代码分支的路径（exec 模式）；verify-only / 纯调查卡请绕开或传
+    allow_empty_diff=True。
+
+    * 零改动：一张改代码的卡一个文件都没动 = 没干活或没提交，直接 failed
+      （卡片显式声明 allow_empty_diff: true 才放行）。
+    * head 未推送：`ls-remote origin refs/heads/task/<tid>` 取回的 sha 必须等于
+      报告的 head；不一致或远端无分支 → failed。
+    * head 为 None：本地连提交都没做成（push 失败），直接 failed。
+      但 allow_empty_diff=True 时放行（纯调查/台账类卡不产出代码分支）。
+    """
+    if not allow_empty_diff and not changed:
+        return False, ("零改动：结果没有任何 changed_files，判 failed；"
+                       "若为纯调查/台账类卡请在任务卡声明 allow_empty_diff: true")
+    if check_remote:
+        if not head:
+            if allow_empty_diff:
+                return True, ""
+            return False, ("head 未推送：本地没有可提交的 HEAD（push 失败），"
+                           "task/<tid> 分支未推到远端")
+        remote = remote_branch_head(repo, f"task/{tid}")
+        if remote != head:
+            return False, (f"head 未推送/不一致：本地 {head}，"
+                           f"远端 {remote or '无'}")
+    return True, ""
+
+
+def result_diff_files(repo: Path, base: str, head: str) -> list[str]:
+    """`git diff --name-only base...head` 列出的改动文件（三点差，取 merge-base）。
+
+    用于 land 前核对结果记录的 `changed_files` 是否与实际分支改动数量级一致，
+    防「零改动也 done」的旧结果被当成有效验收。base 不存在时返回空列表。
+    """
+    if not rev_parse(repo, base) or not rev_parse(repo, head):
+        return []
+    p = git(["diff", "--name-only", f"{base}...{head}"], repo, check=False)
+    return [l for l in p.stdout.splitlines() if l.strip()]
+
+
+def guard_land_self_consistency(repo: Path, tid: str, base: str,
+                                result: dict, allow_empty_diff: bool,
+                                check_remote: bool = True) -> tuple[bool, str]:
+    """land 前置的结果自洽性校验（T-0205 追加证据）。
+
+    防止「结果记的 head 与实际分支头对不上、verify 是在另一棵树上跑的」被当成
+    这次交付的验收（T-0199 实例：结果 head=b8702120，远端 task/T-0199 实际是
+    6bf89553，verify 的 18 passed 是在拿不到的树上跑的）。返回 (ok, error)；
+    ok=False 时 land 必须拒绝合入。
+
+    校验两条：
+    1. 结果记录的 head 必须等于远端 origin/task/<tid> 的分支头（否则提示
+       「结果对应的是另一棵树，请重跑验收」）；
+    2. 记录的 changed_files 非空（除非 allow_empty_diff），且与
+       `git diff --name-only base...origin/task/<tid>` 数量级大致一致
+       （防「零改动也 done」）。
+    """
+    recorded_head = (result or {}).get("head")
+    task_head = rev_parse(repo, f"origin/task/{tid}")
+    if check_remote and recorded_head:
+        if task_head != recorded_head:
+            return False, (f"结果记录的 head {recorded_head} 与远端分支头 "
+                           f"{task_head or '无'} 不一致：结果对应的是另一棵树，"
+                           f"请重跑验收")
+    recorded_changed = (result or {}).get("changed_files") or []
+    if not allow_empty_diff and not recorded_changed:
+        return False, ("结果 changed_files 为空（零改动），拒绝合入；"
+                       "若是纯调查/台账类卡请在任务卡声明 allow_empty_diff: true")
+    if recorded_changed and task_head:
+        actual = result_diff_files(repo, base, f"origin/task/{tid}")
+        if not actual and not allow_empty_diff:
+            return False, (f"远端分支相对 {base} 无任何改动，"
+                           f"与结果记录的 {len(recorded_changed)} 个文件不符")
+    return True, ""
 
 
 # verify 强度：只检查痕迹的是 weak，真的会执行被测对象的才是 strong。
@@ -2726,6 +2833,21 @@ class Hive:
             log(f"{tid} 验证 {p.returncode}: {cmd}")
         ok = all(v["code"] == 0 for v in verify)
 
+        # 结果闸门（T-0205）：产结果前校验 head 在远端可获取、零改动非异常。
+        # 手动 submit 与 worker 走同一条产结果链路（deepseek-win 等 manual agent
+        # 也在这里落地），所以同一套闸门必须在此生效，不能只在 worker 分支里加。
+        if ok:
+            allow_empty = bool(card.get("allow_empty_diff"))
+            guard_ok, guard_err = guard_result_head(
+                repo, tid, head, allow_empty, changed)
+            if not guard_ok:
+                ok = False
+                error = guard_err
+            else:
+                error = ""
+        else:
+            error = "verify 未通过"
+
         summary_file = wt / ".hive" / "summary.md"
         if summary_file.exists() and summary_file.stat().st_size > 0:
             summary = summary_file.read_text(encoding="utf-8").strip()
@@ -2746,7 +2868,7 @@ class Hive:
             "head": head, "exit_code": 0, "timed_out": False,
             "started_at": started, "finished_at": iso(),
             "duration_s": round(duration, 1), "verify": verify, "summary": summary,
-            "error": "" if ok else "verify 未通过",
+            "error": error,
             "declared_paths": card.get("paths") or [],
             "changed_files": changed, "out_of_paths": oop,
         }
@@ -4145,6 +4267,7 @@ class Worker:
         # 提交 + push（agent 自己 commit 过也没关系）；验证模式不产出代码
         head = None
         blocked = oop and strict_paths(self.cfg)
+        push_failed = False
         if blocked:
             log(f"{tid} 严格模式：有越界改动，不提交不验收，直接判失败")
         elif verify_only:
@@ -4159,6 +4282,7 @@ class Worker:
                          f"HEAD:refs/heads/task/{tid}"], wt)
             except HiveError as e:
                 log(f"{tid} 推送代码分支失败: {e}")
+                push_failed = True
 
         verify = []
         self.set_status(tid, state="verifying", progress=70, step="验收",
@@ -4175,6 +4299,10 @@ class Worker:
               and all(v["code"] == 0 for v in verify))
         if blocked:
             error = "越界改动（严格模式）：" + ", ".join(oop[:8])
+        elif push_failed:
+            # T-0205：push 失败（本地有提交但没推）→ 判 failed，点名「未推送」
+            ok = False
+            error = "head 未推送：本地有提交但 task/<tid> 分支未推到远端"
         elif not ok:
             # 顺序很重要：verify 挂掉时 agent 的退出码往往是 0，
             # 写「agent 退出码 0」既误导人，也让 digest 的失败归因全跑偏
@@ -4187,6 +4315,17 @@ class Worker:
                 error = f"agent 退出码 {code}"
         else:
             error = ""
+
+        # 结果闸门（T-0205）：产结果前校验 head 在远端可获取、零改动非异常。
+        # 只对「会产出代码分支」的 exec 路径生效；verify-only 不产出 task 分支，
+        # 零改动是常态，绕开。blocked（越界严格）已经判失败，不再叠加。
+        if not blocked and not verify_only and ok:
+            allow_empty = bool(card.get("allow_empty_diff"))
+            guard_ok, guard_err = guard_result_head(
+                repo, tid, head, allow_empty, changed)
+            if not guard_ok:
+                ok = False
+                error = guard_err
         if summary_file.exists() and summary_file.stat().st_size > 0:
             summary = summary_file.read_text(encoding="utf-8").strip()
         elif verify_only:
