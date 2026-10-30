@@ -33,6 +33,19 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SERVE="$DIR/scripts/serve-dashboard.sh"
 
 PORT="${PORT:-${HIVE_DASHBOARD_PORT:-8787}}"
+# 展示用的绑定地址（探活仍走 127.0.0.1：绑 0.0.0.0 时一样通）
+HOST="${HIVE_DASHBOARD_HOST:-0.0.0.0}"
+
+# 给人看的地址：绑 0.0.0.0 时本机/局域网各给一个（具体 IP 用 `hive dash url`）
+show_url() {
+    if [ "$HOST" = "0.0.0.0" ] || [ -z "$HOST" ]; then
+        echo "    本机   : http://127.0.0.1:$PORT/"
+        echo "    局域网 : http://<本机IP>:$PORT/（hive dash url 会给具体地址）"
+    else
+        echo "    地址   : http://$HOST:$PORT/"
+    fi
+}
+
 INTERVAL="${INTERVAL:-20}"
 WAIT_S="${WAIT_S:-30}"   # 等 serve.py 就绪的秒数：大仓首次 `hive status` 可能要几十秒
 STATE_DIR="${HIVE_STATE:-$HOME/.hive}"
@@ -57,7 +70,7 @@ pid_of() {
 do_start() {
     if pid="$(pid_of)"; then
         echo "看板已在运行（pid=${pid}），端口 $PORT"
-        echo "访问：http://127.0.0.1:$PORT/"
+        show_url
         return 0
     fi
     # 端口被别的进程占着就别硬起，避免"起了但连不上"的假象。
@@ -102,7 +115,7 @@ do_start() {
         if pid_of >/dev/null; then
             if curl -s -o /dev/null -m 2 "http://127.0.0.1:$PORT/" 2>/dev/null; then
                 echo "看板已启动（pid=$(pid_of)），端口 $PORT"
-                echo "访问：http://127.0.0.1:$PORT/"
+                show_url
                 echo "日志：$LOG_FILE"
                 return 0
             fi
@@ -152,7 +165,7 @@ do_status() {
     if pid="$(pid_of)"; then
         echo "运行中（pid=${pid}）"
         echo "端口：$PORT"
-        echo "地址：http://127.0.0.1:$PORT/"
+        show_url
         if command -v curl >/dev/null 2>&1; then
             code="$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:$PORT/" 2>/dev/null)"
             echo "HTTP 探活：$code"

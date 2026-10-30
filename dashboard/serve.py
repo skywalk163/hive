@@ -30,11 +30,15 @@ if str(HIVE_ROOT) not in sys.path:
 try:
     from hive_ports import (
         DASHBOARD_PORT as DEFAULT_DASHBOARD_PORT,
+        DASHBOARD_HOST as DEFAULT_DASHBOARD_HOST,
+        DASHBOARD_HOST_ENV as DASHBOARD_HOST_ENV,
         CLUSTER_HTTP_PORT as CLUSTER_DEFAULT_PORT,
         CLUSTER_HTTP_ENV as CLUSTER_PORT_ENV,
     )
 except ImportError:  # pragma: no cover - 单独拷走 dashboard 时的兜底
     DEFAULT_DASHBOARD_PORT = 8787
+    DEFAULT_DASHBOARD_HOST = "0.0.0.0"
+    DASHBOARD_HOST_ENV = "HIVE_DASHBOARD_HOST"
     CLUSTER_DEFAULT_PORT = 8788
     CLUSTER_PORT_ENV = "HIVE_CLUSTER_PORT"
 
@@ -980,7 +984,9 @@ def main(argv=None):
                         help="hive status --json 导出的状态文件路径（默认 sample-status.json）")
     parser.add_argument("--port", type=int, default=DEFAULT_DASHBOARD_PORT,
                         help=f"监听端口（默认 {DEFAULT_DASHBOARD_PORT}）")
-    parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
+    parser.add_argument("--host", default=None,
+                        help="监听地址（默认 $HIVE_DASHBOARD_HOST，缺省 0.0.0.0；"
+                             "收回本机写 127.0.0.1）")
     parser.add_argument("--auto-refresh", dest="auto_refresh", action="store_true",
                         help="后台定期跑 hive status --json 重生成状态文件（辅通道）")
     parser.add_argument("--refresh-interval", dest="refresh_interval", type=int, default=30,
@@ -989,6 +995,11 @@ def main(argv=None):
                         help="写操作鉴权：auto=非回环绑定就要 token（默认）、"
                              "on=始终要 token、off=关闭（也可用 $HIVE_DASH_AUTH）")
     args = parser.parse_args(argv)
+
+    # 绑定地址：命令行 > 环境变量 > hive_ports 默认值（不在本文件写第二套默认）
+    if not args.host:
+        args.host = (os.environ.get(DASHBOARD_HOST_ENV) or "").strip() \
+            or DEFAULT_DASHBOARD_HOST
 
     if args.auth:
         os.environ[AUTH_MODE_ENV] = args.auth

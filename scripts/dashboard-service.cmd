@@ -20,6 +20,9 @@ set "STATUS=%DASH%\status.json"
 set "PORT=%PORT%"
 if "%PORT%"=="" set "PORT=%HIVE_DASHBOARD_PORT%"
 if "%PORT%"=="" set "PORT=8787"
+rem 绑定地址：默认 0.0.0.0（局域网可访问）。收回本机：set HIVE_DASHBOARD_HOST=127.0.0.1
+set "HOST=%HIVE_DASHBOARD_HOST%"
+if "%HOST%"=="" set "HOST=0.0.0.0"
 set "INTERVAL=%INTERVAL%"
 if "%INTERVAL%"=="" set "INTERVAL=20"
 set "STATE=%USERPROFILE%\.hive"
@@ -46,6 +49,16 @@ if /i "%ACTION%"=="restart" goto :do_restart
 if /i "%ACTION%"=="status" goto :do_status
 echo 用法: %~nx0 {start^|stop^|restart^|status} [port] 1>&2
 exit /b 2
+rem 给人看的地址：绑 0.0.0.0 时本机/局域网各给一个（具体 IP 用 hive dash url）
+:show_url
+if "%HOST%"=="0.0.0.0" goto :show_url_all
+echo     地址   : http://%HOST%:%PORT%/
+goto :eof
+:show_url_all
+echo     本机   : http://127.0.0.1:%PORT%/
+echo     局域网 : http://^<本机IP^>:%PORT%/（hive dash url 会给具体地址）
+goto :eof
+
 
 :do_start
 if exist "%PIDFILE%" (
@@ -53,19 +66,19 @@ if exist "%PIDFILE%" (
     tasklist /FI "PID eq !PID!" 2>nul | find "!PID!" >nul
     if not errorlevel 1 (
         echo 看板已在运行（pid=!PID!），端口 %PORT%
-        echo 访问：http://127.0.0.1:%PORT%/
+        call :show_url
         exit /b 0
     )
 )
 powershell -NoProfile -Command ^
-  "$d='%DASH%'; $a=@('%SERVEPY%','--status','%STATUS%','--port','%PORT%','--auto-refresh','--refresh-interval','%INTERVAL%');" ^
+  "$d='%DASH%'; $a=@('%SERVEPY%','--status','%STATUS%','--port','%PORT%','--host','%HOST%','--auto-refresh','--refresh-interval','%INTERVAL%');" ^
   "$p=Start-Process -FilePath 'python' -ArgumentList $a -WorkingDirectory $d -PassThru -WindowStyle Hidden;" ^
   "Set-Content -Path '%PIDFILE%' -Value $p.Id; Write-Host ('看板已启动（pid=' + $p.Id + '），端口 %PORT%')"
 if errorlevel 1 (
     echo 启动失败 1>&2
     exit /b 1
 )
-echo 访问：http://127.0.0.1:%PORT%/
+call :show_url
 exit /b 0
 
 :do_stop
@@ -102,5 +115,5 @@ if errorlevel 1 (
 )
 echo 运行中（pid=%PID%）
 echo 端口：%PORT%
-echo 地址：http://127.0.0.1:%PORT%/
+call :show_url
 exit /b 0

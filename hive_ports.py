@@ -16,7 +16,7 @@ hive.py 各写各的默认值。集群上线后又多了 HTTP 8788 和 UDP 8789�
 * **查看/体检** → `hive ports [--check] [--json]`。
 
 端口段：
-  8787  TCP  看板 HTTP（只绑 127.0.0.1，默认不对外）
+  8787  TCP  看板 HTTP（默认绑 0.0.0.0，需在可信网络内；写操作默认要 token）
   8788  TCP  集群 HTTP（节点间注册/心跳/投票/进度）
   8789  UDP  集群广播发现（不是 TCP；只开 TCP 也能用静态 seed）
   8790  TCP  MCP HTTP（hived → agent；只绑 127.0.0.1）
@@ -43,6 +43,16 @@ from dataclasses import dataclass
 DASHBOARD_PORT = 8787
 DASHBOARD_ENV = "HIVE_DASHBOARD_PORT"
 DASHBOARD_LEGACY_ENV = "PORT"
+
+# 看板绑定地址。
+#
+# 2026-10-30 起默认 **0.0.0.0**：看板就是要给别人看的，绑回环反而要每人一条 SSH 隧道。
+# 对外暴露的代价由 serve.py 的写操作鉴权兜底（--auth auto：非回环绑定必须带 token），
+# 读接口本来就无鉴权——所以放在可信内网 / 已加反代保护的网络里用。
+#
+# 想收回本机：HIVE_DASHBOARD_HOST=127.0.0.1（或 hive dash --host 127.0.0.1）。
+DASHBOARD_HOST = "0.0.0.0"
+DASHBOARD_HOST_ENV = "HIVE_DASHBOARD_HOST"
 
 CLUSTER_HTTP_PORT = 8788
 CLUSTER_HTTP_ENV = "HIVE_CLUSTER_PORT"
@@ -86,8 +96,10 @@ class PortSpec:
 
 
 SPECS = (
-    PortSpec("dashboard", "看板 HTTP", DASHBOARD_PORT, "tcp", "127.0.0.1",
-             DASHBOARD_ENV, "浏览器/看板服务；默认只绑本机，远程用 SSH 隧道",
+    PortSpec("dashboard", "看板 HTTP", DASHBOARD_PORT, "tcp", DASHBOARD_HOST,
+             DASHBOARD_ENV,
+             "浏览器/看板服务；默认绑 0.0.0.0（写操作需 token），收回本机用 " +
+             DASHBOARD_HOST_ENV + "=127.0.0.1",
              DASHBOARD_LEGACY_ENV),
     PortSpec("cluster", "集群 HTTP", CLUSTER_HTTP_PORT, "tcp", "0.0.0.0",
              CLUSTER_HTTP_ENV, "注册/心跳/投票/进度/租约；跨机需放行"),
@@ -126,6 +138,19 @@ def effective_port(key: str) -> int:
     return _parse_port(raw, spec.port) if raw is not None else spec.port
 
 
+def effective_host(key: str) -> str:
+    """取某个服务当前生效的绑定地址（env > 默认）。
+
+    目前只有看板支持覆盖（HIVE_DASHBOARD_HOST）；其它服务返回默认值，
+    保持「默认值只在本模块定义一次」的口径。
+    """
+    spec = by_key(key)
+    if spec.key != "dashboard":
+        return spec.bind
+    raw = (os.environ.get(DASHBOARD_HOST_ENV) or "").strip()
+    return raw or spec.bind
+
+
 def by_key(key: str) -> PortSpec:
     for spec in SPECS:
         if spec.key == key:
@@ -138,6 +163,7 @@ def port_plan() -> list[dict]:
     for spec in SPECS:
         row = spec.as_dict()
         row["effective"] = effective_port(spec.key)
+        row["bind"] = effective_host(spec.key)
         row["reserved"] = False
         rows.append(row)
     rows.append({

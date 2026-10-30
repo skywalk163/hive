@@ -16,6 +16,8 @@ export HIVE_DASH_AUTOSTART=0
 # 默认值与 serve.py / hive.py 一样来自 hive_ports.py；完整规划见
 # docs/端口与服务规划.md。不要在这里写第二套默认值。
 PORT="${PORT:-${HIVE_DASHBOARD_PORT:-8787}}"
+# 绑定地址：默认 0.0.0.0（局域网可访问）。收回本机：HIVE_DASHBOARD_HOST=127.0.0.1
+HOST="${HIVE_DASHBOARD_HOST:-0.0.0.0}"
 INTERVAL="${INTERVAL:-20}"
 DASH="$DIR/dashboard"
 STATUS="$DASH/status.json"
@@ -76,4 +78,4 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 cd "$DASH" || exit 1
-python3 serve.py --status "$STATUS" --port "$PORT"
+python3 serve.py --status "$STATUS" --port "$PORT" --host "$HOST"

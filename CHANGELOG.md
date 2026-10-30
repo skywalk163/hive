@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.15.1 — 2026-10-30
+
+### Changed
+
+- **看板默认绑定地址 127.0.0.1 → 0.0.0.0**：看板本来就是给人看的，绑回环让每台机器
+  都要一条 SSH 隧道。默认值仍然只在 `hive_ports.py` 定义一次（`DASHBOARD_HOST`）；
+  `hive dash --host` / `HIVE_DASHBOARD_HOST` 可随时收回本机。
+- **写操作保护随之自动生效**：非回环绑定下 `--auth auto` 会要求 token（0.15.0 已实现），
+  读接口保持开放——所以 8787 只能放在可信内网，别直接暴露公网。
+- `hive dash url` / `dash status` / 两个服务脚本的提示改为给出「本机 + 局域网」两档地址，
+  不再把 `0.0.0.0` 直接当访问地址印给人看。
+
+### Fixed
+
+- **Windows 上 `hive dash start/stop/status` 完全不可用**：`dashboard_script()` 固定先找
+  `dashboard-service.sh`，然后拿 `/bin/sh` 去执行 → `WinError 2`。改为按平台挑包装脚本
+  （Windows 选 `.cmd`，其它选 `.sh`）。
+- `hive dash` 的 `--host` 一路传到服务脚本与 `serve.py`（以前停在 `hive.py` 这一层，
+  脚本仍按旧默认起服务）。
+- 探活地址跟绑定地址走：绑到具体网卡地址时，探 `127.0.0.1` 会永远「没起」，ensure 每轮
+  重复拉起。绑 `0.0.0.0` 时仍探回环（一定通）。
+
 ## 0.15.0 — 2026-10-30
 
 > 这一版回应的是「纯 Git 模型在实战里暴露的三个缺口」：易失的租约状态、Windows 的

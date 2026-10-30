@@ -103,7 +103,7 @@ EOF
     run systemctl --user daemon-reload
     run systemctl --user enable hive-dashboard.service
     run systemctl --user restart hive-dashboard.service
-    say "已安装并启动：http://127.0.0.1:$PORT/"
+    say "已安装并启动：http://${HIVE_DASHBOARD_HOST:-0.0.0.0}:$PORT/"
     say ""
     say "提示：systemctl --user 需登录后才会启动。要开机即启动（不登录也跑），"
     say "      请让 root 执行一次：  sudo loginctl enable-linger $USER"
@@ -181,7 +181,7 @@ EOF
         say "[dry-run] 写入 $PLIST_FILE"
     fi
     run launchctl load "$PLIST_FILE"
-    say "已安装并加载：http://127.0.0.1:$PORT/（KeepAlive=true，挂了会自动拉起）"
+    say "已安装并加载：http://${HIVE_DASHBOARD_HOST:-0.0.0.0}:$PORT/（KeepAlive=true，挂了会自动拉起）"
 }
 
 # --------------------------------------------------------------------------- #
@@ -266,7 +266,7 @@ EOF
     if command -v service >/dev/null 2>&1; then
         service hive_dashboard start 2>/dev/null || say "启动：service hive_dashboard start"
     fi
-    say "已安装 FreeBSD 服务：http://127.0.0.1:$PORT/"
+    say "已安装 FreeBSD 服务：http://${HIVE_DASHBOARD_HOST:-0.0.0.0}:$PORT/"
     say "管理：service hive_dashboard {start|stop|status|restart}"
 }
 

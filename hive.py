@@ -51,7 +51,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.15.0"
+VERSION = "0.15.1"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 
@@ -60,12 +60,16 @@ DEFAULT_STATE = Path.home() / ".hive"
 try:
     from hive_ports import (
         DASHBOARD_PORT as _PORT_DASHBOARD,
+        DASHBOARD_HOST as _HOST_DASHBOARD,
+        DASHBOARD_HOST_ENV as _DASH_HOST_ENV,
         CLUSTER_HTTP_PORT as _PORT_CLUSTER,
         CLUSTER_HTTP_ENV as _CLUSTER_PORT_ENV,
         CLUSTER_DISCOVERY_PORT as _PORT_CLUSTER_DISCOVERY,
     )
 except ImportError:  # pragma: no cover - 只在残缺部署上走到
     _PORT_DASHBOARD = 8787
+    _HOST_DASHBOARD = "0.0.0.0"
+    _DASH_HOST_ENV = "HIVE_DASHBOARD_HOST"
     _PORT_CLUSTER = 8788
     _CLUSTER_PORT_ENV = "HIVE_CLUSTER_PORT"
     _PORT_CLUSTER_DISCOVERY = 8789
@@ -5013,6 +5017,7 @@ def cmd_cluster(args) -> int:
 # 想关掉：HIVE_DASH_AUTOSTART=0
 # 想调探测频率（秒）：HIVE_DASH_AUTOSTART_TTL（默认 300，避免反复 spawn）
 # 想换端口：HIVE_DASHBOARD_PORT（默认 8787，与 scripts/ 各脚本、serve.py 同一来源）
+# 想换绑定地址：HIVE_DASHBOARD_HOST（默认 0.0.0.0；收回本机写 127.0.0.1）
 # --------------------------------------------------------------------------- #
 DASH_DEFAULT_PORT = _PORT_DASHBOARD
 DASH_AUTOSTART_SKIP = {"dash", "dashboard", "init", "cluster", "ports"}
@@ -5025,18 +5030,49 @@ def dashboard_port() -> int:
         return DASH_DEFAULT_PORT
 
 
-def dashboard_url(port: int | None = None) -> str:
-    return f"http://127.0.0.1:{port or dashboard_port()}/"
+def dashboard_host() -> str:
+    """看板绑定地址（env > hive_ports 默认 0.0.0.0）。"""
+    raw = (os.environ.get(_DASH_HOST_ENV) or "").strip()
+    return raw or _HOST_DASHBOARD
+
+
+def dashboard_url(port: int | None = None, host: str | None = None) -> str:
+    """给人点的地址：绑 0.0.0.0 时换成可访问的本机/局域网 IP。"""
+    port = port or dashboard_port()
+    bind = (host or dashboard_host()) or ""
+    if bind in ("", "0.0.0.0", "::", "*"):
+        bind = _lan_ip() or "127.0.0.1"
+    elif bind == "::1":
+        bind = "[::1]"
+    return f"http://{bind}:{port}/"
+
+
+def _lan_ip() -> str:
+    """猜本机局域网 IP（不发包：UDP connect 只让内核选路由）。失败回空串。"""
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(0.2)
+        sock.connect(("192.0.2.1", 9))   # TEST-NET-1，不会被真发出
+        return sock.getsockname()[0]
+    except OSError:
+        return ""
+    finally:
+        sock.close()
 
 
 def dashboard_probe(port: int | None = None, timeout: float = 0.25) -> bool:
     """纯 TCP 探活：连得上就当在跑。不走 HTTP 是为了不去碰 /healthz 那种不存在的路由。"""
     import socket
+    # 绑 0.0.0.0 时连 127.0.0.1 一样通；绑到某个具体网卡地址时只认那个地址，
+    # 否则探活会永远"没起"，ensure 每轮都去重复拉起。
+    host = dashboard_host()
+    target = "127.0.0.1" if host in ("", "0.0.0.0", "::", "*") else host
     try:
         sock = socket.socket()
         sock.settimeout(timeout)
         try:
-            return sock.connect_ex(("127.0.0.1", port or dashboard_port())) == 0
+            return sock.connect_ex((target, port or dashboard_port())) == 0
         finally:
             sock.close()
     except OSError:
@@ -5044,8 +5080,17 @@ def dashboard_probe(port: int | None = None, timeout: float = 0.25) -> bool:
 
 
 def dashboard_script() -> Path | None:
+    """按平台挑服务脚本。
+
+    以前固定先找 .sh：Windows 上会选中一个只有 Linux 能跑的文件，然后拿
+    `/bin/sh` 去执行它 —— WinError 2，`hive dash start/stop` 在 Windows 上
+    等于完全不可用（2026-10-30 实测）。顺序按平台来，另一个平台的文件不碰。
+    """
     root = Path(__file__).resolve().parent / "scripts"
-    for name in ("dashboard-service.sh", "dashboard-service.cmd"):
+    names = (("dashboard-service.cmd", "dashboard-service.sh")
+             if os.name == "nt" else
+             ("dashboard-service.sh", "dashboard-service.cmd"))
+    for name in names:
         cand = root / name
         if cand.exists():
             return cand
@@ -5063,6 +5108,7 @@ def _dashboard_run_script(action: str, port: int | None = None,
     env["PORT"] = str(port or dashboard_port())
     # 两个名字都传：脚本侧以 HIVE_DASHBOARD_PORT 为唯一来源，PORT 是历史兼容。
     env["HIVE_DASHBOARD_PORT"] = env["PORT"]
+    env[_DASH_HOST_ENV] = dashboard_host()
     if interval:
         env["INTERVAL"] = str(interval)
     if script.suffix == ".cmd":
@@ -5084,6 +5130,7 @@ def _dashboard_spawn(port: int | None = None, interval: int | None = None) -> bo
     env = dict(os.environ)
     env["PORT"] = str(port or dashboard_port())
     env["HIVE_DASHBOARD_PORT"] = env["PORT"]
+    env[_DASH_HOST_ENV] = dashboard_host()
     if interval:
         env["INTERVAL"] = str(interval)
     if script.suffix == ".cmd":
@@ -5156,8 +5203,12 @@ def _dashboard_autostart(args) -> None:
 def cmd_dash(args) -> int:
     action = getattr(args, "action", "ensure") or "ensure"
     port = args.port or dashboard_port()
+    # 显式 --host 覆盖环境变量（写进本进程的 env，脚本/子进程一路继承下去）
+    if getattr(args, "host", None):
+        os.environ[_DASH_HOST_ENV] = str(args.host)
+    url = dashboard_url(port)
     if action == "url":
-        print(dashboard_url(port))
+        print(url)
         return 0
     if action == "status":
         return _dashboard_run_script("status", port)
@@ -5168,12 +5219,12 @@ def cmd_dash(args) -> int:
         return _dashboard_run_script("start", port, args.interval)
     # ensure / start
     if dashboard_probe(port):
-        print(f"看板已在运行：{dashboard_url(port)}")
+        print(f"看板已在运行：{url}")
         return 0
     if action == "ensure":
         ok = dashboard_ensure(port, wait=max(1.0, float(args.wait)), force=True)
         if ok:
-            print(f"看板已就绪：{dashboard_url(port)}")
+            print(f"看板已就绪：{url}（绑定 {dashboard_host()}）")
             return 0
         print(f"看板未能起来，看日志：{DEFAULT_STATE / 'logs' / 'dashboard.log'}", file=sys.stderr)
         return 1
@@ -5388,6 +5439,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=None, help="覆盖端口（默认 $HIVE_DASHBOARD_PORT 或 8787）")
     s.add_argument("--interval", type=int, default=None, help="状态刷新间隔秒数")
     s.add_argument("--wait", type=float, default=5.0, help="ensure 时最多等多久就绪（秒）")
+    s.add_argument("--host", default=None,
+                   help="绑定地址（默认 0.0.0.0，局域网可访问；收回本机写 127.0.0.1；"
+                        "也可用 $HIVE_DASHBOARD_HOST）")
     s.set_defaults(func=cmd_dash)
 
     s = sub.add_parser("ports", help="端口规划：查看默认/当前生效端口并可选体检占用")
