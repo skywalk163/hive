@@ -573,6 +573,52 @@ def local_store():
     return obj
 
 
+def store_lease_active(claim) -> bool:
+    """store 里的租约是否仍然有效（lease_until 是 epoch 秒）。
+
+    认不出数字就当「没有有效租约」——宁可退回 Git 卡面，也不拿脏数据覆盖。
+    """
+    if not isinstance(claim, dict):
+        return False
+    try:
+        until = float(claim.get("lease_until"))
+    except (TypeError, ValueError):
+        return False
+    return until > time.time()
+
+
+def overlay_store_state(card: dict, store) -> dict:
+    """用 store 的运行时 state/owner/retries 覆盖 Git 卡面 —— **只在有有效租约时**。
+
+    为什么必须加这个前提
+    --------------------
+    2026-10-30 实例：0.88 的看板把 5 张早已 `done` 的卡显示成
+    `ready / assigned / submitted`（T-0001、T-0201~T-0204）。根因是 store 的
+    `tasks` 表只记运行时状态，而这些卡的 `close / land` 是在 **Git 侧**完成的
+    （Windows 那台 `claim_backend=git`），store 永远不知道；旧逻辑无条件用
+    store 覆盖卡面，于是陈旧的 state 每次都把终态翻回去。两台机器同一个
+    commit、同一份卡、同一份 results，面板却不一致。
+
+    租约是唯一可信的运行时硬证据：有未过期租约 = 确实有 worker 正持有这张卡，
+    此时 store 比卡面新；没有租约 = store 只剩簿记，**Git 卡面是权威**。
+    """
+    if not isinstance(card, dict) or store is None:
+        return card
+    tid = str(card.get("id") or "")
+    if not tid:
+        return card
+    row = store.task(tid)
+    if not row:
+        return card
+    if not store_lease_active(store.claim_info(tid)):
+        return card
+    out = dict(card)
+    for key in ("state", "owner", "retries"):
+        if row.get(key) not in (None, ""):
+            out[key] = row[key]
+    return out
+
+
 def store_call(action: str, payload: dict, timeout: float = 3.0) -> dict:
     code, data = _cluster_http("POST", f"store/{action}", payload,
                                timeout=timeout)
@@ -1262,19 +1308,13 @@ class Hive:
         return out
 
     def _overlay_store_state(self, data: dict) -> dict:
-        """store 模式下用运行时 state/owner/retries 覆盖 Git 卡面。"""
+        """store 模式下用运行时 state/owner/retries 覆盖 Git 卡面。
+
+        规则见模块级 `overlay_store_state`：**只有 store 里存在有效租约时才覆盖**。
+        """
         if claim_backend() != "store":
             return data
-        store = local_store()
-        if store is None:
-            return data
-        row = store.task(str(data.get("id") or ""))
-        if not row:
-            return data
-        for key in ("state", "owner", "retries"):
-            if row.get(key) not in (None, ""):
-                data[key] = row[key]
-        return data
+        return overlay_store_state(data, local_store())
 
     def cards(self) -> dict[str, dict]:
         out = {}

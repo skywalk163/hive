@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from hive import (Hive, HiveError, IN_FLIGHT_STATES, claim_backend,
-                  git, git_net, iso, local_store)
+                  git, git_net, iso, local_store, overlay_store_state)
 
 # 只缓存「在飞」卡的 claim/result；已 close 的卡从 main 的 results/ 文件读。
 _CACHE_STATES = set(IN_FLIGHT_STATES) | {"assigned", "running", "submitted"}
@@ -108,19 +108,15 @@ class ReadCache:
             results: dict[str, dict] = {}
             statuses: dict[str, dict] = {}
 
-            # 1a) store 模式：运行时状态以 store 为准（tasks 只覆盖运行字段）
+            # 1a) store 模式：运行时状态以 store 为准（**仅在 store 有有效租约时**）
+            #     规则与 hive.overlay_store_state 共用一份实现：没有租约就退回
+            #     Git 卡面，否则 Git 侧 close/land 的终态会被陈旧 store 翻回去。
             if claim_backend() == "store":
                 store = local_store()
                 if store is not None:
-                    for tid, st in store.tasks().items():
-                        card = cards.get(tid)
-                        if not isinstance(card, dict):
-                            continue
-                        card = dict(card)
-                        for key in ("state", "owner", "retries"):
-                            if st.get(key) not in (None, ""):
-                                card[key] = st[key]
-                        cards[tid] = card
+                    for tid in list(cards):
+                        if isinstance(cards.get(tid), dict):
+                            cards[tid] = overlay_store_state(cards[tid], store)
                     for tid in cards:
                         claim = store.claim_info(tid)
                         if claim:
