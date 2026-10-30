@@ -73,6 +73,16 @@ except ImportError:  # pragma: no cover - 只在残缺部署上走到
     _PORT_CLUSTER = 8788
     _CLUSTER_PORT_ENV = "HIVE_CLUSTER_PORT"
     _PORT_CLUSTER_DISCOVERY = 8789
+
+# 子进程「无窗」出口（T-0206）。Windows 上 console 子进程在父进程没有控制台时
+# 会自建一个可见控制台——看板每 30 秒 `hive status --json` 就闪一次黑窗。
+# 统一走 hive_compat.no_window_kwargs()；缺这个模块（残缺部署）时退回空 dict。
+try:
+    from hive_compat import no_window_kwargs
+except ImportError:  # pragma: no cover - 只在残缺部署上走到
+    def no_window_kwargs() -> dict:
+        return {}
+
 DEFAULT_MAX_PER_REPO = 1
 # 一张卡最多被看门狗**自动**回收几次；超了就转 blocked 退出流水线，不再无限重派。
 # 0 = 一次都不许自动重派（首次判死即 blocked）。人工显式 `hive retry` 不受此限。
@@ -190,7 +200,8 @@ def _copy_clipboard(text: str) -> bool:
     for cmd in candidates:
         try:
             subprocess.run(cmd, input=text, text=True, shell=(os.name == "nt"),
-                           check=False, capture_output=True, timeout=10)
+                           check=False, capture_output=True, timeout=10,
+                           **no_window_kwargs())
         except (OSError, subprocess.SubprocessError):
             # 工具不存在或超时：换下一个
             continue
@@ -245,17 +256,20 @@ def run(cmd, cwd=None, check=True, input=None, timeout=None, shell=False, env=No
     # CR —— 同一份 JSON 在 Windows 上和 Linux 上字节不同，跨平台 diff 全乱。
     # 给了 input 就走二进制 stdin，输出侧自己按 UTF-8 解码。
     raw_input = input.encode("utf-8") if isinstance(input, str) else input
+    # 全仓命令出口：Windows 上加 CREATE_NO_WINDOW（T-0206），git/tasklist/pytest
+    # 这些 console 程序就不会各自新建可见控制台。非 Windows 上恒为空 dict。
     try:
         if raw_input is None:
             p = subprocess.run(
                 cmd, cwd=str(cwd) if cwd else None, text=True, input=None,
                 capture_output=True, timeout=timeout, shell=shell, env=env,
-                encoding="utf-8", errors="replace",
+                encoding="utf-8", errors="replace", **no_window_kwargs(),
             )
         else:
             p = subprocess.run(
                 cmd, cwd=str(cwd) if cwd else None, text=False, input=raw_input,
                 capture_output=True, timeout=timeout, shell=shell, env=env,
+                **no_window_kwargs(),
             )
             p = subprocess.CompletedProcess(
                 p.args, p.returncode,
@@ -4105,7 +4119,8 @@ class Worker:
                 if os.name == "nt" and self.cfg.get("copy_prompt", True):
                     try:
                         subprocess.run("clip", input=prompt, text=True, shell=True,
-                                       check=False, capture_output=True)
+                                       check=False, capture_output=True,
+                                       **no_window_kwargs())
                         log("任务提示词已复制到剪贴板")
                     except OSError:
                         pass
@@ -4258,7 +4273,7 @@ class Worker:
             timed_out = True
             if os.name == "nt":
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
-                               capture_output=True)
+                               capture_output=True, **no_window_kwargs())
             else:
                 try:
                     os.killpg(os.getpgid(p.pid), signal.SIGKILL)

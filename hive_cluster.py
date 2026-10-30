@@ -81,6 +81,14 @@ except ImportError:  # pragma: no cover
     DEFAULT_MCP_PORT = 8790
     MCP_PORT_ENV = "HIVE_MCP_PORT"
 
+# 子进程「无窗」（T-0206）：`_git_rev` / `_remote_head` / `_pid_alive` 都是
+# 短命 console 子进程，父进程无控制台时它们会自建可见窗口（周期性闪窗）。
+try:
+    from hive_compat import no_window_kwargs
+except ImportError:  # pragma: no cover
+    def no_window_kwargs() -> dict:
+        return {}
+
 DEFAULT_CLUSTER_ID = "hive"
 EVENT_LIMIT = 500
 MAX_BODY = 2 * 1024 * 1024
@@ -792,7 +800,8 @@ class RepoSyncAgent:
     def _git_rev(repo: Path, ref: str) -> str:
         try:
             p = subprocess.run(["git", "-C", str(repo), "rev-parse", ref],
-                               capture_output=True, text=True, timeout=5)
+                               capture_output=True, text=True, timeout=5,
+                               **no_window_kwargs())
             return p.stdout.strip() if p.returncode == 0 else ""
         except (OSError, subprocess.SubprocessError):
             return ""
@@ -804,7 +813,8 @@ class RepoSyncAgent:
                 ["git", "-C", str(repo), "ls-remote", "origin",
                  "refs/heads/main", "refs/heads/master"],
                 capture_output=True, text=True, timeout=15,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                **no_window_kwargs())
             if p.returncode != 0:
                 return ""
             for line in p.stdout.splitlines():
@@ -3085,7 +3095,8 @@ def _pid_alive(pid: int) -> bool:
     if os.name == "nt":
         try:
             out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"],
-                                 capture_output=True, text=True, timeout=3)
+                                 capture_output=True, text=True, timeout=3,
+                                 **no_window_kwargs())
             return str(pid) in (out.stdout or "")
         except (OSError, subprocess.SubprocessError):
             return False

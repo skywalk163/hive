@@ -16,6 +16,12 @@
     rewrite(cmd)         -> str    `cmd` 或 `python hive_compat.py run "<cmd>"`
     run(cmd, cwd)         -> 退出码
 
+另外提供子进程「无窗」出口（T-0206）：Windows 上不给 `creationflags`，console
+子进程（git 是 console 程序）在父进程没有控制台时会**自己新建一个可见控制台**
+——看板每 30 秒刷新一次 `hive status --json` 就闪一次黑窗。::
+
+    no_window_kwargs()   -> dict   Windows: {"creationflags": CREATE_NO_WINDOW}
+
 单独调试::
 
     python hive_compat.py run "test -f docs/ok.md"
@@ -26,9 +32,40 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 MARK = "hive_compat.py run"
+
+# 逃生阀：怀疑「隐藏窗口」影响了某个子进程（例如它自己要弹窗）时，
+# `HIVE_NO_WINDOW=0` 让全仓的 no_window_kwargs() 立刻退回空 dict，不用改代码。
+NO_WINDOW_ENV = "HIVE_NO_WINDOW"
+
+
+def no_window_kwargs() -> dict:
+    """子进程无窗的统一出口：Windows 返回 `{"creationflags": CREATE_NO_WINDOW}`。
+
+    为什么需要：Windows 上 console 程序（git / tasklist / python …）在**父进程
+    没有控制台**时，CreateProcess 会为它新建一个可见控制台窗口——这就是看板每
+    30 秒刷新一次就闪一下黑窗的来源。`CREATE_NO_WINDOW` 让子进程完全不分配控制台，
+    输出照旧走管道，不影响任何 `capture_output` 调用方。
+
+    与 `DETACHED_PROCESS` **互斥**（两者都管控制台，混用会起不来），所以后台
+    daemon 拉起那几处（`_dashboard_spawn` / `hive_cluster._spawn_background`）
+    刻意不走这个出口，见 tests/test_no_window.py 的白名单。
+
+    非 Windows 一律返回 `{}`：POSIX 上没有这个概念，也绝不改变既有行为。
+    `HIVE_NO_WINDOW=0`（或 false/no/off）时同样返回 `{}`。
+    """
+    if os.name != "nt":
+        return {}
+    if str(os.environ.get(NO_WINDOW_ENV, "1")).strip().lower() in (
+            "0", "false", "no", "off"):
+        return {}
+    flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if not flag:  # pragma: no cover - 只有残缺的 subprocess 才会走到
+        return {}
+    return {"creationflags": flag}
 
 # 只处理「整条命令就是这一种 POSIX 惯用法」的卡，避免误伤真实脚本。
 _PLAIN = re.compile(r"^\s*(true|false|:)\s*$")

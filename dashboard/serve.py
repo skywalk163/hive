@@ -42,6 +42,14 @@ except ImportError:  # pragma: no cover - 单独拷走 dashboard 时的兜底
     CLUSTER_DEFAULT_PORT = 8788
     CLUSTER_PORT_ENV = "HIVE_CLUSTER_PORT"
 
+# 子进程「无窗」（T-0206）：refresh_loop 每 --refresh-interval（默认 30s）跑一次
+# `hive status --json`，不给 CREATE_NO_WINDOW 就会每 30 秒闪一次黑窗。
+try:
+    from hive_compat import no_window_kwargs
+except ImportError:  # pragma: no cover - 单独拷走 dashboard 时的兜底
+    def no_window_kwargs():
+        return {}
+
 # 系统级核心配置：Hub 地址 + 集中式仓库列表，与 agents/<name>.json 共同构成 hive 配置
 HIVE_CONFIG_PATH = HIVE_ROOT / "hive-config.json"
 
@@ -318,7 +326,7 @@ def refresh_loop(status_path, interval):
         try:
             proc = subprocess.run(argv, capture_output=True, text=True,
                                   encoding="utf-8", env=PYTHON_ENV,
-                                  timeout=HIVE_OP_TIMEOUT)
+                                  timeout=HIVE_OP_TIMEOUT, **no_window_kwargs())
             if proc.returncode == 0 and proc.stdout.strip():
                 write_status_atomic(status_path, proc.stdout)
             else:
@@ -924,7 +932,7 @@ def build_handler(status_path, write_auth="off"):
             try:
                 proc = subprocess.run(argv, capture_output=True, text=True,
                                      encoding="utf-8", env=PYTHON_ENV,
-                                     timeout=HIVE_OP_TIMEOUT)
+                                     timeout=HIVE_OP_TIMEOUT, **no_window_kwargs())
             except FileNotFoundError:
                 append_audit({"action": action, "task": tid, "ok": False,
                               "agent": who.get("agent"), "detail": "找不到 hive.py"})
@@ -961,7 +969,8 @@ def build_handler(status_path, write_auth="off"):
                 proc = subprocess.run(
                     hive_argv("status", "--json"),
                     capture_output=True, text=True, encoding="utf-8",
-                    env=PYTHON_ENV, timeout=HIVE_OP_TIMEOUT)
+                    env=PYTHON_ENV, timeout=HIVE_OP_TIMEOUT,
+                    **no_window_kwargs())
                 if proc.returncode == 0 and proc.stdout.strip():
                     write_status_atomic(status_path, proc.stdout)
                 else:
