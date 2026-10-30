@@ -1810,6 +1810,15 @@
   }
 
   // ---------- 启动 ----------
+  // T-0207：把顶栏实际高度写进 --topbar-h，fixed 抽屉据此从顶栏下方起滑。
+  // 顶栏会随窗口宽度换行（≤768px 筛选区换行、meta 行），固定 px 会错位，
+  // 所以这里实测 offsetHeight；首帧 CSS 里的 84px 只是兜底。
+  function syncTopbarHeight() {
+    var bar = document.querySelector('.topbar');
+    if (!bar) return;
+    document.documentElement.style.setProperty('--topbar-h', bar.offsetHeight + 'px');
+  }
+
   function init() {
     cacheEls();
     buildColumns();
@@ -1817,6 +1826,12 @@
     bindEvents();
     bindTaskActions();         // 异常卡操作按钮：终止 / 改派 / 退回未分配
     applyEffective();          // 落地主题/紧凑/CI/刷新间隔等生效设置
+
+    syncTopbarHeight();
+    if (window.addEventListener) {
+      window.addEventListener('resize', syncTopbarHeight);
+      window.addEventListener('orientationchange', syncTopbarHeight);
+    }
 
     state.autoRefresh = storeGet(STORE_AUTO) !== 'off';
     el.auto.checked = state.autoRefresh;
