@@ -163,3 +163,19 @@ B_valve_off  (HIVE_NO_WINDOW=0)    峰值 5 / 基线 4 → 增量 1
 - 结论：**代码与判据就绪且已在门禁机全绿；本机 submit 过不了是环境 + 1800s 上限**。
   建议换一台健康的 Windows 机器 submit，或先修本机「git 孙进程持管道」问题；
   **不要为了过门去改 `run_verify` 的超时，也不要改代码**。
+
+## 第三次尝试：本机全量终于跑通一次（关键在「有控制台 + -n 4」）
+
+- 根因补强：**Bash 工具拉起的进程链 `GetConsoleWindow()==0`（没有控制台）**，于是每个
+  console 子进程（git/python/cmd）都要新建一个控制台；高频 spawn 下偶发 0 CPU 死锁
+  （复现器 163 次 spawn 抓到 1 次；40 分钟全量会撞 3~4 次，位置随机）。
+- **把测试放到有控制台的进程里跑（`GetConsoleWindow()!=0` 的终端）**，同一台机器、
+  同一份代码：
+  `pytest -q tests/test_no_window.py tests/test_core.py tests/test_dashboard_freshness.py`
+  （`PYTEST_ADDOPTS="-n 4 --basetemp=.hive/pt-c1 -p no:cacheprovider"`）
+  → **98 passed in 1052.88s (17:32)**，全程无卡死。
+- 必须 `-n 4`：hive 的 `run_verify` 硬上限 1800s，串行要 35~45 分钟必然超时；4 并行压到 ~17 分钟。
+- 但死锁仍会随机复发（随后一次同配置跑到 30 分钟时 2 个 worker 又卡住）⇒ **本机的解法是
+  「有控制台 + -n 4 + 卡住了重跑」，不是一次性修好**。彻底的代码级修法（另开卡）：
+  测试夹具 `tests/conftest.py::sh` 与测试里的 `Popen` 也带上 `no_window_kwargs()`，
+  这样即使父进程没有控制台，子进程也不再分配控制台。
