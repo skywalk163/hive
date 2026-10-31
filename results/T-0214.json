@@ -1,0 +1,42 @@
+{
+  "task": "T-0214",
+  "agent": "fb88-dsh",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0214",
+  "base": "main",
+  "head": "c46e3e7bcdc07d35ec42cf19312a0215e3e4697d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-31T12:52:23+00:00",
+  "finished_at": "2026-10-31T12:52:23+00:00",
+  "duration_s": 0.6,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/unit/test_R158_地板证据窗口漂移.py",
+      "code": 0,
+      "tail": [
+        "0.06s call     tests/unit/test_R158_地板证据窗口漂移.py::Test正向_真仓库不漂::test_门禁在真仓库上通过",
+        "0.05s call     tests/unit/test_R158_地板证据窗口漂移.py::Test正向_真仓库不漂::test_地板自举率等于基线快照",
+        "",
+        "(10 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "10 passed in 3.08s"
+      ]
+    }
+  ],
+  "summary": "# T-0214 交付摘要：地板自举率回归门 test_R158 在 main 上 4 条红（门禁自己漂了）\n\n## 结论：改了判据，没刷基线\n\n`tools/ci/floor_bootstrap_baseline.json`（69/102）与 `任务书/自举地板清单.json` **一字未动**\n—— 基线本身是对的（清单确有 69 条 `has_light_impl`、分母 102），是测试把 R158 当时的\n快照值写死了，仓库往前走、判据没跟上，门禁自己先红。走任务卡落点的第一选择：\n**判据不再写死快照值**。\n\n## 改动（仅 tests/unit/test_R158_地板证据窗口漂移.py，+52/−29）\n\n1. `test_地板自举率等于68比96` → 改名 `test_地板自举率等于基线快照`：\n   `(68, 96)` 硬编码改为从 `tools/ci/floor_bootstrap_baseline.json` 读\n   `light_count` / `denominator`，比率断言同样取自基线。\n2. `_是字母定义行_R157 = 61` 写死锚点 → 删除，新增 `_现算定义行(名字)`：\n   用 `FB.声明行表` + `FB.定位定义行` 对真仓库判型文件**现算**定义行\n   （当前算出 73）。反跑一的三条用例（旧窗口失配 / 新定位仍绿 / 删行仍绿）\n   的证据行一律用现算值。\n3. `test_插行后整条门禁仍绿` 里 `light_count == 68` → 改为等于真基线的\n   `light_count`（漂移树的分子仍不许缩水，只是不再写死数字）。\n4. `test_前缀同名不许互相冒充` 里证据行 `\"%s:73\"` 写死 → 改为现算\n   `是空白` 的定义行（当前 94），保持「证据指向前缀同名声明」的反跑语义\n   （原 73 恰好已被 `是字母` 漂移占用，属于同一类隐形地雷）。\n5. 模块/类 docstring 里写死的 68/96、61→64 等数字同步改为口径描述\n   （历史叙述保留），并记下 T-0214 教训：**写死快照值的门禁会自己先红**。\n\n## 为什么这么改不会让门禁失去牙\n\n- 棘轮方向没变：基线 `light_count`/`denominator` 仍然「只升不降」，测试只是把\n  「等于某个历史数字」改成「等于基线快照」—— 门禁照样卡住分子缩水与分母灌水；\n  反跑①的 `--write-baseline` 分支断言的正是「漂移后分子不缩水」。\n- 三条「必须红」的反跑全部原样保留且实测仍判红（它们绿 = 判据有牙）：\n  `test_空壳误标has_light_impl即红`、`test_证据指向远处行即红`、\n  `test_前缀同名不许互相冒充`。\n- 反跑①的核心不变量仍在：把 `floor_bootstrap.py` 改回 ±2 文本窗口，\n  `test_旧窗口在漂移后失配`（旧口径复刻）+ `test_新定位在漂移后仍绿` 立即转红。\n\n## 验收证据\n\n- `python3 -m pytest -q tests/unit/test_R158_地板证据窗口漂移.py` → **10 passed**\n  （改前：4 failed / 6 passed，在干净 HEAD 工作树上同样 4 红，与卡面症状一致）\n- 旁证回归：`test_ci_gates_round9.py` 42 passed；`test_floor_manifest_gate.py` +\n  `test_ci_gates.py` 41 passed —— 相邻门禁无一被波及。\n- `git diff --stat`：仅本测试文件一个改动（52+/29−），两个 JSON 未动。\n\n## 边界遵守\n\n- 未删 `任务书/自举地板清单.json` 任何条目（分母只升不降的硬口径没碰）。\n- 未改 `stdlib/内置核心判型.light` 段落顺序去「对准行号」（没把尺子锯短）。\n- 未动 paths 之外任何文件。\n\n## 没做 / 风险\n\n- 无已知风险。唯一注意点：今后基线在合并点上棘轮（69/102 → 更高）时，\n  本门禁自动跟随，无需再改测试。",
+  "error": "",
+  "declared_paths": [
+    "tests/unit/test_R158_地板证据窗口漂移.py",
+    "tools/ci/floor_bootstrap_baseline.json",
+    "任务书/自举地板清单.json"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "tests/unit/test_R158_地板证据窗口漂移.py"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md"
+  ],
+  "lease": "missing"
+}
