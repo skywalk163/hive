@@ -20,8 +20,10 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _ISO_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+# 摘要行里 summary_head 的长度上限：列表只用它做一行提示，不是正文。
+SUMMARY_HEAD_MAX = 120
 
 
 def _now() -> float:
@@ -44,6 +46,20 @@ def _epoch(value) -> float:
         return datetime.fromisoformat(text).timestamp()
     except ValueError:
         return 0.0
+
+
+def summary_head(text, limit: int = SUMMARY_HEAD_MAX) -> str:
+    """结果 summary 的「一行提示」：取首行非空文本，截到 limit 字。
+
+    列表页只要「这张卡干完了什么」的一句话；整段结论属于详情，不进摘要。
+    """
+    if not text:
+        return ""
+    for line in str(text).splitlines():
+        line = line.strip()
+        if line:
+            return line[:limit]
+    return ""
 
 
 class StoreError(Exception):
@@ -127,6 +143,48 @@ class Store:
         cols = {r["name"] for r in self._db.execute("PRAGMA table_info(ops)")}
         if "committed" not in cols:
             self._db.execute("ALTER TABLE ops ADD COLUMN committed INTEGER NOT NULL DEFAULT 1")
+        self._migrate_v2()
+
+    # -- v1 -> v2：列表摘要表 ---------------------------------------------- #
+    def _migrate_v2(self) -> None:
+        """加 `task_summary` 与两张索引，版本号落在 `PRAGMA user_version`。
+
+        幂等性来自三处：DDL 全带 `IF NOT EXISTS`、`PRAGMA user_version = 2` 重复写
+        不改变结果、老库不重建任何既有表也不搬数据。所以连跑两次（同一路径开两次
+        `Store`）结构必须逐字一致 —— 这是 T-0219 判据 1 的直接来源。
+
+        版本号用 SQLite 原生 `user_version` 而不是 `meta.schema_version`：前者跟着
+        库文件走、不会被业务代码顺手改掉；`meta` 里那条同步写只为兼容旧读者。
+        """
+        self._db.executescript("""
+        CREATE TABLE IF NOT EXISTS task_summary (
+            id           TEXT PRIMARY KEY,
+            title        TEXT NOT NULL DEFAULT '',
+            state        TEXT NOT NULL DEFAULT '',
+            repo         TEXT NOT NULL DEFAULT '',
+            priority     TEXT NOT NULL DEFAULT '',
+            owner        TEXT NOT NULL DEFAULT '',
+            created_at   TEXT NOT NULL DEFAULT '',
+            finished_at  TEXT NOT NULL DEFAULT '',
+            summary_head TEXT NOT NULL DEFAULT '',
+            archived     INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_summary_state_finished
+            ON task_summary(state, finished_at);
+        CREATE INDEX IF NOT EXISTS idx_task_summary_repo_state
+            ON task_summary(repo, state);
+        """)
+        current = int(self._db.execute("PRAGMA user_version").fetchone()[0] or 0)
+        if current < SCHEMA_VERSION:
+            self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        if self._meta("schema_version", "") != str(SCHEMA_VERSION):
+            self._set_meta("schema_version", str(SCHEMA_VERSION))
+
+    def schema_version(self) -> int:
+        """库文件自报的 schema 版本（`PRAGMA user_version`）。"""
+        with self._lock:
+            return int(self._db.execute("PRAGMA user_version").fetchone()[0] or 0)
+
 
     def close_conn(self) -> None:
         with self._lock:
@@ -197,7 +255,8 @@ class Store:
                     results[tid] = res
             return {"commit_seq": self.commit_seq(), "last_seq": self.last_seq(),
                     "compacted_through": self.compacted_through(),
-                    "tasks": self.tasks(), "claims": claims, "results": results}
+                    "tasks": self.tasks(), "claims": claims, "results": results,
+                    "summaries": self.summaries()}
 
     def import_snapshot(self, snap: dict) -> int:
         if not isinstance(snap, dict):
@@ -212,12 +271,18 @@ class Store:
                 self._db.execute("DELETE FROM claims")
                 self._db.execute("DELETE FROM results")
                 self._db.execute("DELETE FROM ops")
+                self._db.execute("DELETE FROM task_summary")
                 for task in (snap.get("tasks") or {}).values():
                     self._upsert_task(task)
                 for claim in (snap.get("claims") or {}).values():
                     self._upsert_claim(claim)
                 for res in (snap.get("results") or {}).values():
                     self._upsert_result(res)
+                # 摘要里的 archived 是生命周期标记，snapshot 带过来就还原，
+                # 否则新节点会把「已移出热窗口」的卡重新算成热卡。
+                for srow in (snap.get("summaries") or {}).values():
+                    if isinstance(srow, dict) and srow.get("id") and srow.get("archived"):
+                        self.set_summary_archived(str(srow["id"]), True)
                 self._set_meta("commit_seq", str(commit))
                 self._set_meta("last_seq", str(max(commit, int(
                     snap.get("last_seq") or commit))))
@@ -240,8 +305,14 @@ class Store:
             results = self._db.execute("SELECT COUNT(*) AS n FROM results").fetchone()["n"]
             pending = self._db.execute(
                 "SELECT COUNT(*) AS n FROM results WHERE archived_at=''").fetchone()["n"]
+            # 热/冷卡计数（T-0219）：列表页只看热卡，归档数单独报，便于对账。
+            archived = self._db.execute(
+                "SELECT COUNT(*) AS n FROM task_summary WHERE archived=1").fetchone()["n"]
             return {"tasks": int(tasks), "claims": int(claims), "results": int(results),
                     "archive_pending": int(pending),
+                    "tasks_archived": int(archived),
+                    "tasks_hot": int(tasks) - int(archived),
+                    "schema_version": self.schema_version(),
                     "last_seq": self.last_seq(), "commit_seq": self.commit_seq(),
                     "compacted_through": self.compacted_through(),
                     "node": self.node_id, "path": str(self.path)}
@@ -338,6 +409,7 @@ class Store:
                         "UPDATE tasks SET payload_json=?, def_hash=?, updated=? "
                         "WHERE id=?", (json.dumps(payload, ensure_ascii=False),
                                        def_hash, _iso(), tid))
+                self._sync_summary_locked(tid)
                 n += 1
         return n
 
@@ -465,6 +537,7 @@ class Store:
         if payload.get("clear_result"):
             self._db.execute("DELETE FROM results WHERE task_id=?",
                              (str(op.get("task_id") or ""),))
+            self._sync_summary_locked(str(op.get("task_id") or ""))
         if "result" in payload:
             self._upsert_result(payload.get("result"))
         archive = payload.get("archive")
@@ -474,6 +547,7 @@ class Store:
                 (str(archive.get("archived_at") or _iso()),
                  str(archive.get("archive_sha") or ""),
                  str(archive.get("task_id"))))
+            self._sync_summary_locked(str(archive.get("task_id")))
 
     def _upsert_task(self, task: dict | None) -> None:
         if not isinstance(task, dict) or not task.get("id"):
@@ -490,6 +564,7 @@ class Store:
                                      "updated", "def_hash")},
                        ensure_ascii=False),
              str(task.get("def_hash") or ""), str(task.get("updated") or _iso())))
+        self._sync_summary_locked(str(task["id"]))
 
     def _upsert_claim(self, claim: dict | None) -> None:
         if claim is None:
@@ -528,6 +603,7 @@ class Store:
              str(result.get("accepted_at") or ""),
              str(result.get("archived_at") or ""),
              str(result.get("archive_sha") or "")))
+        self._sync_summary_locked(str(result["task_id"]))
 
     # -- 业务动作（leader） ------------------------------------------------- #
     def claim(self, tid: str, agent: str, term: int, lease_minutes: int,
@@ -681,6 +757,117 @@ class Store:
                               "note": str(note or "")}}
             op["seq"] = self.apply_op(op) if commit else self.stage_op(op)
             return {"ok": True, "task": task, "seq": op["seq"]}
+
+    # -- 摘要表（列表用物化视图，T-0219） ----------------------------------- #
+    def _sync_summary_locked(self, tid: str) -> None:
+        """按 tasks/results 当前内容重算一行摘要。
+
+        `archived` **不由这里推导**：它是「这张卡已移出热窗口」的生命周期标记，
+        只由 `set_summary_archived()`（归档/回滚时调用）改写。这里读写一遍保留原值，
+        否则每次 claim/result 都会把刚打的归档标记抹掉。
+        """
+        tid = str(tid)
+        row = self._db.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+        res = self._db.execute("SELECT * FROM results WHERE task_id=?",
+                               (tid,)).fetchone()
+        if row is None and res is None:
+            self._db.execute("DELETE FROM task_summary WHERE id=?", (tid,))
+            return
+        try:
+            payload = json.loads(row["payload_json"] or "{}") if row is not None else {}
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        state = str(row["state"] or "") if row is not None else ""
+        owner = str(row["owner"] or "") if row is not None else ""
+        finished_at, head = "", ""
+        if res is not None:
+            finished_at = str(res["accepted_at"] or "")
+            try:
+                rp = json.loads(res["payload_json"] or "{}")
+            except ValueError:
+                rp = {}
+            if isinstance(rp, dict):
+                finished_at = str(rp.get("finished_at") or finished_at)
+                head = summary_head(rp.get("summary"))
+            if str(res["status"] or "") in ("done", "") and not state:
+                state = "done"
+        prev = self._db.execute("SELECT archived FROM task_summary WHERE id=?",
+                                (tid,)).fetchone()
+        archived = int(prev["archived"] or 0) if prev is not None else 0
+        self._db.execute(
+            "INSERT INTO task_summary(id,title,state,repo,priority,owner,"
+            "created_at,finished_at,summary_head,archived) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            "title=excluded.title, state=excluded.state, repo=excluded.repo, "
+            "priority=excluded.priority, owner=excluded.owner, "
+            "created_at=excluded.created_at, finished_at=excluded.finished_at, "
+            "summary_head=excluded.summary_head, archived=excluded.archived",
+            (tid, str(payload.get("title") or ""), state,
+             str(payload.get("repo") or ""), str(payload.get("priority") or ""),
+             owner, str(payload.get("created") or ""), finished_at, head, archived))
+
+    def refresh_summaries(self) -> int:
+        """从既有 tasks/results 全量重建摘要（老库升级、或怀疑漂移时手动跑）。
+
+        保留已有 `archived` 标记：重建只负责「派生字段」，归档状态是人的决定。
+        """
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                ids = [str(r["id"]) for r in self._db.execute("SELECT id FROM tasks")]
+                ids += [str(r["task_id"]) for r in self._db.execute(
+                    "SELECT task_id FROM results")]
+                seen, n = set(), 0
+                for tid in ids:
+                    if tid in seen:
+                        continue
+                    seen.add(tid)
+                    self._sync_summary_locked(tid)
+                    n += 1
+                self._db.execute("COMMIT")
+                return n
+            except Exception:
+                try:
+                    self._db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+
+    def set_summary_archived(self, tid: str, archived: bool = True) -> bool:
+        """打/清归档标记。找不到摘要行时返回 False（卡还没 ingest 过）。"""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE task_summary SET archived=? WHERE id=?",
+                (1 if archived else 0, str(tid)))
+            return cur.rowcount > 0
+
+    def summary_rows(self, include_archived: bool = False,
+                     limit: int | None = None) -> list[dict]:
+        """列表用摘要行：10 个字段，按 id 排序（稳定顺序，前端不用再排）。"""
+        sql = ("SELECT id,title,state,repo,priority,owner,created_at,finished_at,"
+               "summary_head,archived FROM task_summary")
+        args: list = []
+        if not include_archived:
+            sql += " WHERE archived=0"
+        sql += " ORDER BY id"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(int(limit))
+        with self._lock:
+            rows = self._db.execute(sql, tuple(args)).fetchall()
+        return [{"id": str(r["id"]), "title": str(r["title"]),
+                 "state": str(r["state"]), "repo": str(r["repo"]),
+                 "priority": str(r["priority"]), "owner": str(r["owner"]),
+                 "created_at": str(r["created_at"]),
+                 "finished_at": str(r["finished_at"]),
+                 "summary_head": str(r["summary_head"]),
+                 "archived": bool(r["archived"])} for r in rows]
+
+    def summaries(self) -> dict[str, dict]:
+        """全部摘要行（含冷卡），按 id 索引；给集群复制/排障用。"""
+        return {r["id"]: r for r in self.summary_rows(include_archived=True)}
 
     # -- 行转换 ------------------------------------------------------------ #
     @staticmethod

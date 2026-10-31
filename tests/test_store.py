@@ -1,6 +1,9 @@
 """P2a：SQLite store 的 CAS、幂等、复制回放。"""
 from __future__ import annotations
 
+import json
+import sqlite3
+
 import pytest
 
 from hive_store import Store, StoreError
@@ -182,3 +185,137 @@ def test_retry_clears_result_and_claim(tmp_path):
     assert s.claim_info("T-0001") is None
     assert s.task("T-0001")["state"] == "assigned"
     assert s.task("T-0001")["owner"] == "A"
+
+
+# --------------------------------------------------------------------------- #
+# T-0219：schema v2（task_summary）+ 迁移幂等
+# --------------------------------------------------------------------------- #
+
+def _schema_snapshot(path) -> tuple[int, list[tuple[str, str, str]]]:
+    """(user_version, [(type, name, sql)]) —— 结构比对的唯一口径。"""
+    conn = sqlite3.connect(str(path))
+    try:
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0] or 0)
+        rows = [tuple(r) for r in conn.execute(
+            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name")]
+    finally:
+        conn.close()
+    return version, rows
+
+
+def test_migration_v2_is_idempotent(tmp_path):
+    """连跑两次迁移：user_version 与整库结构必须逐字一致（判据 1）。"""
+    path = tmp_path / "v2.db"
+    first = Store(path, "n")
+    assert first.schema_version() == 2
+    assert first._meta("schema_version") == "2"     # 兼容旧读者，与 user_version 同步
+    first.close_conn()
+    v1, dump1 = _schema_snapshot(path)
+    assert v1 == 2
+
+    second = Store(path, "n")                        # 第二次打开 = 第二次跑迁移
+    assert second.schema_version() == 2
+    second.close_conn()
+    v2, dump2 = _schema_snapshot(path)
+
+    assert (v1, dump1) == (v2, dump2)
+    names = {name for _, name, _ in dump2}
+    assert "task_summary" in names
+    assert "idx_task_summary_state_finished" in names
+    assert "idx_task_summary_repo_state" in names
+
+
+def test_legacy_v1_db_upgrades_in_place(tmp_path):
+    """老库（只有 5 张表、user_version=0）打开后升到 v2，且原有数据不丢。"""
+    path = tmp_path / "legacy.db"
+    seed = Store(path, "n")
+    seed.ingest_cards({"T-0001": _card(title="老卡")})
+    seed.close_conn()
+
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("DROP TABLE task_summary")
+        conn.execute("PRAGMA user_version = 0")
+        conn.commit()
+    finally:
+        conn.close()
+    version, names = _schema_snapshot(path)[0], {r[1] for r in _schema_snapshot(path)[1]}
+    assert version == 0 and "task_summary" not in names     # 确认真的退回 v1 形态
+
+    upgraded = Store(path, "n")
+    assert upgraded.schema_version() == 2
+    assert upgraded.task("T-0001")["title"] == "老卡"        # 既有数据不丢
+    # 摘要表首次为空，refresh 从既有 tasks/results 灌一遍
+    assert upgraded.refresh_summaries() == 1
+    rows = upgraded.summary_rows()
+    assert [r["id"] for r in rows] == ["T-0001"]
+    assert rows[0]["title"] == "老卡"
+    upgraded.close_conn()
+
+
+def test_summary_follows_task_lifecycle(tmp_path):
+    """摘要行跟着 claim/result/close 走：state、finished_at、summary_head 都对得上。"""
+    s = Store(tmp_path / "life.db", "n")
+    s.ingest_cards({"T-0001": _card(created="2026-10-01T00:00:00+08:00",
+                                    priority="P1", title="摘要卡")})
+    row = s.summary_rows()[0]
+    assert row["state"] == "ready"
+    assert row["repo"] == "light" and row["priority"] == "P1"
+    assert row["created_at"] == "2026-10-01T00:00:00+08:00"
+    assert row["finished_at"] == "" and row["summary_head"] == ""
+    assert row["archived"] is False
+
+    c = s.claim("T-0001", "A", term=1, lease_minutes=10)
+    assert s.summary_rows()[0]["state"] == "running"
+
+    s.result("T-0001", "A", c["claim"]["lease_id"], term=1,
+             payload={"status": "done", "finished_at": "2026-10-31T10:00:00+08:00",
+                      "summary": "第一行结论\n第二行细节不该进摘要"})
+    row = s.summary_rows()[0]
+    assert row["state"] == "submitted"
+    assert row["finished_at"] == "2026-10-31T10:00:00+08:00"
+    assert row["summary_head"] == "第一行结论"      # 只取首行，不带细节
+
+    s.close("T-0001", done=True, note="land")
+    assert s.summary_rows()[0]["state"] == "done"
+    s.close_conn()
+
+
+def test_summary_archived_flag_survives_later_writes(tmp_path):
+    """`archived` 是生命周期标记，不能被后续 claim/result 顺手抹掉。"""
+    s = Store(tmp_path / "arch.db", "n")
+    s.ingest_cards({"T-0001": _card(), "T-0002": _card(tid="T-0002")})
+    assert s.set_summary_archived("T-0001", True) is True
+    assert s.set_summary_archived("T-9999", True) is False   # 没 ingest 过的卡
+
+    assert [r["id"] for r in s.summary_rows()] == ["T-0002"]           # 默认只热卡
+    full = s.summary_rows(include_archived=True)
+    assert [r["id"] for r in full] == ["T-0001", "T-0002"]
+    assert full[0]["archived"] is True
+
+    # 归档后又跑了一轮 claim/result，标记必须还在
+    s.claim("T-0001", "A", term=1, lease_minutes=10)
+    s.ingest_cards({"T-0001": _card(state="done")})
+    assert s.summaries()["T-0001"]["archived"] is True
+
+    s.set_summary_archived("T-0001", False)
+    assert s.summaries()["T-0001"]["archived"] is False
+    assert s.summary_rows()[0]["id"] == "T-0001"
+    s.close_conn()
+
+
+def test_summary_survives_snapshot_roundtrip(tmp_path):
+    """快照复制到新节点后，冷卡的 archived 标记不能变回热卡。"""
+    a = Store(tmp_path / "snap-a.db", "a")
+    a.ingest_cards({"T-0001": _card(state="done")})
+    a.set_summary_archived("T-0001", True)
+    snap = a.snapshot()
+    assert snap["summaries"]["T-0001"]["archived"] is True
+
+    b = Store(tmp_path / "snap-b.db", "b")
+    b.import_snapshot(snap)
+    assert b.summaries()["T-0001"]["archived"] is True
+    assert b.summary_rows() == []                    # 冷卡不进默认列表
+    assert b.summary()["tasks_archived"] == 1
+    a.close_conn()
+    b.close_conn()

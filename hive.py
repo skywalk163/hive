@@ -151,6 +151,10 @@ TASK_FIELDS = [
     # T-0220 追加：派发出去但一直没人领的次数。>=2 转 blocked 等人工，
     # 避免「派发→没人领→回收→再派发」的无限拉锯。
     "dispatch_miss",
+    # T-0219 追加：冷热分离。`archived` 为真表示卡已移出热目录（tasks/archive/），
+    # `archived_at` 记归档时刻。**必须列在这里**，否则 write_card 按 TASK_FIELDS
+    # 遍历写盘时会把这两个字段直接丢掉——归档标记写不进去，列表就永远看不到它。
+    "archived", "archived_at",
 ]
 
 # 文件级锁（任务卡 `locks` 字段）的判定在 conflict.py。放 try 里是因为 hive.py 允许被
@@ -1565,10 +1569,23 @@ class Hive:
     def card(self, tid: str) -> dict:
         p = self.dir / "tasks" / f"{tid}.md"
         if not p.exists():
-            raise HiveError(f"没有任务 {tid}")
+            # T-0219：冷卡在 tasks/archive/YYYY-MM/ 下。详情按 id 现取时两处都看，
+            # 否则归档过的卡 reopen/close 会直接报「没有任务」，看起来像丢卡。
+            cold = self.archived_cards().get(str(tid))
+            if cold is None:
+                raise HiveError(f"没有任务 {tid}")
+            return self._overlay_store_state(cold)
         data, body = parse_card(p)
         data["_body"], data["_path"] = body, p
         return self._overlay_store_state(data)
+
+    def archived_cards(self) -> dict[str, dict]:
+        """冷目录里的卡（`archived: true`）。归档模块未部署时返回空字典。"""
+        try:
+            import hive_archive
+        except ImportError:  # pragma: no cover - 残缺部署
+            return {}
+        return hive_archive.archived_cards(self.dir)
 
     def save_card(self, data: dict, body: str | None = None) -> None:
         p = data["_path"]
@@ -3199,11 +3216,78 @@ class Hive:
                 print(f"  ! {w}")
         return reports
 
-    def cmd_status(self, as_json: bool = False, with_board: bool = False) -> None:
+    def _status_summary(self, as_json: bool = False,
+                        include_archived: bool = False) -> list[dict]:
+        """列表页专用摘要通道（T-0219）。
+
+        只回 10 个字段：`id/title/state/repo/priority/owner/created_at/
+        finished_at/summary_head/archived`。**刻意不构造** `verify[]`、
+        `result_summary`、`body` —— 这三样占了旧 `status.json` 的绝大部分字节，
+        而列表页一个都用不到；要详情请按 id 走 `Hive.card()` / `hive result`。
+
+        `include_archived=False`（默认）只回热卡：冷卡已移出 `tasks/`，
+        默认列表里不该再为历史付体积。要看全量索引加 `--include-archived`。
+        """
+        try:
+            import hive_archive as ha
+        except ImportError:  # pragma: no cover - 残缺部署（只拷了 hive.py）
+            ha = None
+
+        cards = self.cards()
+        if ha is not None and include_archived:
+            for tid, c in ha.archived_cards(self.dir).items():
+                cards.setdefault(tid, c)
+
+        rows: list[dict] = []
+        for tid, c in cards.items():
+            archived = bool(c.get("archived"))
+            if archived and not include_archived:
+                continue
+            finished = (ha.card_finished_at(self.dir, c) if ha is not None
+                        else str(c.get("updated") or c.get("created") or ""))
+            rows.append({
+                "id": tid,
+                "title": str(c.get("title") or ""),
+                "state": str(c.get("state") or ""),
+                "repo": str(c.get("repo") or ""),
+                "priority": str(c.get("priority") or ""),
+                "owner": str(c.get("owner") or ""),
+                "created_at": str(c.get("created") or ""),
+                "finished_at": finished,
+                "summary_head": (ha.card_summary_head(self.dir, c)
+                                 if ha is not None else ""),
+                "archived": archived,
+            })
+        rows.sort(key=lambda r: r["id"])
+
+        if as_json:
+            # 顶层仍是数组：dashboard 与既有脚本都按 Array.isArray 校验，
+            # 摘要通道不能破坏这个契约（要 board 用旧的 --board 路径）。
+            print(json.dumps(rows, ensure_ascii=False, indent=2))
+            return rows
+        if not rows:
+            print("（还没有任务）")
+            return rows
+        print(f"摘要：{len(rows)} 张"
+              f"{'（含冷卡）' if include_archived else '（只热卡）'}")
+        print(f"{'ID':<9} {'STATE':<9} {'REPO':<12} {'PRI':<5} {'ARCH':<5} "
+              f"{'FINISHED':<20} TITLE")
+        for r in rows:
+            print(f"{r['id']:<9} {r['state']:<9} {r['repo']:<12} "
+                  f"{r['priority']:<5} {'yes' if r['archived'] else '-':<5} "
+                  f"{r['finished_at'][:19]:<20} {r['title'][:40]}")
+        return rows
+
+    def cmd_status(self, as_json: bool = False, with_board: bool = False,
+                   summary: bool = False, include_archived: bool = False) -> None:
         # T-0216：先 ls-remote 比对远端 SHA，没变就不白跑 git fetch --prune。
         # ls-remote 失败 / SHA 变化 / HIVE_FETCH_ALWAYS=1 时才真 fetch。
         if fetch_if_changed(self.dir):
             self.fetch()
+        # T-0219：列表页走摘要通道，不构造 verify/result_summary 这些详情字段。
+        if summary:
+            self._status_summary(as_json=as_json, include_archived=include_archived)
+            return
         cards = self.cards()
         rows = []
         for tid, c in cards.items():
@@ -5309,7 +5393,28 @@ def cmd_land(args) -> None:
 
 
 def cmd_status(args) -> None:
-    Hive(args.dir).cmd_status(args.json, args.board)
+    Hive(args.dir).cmd_status(args.json, args.board, summary=args.summary,
+                              include_archived=args.include_archived)
+
+
+def cmd_archive(args) -> None:
+    """`hive archive`：转发给 hive_archive（默认 dry-run，`--apply` 才动文件）。
+
+    只是把参数翻一遍，归档逻辑全部在 hive_archive.py 里——这样脚本单独跑
+    （`python hive_archive.py --dir .`）与走 `hive archive` 行为逐字一致。
+    """
+    import hive_archive
+
+    argv = ["--dir", str(args.dir)]
+    if args.days is not None:
+        argv += ["--days", str(args.days)]
+    if args.apply:
+        argv += ["--apply"]
+    if args.restore:
+        argv += ["--restore", str(args.restore)]
+    if args.json:
+        argv += ["--json"]
+    sys.exit(hive_archive.main(argv))
 
 
 def cmd_gc(args) -> None:
@@ -5869,7 +5974,26 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--board", action="store_true",
                    help="--json 时顶层改为 {tasks, board}：board 是派发阶段分组摘要"
                         "（待分配/已推送/已领取/在跑…），不写该标志时保持数组形态向后兼容")
+    s.add_argument("--summary", action="store_true",
+                   help="只输出摘要字段（id/title/state/repo/priority/owner/"
+                        "created_at/finished_at/summary_head/archived），不含 "
+                        "verify/result_summary/正文；列表页与后续接口用这个")
+    s.add_argument("--include-archived", dest="include_archived",
+                   action="store_true",
+                   help="摘要通道里带上已归档的冷卡（archived: true）；默认只列热卡")
     s.set_defaults(func=cmd_status)
+
+    # —— T-0219：冷热分离 ——
+    s = sub.add_parser("archive",
+                       help="归档完成超过热窗口的卡到 tasks/archive/YYYY-MM/"
+                            "（默认 dry-run，只报告不动文件）")
+    s.add_argument("--days", type=int, default=None,
+                   help="热窗口天数，默认取 HIVE_ARCHIVE_DAYS 或 14；<=0 表示本次不归档")
+    s.add_argument("--apply", action="store_true", help="真归档；默认只报告")
+    s.add_argument("--restore", metavar="TID", default=None,
+                   help="把一张冷卡搬回 tasks/ 并清掉 archived 标记")
+    s.add_argument("--json", action="store_true", help="输出结构化 JSON")
+    s.set_defaults(func=cmd_archive)
 
     # —— T-0188：派发流水线的接线命令 ——
     s = sub.add_parser("prompt", help="渲染一张卡的派发指令（markdown 或 json payload）")
