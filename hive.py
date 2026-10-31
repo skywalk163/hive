@@ -1854,6 +1854,26 @@ class Hive:
             plan["problems"].append(f"代码仓里没有 {branch} 分支")
             return plan
         if task_head == base_head:
+            # task 分支与 base 一致：代码已在 main。但卡面可能仍在飞（上次 land
+            # push 到了远端但 close 没走完，典型场景是 push 超时本地没收到回执）。
+            # 这种情况必须补 close，不能只说"无需合并"就 return，否则看板永远
+            # 卡在"待合并"列，要人手工改卡面（T-0211 踩过）。
+            if card.get("state") in IN_FLIGHT_STATES:
+                plan["head"] = task_head
+                plan["merged"] = True
+                try:
+                    self.cmd_close(tid, note=note or f"land {tid}（补 close）")
+                    plan["closed"] = True
+                    plan["status"] = "landed"
+                    plan["problems"].append(
+                        f"代码已在 {target}，卡面补 close（上次 push 可能超时未收回执）")
+                except HiveError as e:
+                    plan["status"] = "merged-not-closed"
+                    plan["problems"].append(
+                        f"代码已在 {target}，但关卡失败：{e}。"
+                        f"跑 hive close {tid} 收尾")
+                self._after_land(plan)
+                return plan
             plan["problems"].append(f"已经合进 {target} 了（内容一致，无需合并）")
             return plan
 
@@ -1906,13 +1926,27 @@ class Hive:
                          f"{plan['head']}:refs/heads/{target}"], repo)
             except HiveError as e:
                 if getattr(e, "timed_out", False):
-                    # 超时和「被别人抢先推了」是两回事：别让人误以为是抢锁失败。
-                    plan["status"] = "failed"
-                    plan["problems"].append(f"推送 {target} 超时：{e}")
+                    # push 超时 ≠ 没推上去：git 经常在远端已更新、但本地进程被
+                    # NET_TIMEOUT 杀掉没收到回执。fetch 一次再比 origin/main，
+                    # 到了就当成功继续 close；真没到才判 failed（T-0211 踩过）。
+                    try:
+                        git_net(["fetch", "origin"], repo)
+                    except HiveError:
+                        pass
+                    if rev_parse(repo, base) == plan["head"]:
+                        log(f"{tid} push 超时但远端已到 {plan['head'][:8]}，继续 close")
+                        plan["problems"].append(
+                            f"push {target} 超时但远端已确认到 "
+                            f"{plan['head'][:8]}，继续关闭")
+                    else:
+                        plan["status"] = "failed"
+                        plan["problems"].append(
+                            f"推送 {target} 超时且远端未到：{e}")
+                        return plan
                 else:
                     plan["problems"].append(
                         f"推送 {target} 失败（可能别人刚推过）: {e}")
-                return plan
+                    return plan
             plan["merged"] = True
         finally:
             git(["worktree", "remove", "--force", str(wt)], repo, check=False)
@@ -5417,6 +5451,17 @@ def cmd_archive(args) -> None:
     sys.exit(hive_archive.main(argv))
 
 
+def cmd_top(args) -> int:
+    """`hive top`：常驻终端视图。实现全在 hive_tui.py（纯标准库，只读）。"""
+    try:
+        import hive_tui
+    except ImportError as exc:
+        raise HiveError(
+            "找不到 hive_tui.py；它是 `hive top` 的实现，请确认它和 hive.py "
+            "在同一目录") from exc
+    return hive_tui.run(args)
+
+
 def cmd_gc(args) -> None:
     Hive(args.dir).cmd_gc(args.minutes)
 
@@ -5994,6 +6039,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="把一张冷卡搬回 tasks/ 并清掉 archived 标记")
     s.add_argument("--json", action="store_true", help="输出结构化 JSON")
     s.set_defaults(func=cmd_archive)
+
+    s = sub.add_parser("top", help="常驻终端视图：一眼看当前在跑什么（只读，纯标准库）")
+    s.add_argument("--once", action="store_true",
+                   help="只打印一帧就退出（给测试/脚本用，退出码恒 0）")
+    s.add_argument("--width", type=int, default=0,
+                   help="固定宽度（默认取终端宽度，最小 60）")
+    s.add_argument("--interval", type=float, default=2.0, help="刷新间隔秒数（默认 2）")
+    s.add_argument("--no-clear", dest="no_clear", action="store_true",
+                   help="不清屏：保留滚动历史，便于复制")
+    s.add_argument("--api", default="",
+                   help="看板地址（默认 http://127.0.0.1:$HIVE_DASHBOARD_PORT）")
+    s.set_defaults(func=cmd_top)
 
     # —— T-0188：派发流水线的接线命令 ——
     s = sub.add_parser("prompt", help="渲染一张卡的派发指令（markdown 或 json payload）")
