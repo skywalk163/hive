@@ -1837,6 +1837,26 @@ class Hive:
             plan["problems"].append(f"代码仓里没有 {branch} 分支")
             return plan
         if task_head == base_head:
+            # task 分支与 base 一致：代码已在 main。但卡面可能仍在飞（上次 land
+            # push 到了远端但 close 没走完，典型场景是 push 超时本地没收到回执）。
+            # 这种情况必须补 close，不能只说"无需合并"就 return，否则看板永远
+            # 卡在"待合并"列，要人手工改卡面（T-0211 踩过）。
+            if card.get("state") in IN_FLIGHT_STATES:
+                plan["head"] = task_head
+                plan["merged"] = True
+                try:
+                    self.cmd_close(tid, note=note or f"land {tid}（补 close）")
+                    plan["closed"] = True
+                    plan["status"] = "landed"
+                    plan["problems"].append(
+                        f"代码已在 {target}，卡面补 close（上次 push 可能超时未收回执）")
+                except HiveError as e:
+                    plan["status"] = "merged-not-closed"
+                    plan["problems"].append(
+                        f"代码已在 {target}，但关卡失败：{e}。"
+                        f"跑 hive close {tid} 收尾")
+                self._after_land(plan)
+                return plan
             plan["problems"].append(f"已经合进 {target} 了（内容一致，无需合并）")
             return plan
 
@@ -1889,13 +1909,27 @@ class Hive:
                          f"{plan['head']}:refs/heads/{target}"], repo)
             except HiveError as e:
                 if getattr(e, "timed_out", False):
-                    # 超时和「被别人抢先推了」是两回事：别让人误以为是抢锁失败。
-                    plan["status"] = "failed"
-                    plan["problems"].append(f"推送 {target} 超时：{e}")
+                    # push 超时 ≠ 没推上去：git 经常在远端已更新、但本地进程被
+                    # NET_TIMEOUT 杀掉没收到回执。fetch 一次再比 origin/main，
+                    # 到了就当成功继续 close；真没到才判 failed（T-0211 踩过）。
+                    try:
+                        git_net(["fetch", "origin"], repo)
+                    except HiveError:
+                        pass
+                    if rev_parse(repo, base) == plan["head"]:
+                        log(f"{tid} push 超时但远端已到 {plan['head'][:8]}，继续 close")
+                        plan["problems"].append(
+                            f"push {target} 超时但远端已确认到 "
+                            f"{plan['head'][:8]}，继续关闭")
+                    else:
+                        plan["status"] = "failed"
+                        plan["problems"].append(
+                            f"推送 {target} 超时且远端未到：{e}")
+                        return plan
                 else:
                     plan["problems"].append(
                         f"推送 {target} 失败（可能别人刚推过）: {e}")
-                return plan
+                    return plan
             plan["merged"] = True
         finally:
             git(["worktree", "remove", "--force", str(wt)], repo, check=False)
