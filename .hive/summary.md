@@ -179,3 +179,43 @@ B_valve_off  (HIVE_NO_WINDOW=0)    峰值 5 / 基线 4 → 增量 1
   「有控制台 + -n 4 + 卡住了重跑」，不是一次性修好**。彻底的代码级修法（另开卡）：
   测试夹具 `tests/conftest.py::sh` 与测试里的 `Popen` 也带上 `no_window_kwargs()`，
   这样即使父进程没有控制台，子进程也不再分配控制台。
+
+## 第四次：根治本机死锁（把 no_window 下沉到测试夹具）—— 全量 99 passed / 16:53
+
+上一轮把「死锁」归因为「父进程无控制台 + 高频 spawn → conhost 分配竞争」，并留了
+「另开卡把 `no_window_kwargs()` 下沉到测试夹具」的尾巴。本轮直接把这个尾巴做掉，
+因为它是本机 submit 过门的唯一硬阻塞。
+
+### 最小复现（一次性脚本，已删除，不入库）
+4 线程 × 8 轮 `git init --bare` → `clone` → `commit` → `push`（push 会 spawn
+`receive-pack`，即之前观察到的「孙进程持管道」形态），父进程无控制台：
+
+```
+对照（默认 spawn）：整组挂死——每个 git 操作都等到自己的超时才返回，跑不完
+实验（CREATE_NO_WINDOW）：done=32/32  stuck=0  elapsed=42.7s
+```
+
+⇒ 根因确认：**无控制台父进程下，console 子进程（git）自建控制台，高频并发撞
+conhost 分配竞争 → 0 CPU 永久挂起**。`CREATE_NO_WINDOW` 让子进程不再分配控制台，
+彻底消掉这一类死锁。
+
+### 改动（把统一出口下沉到测试夹具，与 T-0206 同一套纪律）
+- `tests/conftest.py`：`sh()`（世界夹具与 `world.hive()` 的唯一 spawn 出口）加
+  `**no_window_kwargs()`；顶部 `from hive_compat import no_window_kwargs`。
+- `tests/test_core.py`：3 处直连 `subprocess`（`test_claim_is_atomic` /
+  `test_retry_fresh_clears_archive` / `test_concurrent_claims_share_one_clone`）
+  同样接入。
+- 非 Windows 返回 `{}`，门禁机 0.88（FreeBSD）行为一个字节不变；
+  `tests/test_no_window.py` 的 AST 扫描只覆盖生产模块（不含 `tests/`），
+  白名单精确集合不受影响。
+
+### 验证
+```
+pytest -q tests/test_no_window.py tests/test_core.py tests/test_dashboard_freshness.py
+PYTEST_ADDOPTS="-n 4 --basetemp=.hive/pt-fix2 -p no:cacheprovider"
+→ 99 passed in 1013.86s (0:16:53)
+```
+（Windows 上 99 条全过；0.88 上 `test_no_window_kwargs_on_windows` 因 skipif 跳过，
+故为 98 passed + 1 skipped，总数一致。）
+
+之前同一条 `-n 4` 命令会随机死锁（30~45 分钟内 3~4 次）；本次全程无卡死、一次跑通。

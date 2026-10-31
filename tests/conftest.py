@@ -15,6 +15,15 @@ sys.path.insert(0, str(ROOT))
 HIVE = ROOT / "hive.py"
 FAKE = ROOT / "fake_agent.py"
 
+# 夹具统一走 no_window 出口（T-0206）：Windows 上本夹具被 pytest-xdist 多进程
+# 并发调用，每次 spawn 一个 console 程序（git / hive.py）。若父进程没有控制台
+# （无终端 CI / 后台 agent），CreateProcess 会为每个子进程新建一个控制台，高频
+# 并发下会撞 conhost 分配竞争，表现为 git 子进程 0 CPU 永久挂起（本机实测可复现：
+# 4 线程 × 8 轮 init/clone/push，不带 flag 时整组挂死，带 flag 时 32/32 通过）。
+# 加上 CREATE_NO_WINDOW 后子进程不再分配控制台，输出仍走管道，对断言零影响；
+# 非 Windows 返回 {}，POSIX（门禁机 0.88）行为不变。
+from hive_compat import no_window_kwargs  # noqa: E402
+
 
 def _tmp_home() -> Path:
     """每个测试进程一份独立的临时 home（用于租约留底等本机状态）。"""
@@ -37,7 +46,7 @@ def sh(cmd, cwd=None, check=True, env=None):
     # 看起来像"业务逻辑坏了"，实际只是测试夹具没对齐编码。
     p = subprocess.run([str(c) for c in cmd], cwd=str(cwd) if cwd else None,
                        text=True, capture_output=True, env=_utf8_env(env),
-                       encoding="utf-8", errors="replace")
+                       encoding="utf-8", errors="replace", **no_window_kwargs())
     if check and p.returncode != 0:
         raise AssertionError(f"命令失败({p.returncode}): {cmd}\n{p.stdout}\n{p.stderr}")
     return p

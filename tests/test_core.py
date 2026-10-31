@@ -10,6 +10,7 @@ import hive
 import pytest
 
 from conftest import HIVE, sh
+from hive_compat import no_window_kwargs
 
 
 def show(world, ref: str) -> str:
@@ -176,7 +177,8 @@ def test_claim_is_atomic(world, fake_cmd):
             [sys.executable, str(HIVE),
              "--dir", str(world.hive1 if name == "a1" else world.hive2),
              "claim", "T-0001", "--agent", name],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            **no_window_kwargs())
         for name in ("a1", "a2")
     ]
     codes = [p.wait() for p in procs]
@@ -233,7 +235,7 @@ def test_retry_fresh_clears_archive(world):
     # 归档已从 main 撤掉
     check = subprocess.run(
         ["git", "--git-dir", str(world.hive_origin), "show", "main:results/T-0001.json"],
-        text=True, capture_output=True)
+        text=True, capture_output=True, **no_window_kwargs())
     assert check.returncode != 0
     assert world.card("T-0001")["fresh"] is True
 
@@ -318,7 +320,8 @@ def test_concurrent_claims_share_one_clone(world, fake_cmd):
             subprocess.Popen(
                 [sys.executable, str(HIVE), "--dir", str(world.hive1),
                  "claim", tid, "--agent", name],
-                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                **no_window_kwargs())
             for name in ("a1", "a2")
         ]
         codes = [p.wait() for p in procs]
