@@ -121,6 +121,7 @@
     source: '/api/status',
     snapshotAt: null,   // 快照生成时刻（毫秒），来自 X-Snapshot-Mtime；null = 服务端没给
     cluster: null,      // /api/cluster 的集群视图（leader/term/在线节点）
+    clusterOpen: false, // 集群面板是否展开（默认折叠）
     board: null,        // /api/status 附带的 board 摘要（stage 分桶）；旧快照里没有 → null
     inflight: false
   };
@@ -906,10 +907,162 @@
     state.source = source;
     state.loading = false;
     render();
+    // 集群面板里的「任务数」来自 /api/status，任务刷新时同步重算（不额外请求）
+    if (state.cluster) renderCluster(state.cluster);
   }
 
   // ---------- 常驻集群状态（5s 一次，与任务快照解耦） ----------
   var CLUSTER_MS = 5000;
+  // 后端 snapshot 目前没下发 peer_timeout / dead_timeout；缺失时的估算档位。
+  // 节点记录里已有后端算好的 status，优先用它，只有旧快照缺 status 才按这两个数估。
+  var CLUSTER_EST_PEER_S = 15;
+  var CLUSTER_EST_DEAD_S = 60;
+
+  // —— 纯函数：不碰 DOM，tests/test_dashboard_cluster.py 用 node 直接断言渲染结果 ——
+  function clusterAgeSeconds(epoch, now) {
+    var seen = Number(epoch);
+    var at = Number(now);
+    if (!isFinite(seen) || seen <= 0 || !isFinite(at)) return null;
+    return Math.max(0, Math.round(at - seen));
+  }
+
+  /** 心跳 age：3s / 2m / 1h；没有 last_seen_epoch 返回 —（不伪造时间） */
+  function clusterAge(epoch, now) {
+    var s = clusterAgeSeconds(epoch, now);
+    if (s === null) return '—';
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm';
+    if (s < 86400) return Math.floor(s / 3600) + 'h';
+    return Math.floor(s / 86400) + 'd';
+  }
+
+  function clusterThresholds(snap) {
+    var peer = Number(snap && snap.peer_timeout);
+    var dead = Number(snap && snap.dead_timeout);
+    var guessed = !(isFinite(peer) && peer > 0 && isFinite(dead) && dead > peer);
+    if (guessed) {
+      peer = CLUSTER_EST_PEER_S;
+      dead = CLUSTER_EST_DEAD_S;
+    }
+    return { peer: peer, dead: dead, guessed: guessed };
+  }
+
+  /** 优先用后端 status（已按 peer_timeout/dead_timeout 分档）；缺失时才按 age 估。 */
+  function clusterNodeStatus(node, now, peer, dead) {
+    var st = String((node && node.status) || '');
+    if (st === 'alive' || st === 'suspect' || st === 'dead') return st;
+    var age = clusterAgeSeconds(node && node.last_seen_epoch, now);
+    if (age === null) return 'dead';
+    if (age <= peer) return 'alive';
+    if (age <= dead) return 'suspect';
+    return 'dead';
+  }
+
+  function clusterStatusView(status) {
+    if (status === 'alive') return { cls: 'alive', label: '在线' };
+    if (status === 'suspect') return { cls: 'suspect', label: '可疑' };
+    return { cls: 'dead', label: '离线' };
+  }
+
+  function clusterEndpoint(leader) {
+    if (!leader) return '';
+    if (leader.url) return String(leader.url);
+    if (leader.host && leader.port) return 'http://' + leader.host + ':' + leader.port;
+    return '';
+  }
+
+  /** 在飞卡 = owner 对得上，且还没 done / closed / blocked / failed。 */
+  function clusterTaskCount(tasks, name) {
+    if (!name || !Array.isArray(tasks)) return 0;
+    var n = 0;
+    tasks.forEach(function (t) {
+      if (!t) return;
+      if ((t.owner || t.claim_agent || '') !== name) return;
+      if (t.state === 'done' || t.state === 'closed' || t.state === 'blocked') return;
+      if (t.result_status === 'failed') return;
+      n++;
+    });
+    return n;
+  }
+
+  function renderClusterSummary(snap, open) {
+    snap = snap || {};
+    var leader = snap.leader || {};
+    var self = snap.self || {};
+    var term = snap.term || 0;
+    var alive = snap.alive || 0;
+    var known = snap.known || 0;
+    var txt = '集群：' + (leader.name || '无主') + ' · term ' + term + ' · ' + alive + '/' + known;
+    if (snap.role === 'leader' || (self.id && leader.id === self.id)) {
+      txt = '集群：本机主节点 · term ' + term + ' · ' + alive + '/' + known;
+    }
+    return '<button type="button" class="cluster-toggle" data-cluster-toggle ' +
+      'aria-expanded="' + (open ? 'true' : 'false') + '" aria-controls="cluster-panel">' +
+      esc(txt) + '<span class="cluster-caret" aria-hidden="true">' +
+      (open ? '▾' : '▸') + '</span></button>';
+  }
+
+  function renderClusterPanel(snap, tasks, now) {
+    snap = snap || {};
+    var leader = snap.leader || {};
+    var self = snap.self || {};
+    var thresholds = clusterThresholds(snap);
+    var endpoint = clusterEndpoint(leader);
+    var html = '<div class="cluster-panel" id="cluster-panel" role="region" aria-label="集群节点">';
+
+    html += '<div class="cluster-head">' +
+      '<div class="cluster-leader"><span class="cluster-kicker">主节点</span>' +
+      '<b class="cluster-leader-name">' + esc(leader.name || '无主') + '</b>';
+    if (endpoint) {
+      html += '<code class="cluster-addr mono">' + esc(endpoint) + '</code>' +
+        '<button type="button" class="btn mini cluster-copy" data-cluster-copy="' +
+        esc(endpoint) + '">复制</button>';
+    } else {
+      html += '<span class="cluster-addr muted">未上报地址</span>';
+    }
+    html += '</div><dl class="cluster-facts">' +
+      '<div><dt>term</dt><dd>' + esc(snap.term || 0) + '</dd></div>' +
+      '<div><dt>quorum</dt><dd>' + esc(snap.quorum || 0) + '</dd></div>' +
+      '<div><dt>集群 ID</dt><dd>' + esc(snap.cluster_id || '—') + '</dd></div>' +
+      '</dl></div>';
+
+    html += '<table class="cluster-nodes"><thead><tr>' +
+      '<th>节点</th><th>角色</th><th>状态</th><th>心跳</th><th>任务</th><th>版本</th>' +
+      '</tr></thead><tbody>';
+    var nodes = Array.isArray(snap.nodes) ? snap.nodes : [];
+    if (!nodes.length) {
+      html += '<tr><td colspan="6" class="cluster-empty">快照里没有节点</td></tr>';
+    } else {
+      nodes.forEach(function (n) {
+        n = n || {};
+        var status = clusterNodeStatus(n, now, thresholds.peer, thresholds.dead);
+        var view = clusterStatusView(status);
+        var role = n.role || (leader.id && n.id === leader.id ? 'leader' : 'follower');
+        var isSelf = !!(self.id && n.id === self.id);
+        var age = clusterAge(n.last_seen_epoch, now);
+        html += '<tr class="cluster-node">' +
+          '<td class="cluster-name"><b>' + esc(n.name || n.id || '?') + '</b>' +
+          (isSelf ? '<span class="cluster-self">本机</span>' : '') + '</td>' +
+          '<td class="cluster-role">' + esc(role) + '</td>' +
+          '<td><span class="cluster-status ' + view.cls + '"><span class="cluster-lamp"></span>' +
+          view.label + '</span></td>' +
+          '<td><span class="cluster-age mono" title="最后心跳 ' + esc(age) + ' 前">' +
+          esc(age) + '</span></td>' +
+          '<td><span class="cluster-tasks">' +
+          clusterTaskCount(tasks, n.name || n.id) + '</span></td>' +
+          '<td class="cluster-version mono">' + esc(n.version || '—') + '</td>' +
+          '</tr>';
+      });
+    }
+    html += '</tbody></table><p class="cluster-note">';
+    if (thresholds.guessed) {
+      html += '后端未下发 peer_timeout / dead_timeout，缺失状态的节点按 15s / 60s 估。';
+    } else {
+      html += '状态灯按后端下发的 peer_timeout / dead_timeout 分档。';
+    }
+    html += '数据源 /api/cluster，任务数来自 /api/status。</p></div>';
+    return html;
+  }
 
   function renderCluster(data) {
     if (!el.cluster) return;
@@ -917,22 +1070,18 @@
     var snap = (data && data.state) || {};
     var leader = snap.leader || {};
     if (!running) {
-      el.cluster.textContent = '集群：未启动';
+      state.clusterOpen = false;
       el.cluster.className = 'cluster off';
+      el.cluster.innerHTML = '<span class="cluster-summary">集群：未启动</span>';
       el.cluster.title = '本机没有运行 hive cluster serve；用 hive cluster start 接入集群';
       return;
     }
-    var term = snap.term || 0;
+    var open = !!state.clusterOpen;
     var alive = snap.alive || 0;
     var known = snap.known || 0;
-    var who = leader.name || '无主';
-    var self = snap.self || {};
-    var txt = '集群：' + who + ' · term ' + term + ' · ' + alive + '/' + known;
-    if (snap.role === 'leader' || (self.id && leader.id === self.id)) {
-      txt = '集群：本机主节点 · term ' + term + ' · ' + alive + '/' + known;
-    }
-    el.cluster.textContent = txt;
-    el.cluster.className = 'cluster ' + (leader.id ? 'ok' : 'warn');
+    el.cluster.className = 'cluster ' + (leader.id ? 'ok' : 'warn') + (open ? ' is-open' : '');
+    el.cluster.innerHTML = renderClusterSummary(snap, open) +
+      (open ? renderClusterPanel(snap, state.tasks, Date.now() / 1000) : '');
     el.cluster.title = (leader.url ? ('主节点 ' + leader.name + ' ' + leader.url) : '当前没有主节点') +
       '；节点 ' + alive + '/' + known + ' 在线；数据源 /api/cluster';
   }
@@ -1206,6 +1355,36 @@
 
     el.overlay.addEventListener('click', closeDrawer);
 
+    // 集群面板：点标题展开/折叠；主节点地址按钮复制；点面板外关闭
+    if (el.cluster) el.cluster.addEventListener('click', function (e) {
+      var copyBtn = e.target.closest && e.target.closest('[data-cluster-copy]');
+      if (copyBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        var addr = copyBtn.getAttribute('data-cluster-copy') || '';
+        writeClipboard(addr).then(function () {
+          flashCopied(copyBtn);
+          flash('已复制主节点地址 ' + addr);
+        }).catch(function (err) {
+          flash('复制失败：' + ((err && err.message) ? err.message : err), true);
+        });
+        return;
+      }
+      var toggle = e.target.closest && e.target.closest('[data-cluster-toggle]');
+      if (!toggle) return;
+      e.preventDefault();
+      e.stopPropagation();
+      state.clusterOpen = !state.clusterOpen;
+      renderCluster(state.cluster);
+      syncTopbarHeight();
+    });
+    document.addEventListener('click', function (e) {
+      if (!state.clusterOpen) return;
+      if (el.cluster && el.cluster.contains(e.target)) return;
+      state.clusterOpen = false;
+      renderCluster(state.cluster);
+    });
+
     // 设置弹窗：齿轮按钮 + 遮罩点击关闭 + Esc 关闭
     var settingsBtn = document.getElementById('settings-btn');
     if (settingsBtn) settingsBtn.addEventListener('click', openSettings);
@@ -1213,7 +1392,9 @@
     if (settingsOverlay) settingsOverlay.addEventListener('click', closeSettings);
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' || e.key === 'Esc') {
-        if (state.settingsOpen) closeSettings(); else closeDrawer();
+        if (state.settingsOpen) closeSettings();
+        else if (state.clusterOpen) { state.clusterOpen = false; renderCluster(state.cluster); }
+        else closeDrawer();
       }
     });
 
