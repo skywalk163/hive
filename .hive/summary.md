@@ -140,3 +140,26 @@ B_valve_off  (HIVE_NO_WINDOW=0)    峰值 5 / 基线 4 → 增量 1
 - 遗留：`hive_pr.py::git_remote`、`llm_controller.py::McpStdioBackend.__init__`、
   `selftest.py` 全部调用点仍在白名单里——它们**不在本卡允许修改路径**内，
   建议后续卡收口（都是非周期路径，闪窗概率低）。
+
+## 第二次尝试（2026-10-31）新增证据
+
+- **verify 在门禁机 0.88（fb98, FreeBSD, Python 3.12.13）全绿**：
+  `python3 -m pytest -q tests/test_no_window.py tests/test_core.py tests/test_dashboard_freshness.py`
+  → **98 passed, 1 skipped in 170.81s**（同一 commit `89a5222`，同一三条命令，只把 worktree
+  去掉 `.git/.hive/_archive` 打包上传到 `/tmp/t0206` 跑）。
+- **本机 Windows 的卡死与本卡无关**：用 `origin/main`（不含本卡任何代码）建 worktree 跑同一套件，
+  同样在 24 个用例后卡死在 `test_gc_reclaims_expired_claim`；本卡树卡在
+  `test_land_survives_dirty_coordination_tree` / `test_concurrent_claims_share_one_clone` /
+  `test_retry_fresh_clears_archive` / `test_dispatch_respects_max_concurrent` 等**不同**位置。
+  每个卡住的用例单跑都能过（38.33s / 44.36s / 108.05s）。
+- **死锁形态**：卡住时 `hive.py` + `git receive-pack` 存活、CPU≈0、`git push` 客户端已消失
+  ⇒ 孙进程持有继承来的 stdout 管道，父进程 `subprocess.run(capture_output=True)` 等不到 EOF。
+  同一机制也适用于 `git maintenance run --auto --detach` 这类「孤儿持管道」。
+- **hive 自己的 verify 上限是 1800s**（`run_verify(..., timeout=1800)`，无环境变量可调）：
+  本机这套件串行需要 30~50 分钟 ⇒ 在 Windows 上必然被 1800s 掐掉；`-n 4` 能压到 ~15 分钟，
+  但并发用例会随机触发上面的死锁。
+- 已排除的变量：`--capture=sys`、basetemp 移出工作区、全局关 `maintenance.auto`/`gc.auto`、
+  沙箱外运行、`-n 4`（前期快、后期仍卡）。
+- 结论：**代码与判据就绪且已在门禁机全绿；本机 submit 过不了是环境 + 1800s 上限**。
+  建议换一台健康的 Windows 机器 submit，或先修本机「git 孙进程持管道」问题；
+  **不要为了过门去改 `run_verify` 的超时，也不要改代码**。
