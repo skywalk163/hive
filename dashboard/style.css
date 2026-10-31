@@ -20,6 +20,9 @@
   --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 6px 16px rgba(16, 24, 40, .06);
   --radius: 10px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  /* 顶栏高度：drawer 用它让位（app.js 会按 .topbar 实际高度覆盖，这里是首帧兜底）。
+     T-0207：抽屉 top 从 0 改成 var(--topbar-h)，不再压住顶栏筛选区。 */
+  --topbar-h: 84px;
 }
 
 [data-theme="dark"] {
@@ -68,7 +71,9 @@ body {
 .topbar {
   position: sticky;
   top: 0;
-  z-index: 20;
+  /* T-0207：20 -> 33。原先抽屉(z31)/遮罩(z30)压过顶栏，右侧筛选区点不到；
+     顶栏提层到 33（仍低于 toast1000 / drop-hint40），抽屉打开时筛选仍可点。 */
+  z-index: 33;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   padding: 10px 14px;
@@ -157,6 +162,74 @@ body {
 .cluster.ok { color: var(--ok, #1f9d55); }
 .cluster.warn { color: var(--warn, #b7791f); }
 .cluster.off { color: var(--muted); opacity: .8; }
+.cluster-toggle {
+  appearance: none; background: transparent; border: 0; padding: 0;
+  font: inherit; color: inherit; cursor: pointer; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.cluster-toggle:hover { text-decoration: underline; }
+.cluster-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.cluster-caret { font-size: 10px; opacity: .85; }
+/* T-0217：集群面板。fixed 挂在顶栏（z 33）的层叠上下文里，
+   不新增 z-index，也不改 .topbar 的层级；默认折叠，点击标题展开。 */
+.cluster-panel {
+  position: fixed;
+  top: calc(var(--topbar-h) + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(760px, calc(100vw - 28px));
+  max-height: calc(100vh - var(--topbar-h) - 20px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 12px 14px;
+  white-space: normal;
+  text-align: left;
+}
+.cluster-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px 18px; flex-wrap: wrap; }
+.cluster-leader { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; min-width: 0; }
+.cluster-kicker { font-size: 11px; color: var(--muted); letter-spacing: .04em; }
+.cluster-leader-name { font-size: 14px; }
+.cluster-addr { font-size: 12px; overflow-wrap: anywhere; }
+.cluster-copy { padding: 1px 7px; font-size: 11px; }
+.cluster-facts { display: flex; align-items: flex-start; gap: 16px; margin: 0; flex-wrap: wrap; }
+.cluster-facts div { display: flex; flex-direction: column; gap: 1px; }
+.cluster-facts dt { font-size: 10.5px; color: var(--muted); letter-spacing: .04em; }
+.cluster-facts dd { margin: 0; font-size: 12.5px; font-weight: 600; }
+.cluster-nodes { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 10px; font-size: 12.5px; }
+.cluster-nodes th, .cluster-nodes td {
+  text-align: left; padding: 6px 8px; border-top: 1px solid var(--border);
+  vertical-align: middle; overflow-wrap: anywhere;
+}
+.cluster-nodes th { color: var(--muted); font-size: 11.5px; font-weight: 600; }
+.cluster-nodes th:nth-child(1), .cluster-nodes td:nth-child(1) { width: 27%; }
+.cluster-nodes th:nth-child(2), .cluster-nodes td:nth-child(2) { width: 13%; }
+.cluster-nodes th:nth-child(3), .cluster-nodes td:nth-child(3) { width: 13%; }
+.cluster-nodes th:nth-child(4), .cluster-nodes td:nth-child(4) { width: 13%; }
+.cluster-nodes th:nth-child(5), .cluster-nodes td:nth-child(5) { width: 12%; }
+.cluster-nodes th:nth-child(6), .cluster-nodes td:nth-child(6) { width: 22%; }
+.cluster-node:hover td { background: var(--panel-alt); }
+.cluster-name b { font-weight: 600; }
+.cluster-self {
+  display: inline-block; margin-left: 5px; padding: 0 5px;
+  border: 1px solid var(--accent); border-radius: 999px;
+  color: var(--accent); font-size: 10px; line-height: 1.5;
+}
+.cluster-status { display: inline-flex; align-items: center; white-space: nowrap; }
+.cluster-status.alive { color: var(--ok); }
+.cluster-status.suspect { color: var(--warn); }
+.cluster-status.dead { color: var(--danger); }
+.cluster-lamp { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; background: var(--muted); }
+.cluster-status.alive .cluster-lamp { background: var(--ok); box-shadow: 0 0 0 2px var(--ok-bg); }
+.cluster-status.suspect .cluster-lamp { background: var(--warn); box-shadow: 0 0 0 2px var(--warn-bg); }
+.cluster-status.dead .cluster-lamp { background: var(--danger); box-shadow: 0 0 0 2px var(--danger-bg); }
+.cluster-age { font-size: 12px; }
+.cluster-note { margin: 9px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+.cluster-empty { color: var(--muted); text-align: center; }
 /* 派发分组摘要（T-0189）：只在拿到 stage/board 时显示，[hidden] 时不占位 */
 .board { color: var(--muted); white-space: nowrap; }
 .board[hidden] { display: none; }
@@ -554,7 +627,8 @@ body {
 
 .drawer {
   position: fixed;
-  top: 0;
+  /* T-0207：top 从 0 改成顶栏高度，抽屉从顶栏下方滑入，不再压住顶栏筛选区。 */
+  top: var(--topbar-h);
   right: 0;
   bottom: 0;
   width: min(560px, 92vw);
@@ -637,6 +711,15 @@ body.dropping .drop-hint { opacity: 1; visibility: visible; }
   .field.grow { flex: 1 1 100%; }
   .stats { width: 100%; }
   .drawer { width: 100%; border-left: none; }
+  /* T-0217：集群面板窄屏只留「名称 + 状态灯」两列，其余列隐藏，避免横向滚动 */
+  .cluster-panel { padding: 10px 11px; }
+  .cluster-head { flex-direction: column; }
+  .cluster-nodes th:nth-child(2), .cluster-nodes td:nth-child(2),
+  .cluster-nodes th:nth-child(4), .cluster-nodes td:nth-child(4),
+  .cluster-nodes th:nth-child(5), .cluster-nodes td:nth-child(5),
+  .cluster-nodes th:nth-child(6), .cluster-nodes td:nth-child(6) { display: none; }
+  .cluster-nodes th:nth-child(1), .cluster-nodes td:nth-child(1) { width: 65%; }
+  .cluster-nodes th:nth-child(3), .cluster-nodes td:nth-child(3) { width: 35%; }
 }
 
 /* ---------------- 减少动效 ---------------- */
@@ -683,7 +766,9 @@ body.dropping .drop-hint { opacity: 1; visibility: visible; }
   border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: var(--shadow);
-  z-index: 32;
+  /* T-0207：32 -> 34。顶栏提到 33 后，设置弹窗要仍高于顶栏，
+     否则居中弹窗的顶边会被 sticky 顶栏盖住、背景遮罩也挡不住顶栏筛选。 */
+  z-index: 34;
   display: flex;
   flex-direction: column;
   overflow: hidden;

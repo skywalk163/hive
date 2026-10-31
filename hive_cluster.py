@@ -1967,9 +1967,16 @@ class Cluster:
     def _heartbeat_once(self) -> None:
         with self.lock:
             role = self.role
+            # leader 连 dead 节点也要探：两台机器重启/失联后互判 dead 时，若双方
+            # 都只给 alive/suspect 发心跳，就谁也不先说话 —— 各自以「1 节点多数」
+            # 当选后永久双主（2026-10-31 实测：fb98 重启自选 term=6 与 0.100 撞车，
+            # 互相标记 dead、不再互发心跳，只能人工发一次心跳才解）。探 dead 的
+            # 代价只是对一个不可达地址的短超时请求，换来同 term 双主能在下一跳自愈。
+            statuses = (("alive", "suspect", "dead") if role == "leader"
+                        else ("alive", "suspect"))
             peers = [dict(rec) for nid, rec in self.nodes.items()
                      if nid != self.node_id and rec.get("url")
-                     and self._node_status_locked(rec) in ("alive", "suspect")]
+                     and self._node_status_locked(rec) in statuses]
             leader_url = self.leader_url
             leader_id = self.leader_id
             if role == "leader":
@@ -3056,17 +3063,20 @@ def _local_state(config: Config):
     return (snap if isinstance(snap, dict) else raw), False
 
 
-def _status_line(snap: dict, running: bool) -> str:
+def _status_line(snap: dict, running: bool, stopped: bool = False) -> str:
     if not snap:
-        return "集群未运行（没有状态文件）"
+        return ("集群未运行（已手动停止）" if stopped
+                else "集群未运行（没有状态文件）")
     leader = snap.get("leader") or {}
     self_node = snap.get("self") or {}
     lines = [
         f"集群 {snap.get('cluster_id', DEFAULT_CLUSTER_ID)}  本机 {self_node.get('name', '?')}"
-        f"（{self_node.get('id', '?')}）  {'运行中' if running else '状态文件（进程未运行）'}",
+        f"（{self_node.get('id', '?')}）  {'运行中' if running else '状态文件（进程未运行）'}"
+        + ("" if running else ("  已手动停止（不再自动拉起）" if stopped else "")),
         f"角色 {snap.get('role', '?')}  任期 {snap.get('term', 0)}  "
         f"主节点 {leader.get('name') or '-'}  "
-        f"在线 {snap.get('alive', 0)}/{snap.get('known', 0)}  多数门槛 {snap.get('quorum', 1)}",
+        f"在线 {snap.get('alive', 0)}/{snap.get('known', 0)}  多数门槛 {snap.get('quorum', 1)}"
+        + ("" if running else "  （快照，非实时）"),
     ]
     if leader:
         lease_until = leader.get("lease_until_epoch") or 0
@@ -3135,6 +3145,7 @@ def _spawn_background(config: Config, args) -> int:
               f"role={health.get('role')} http://127.0.0.1:{config.port}")
         return 0
     config.state_dir.mkdir(parents=True, exist_ok=True)
+    _clear_stopped(config)   # 显式 start/restart/ensure=恢复自动拉起
     # 先把端口/名字/seed 落盘，后续 `hive cluster status` 不用重复传参
     config.save()
     try:
@@ -3216,6 +3227,34 @@ def _spawn_background(config: Config, args) -> int:
     return 1
 
 
+STOPPED_MARKER_NAME = "stopped"
+
+
+def _stopped_marker(config: Config) -> Path:
+    return config.state_dir / STOPPED_MARKER_NAME
+
+
+def _mark_stopped(config: Config) -> None:
+    """记下「用户主动 stop」：ensure_background 看到标记就不再自动拉起。
+
+    没有这个标记时，orchestrate 每轮 tick 都会 cluster_ensure，`cluster stop`
+    刚杀掉的进程 180 秒内就会复活（2026-10-31 实测）。标记只在显式
+    start/restart/serve 时清除。
+    """
+    try:
+        config.state_dir.mkdir(parents=True, exist_ok=True)
+        _stopped_marker(config).write_text(_iso() + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_stopped(config: Config) -> None:
+    try:
+        _stopped_marker(config).unlink()
+    except OSError:
+        pass
+
+
 def _stop_background(config: Config) -> int:
     health = _local_health(config)
     if health:
@@ -3230,6 +3269,7 @@ def _stop_background(config: Config) -> int:
         if health:
             print("集群在运行，但找不到 pid 文件；请手动结束进程", file=sys.stderr)
             return 1
+        _mark_stopped(config)
         print("集群未运行")
         return 0
     if not _pid_alive(pid):
@@ -3238,6 +3278,7 @@ def _stop_background(config: Config) -> int:
             config.pid_path.unlink()
         except OSError:
             pass
+        _mark_stopped(config)
         return 0
     try:
         os.kill(pid, signal.SIGTERM)
@@ -3259,6 +3300,7 @@ def _stop_background(config: Config) -> int:
     except OSError:
         pass
     print(f"集群已停止（pid={pid}）")
+    _mark_stopped(config)
     return 0
 
 
@@ -3313,6 +3355,7 @@ def run_cli(args) -> int:
     if action == "serve":
         cluster = Cluster(config)
         try:
+            _clear_stopped(config)
             cluster.start()
         except ClusterError as exc:
             print(f"错误: {exc}", file=sys.stderr)
@@ -3349,6 +3392,9 @@ def run_cli(args) -> int:
 
     if action == "ensure":
         if _local_health(config):
+            return 0
+        if _stopped_marker(config).exists():
+            print("集群已手动停止（stopped 标记），跳过拉起；要恢复请 `hive cluster start`")
             return 0
         return _spawn_background(config, args)
 
@@ -3409,7 +3455,7 @@ def run_cli(args) -> int:
             _print_json({"running": running, "state": snap,
                          "mcp": health.get("mcp") or {}})
         else:
-            print(_status_line(snap, running))
+            print(_status_line(snap, running, _stopped_marker(config).exists()))
             health = _local_health(config) or {}
             mcp = health.get("mcp") or {}
             if mcp:
@@ -3494,6 +3540,10 @@ def ensure_background(hive_dir=None, state_dir=None) -> bool:
     config = Config(hive_dir=hive_dir, state_dir=state_dir)
     if _local_health(config):
         return True
+    if _stopped_marker(config).exists():
+        # 用户显式 stop 之后，orchestrate/worker 的「按需自愈」不能再把它拉起来，
+        # 否则 stop 看起来「没生效」（实测：180s 内复活）。
+        return False
     if _spawn_background(config, None) == 0:
         return True
     return False

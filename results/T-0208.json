@@ -1,0 +1,41 @@
+{
+  "task": "T-0208",
+  "agent": "dumate-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0208",
+  "base": "main",
+  "head": "438ba2be82f3539723d12d93af478186cc301ae2",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-30T22:04:30+08:00",
+  "finished_at": "2026-10-30T22:51:40+08:00",
+  "duration_s": 2830.2,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_dispatch_script_static.py",
+      "code": 0,
+      "tail": [
+        "................................                                         [100%]",
+        "32 passed in 0.37s"
+      ]
+    }
+  ],
+  "summary": "T-0208：常驻进程日志轮转 + 单实例守护 + 系统托盘 —— 完成，验收全绿。\n\n改动（只动卡面允许的 4 条路径）\n- scripts/install-autostart.ps1：按天日志 hive-<yyyyMMdd>.log + 大小轮转（-MaxLogMB 默认 5，超限改名\n  .log.1/.2…）+ 超期清理（-LogDays 默认 7）；追加走 cmd 的 >>（不用会截断的 -RedirectStandardOutput）；\n  单实例守护 running / port-busy / stopped（pid 存活 + TCP 连通，HTTP /api/status 兜底，不只看 200）；\n  Start / Stop / Restart / Status / Uninstall 全部 -WindowStyle Hidden，从不自动开浏览器。\n- windows/tray.ahk（新建，AHK v2）：托盘图标 + 六项菜单（状态：/ 启动 / 停止 / 打开看板 / 打开日志 / 退出），\n  只读 /api/cluster/health 与 /api/status；启动 / 停止一律委托 install-autostart.ps1，自己不杀进程。\n- windows/README.md：新增 3.5 节，写清三件事的行为、参数与踩坑依据。\n- tests/test_dispatch_script_static.py：新增第 8 节 6 个用例（BOM / 轮转口径 / PID 过滤 / 单实例 / 不弹窗 / 托盘只读委托）+ 1 个写序用例。\n\n验证\n- 验收命令：python3 -m pytest -q tests/test_dispatch_script_static.py → 32 passed（原 31，本卡 +1）。\n- 隔离真机冷启动（USERPROFILE 指临时目录 + 端口 8789，不动 8787 既有看板）：预置 1331200 B 的当天日志被轮转成\n  .log.1、新 .log 生成且中文可读；重复启动第二次 exit=0、pid 不变、tasklist 仍 1 行；-Stop 先亮清单再\n  taskkill /PID /T /F，停后端口释放、进程 0、8787 仍 200。\n- 托盘真机实测（AutoHotkey v2.0.31）：tray.ahk 加载无错、无窗口、stdout/stderr 为空；探针服务证实 8 秒内两轮\n  轮询 /api/cluster/health + /api/status；端口无监听时显示「未运行」不弹窗。PowerShell AST 解析 0 error；\n  四份产物 BOM/CRLF 规范（LF-only=0）。\n\n遗留 / 风险\n- 未取托盘截图（卡面「真机证据」要求项）：托盘图标是瞬时 UI，截图会捕获用户实时桌面与托盘区，故未做，\n  功能证据以上面的真机轮询与加载结果替代。\n- 当天日志由脚本首次创建时带 UTF-8 BOM（PS 5.1 `-Encoding UTF8` 的行为），读取端按 UTF-8 解即可，已写入 README。",
+  "error": "",
+  "declared_paths": [
+    "windows/tray.ahk",
+    "windows/README.md",
+    "scripts/install-autostart.ps1",
+    "tests/test_dispatch_script_static.py"
+  ],
+  "changed_files": [
+    "scripts/install-autostart.ps1",
+    "tests/test_dispatch_script_static.py",
+    "windows/README.md",
+    "windows/tray.ahk"
+  ],
+  "out_of_paths": [],
+  "lease_id": "96f6c36a43544f9da758fd83ef5fbac6",
+  "fence": 1
+}

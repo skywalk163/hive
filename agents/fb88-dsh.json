@@ -2,8 +2,8 @@
     "name":  "fb88-dsh",
     "host":  "fb98",
     "command":  "/home/skywalk/dswork/hive/scripts/dsh-exec",
-    "mode":  "exec",
-    "manual":  false,
+    "mode":  "manual",
+    "manual":  true,
     "abilities":  [
                       "code",
                       "ci",

@@ -6,16 +6,24 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 DASH = Path(__file__).resolve().parents[1] / "dashboard"
 sys.path.insert(0, str(DASH))
 
 import serve  # noqa: E402
+
+APP_JS = DASH / "app.js"
+STYLE_CSS = DASH / "style.css"
 
 
 def _free_port():
@@ -97,3 +105,193 @@ def test_status_merges_cluster_progress(tmp_path, monkeypatch):
     assert row["push_step"] == "跑 verify"
     assert row["push_message"] == "集群实时进度"
     assert row["push_source"] == "cluster"
+
+
+# --------------------------------------------------------------------------- #
+# T-0217：集群面板（节点表 + 心跳 age + 三档状态灯）
+# --------------------------------------------------------------------------- #
+NOW = 1_800_000_000.0
+CLUSTER_JS_NAMES = [
+    "esc", "clusterAgeSeconds", "clusterAge", "clusterThresholds",
+    "clusterNodeStatus", "clusterStatusView", "clusterEndpoint",
+    "clusterTaskCount", "renderClusterSummary", "renderClusterPanel",
+]
+CLUSTER_JS_CONSTS = ["CLUSTER_EST_PEER_S", "CLUSTER_EST_DEAD_S"]
+
+_NODE_RENDER = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.env.HIVE_APP_JS, 'utf8');
+function grabConst(name) {
+  const re = new RegExp('var\\s+' + name + '\\s*=\\s*([^;]+);');
+  const m = re.exec(src);
+  if (!m) throw new Error('app.js 里找不到常量 ' + name);
+  return 'var ' + name + ' = ' + m[1] + ';';
+}
+function grab(name) {
+  const re = new RegExp('function\\s+' + name + '\\s*\\([^)]*\\)\\s*\\{');
+  const m = re.exec(src);
+  if (!m) throw new Error('app.js 里找不到函数 ' + name);
+  let i = m.index + m[0].length - 1, depth = 0;
+  for (; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) { i++; break; } }
+  }
+  return src.slice(m.index, i);
+}
+const consts = JSON.parse(process.env.HIVE_CLUSTER_JS_CONSTS || '[]');
+const names = JSON.parse(process.env.HIVE_CLUSTER_JS_NAMES);
+const api = new Function(consts.map(grabConst).join('\n') + '\n' +
+  names.map(grab).join('\n') +
+  '\nreturn {' + names.join(',') + '};')();
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const html = api.renderClusterPanel(input.snapshot, input.tasks, input.now);
+const summary = api.renderClusterSummary(input.snapshot, input.open);
+const ages = (input.snapshot.nodes || []).map(function (n) {
+  return api.clusterAge(n.last_seen_epoch, input.now);
+});
+process.stdout.write(JSON.stringify({html: html, summary: summary, ages: ages}));
+"""
+
+
+def _snapshot():
+    """三节点快照：alive / suspect / dead 各一，age 分别为 2s / 30s / 2m。"""
+    return {
+        "protocol": "1",
+        "cluster_id": "hive-prod",
+        "term": 7,
+        "role": "follower",
+        "leader": {"id": "n1", "name": "fb98", "url": "http://10.0.0.11:8788"},
+        "self": {"id": "n2", "name": "fb99"},
+        "nodes": [
+            {"id": "n1", "name": "fb98", "url": "http://10.0.0.11:8788", "port": 8788,
+             "role": "leader", "status": "alive", "last_seen_epoch": NOW - 2,
+             "electable": True, "version": "1.0"},
+            {"id": "n2", "name": "fb99", "url": "http://10.0.0.12:8788", "port": 8788,
+             "role": "follower", "status": "suspect", "last_seen_epoch": NOW - 30,
+             "electable": True, "version": "1.0"},
+            {"id": "n3", "name": "fb9a", "url": "http://10.0.0.13:8788", "port": 8788,
+             "role": "follower", "status": "dead", "last_seen_epoch": NOW - 120,
+             "electable": True, "version": "1.0"},
+        ],
+        "alive": 1,
+        "known": 3,
+        "quorum": 2,
+    }
+
+
+TASKS = [
+    {"id": "T-1", "owner": "fb98", "state": "running"},
+    {"id": "T-2", "owner": "fb98", "state": "assigned"},
+    {"id": "T-3", "owner": "fb98", "state": "done"},
+    {"id": "T-4", "owner": "fb99", "state": "running"},
+    {"id": "T-5", "owner": "fb9a", "state": "blocked"},
+]
+
+
+def _render_cluster(snapshot, tasks=None, open_=False):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("没有 node，无法执行 app.js 里的纯渲染函数")
+    payload = json.dumps({"snapshot": snapshot, "tasks": tasks or [],
+                          "now": NOW, "open": open_}, ensure_ascii=False)
+    env = dict(os.environ)
+    env["HIVE_APP_JS"] = str(APP_JS)
+    env["HIVE_CLUSTER_JS_NAMES"] = json.dumps(CLUSTER_JS_NAMES)
+    env["HIVE_CLUSTER_JS_CONSTS"] = json.dumps(CLUSTER_JS_CONSTS)
+    proc = subprocess.run([node, "-e", _NODE_RENDER], input=payload,
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", env=env, timeout=30)
+    assert proc.returncode == 0, (
+        "node 渲染集群面板失败：\nstdout=%s\nstderr=%s" % (proc.stdout, proc.stderr))
+    return json.loads(proc.stdout)
+
+
+def test_cluster_panel_renders_three_nodes_and_ages():
+    """3 节点快照必须渲染出三档状态灯 + 2s/30s/2m 心跳 age + 每台任务数。"""
+    out = _render_cluster(_snapshot(), TASKS)
+    html = out["html"]
+
+    assert html.count('class="cluster-lamp"') == 3, "每个节点必须有一盏状态灯"
+    for cls, label in (("alive", "在线"), ("suspect", "可疑"), ("dead", "离线")):
+        assert 'class="cluster-status %s"' % cls in html, "缺 %s 状态灯" % cls
+        assert label in html, "缺 %s 文案" % label
+
+    assert out["ages"] == ["2s", "30s", "2m"], (
+        "心跳 age 换算错误：%r" % (out["ages"],))
+    for age in ("2s", "30s", "2m"):
+        assert ">%s<" % age in html, "渲染结果里没有 age 文案 %s" % age
+
+    # 本机标记只出现在 self 那一行（fb99）
+    assert html.count('class="cluster-self"') == 1
+    assert "fb99</b><span class=\"cluster-self\">本机</span>" in html
+
+    # 头部：主节点地址可复制 + term / quorum / 集群 ID
+    assert 'data-cluster-copy="http://10.0.0.11:8788"' in html
+    assert "fb98" in html and "hive-prod" in html
+    assert "<dd>7</dd>" in html and "<dd>2</dd>" in html
+
+    # 任务数：owner 对得上的在飞卡；done / blocked 不算
+    assert '<span class="cluster-tasks">2</span>' in html
+    assert '<span class="cluster-tasks">1</span>' in html
+    assert '<span class="cluster-tasks">0</span>' in html
+
+    # 后端没下发阈值时，卡片上必须注明估算口径
+    assert "按 15s / 60s 估" in html
+
+    summary = out["summary"]
+    assert 'aria-expanded="false"' in summary and "集群：fb98" in summary
+    opened = _render_cluster(_snapshot(), TASKS, open_=True)
+    assert 'aria-expanded="true"' in opened["summary"]
+
+
+def test_cluster_status_falls_back_to_age_with_backend_timeouts():
+    """旧快照缺 status 时，用后端下发的 peer_timeout/dead_timeout 按 age 分档。"""
+    snap = _snapshot()
+    snap["peer_timeout"] = 15
+    snap["dead_timeout"] = 60
+    for n in snap["nodes"]:
+        n.pop("status", None)
+
+    out = _render_cluster(snap, TASKS)
+    html = out["html"]
+    assert 'class="cluster-status alive"' in html
+    assert 'class="cluster-status suspect"' in html
+    assert 'class="cluster-status dead"' in html
+    assert "peer_timeout / dead_timeout 分档" in html
+    assert "按 15s / 60s 估" not in html
+
+
+def test_cluster_status_estimates_15s_60s_when_timeouts_missing():
+    snap = _snapshot()
+    for n in snap["nodes"]:
+        n.pop("status", None)
+    out = _render_cluster(snap, TASKS)
+    html = out["html"]
+    assert 'class="cluster-status alive"' in html   # 2s
+    assert 'class="cluster-status suspect"' in html  # 30s
+    assert 'class="cluster-status dead"' in html     # 120s
+    assert "按 15s / 60s 估" in html
+
+
+def test_cluster_panel_css_is_wired_and_mobile_is_two_columns():
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    assert ".cluster-panel" in css
+    assert ".cluster-status.alive" in css and ".cluster-status.dead" in css
+    assert ".cluster-lamp" in css
+    assert "@media (max-width: 768px)" in css
+    # ≤768px 隐藏角色/心跳/任务/版本，只留名称 + 状态两列
+    for idx in ("2", "4", "5", "6"):
+        assert ".cluster-nodes th:nth-child(%s)" % idx in css
+        assert ".cluster-nodes td:nth-child(%s)" % idx in css
+    assert "overflow-x: hidden" in css
+
+
+def test_cluster_panel_reuses_existing_api_and_fields():
+    """不新增接口：只读 /api/cluster，age/status 都从已有字段来。"""
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "fetch('/api/cluster'" in src
+    for field in ("last_seen_epoch", "peer_timeout", "dead_timeout",
+                  "cluster_id", "quorum", "status"):
+        assert field in src
+    assert "/api/cluster/nodes" not in src, "不许新增后端接口"
