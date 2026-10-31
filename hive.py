@@ -5312,6 +5312,17 @@ def cmd_status(args) -> None:
     Hive(args.dir).cmd_status(args.json, args.board)
 
 
+def cmd_top(args) -> int:
+    """`hive top`：常驻终端视图。实现全在 hive_tui.py（纯标准库，只读）。"""
+    try:
+        import hive_tui
+    except ImportError as exc:
+        raise HiveError(
+            "找不到 hive_tui.py；它是 `hive top` 的实现，请确认它和 hive.py "
+            "在同一目录") from exc
+    return hive_tui.run(args)
+
+
 def cmd_gc(args) -> None:
     Hive(args.dir).cmd_gc(args.minutes)
 
@@ -5870,6 +5881,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="--json 时顶层改为 {tasks, board}：board 是派发阶段分组摘要"
                         "（待分配/已推送/已领取/在跑…），不写该标志时保持数组形态向后兼容")
     s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("top", help="常驻终端视图：一眼看当前在跑什么（只读，纯标准库）")
+    s.add_argument("--once", action="store_true",
+                   help="只打印一帧就退出（给测试/脚本用，退出码恒 0）")
+    s.add_argument("--width", type=int, default=0,
+                   help="固定宽度（默认取终端宽度，最小 60）")
+    s.add_argument("--interval", type=float, default=2.0, help="刷新间隔秒数（默认 2）")
+    s.add_argument("--no-clear", dest="no_clear", action="store_true",
+                   help="不清屏：保留滚动历史，便于复制")
+    s.add_argument("--api", default="",
+                   help="看板地址（默认 http://127.0.0.1:$HIVE_DASHBOARD_PORT）")
+    s.set_defaults(func=cmd_top)
 
     # —— T-0188：派发流水线的接线命令 ——
     s = sub.add_parser("prompt", help="渲染一张卡的派发指令（markdown 或 json payload）")

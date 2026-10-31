@@ -1,62 +1,80 @@
-# T-0220 交付：派发中间态（TTL 对 dispatch 生效 + 派发未领取快速回收）
+# T-0218 交付：hive top —— 纯标准库常驻 TUI（--once 可断言）
 
 ## 结论
 
-T-0196 现场（unassign 回 ready 后 3 分钟被 orchestrate 连派 3 次、每次都没人领）
-有两条根因，都在代码里，本卡各给了一条修法：
-
-1. `_assign_local()` 只写 `state/owner` + inbox `assigned_at`，从不写
-   `dispatched_to` / `dispatched_at` ⇒ `is_dispatch_candidate()` 认为「没推过」，
-   下一轮 180s 立刻重派。
-2. 没有「派发未领取」的快速回收，只有 `orphan_grace` 45 分钟的 orphan 兜底，
-   既不记「这次没人领」，也不阻止下一轮再派给同一个 agent。
+新增 `hive top`：一个只读的常驻视图，默认每 2s 刷一屏，头部是集群角色/term/
+在线节点/数据新鲜度，中部是「待领取 / 进行中 / 待合并 / 异常」四组，底部是
+时间 + `q` 退出提示。零第三方依赖（没引 textual/rich/blessed），`--once` 打一帧
+就退出且退出码恒 0，三条判据都能写成断言。
 
 ## 改了什么
 
 | 文件 | 改动 |
 | --- | --- |
-| `hive.py` | `_assign_local()` 同时写 `dispatched_to` / `dispatched_at`（与 inbox `assigned_at` 共用同一个 stamp）；新增 `_dispatch_unclaimed_minutes()`（`HIVE_DISPATCH_UNCLAIMED_MINUTES`，默认 10）与 watchdog `dispatch_unclaimed` / `reclaim_miss` 分支；新增 `_reclaim_dispatch_miss()`（`dispatch_miss += 1`、删 inbox 残留、`>=2` 转 blocked 并写明「转人工」）；`DISPATCH_MISS_BLOCK_AT = 2`；`TASK_FIELDS` 追加 `dispatch_miss`；dispatch 侧跳过 `dispatch_miss >= 2` 的卡；新增 `_store_state_conflict()` 做 store 模式派发前校验；`_assigned_at()` 增加 `dispatched_at` 兜底；`cmd_unblock` 清零 `dispatch_miss`（人工解挂 = 重新给自动派发机会）；watchdog `--json` 新增 `would_reclaim_miss` |
-| `tests/test_dispatch_miss.py`（新） | 7 条判据：派发写标记、unassign 后 TTL 生效、11 分钟未领取回收并清 inbox、阈值可配、连续 2 次转 blocked、ready 卡 miss>=2 不进计划、store 状态不一致不派 |
+| `hive_tui.py`（新） | 全部实现：中文双宽 `char_width/text_width`、`truncate/fit`、快照归一 `snapshot/_pick`、四组分类 `classify`、取数 `load_http/load_local/load_snapshot`、渲染 `render_frame`（含高度裁剪 `layout_counts`）、按键 `Keyboard`（POSIX select+cbreak / Windows msvcrt）、入口 `run` |
+| `hive.py` | 只加两处：`top` 的 argparse（`--once/--width/--interval/--no-clear/--api`）+ `cmd_top` 一行派发（懒 import `hive_tui`，缺文件给可操作错误）。没动任何既有函数 |
+| `tests/test_tui.py`（新） | 11 条用例：双宽/截断、80 列每行不超宽（含反证）、60 列下限、四组齐全且卡片数与快照一致、少一张就少一行、done 卡不进组、高度裁剪、`q` 干净退出、两源皆挂显示「无数据」、看板挂回落本地、分类优先级 |
 
-`dispatch_tracking.py` **未改**：`is_dispatch_candidate()` 的语义（ready + 无 owner +
-TTL）本来就是对的，缺的只是写入端。
+## 关键取舍
 
-## 判据与反证（每条都钉住旧实现的错误）
-
-1. 派发后卡面有 `dispatched_to` + `dispatched_at` —— 删掉写入即红；
-2. 派发后 `unassign` → `is_dispatch_candidate() == False`，且 `dispatch --json`
-   的 skipped 给出「刚推送过（TTL 60 分钟内不重复派）」—— 退回旧实现这里会重新派；
-3. `assigned` + 无 claim + `assigned_at` 11 分钟前 → 回收后 `state=ready`、
-   `dispatch_miss=1`、`inbox/<agent>/<tid>.md` 被删；
-4. `dispatch_miss=2` → 转 `blocked` 且 `dispatch --json` 的 plan 里不再出现
-   （skipped 理由「连续 2 次派发无人领取，转人工」）。
+1. **宽度自己算，不用 `len()`**：`len("中文")==2` 而终端占 4 列，靠 len 裁剪
+   必然溢出 80 列。`char_width` 按 `east_asian_width` 取 W/F=2，歧义宽度（`…`、
+   `─`）按 1 —— 这是 Windows Terminal / xterm 的默认，也是边框线整齐的前提。
+2. **每行只从 `fit()` 出**：`render_frame` 返回前对整帧再过一遍 `fit`，所以
+   「某一行漏了裁剪」不会靠单个调用点的自觉。
+3. **高度裁剪写在组标题里**（`待领取 120 · 显示 5`），不额外占一行「还有 N 张」：
+   小终端上多一行就可能把整帧顶出屏幕。实测 12/16/24 行终端分别输出 12/16/24 行。
+4. **本地回落不 fetch**：看板够不着时才走本地快照，这时再去 fetch 只会把它也
+   拖进同一个网络失败；读到什么显示什么。回落用 `hive.Hive(...).cards()`
+   在内存里等价 `hive status --json` 的行，不打印、不落盘。
+5. **不用 curses**：Windows 标准库里没有 curses（要装 windows-curses），而这
+   个视图正是给 Windows 用的。ANSI 转义 + `msvcrt` 就够，且不多开窗口。
 
 ## 验证
 
 ```
-python3 -m pytest -q tests/test_dispatch_tracking.py tests/test_orchestrate.py tests/test_dispatch_miss.py
-46 passed in 58.53s
+$ python3 -m pytest -q tests/test_tui.py
+...........                                                              [100%]
+11 passed in 6.23s
 ```
 
-回归（相关面）：`test_watchdog / test_retry_cap / test_store / test_store_overlay /
-test_mcp / test_new_surfaces` → **83 passed in 185.97s**。
+三条判据的反证（都验证过「拆掉就红」）：
 
-## 现场回归的局限
+- 把 `truncate` 改成直接返回原串 → `test_once_width_80_每行都不超宽`、
+  `test_width_下限是60`、`test_中文按双宽计算且截断带省略号` 三条同时失败
+  （实测 `max(widths)` 从 60 涨到 91）；改回来即恢复全绿。
+- 卡片数是跟着快照走的：`test_少一张卡就少一行` 直接拿掉一行断言总数减一。
+- 数据源不可达：`test_两个数据源都不可达时显示无数据且退出码0` 断言退出码 0、
+  输出含「无数据」、stderr 无 Traceback、头尾都还在（不是半截输出）。
 
-0.88 的 orchestrate 与 store 多数派集群不在本机，无法直接跑「两轮真集群」。已在真实
-协调仓跑两轮 `dispatch --dry-run` 取证：T-0220 自身因「能力缺失 python/pytest +
-fb88-dsh 是 manual」被跳过，T-0213/T-0215 因仓白名单被跳过，没有出现新的
-assigned-无-claim 卡。真集群两轮复核需在 0.88 上换新代码后跑
-`orchestrate --interval 180`。
+真实终端（本机 0.88，`hive --dir . top --once --width 80`）：
 
-## 边界与已知限制
+```
+hive top │ hive │ leader │ term 8 │ 节点 2/2 │ 数据 3s 前
+────────────────────────────────────────────────────────────
+ 待领取 3 ──────────────────────────────────────────────────
+  T-0213  光明P2：linter 内置名清单登记了但运行期不存在的名…
+  T-0215  光明P2：原生腿 `参数列表()` 比转译腿多返回 argv[0…
+  T-0219  冷热分离：摘要表 + 可回滚归档（status.json 已 362…
+ 进行中 1 ──────────────────────────────────────────────────
+  T-0218  hive top：纯标准库常驻 TUI（--once 可断言）  @wor…
+ ...
+```
 
-- **没动** `cmd_unassign` 的语义（人工退回仍无条件执行）；只动了 `cmd_unblock`
-  的计数清零。
-- **没改** `orphan_grace` 默认 45 分钟：`dispatch_unclaimed` 是更快的另一条通道，
-  阈值调大时仍会落回原来的 orphan 语义。
-- **没给** dispatch 加新的必填参数（阈值走环境变量，默认 10 分钟向后兼容）。
-- **没碰** `run()`（T-0206）与 `fetch()`（T-0216）。
-- store 后端仍不写 Git 卡面（原设计），`dispatch_miss` 在 store 模式下不落盘；
-  TTL 是「按卡」而非「按 agent」，unassign 后 60 分钟内其它 agent 也接不走 ——
-  若要按 agent 粒度需要另开卡。
+邻近回归：`tests/test_new_surfaces.py test_cli_daemon.py test_no_window.py
+test_status_git.py` → 59 passed, 1 skipped；`tests/test_docs*.py` → 43 passed。
+
+## 没做到的 / 需要人接
+
+1. **截图没附**：本机是无显示器的 Linux（ssh），出不了 Windows Terminal 和
+   0.88 终端窗口的截图。上面那段是同一台机器上的真实 stdout 捕获，
+   需要人工在 Windows Terminal 里补两张图。
+2. **领取走了 git 后端**：`hive claim`（store 后端）当前必然失败，原因是集群
+   follower（DESKTOP-6LFQUO8）的 store 在 22:54 重启后没启用 ——
+   `GET /api/cluster/op/since?since=0` 在它那里返回
+   `{"ok":false,"error":"store 未启用"}`，于是 leader 每次 prepare 都凑不到
+   quorum 2，报「未达到多数 prepare，写未确认」。本卡因此改用
+   `HIVE_CLAIM_BACKEND=git` 领取（Windows 那台一直是这个模式）。
+   这是集群侧的问题，不在本卡允许改的路径里，没碰。
+3. `tests/test_core.py::test_block_skips_dispatch_and_worker` 在 HEAD 干净树上
+   同样失败（`刚推送过（TTL 60 分钟内不重复派）`），与本卡无关，未处理。
