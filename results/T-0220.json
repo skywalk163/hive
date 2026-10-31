@@ -1,0 +1,43 @@
+{
+  "task": "T-0220",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0220",
+  "base": "main",
+  "head": "2ee5b58558b296868b09d518b5bff638ab3f9811",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-31T15:38:16+00:00",
+  "finished_at": "2026-10-31T15:41:14+00:00",
+  "duration_s": 178.3,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_dispatch_tracking.py tests/test_orchestrate.py tests/test_dispatch_miss.py",
+      "code": 0,
+      "tail": [
+        "..............................................                           [100%]",
+        "46 passed in 59.51s"
+      ]
+    }
+  ],
+  "summary": "# T-0220 交付：派发中间态（TTL 对 dispatch 生效 + 派发未领取快速回收）\n\n## 结论\n\nT-0196 现场（unassign 回 ready 后 3 分钟被 orchestrate 连派 3 次、每次都没人领）\n有两条根因，都在代码里，本卡各给了一条修法：\n\n1. `_assign_local()` 只写 `state/owner` + inbox `assigned_at`，从不写\n   `dispatched_to` / `dispatched_at` ⇒ `is_dispatch_candidate()` 认为「没推过」，\n   下一轮 180s 立刻重派。\n2. 没有「派发未领取」的快速回收，只有 `orphan_grace` 45 分钟的 orphan 兜底，\n   既不记「这次没人领」，也不阻止下一轮再派给同一个 agent。\n\n## 改了什么\n\n| 文件 | 改动 |\n| --- | --- |\n| `hive.py` | `_assign_local()` 同时写 `dispatched_to` / `dispatched_at`（与 inbox `assigned_at` 共用同一个 stamp）；新增 `_dispatch_unclaimed_minutes()`（`HIVE_DISPATCH_UNCLAIMED_MINUTES`，默认 10）与 watchdog `dispatch_unclaimed` / `reclaim_miss` 分支；新增 `_reclaim_dispatch_miss()`（`dispatch_miss += 1`、删 inbox 残留、`>=2` 转 blocked 并写明「转人工」）；`DISPATCH_MISS_BLOCK_AT = 2`；`TASK_FIELDS` 追加 `dispatch_miss`；dispatch 侧跳过 `dispatch_miss >= 2` 的卡；新增 `_store_state_conflict()` 做 store 模式派发前校验；`_assigned_at()` 增加 `dispatched_at` 兜底；`cmd_unblock` 清零 `dispatch_miss`（人工解挂 = 重新给自动派发机会）；watchdog `--json` 新增 `would_reclaim_miss` |\n| `tests/test_dispatch_miss.py`（新） | 7 条判据：派发写标记、unassign 后 TTL 生效、11 分钟未领取回收并清 inbox、阈值可配、连续 2 次转 blocked、ready 卡 miss>=2 不进计划、store 状态不一致不派 |\n\n`dispatch_tracking.py` **未改**：`is_dispatch_candidate()` 的语义（ready + 无 owner +\nTTL）本来就是对的，缺的只是写入端。\n\n## 判据与反证（每条都钉住旧实现的错误）\n\n1. 派发后卡面有 `dispatched_to` + `dispatched_at` —— 删掉写入即红；\n2. 派发后 `unassign` → `is_dispatch_candidate() == False`，且 `dispatch --json`\n   的 skipped 给出「刚推送过（TTL 60 分钟内不重复派）」—— 退回旧实现这里会重新派；\n3. `assigned` + 无 claim + `assigned_at` 11 分钟前 → 回收后 `state=ready`、\n   `dispatch_miss=1`、`inbox/<agent>/<tid>.md` 被删；\n4. `dispatch_miss=2` → 转 `blocked` 且 `dispatch --json` 的 plan 里不再出现\n   （skipped 理由「连续 2 次派发无人领取，转人工」）。\n\n## 验证\n\n```\npython3 -m pytest -q tests/test_dispatch_tracking.py tests/test_orchestrate.py tests/test_dispatch_miss.py\n46 passed in 58.53s\n```\n\n回归（相关面）：`test_watchdog / test_retry_cap / test_store / test_store_overlay /\ntest_mcp / test_new_surfaces` → **83 passed in 185.97s**。\n\n## 现场回归的局限\n\n0.88 的 orchestrate 与 store 多数派集群不在本机，无法直接跑「两轮真集群」。已在真实\n协调仓跑两轮 `dispatch --dry-run` 取证：T-0220 自身因「能力缺失 python/pytest +\nfb88-dsh 是 manual」被跳过，T-0213/T-0215 因仓白名单被跳过，没有出现新的\nassigned-无-claim 卡。真集群两轮复核需在 0.88 上换新代码后跑\n`orchestrate --interval 180`。\n\n## 边界与已知限制\n\n- **没动** `cmd_unassign` 的语义（人工退回仍无条件执行）；只动了 `cmd_unblock`\n  的计数清零。\n- **没改** `orphan_grace` 默认 45 分钟：`dispatch_unclaimed` 是更快的另一条通道，\n  阈值调大时仍会落回原来的 orphan 语义。\n- **没给** dispatch 加新的必填参数（阈值走环境变量，默认 10 分钟向后兼容）。\n- **没碰** `run()`（T-0206）与 `fetch()`（T-0216）。\n- store 后端仍不写 Git 卡面（原设计），`dispatch_miss` 在 store 模式下不落盘；\n  TTL 是「按卡」而非「按 agent」，unassign 后 60 分钟内其它 agent 也接不走 ——\n  若要按 agent 粒度需要另开卡。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "dispatch_tracking.py",
+    "tests/test_dispatch_tracking.py",
+    "tests/test_orchestrate.py",
+    "tests/test_dispatch_miss.py"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "hive.py",
+    "tests/test_dispatch_miss.py"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md"
+  ],
+  "lease_id": "5f0b4c2861d74cea8b548e13223b9872",
+  "fence": 1
+}
