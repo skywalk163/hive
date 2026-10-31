@@ -1,0 +1,46 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.14.7, pytest-9.1.1, pluggy-1.6.0 -- C:\Python314\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\skywalk\.hive\wt\deepseek-win\T-0205
+plugins: anyio-4.14.2, asyncio-1.4.0, cov-7.1.0, timeout-2.4.0, xdist-3.8.0, respx-0.23.1
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 16 items
+
+tests/test_result_head_guard.py::test_guard_passes_when_head_on_remote PASSED [  6%]
+tests/test_result_head_guard.py::test_guard_fails_when_head_not_pushed PASSED [ 12%]
+tests/test_result_head_guard.py::test_guard_fails_when_remote_branch_deleted PASSED [ 18%]
+tests/test_result_head_guard.py::test_guard_head_mismatch PASSED         [ 25%]
+tests/test_result_head_guard.py::test_guard_fails_on_zero_changes PASSED [ 31%]
+tests/test_result_head_guard.py::test_guard_zero_changes_allowed_when_allow_empty_diff PASSED [ 37%]
+tests/test_result_head_guard.py::test_guard_retries_ls_remote_once_on_network_failure PASSED [ 43%]
+tests/test_result_head_guard.py::test_result_diff_files PASSED           [ 50%]
+tests/test_result_head_guard.py::test_land_self_consistency_head_mismatch PASSED [ 56%]
+tests/test_result_head_guard.py::test_land_self_consistency_zero_changes PASSED [ 62%]
+tests/test_result_head_guard.py::test_land_self_consistency_zero_changes_allowed PASSED [ 68%]
+tests/test_result_head_guard.py::test_land_self_consistency_ok FAILED    [ 75%]
+tests/test_result_head_guard.py::test_land_self_consistency_count_mismatch PASSED [ 81%]
+tests/test_result_head_guard.py::test_land_rejects_when_result_head_mismatch PASSED [ 87%]
+tests/test_result_head_guard.py::test_land_rejects_when_zero_changes_result PASSED [ 93%]
+tests/test_result_head_guard.py::test_land_normal_card_still_lands FAILED [100%]
+
+================================== FAILURES ===================================
+________________________ test_land_self_consistency_ok ________________________
+tests\test_result_head_guard.py:298: in test_land_self_consistency_ok
+    world.create_worktree("T-016", head)
+tests\test_result_head_guard.py:92: in create_worktree
+    git(self.light, "branch", f"task/{tid}", head_sha)
+tests\test_result_head_guard.py:21: in git
+    raise RuntimeError(f"git {args} failed: {r.stderr}")
+E   RuntimeError: git ('branch', 'task/T-016', '314189605e9ee9941d214dc554a2c8b2f1210fd1') failed: fatal: a branch named 'task/T-016' already exists
+______________________ test_land_normal_card_still_lands ______________________
+tests\test_result_head_guard.py:375: in test_land_normal_card_still_lands
+    world.create_worktree("T-020", head)
+tests\test_result_head_guard.py:92: in create_worktree
+    git(self.light, "branch", f"task/{tid}", head_sha)
+tests\test_result_head_guard.py:21: in git
+    raise RuntimeError(f"git {args} failed: {r.stderr}")
+E   RuntimeError: git ('branch', 'task/T-020', '2c939eeba2560ae171b2d84181e65cbaf86e1aa0') failed: fatal: a branch named 'task/T-020' already exists
+=========================== short test summary info ===========================
+FAILED tests/test_result_head_guard.py::test_land_self_consistency_ok - Runti...
+FAILED tests/test_result_head_guard.py::test_land_normal_card_still_lands - R...
+=================== 2 failed, 14 passed in 69.66s (0:01:09) ===================
