@@ -1,28 +1,76 @@
-T-0217 看板集群面板：节点表 + 心跳 age + 状态灯
+# T-0216 完成报告：status fetch 前置比对（SHA + TTL）
 
-做了什么：
-1. `dashboard/app.js`：`#cluster` 从一行文本升级为点击展开的面板（默认折叠）。
-   头部显示主节点名称 + `http://IP:Port`（复制按钮）、term、quorum、集群 ID；
-   节点表为 名称 / 角色 / 状态灯 / 心跳 age / 在飞任务数 / 版本，self 行带「本机」。
-2. age 用 `last_seen_epoch` 换算 `3s`/`2m`/`1h`；状态灯优先用后端 `status`，
-   缺失时按 `peer_timeout`/`dead_timeout` 分档，后端没下发时按 15s/60s 估并在卡片注明。
-3. 任务数在前端按 `/api/status` 的 `owner == 节点名` 统计在飞卡（不新增接口）；
-   失败仍降级为「集群：未启动」。
-4. `dashboard/style.css`：面板/表/三色状态灯样式；≤768px 只留名称 + 状态两列。
-   未改 `.topbar` 层级，未新增 z-index。
-5. `tests/test_dashboard_cluster.py`：新增 5 个用例，用 node 直接执行 app.js 的纯渲染函数，
-   构造 3 节点（alive/suspect/dead）快照断言三档灯、2s/30s/2m age、任务数、本机标记与手机两列。
+## 改了什么
 
-验证：
-- `python3 -m pytest -q tests/test_dashboard_cluster.py tests/test_dashboard_freshness.py` → 12 passed。
-- 邻近回归 `test_dashboard_layering.py` + `test_dashboard_dispatch_ui.py` → 32 passed, 1 skipped。
-- 手测：假集群 mock 一台 dead 节点，展开面板显示红色「离线」；375px 下 `scrollWidth=375`，无横向滚动。
+### hive.py
 
-截图（浅色，已附）：
-- 折叠态：![折叠态](.hive/cluster-collapsed.png)
-- 展开态：![展开态](.hive/cluster-expanded.png)
-- 手机 375px：![手机](.hive/mobile-cluster-expanded.png)
+1. **新增 `remote_head(path) -> str`**
+   - `git ls-remote origin refs/heads/main refs/heads/master`，超时 10s
+   - `GIT_TERMINAL_PROMPT=0`（交互提示绝不弹出）
+   - 失败/分支不存在返回空串 `""`
 
-风险：后端 snapshot 当前不下发 peer_timeout/dead_timeout，面板会显示「按 15s/60s 估」；
-节点灯仍优先用后端 status，因此不会与后端判定打架。截图时用个人设置关掉了既有空 CI 条，
-避免它遮挡面板（与本卡无关）。
+2. **新增 `fetch_if_changed(path, ttl=10) -> bool`**
+   - 先 `remote_head()` 拿远端 SHA，与本地 `refs/remotes/origin/main`（或 master）比对
+   - 相同 → 返回 `False`，**不启动 fetch 子进程**
+   - 不同 / ls-remote 失败 → 返回 `True`，回落无条件 fetch
+   - 进程内按路径记 TTL（默认 10s），看板 30s 一轮、多仓时不至于 3×N 次往返
+   - `HIVE_FETCH_ALWAYS=1` 强制回到「每次都 fetch」的旧行为（回退阀）
+
+3. **`cmd_status` 改用条件 fetch**
+   - 原来：`self.fetch()` 无条件 `git fetch --prune origin`
+   - 现在：`if fetch_if_changed(self.dir): self.fetch()`
+   - 远端 SHA 没变时，跳过整个 fetch（连网络请求都不发）
+
+4. **`_sync_one_repo` 改用条件 fetch**
+   - 原来：开头无条件 `git fetch --prune origin`
+   - 现在：`if fetch_if_changed(path): git_net(["fetch", "--prune", "origin"], path)`
+   - 安全边界不变：只 `merge --ff-only`，绝不 `reset --hard`
+
+### tests/test_status_git.py
+
+新增 8 个测试：
+- `test_remote_head_returns_sha`：ls-remote 拿到正确 SHA
+- `test_remote_head_empty_on_bad_path`：非 git 仓返回空串
+- `test_fetch_if_changed_false_when_up_to_date`：远端没变 → 不 fetch
+- `test_fetch_if_changed_true_when_remote_changes`：远端变了 → 要 fetch
+- `test_fetch_if_changed_true_on_ls_remote_failure`：ls-remote 失败 → 回落无条件 fetch
+- `test_fetch_if_changed_ttl_caches_result`：进程内 TTL 缓存 ls-remote 结果
+- `test_fetch_if_changed_always_env_forces_fetch`：`HIVE_FETCH_ALWAYS=1` 强制 fetch
+- `test_cmd_status_no_fetch_when_remote_unchanged`：cmd_status 远端没变不跑 fetch
+
+## 反证（三条）
+
+1. **远端 SHA 未变 → git fetch 调用次数 == 0**
+   - `test_fetch_if_changed_false_when_up_to_date`：spy git_net，远端没变时零 fetch 调用
+   - `test_cmd_status_no_fetch_when_remote_unchanged`：cmd_status 远端没变零 fetch
+
+2. **远端 SHA 变化 → 调用次数 == 1**
+   - `test_fetch_if_changed_true_when_remote_changes`：hive2 push 新提交后，fetch_if_changed 返回 True
+
+3. **ls-remote 不可达 → 回落为 1**
+   - `test_fetch_if_changed_true_on_ls_remote_failure`：mock remote_head 返回空串，fetch_if_changed 仍返回 True
+
+## 测试结果
+
+```
+python -m pytest tests/test_status_git.py -v
+17 passed in 288.86s
+
+python -m pytest tests/test_sync_repos.py -q
+10 passed in 313.96s
+```
+
+test_core.py 有部分 Windows 兼容性预存失败（`true` / `test -f` 等 Unix 命令在 Windows 不存在），与本次改动无关——前 10 个 dispatch 测试全部通过。
+
+## 没动什么
+
+- `HIVE_NET_TIMEOUT` 语义：不变
+- `merge --ff-only` 安全边界：不变
+- `run()`（T-0206 的地盘）：没碰
+- `sync_main()` / `_sync_for_commit()` 里的 `self.fetch()`：没碰（写操作必须硬同步）
+
+## 环境变量
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `HIVE_FETCH_ALWAYS` | 未设 | `1`/`true`/`always` 强制每次都 fetch（回退阀） |
