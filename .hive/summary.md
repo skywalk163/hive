@@ -1,221 +1,62 @@
-# T-0206 交付：Windows 子进程全局无窗（CREATE_NO_WINDOW 统一出口）
+# T-0220 交付：派发中间态（TTL 对 dispatch 生效 + 派发未领取快速回收）
 
 ## 结论
 
-看板每 30 秒闪一次黑窗的根因是 **spawn 方式**，不是调度：父进程（detached 的
-`serve.py`）没有控制台，`refresh_loop` 每 30s 跑一次 `hive status --json`，而这个
-console 子进程（以及它拉起的 git）会各自**新建一个可见控制台**。本卡把
-`CREATE_NO_WINDOW` 收口成一个出口，并在 11 个调用点上接入；4 类**必须保留窗口**的
-调用点（交互式 agent 拉起、DETACHED_PROCESS daemon 拉起、daemon 控制脚本、
-非本卡允许路径的模块）显式进白名单，由 AST 判据钉住。
+T-0196 现场（unassign 回 ready 后 3 分钟被 orchestrate 连派 3 次、每次都没人领）
+有两条根因，都在代码里，本卡各给了一条修法：
+
+1. `_assign_local()` 只写 `state/owner` + inbox `assigned_at`，从不写
+   `dispatched_to` / `dispatched_at` ⇒ `is_dispatch_candidate()` 认为「没推过」，
+   下一轮 180s 立刻重派。
+2. 没有「派发未领取」的快速回收，只有 `orphan_grace` 45 分钟的 orphan 兜底，
+   既不记「这次没人领」，也不阻止下一轮再派给同一个 agent。
 
 ## 改了什么
 
 | 文件 | 改动 |
 | --- | --- |
-| `hive_compat.py` | 新增 `no_window_kwargs()` + `NO_WINDOW_ENV="HIVE_NO_WINDOW"`：Windows 返回 `{"creationflags": CREATE_NO_WINDOW}`，其它平台 `{}`；`HIVE_NO_WINDOW=0/false/no/off` 一律 `{}`（逃生阀） |
-| `hive.py` | 顶层 `from hive_compat import no_window_kwargs`（ImportError 兜底）；**`run()` 单点接入**（全仓唯一命令出口，`git()`/`git_net()` 都走它）；`_copy_clipboard()`、`Worker.run_task` 的 `clip`、`Worker._exec` 的 `taskkill` 也接入 |
-| `dashboard/serve.py` | `refresh_loop`（30s 那一闪）、`serve_task_post`、`_refresh_status` 三处接入 |
-| `hive_cluster.py` | `RepoSyncAgent._git_rev`、`RepoSyncAgent._remote_head`、`_pid_alive` 三处接入 |
-| `tests/test_no_window.py`（新） | 25 条判据：AST 全量扫描 + 白名单精确集合 + 单点钉死 + 不许 DETACHED 混用 + 行为层 |
+| `hive.py` | `_assign_local()` 同时写 `dispatched_to` / `dispatched_at`（与 inbox `assigned_at` 共用同一个 stamp）；新增 `_dispatch_unclaimed_minutes()`（`HIVE_DISPATCH_UNCLAIMED_MINUTES`，默认 10）与 watchdog `dispatch_unclaimed` / `reclaim_miss` 分支；新增 `_reclaim_dispatch_miss()`（`dispatch_miss += 1`、删 inbox 残留、`>=2` 转 blocked 并写明「转人工」）；`DISPATCH_MISS_BLOCK_AT = 2`；`TASK_FIELDS` 追加 `dispatch_miss`；dispatch 侧跳过 `dispatch_miss >= 2` 的卡；新增 `_store_state_conflict()` 做 store 模式派发前校验；`_assigned_at()` 增加 `dispatched_at` 兜底；`cmd_unblock` 清零 `dispatch_miss`（人工解挂 = 重新给自动派发机会）；watchdog `--json` 新增 `would_reclaim_miss` |
+| `tests/test_dispatch_miss.py`（新） | 7 条判据：派发写标记、unassign 后 TTL 生效、11 分钟未领取回收并清 inbox、阈值可配、连续 2 次转 blocked、ready 卡 miss>=2 不进计划、store 状态不一致不派 |
 
-`hive_compat.no_window_kwargs()` 的实现要点：`os.name != "nt"` 直接返回 `{}`
-（POSIX 口径一个字节不动）；flag 取 `getattr(subprocess, "CREATE_NO_WINDOW", 0)`，
-取不到也返回 `{}`（残缺 subprocess 不炸）。
+`dispatch_tracking.py` **未改**：`is_dispatch_candidate()` 的语义（ready + 无 owner +
+TTL）本来就是对的，缺的只是写入端。
 
-## 调用点清单（AST 实测，生产模块 25 处）
+## 判据与反证（每条都钉住旧实现的错误）
 
-扫描面 = 仓库根 `*.py` + `dashboard/*.py`（不含 `tests/`：pytest 前台驱动，不是
-常驻周期路径）。逐条：
+1. 派发后卡面有 `dispatched_to` + `dispatched_at` —— 删掉写入即红；
+2. 派发后 `unassign` → `is_dispatch_candidate() == False`，且 `dispatch --json`
+   的 skipped 给出「刚推送过（TTL 60 分钟内不重复派）」—— 退回旧实现这里会重新派；
+3. `assigned` + 无 claim + `assigned_at` 11 分钟前 → 回收后 `state=ready`、
+   `dispatch_miss=1`、`inbox/<agent>/<tid>.md` 被删；
+4. `dispatch_miss=2` → 转 `blocked` 且 `dispatch --json` 的 plan 里不再出现
+   （skipped 理由「连续 2 次派发无人领取，转人工」）。
 
-| # | 位置 | 处置 | 理由 |
-| --- | --- | --- | --- |
-| 1 | `hive.py::_copy_clipboard → run` | 封装 | 剪贴板 `clip`，输出走管道 |
-| 2 | `hive.py::run → run`（无 input） | 封装 | **全仓命令出口**，覆盖 `git()`/`git_net()`/`run_verify()` |
-| 3 | `hive.py::run → run`（有 input） | 封装 | 同上（二进制 stdin 分支） |
-| 4 | `hive.py::Worker.run_task → run`（clip） | 封装 | 手动模式复制提示词 |
-| 5 | `hive.py::Worker.run_task → Popen`（manual `--launch`） | **白名单** | 交互式 GUI agent 拉起：人要在那个窗口里干活 |
-| 6 | `hive.py::Worker._exec → Popen`（agent 命令） | **白名单** | 交互式 agent 拉起：实时输出要给人看，隐藏会吞掉 |
-| 7 | `hive.py::Worker._exec → run`（taskkill 超时清场） | 封装 | 纯清场，无输出需求 |
-| 8 | `hive.py::_dashboard_run_script → run` | **白名单** | daemon 控制脚本（start/stop/status），前景调用、用户在终端执行；卡明确划出 daemon 拉起边界 |
-| 9 | `hive.py::_dashboard_spawn → Popen` | **白名单** | DETACHED_PROCESS，与 CREATE_NO_WINDOW **互斥** |
-| 10 | `hive_cluster.py::RepoSyncAgent._git_rev → run` | 封装 | 周期同步里的 `git rev-parse` |
-| 11 | `hive_cluster.py::RepoSyncAgent._remote_head → run` | 封装 | 周期同步里的 `git ls-remote` |
-| 12 | `hive_cluster.py::_pid_alive → run`（tasklist） | 封装 | Windows 存活探测 |
-| 13 | `hive_cluster.py::_spawn_background → Popen` | **白名单** | DETACHED_PROCESS，互斥 |
-| 14 | `hive_pr.py::git_remote → run` | **白名单** | `hive pr` 交互命令，非 30s 刷新路径；**不在本卡允许修改路径** ⇒ 留后续卡 |
-| 15 | `llm_controller.py::McpStdioBackend.__init__ → Popen` | **白名单** | MCP stdio 子进程（全管道、控制器启动时一次）；**不在本卡允许路径** |
-| 16-22 | `selftest.py`（`sh` 1 处 + `main` 6 处） | **整文件白名单** | 端到端自测脚本，人工/CI 前台跑；**不在本卡允许路径** |
-| 23 | `dashboard/serve.py::refresh_loop → run` | 封装 | **用户看到的那一闪** |
-| 24 | `dashboard/serve.py::build_handler.HiveHandler.serve_task_post → run` | 封装 | 看板操作按钮 |
-| 25 | `dashboard/serve.py::build_handler.HiveHandler._refresh_status → run` | 封装 | 操作后重生成状态 |
-
-合计：**11 处走统一封装**、**7 处白名单（4 类理由）**、**7 处整文件白名单**。
-
-与卡上「29 处」的口径差异：29 是 `grep -rn subprocess\.` 的**行数**（含
-`hive.py:82`/`hive.py:4057` 两行注释文字、含 `tests/` 夹具 15 处、不含
-`selftest.py` 的 7 处）。本卡以 AST 判据为准，口径可复跑：
-`python -c "import sys;sys.path[:0]=['.','tests'];import test_no_window as t;print(len(list(t.unguarded_sites())))"`。
-
-## 反证（判据有牙）
-
-把 `hive.run()` 里两处 `**no_window_kwargs()` 删掉（在隔离副本里做，不动交付树）：
+## 验证
 
 ```
-FAILED tests/test_no_window.py::test_every_subprocess_call_is_guarded
-FAILED tests/test_no_window.py::test_run_is_the_single_guarded_exit
-FAILED tests/test_no_window.py::test_run_passes_creationflags_on_windows
-3 failed, 22 passed in 11.17s
+python3 -m pytest -q tests/test_dispatch_tracking.py tests/test_orchestrate.py tests/test_dispatch_miss.py
+46 passed in 58.53s
 ```
 
-恢复后：`25 passed`。白名单也是精确集合——多一条（僵尸豁免）就红
-（`test_whitelist_has_no_zombie_entries`）。
+回归（相关面）：`test_watchdog / test_retry_cap / test_store / test_store_overlay /
+test_mcp / test_new_surfaces` → **83 passed in 185.97s**。
 
-## Windows 真机证据
+## 现场回归的局限
 
-计数脚本（一次性探针，未入库；核心就这 30 行）：
-
-```python
-import ctypes, ctypes.wintypes as wt, subprocess, sys, time
-from pathlib import Path
-u = ctypes.windll.user32
-WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
-def count():
-    n = [0]
-    def cb(hwnd, _l):
-        if u.IsWindowVisible(hwnd):
-            b = ctypes.create_unicode_buffer(256); u.GetClassNameW(hwnd, b, 256)
-            if b.value in ("ConsoleWindowClass", "PseudoConsoleWindow"): n[0] += 1
-        return True
-    u.EnumWindows(WNDENUMPROC(cb), 0); return n[0]
-# 父进程用 pythonw.exe（GUI 子系统，天生无控制台 = 看板 daemon 的处境），
-# 每 10ms 采样一次；循环体与 refresh_loop 同一条命令 + 同一个 no_window_kwargs()
-```
-
-父进程必须是**无控制台**的 pythonw，否则测不出来（终端里跑 `hive status`，子进程
-直接继承父控制台，永远不会新建窗口）。隔离实验（1 次 `git --version`）：
-
-```
-A_outer_no_window_inner_no_window: rc=0 base=4 peak=4 delta=0
-B_outer_plain_inner_plain:         rc=0 base=4 peak=5 delta=1
-```
-
-A/B（`hive status --json`，pythonw 父进程）：
-
-```
-A_fixed      (HIVE_NO_WINDOW 默认) 峰值 4 / 基线 4 → 增量 0
-B_valve_off  (HIVE_NO_WINDOW=0)    峰值 5 / 基线 4 → 增量 1
-```
-
-结论：`CREATE_NO_WINDOW` 确实把可见控制台挡掉；关掉逃生阀立刻复现窗口。
-
-## verify 状态（重要，未按 90 分钟预算跑完）
-
-- `tests/test_no_window.py`：**25 passed**（反复跑 3 次均绿）。
-- 反证：删掉 `run()` 的守卫 → 3 failed / 22 passed（见上）。
-- **全量三文件套件在本机没跑完**：
-  - 串行跑 40 分 10 秒仍在跑（被 90 分钟预算打断）；
-  - `-n 4` 并行跑 45 分 42 秒仍在跑，其中 `test_claim_is_atomic` /
-    `test_concurrent_claims_share_one_clone` / `test_retry_fresh_clears_archive`
-    的 3 个 git 子进程（`git init -b main` / `git status --porcelain` /
-    `git hash-object -w --stdin`）**CPU 时间 0s 阻塞 40 分钟**，把 gw0/gw1/gw2
-    三个 worker 全卡住。
-  - **排除本卡回归**：单跑 `test_claim_is_atomic` → `1 passed in 38.33s`；
-    且「无控制台父进程 + CREATE_NO_WINDOW」下 `hive init --remote` 三种组合
-    （带/不带 flag、带 stdin=DEVNULL）全部 rc=0（12.8~15.8s），**不挂**。
-  - 现场观察：同机另一个 agent 正在并发跑
-    `pytest -q tests/test_result_head_guard.py tests/test_core.py`（PID 7060），
-    两个 test_core 抢同一台机器的 git/磁盘；本机单个 world 夹具约 30~40s
-    （54 个用例 ⇒ 串行 30 分钟以上）。
-- 因此本卡按卡上失败策略处理：**代码与判据已交付且绿，全量套件受环境争用未跑完**，
-  由 `hive submit` 自己重跑 verify 定论（已加 `--timeout=600` 兜底，防止再次无限挂）。
-
+0.88 的 orchestrate 与 store 多数派集群不在本机，无法直接跑「两轮真集群」。已在真实
+协调仓跑两轮 `dispatch --dry-run` 取证：T-0220 自身因「能力缺失 python/pytest +
+fb88-dsh 是 manual」被跳过，T-0213/T-0215 因仓白名单被跳过，没有出现新的
+assigned-无-claim 卡。真集群两轮复核需在 0.88 上换新代码后跑
+`orchestrate --interval 180`。
 
 ## 边界与已知限制
 
-- **没动**调度架构、同步间隔（T-0211）、`git_net` 超时语义。
-- **没给** `_dashboard_spawn` / `_spawn_background` 的 DETACHED_PROCESS 叠
-  CREATE_NO_WINDOW（互斥，会起不来）；`test_detached_spawn_never_mixes` 用 AST 守这条。
-- **没给**交互式 agent 拉起（`Worker._exec` / manual `--launch`）加隐藏窗口。
-- 遗留：`hive_pr.py::git_remote`、`llm_controller.py::McpStdioBackend.__init__`、
-  `selftest.py` 全部调用点仍在白名单里——它们**不在本卡允许修改路径**内，
-  建议后续卡收口（都是非周期路径，闪窗概率低）。
-
-## 第二次尝试（2026-10-31）新增证据
-
-- **verify 在门禁机 0.88（fb98, FreeBSD, Python 3.12.13）全绿**：
-  `python3 -m pytest -q tests/test_no_window.py tests/test_core.py tests/test_dashboard_freshness.py`
-  → **98 passed, 1 skipped in 170.81s**（同一 commit `89a5222`，同一三条命令，只把 worktree
-  去掉 `.git/.hive/_archive` 打包上传到 `/tmp/t0206` 跑）。
-- **本机 Windows 的卡死与本卡无关**：用 `origin/main`（不含本卡任何代码）建 worktree 跑同一套件，
-  同样在 24 个用例后卡死在 `test_gc_reclaims_expired_claim`；本卡树卡在
-  `test_land_survives_dirty_coordination_tree` / `test_concurrent_claims_share_one_clone` /
-  `test_retry_fresh_clears_archive` / `test_dispatch_respects_max_concurrent` 等**不同**位置。
-  每个卡住的用例单跑都能过（38.33s / 44.36s / 108.05s）。
-- **死锁形态**：卡住时 `hive.py` + `git receive-pack` 存活、CPU≈0、`git push` 客户端已消失
-  ⇒ 孙进程持有继承来的 stdout 管道，父进程 `subprocess.run(capture_output=True)` 等不到 EOF。
-  同一机制也适用于 `git maintenance run --auto --detach` 这类「孤儿持管道」。
-- **hive 自己的 verify 上限是 1800s**（`run_verify(..., timeout=1800)`，无环境变量可调）：
-  本机这套件串行需要 30~50 分钟 ⇒ 在 Windows 上必然被 1800s 掐掉；`-n 4` 能压到 ~15 分钟，
-  但并发用例会随机触发上面的死锁。
-- 已排除的变量：`--capture=sys`、basetemp 移出工作区、全局关 `maintenance.auto`/`gc.auto`、
-  沙箱外运行、`-n 4`（前期快、后期仍卡）。
-- 结论：**代码与判据就绪且已在门禁机全绿；本机 submit 过不了是环境 + 1800s 上限**。
-  建议换一台健康的 Windows 机器 submit，或先修本机「git 孙进程持管道」问题；
-  **不要为了过门去改 `run_verify` 的超时，也不要改代码**。
-
-## 第三次尝试：本机全量终于跑通一次（关键在「有控制台 + -n 4」）
-
-- 根因补强：**Bash 工具拉起的进程链 `GetConsoleWindow()==0`（没有控制台）**，于是每个
-  console 子进程（git/python/cmd）都要新建一个控制台；高频 spawn 下偶发 0 CPU 死锁
-  （复现器 163 次 spawn 抓到 1 次；40 分钟全量会撞 3~4 次，位置随机）。
-- **把测试放到有控制台的进程里跑（`GetConsoleWindow()!=0` 的终端）**，同一台机器、
-  同一份代码：
-  `pytest -q tests/test_no_window.py tests/test_core.py tests/test_dashboard_freshness.py`
-  （`PYTEST_ADDOPTS="-n 4 --basetemp=.hive/pt-c1 -p no:cacheprovider"`）
-  → **98 passed in 1052.88s (17:32)**，全程无卡死。
-- 必须 `-n 4`：hive 的 `run_verify` 硬上限 1800s，串行要 35~45 分钟必然超时；4 并行压到 ~17 分钟。
-- 但死锁仍会随机复发（随后一次同配置跑到 30 分钟时 2 个 worker 又卡住）⇒ **本机的解法是
-  「有控制台 + -n 4 + 卡住了重跑」，不是一次性修好**。彻底的代码级修法（另开卡）：
-  测试夹具 `tests/conftest.py::sh` 与测试里的 `Popen` 也带上 `no_window_kwargs()`，
-  这样即使父进程没有控制台，子进程也不再分配控制台。
-
-## 第四次：根治本机死锁（把 no_window 下沉到测试夹具）—— 全量 99 passed / 16:53
-
-上一轮把「死锁」归因为「父进程无控制台 + 高频 spawn → conhost 分配竞争」，并留了
-「另开卡把 `no_window_kwargs()` 下沉到测试夹具」的尾巴。本轮直接把这个尾巴做掉，
-因为它是本机 submit 过门的唯一硬阻塞。
-
-### 最小复现（一次性脚本，已删除，不入库）
-4 线程 × 8 轮 `git init --bare` → `clone` → `commit` → `push`（push 会 spawn
-`receive-pack`，即之前观察到的「孙进程持管道」形态），父进程无控制台：
-
-```
-对照（默认 spawn）：整组挂死——每个 git 操作都等到自己的超时才返回，跑不完
-实验（CREATE_NO_WINDOW）：done=32/32  stuck=0  elapsed=42.7s
-```
-
-⇒ 根因确认：**无控制台父进程下，console 子进程（git）自建控制台，高频并发撞
-conhost 分配竞争 → 0 CPU 永久挂起**。`CREATE_NO_WINDOW` 让子进程不再分配控制台，
-彻底消掉这一类死锁。
-
-### 改动（把统一出口下沉到测试夹具，与 T-0206 同一套纪律）
-- `tests/conftest.py`：`sh()`（世界夹具与 `world.hive()` 的唯一 spawn 出口）加
-  `**no_window_kwargs()`；顶部 `from hive_compat import no_window_kwargs`。
-- `tests/test_core.py`：3 处直连 `subprocess`（`test_claim_is_atomic` /
-  `test_retry_fresh_clears_archive` / `test_concurrent_claims_share_one_clone`）
-  同样接入。
-- 非 Windows 返回 `{}`，门禁机 0.88（FreeBSD）行为一个字节不变；
-  `tests/test_no_window.py` 的 AST 扫描只覆盖生产模块（不含 `tests/`），
-  白名单精确集合不受影响。
-
-### 验证
-```
-pytest -q tests/test_no_window.py tests/test_core.py tests/test_dashboard_freshness.py
-PYTEST_ADDOPTS="-n 4 --basetemp=.hive/pt-fix2 -p no:cacheprovider"
-→ 99 passed in 1013.86s (0:16:53)
-```
-（Windows 上 99 条全过；0.88 上 `test_no_window_kwargs_on_windows` 因 skipif 跳过，
-故为 98 passed + 1 skipped，总数一致。）
-
-之前同一条 `-n 4` 命令会随机死锁（30~45 分钟内 3~4 次）；本次全程无卡死、一次跑通。
+- **没动** `cmd_unassign` 的语义（人工退回仍无条件执行）；只动了 `cmd_unblock`
+  的计数清零。
+- **没改** `orphan_grace` 默认 45 分钟：`dispatch_unclaimed` 是更快的另一条通道，
+  阈值调大时仍会落回原来的 orphan 语义。
+- **没给** dispatch 加新的必填参数（阈值走环境变量，默认 10 分钟向后兼容）。
+- **没碰** `run()`（T-0206）与 `fetch()`（T-0216）。
+- store 后端仍不写 Git 卡面（原设计），`dispatch_miss` 在 store 模式下不落盘；
+  TTL 是「按卡」而非「按 agent」，unassign 后 60 分钟内其它 agent 也接不走 ——
+  若要按 agent 粒度需要另开卡。

@@ -88,6 +88,9 @@ DEFAULT_MAX_PER_REPO = 1
 # 一张卡最多被看门狗**自动**回收几次；超了就转 blocked 退出流水线，不再无限重派。
 # 0 = 一次都不许自动重派（首次判死即 blocked）。人工显式 `hive retry` 不受此限。
 DEFAULT_MAX_RETRIES = 3
+# T-0220：同一张卡「派发出去没人领」累计到这个次数就转 blocked 等人工。
+# 与 max_retries 分开记：retries 是「跑过但失败」，dispatch_miss 是「压根没人接」。
+DISPATCH_MISS_BLOCK_AT = 2
 
 # 网络类 git 操作（fetch / push / clone / ls-remote）的默认超时（秒）。
 # subprocess.run 不传 timeout 就是无限等：2026-10-25 Gitea 约 12 小时不可达，
@@ -145,6 +148,9 @@ TASK_FIELDS = [
     # T-0206 追加：租约 fencing 序号。每次回收/重派 +1，结果里带上写入时的 fence，
     # land/close 用它识别「旧 worker 复活后写进来的过期结果」。
     "fence",
+    # T-0220 追加：派发出去但一直没人领的次数。>=2 转 blocked 等人工，
+    # 避免「派发→没人领→回收→再派发」的无限拉锯。
+    "dispatch_miss",
 ]
 
 # 文件级锁（任务卡 `locks` 字段）的判定在 conflict.py。放 try 里是因为 hive.py 允许被
@@ -194,6 +200,16 @@ def iso(dt: datetime | None = None) -> str:
 
 def parse_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
+
+
+def _int_or_zero(v) -> int:
+    """把卡面字段宽松转成非负整数（缺省 / 脏数据一律当 0）。"""
+    if v is None or v == "":
+        return 0
+    try:
+        return max(0, int(v))
+    except (TypeError, ValueError):
+        return 0
 
 
 def log(msg: str) -> None:
@@ -2105,6 +2121,46 @@ class Hive:
         except ValueError:
             return 60
 
+    def _dispatch_unclaimed_minutes(self) -> int:
+        """「派发出去多久没人领」的快速回收阈值（分钟），默认 10。
+
+        和 `orphan_grace`（45 分钟，管「领了但死了」）是两件事：
+        这里回收的是 **从没被 claim 过** 的卡，10 分钟足够 agent 反应了。
+        可读 `HIVE_DISPATCH_UNCLAIMED_MINUTES`；写成方法是为了测试能钉住，
+        不在模块层读一次（与 `_dispatch_ttl_minutes` 同款）。
+        """
+        raw = (os.environ.get("HIVE_DISPATCH_UNCLAIMED_MINUTES") or "").strip()
+        try:
+            return max(0, int(raw)) if raw else 10
+        except ValueError:
+            return 10
+
+    def _store_state_conflict(self, card: dict) -> str | None:
+        """store 模式下派发前校验：store 的 state 与 Git 卡面不一致就返回跳过原因。
+
+        store 记运行时状态，Git 卡面是派发依据。两者不一致时 `store_assign`
+        写下去也没意义 —— agent 来 claim 时 CAS 过不去（T-0196 现场：
+        卡面 ready、store 还是 blocked，卡停在「已分派无人领」）。
+        返回 None 表示「没发现问题」或「当前不是 store 后端」。
+        """
+        if claim_backend() != "store":
+            return None
+        store = local_store()
+        if store is None:
+            return None
+        try:
+            row = store.task(str(card.get("id") or ""))
+        except Exception:  # noqa: BLE001 —— 读 store 失败不该把整轮 dispatch 打死
+            return None
+        if not isinstance(row, dict):
+            return None
+        store_state = str(row.get("state") or "").strip().lower()
+        card_state = str(card.get("state") or "").strip().lower()
+        if not store_state or not card_state or store_state == card_state:
+            return None
+        return (f"store 状态与卡面不一致（卡面 {card_state} / store {store_state}），"
+                f"派下去也 claim 不到，跳过")
+
     def dispatch_repos(self) -> set[str]:
         """允许被 dispatch 的代码仓白名单。
 
@@ -2118,16 +2174,28 @@ class Hive:
         return {r.strip() for r in raw.split(",") if r.strip()}
 
     def _assign_local(self, tid: str, agent: str) -> None:
+        """本地分派：写卡面 assigned/owner + 收件箱信号。
+
+        T-0220：同时写 `dispatched_to` / `dispatched_at`。
+        以前只写 state/owner，`is_dispatch_candidate()` 看不出「刚派过」，
+        于是卡被 `unassign` 回 ready 之后，下一轮 orchestrate（180s）立刻又派给
+        同一个 agent —— T-0196 现场 3 分钟被连派 3 次，每次都没人领。
+        两个时间戳用同一个 stamp，保证卡面 `dispatched_at` 与 inbox
+        `assigned_at` 完全对齐（看门狗只读一处也不会差几秒）。
+        """
+        stamp = iso()
         self.agent(agent)  # 校验已登记
         card = self.card(tid)
         card["state"] = "assigned"
         card["owner"] = agent
+        card["dispatched_to"] = agent
+        card["dispatched_at"] = stamp
         self.save_card(card)
         inbox = self.dir / "inbox" / agent
         inbox.mkdir(parents=True, exist_ok=True)
         (inbox / f"{tid}.md").write_text(
             f"# {tid} -> {agent}\n\n"
-            f"assigned_at: {iso()}\n\n"
+            f"assigned_at: {stamp}\n\n"
             f"任务卡：`tasks/{tid}.md`\n",
             encoding="utf-8",
         )
@@ -2179,6 +2247,22 @@ class Hive:
         for c in ready:
             if limit and len(plan) >= limit:
                 skipped.append((c["id"], f"超出本次 --limit {limit}"))
+                continue
+            # T-0220：连续派发无人领取的卡不再自动派，交给人工判断（见 watchdog）。
+            miss = _int_or_zero(c.get("dispatch_miss"))
+            if miss >= DISPATCH_MISS_BLOCK_AT:
+                skipped.append(
+                    (c["id"],
+                     f"连续 {miss} 次派发无人领取，转人工（不再自动派发）"))
+                log(f"{c['id']} 连续 {miss} 次派发无人领取，跳过自动派发")
+                continue
+            # T-0220：store 模式下先核对 store 的 state 与 Git 卡面 —— 不一致时
+            # claim 的 CAS 注定失败（T-0196：卡面 ready、store 还是 blocked），
+            # 与其派一张领不走的卡，不如跳过后记一行日志。
+            stale_store = self._store_state_conflict(c)
+            if stale_store:
+                skipped.append((c["id"], stale_store))
+                log(f"{c['id']} 跳过派发：{stale_store}")
                 continue
             repo = c.get("repo") or ""
             # 派发白名单：默认只有 hive 仓（其它代码仓的 worktree/合并约定还没收口）。
@@ -3232,6 +3316,10 @@ class Hive:
         if card.get("state") != "blocked":
             raise HiveError(f"{tid} 的状态是 {card.get('state')}，不是 blocked")
         card["state"] = "assigned" if card.get("owner") else "ready"
+        # T-0220：人工显式解除挂起 = 重新给自动派发机会，连 dispatch_miss 一起清零；
+        # 否则「连续 2 次派发无人领」被自动转 blocked 的卡，解挂后仍永远派不出去。
+        if card.get("dispatch_miss"):
+            card["dispatch_miss"] = 0
         body = (card["_body"] + f"\n\n---\n\n**unblock（{iso()}，by {who}）**："
                 f"{reason or '已解除挂起'}，回到 {card['state']}\n")
         self.save_card(card, body)
@@ -3365,6 +3453,14 @@ class Hive:
         body = card.get("_body") or ""
         m = re.search(r"^assigned_at:\s*(\S+)", body, re.MULTILINE)
         if not m:
+            # T-0220：`_assign_local` 现在也把派发时间写在卡面 dispatched_at 上。
+            # inbox 信号被清掉/没同步过来时用它兜底，别让看门狗认不出「派了多久」。
+            raw = card.get("dispatched_at")
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    return parse_iso(raw.strip())
+                except ValueError:
+                    return None
             return None
         try:
             return parse_iso(m.group(1))
@@ -3440,6 +3536,52 @@ class Hive:
         self.commit_and_push(f"watchdog reclaim {tid}: {reason}", self._card_paths(tid))
         log(f"{tid} 已退回 ready（{reason}）")
 
+    def _reclaim_dispatch_miss(self, tid: str, minutes: int = 0) -> None:
+        """回收「派发出去但一直没人领」的卡（T-0220）。
+
+        和 `_reenqueue_ready` 刻意分开：那条路是「领过但死了/掉线」，
+        走 retries 熔断；这条路是「压根没人来领」，只累计 `dispatch_miss`。
+        动作：
+          * `dispatch_miss += 1`；
+          * 清掉 `inbox/<agent>/<tid>.md` 残留（否则 agent 还会看到旧信号）；
+          * 未到阈值 → 退回 ready（`dispatched_to` 保留，TTL 继续压着不重派）；
+            到阈值 → 转 blocked 并在卡体写明「连续 N 次派发无人领取，转人工」。
+        """
+        card = self.card(tid)
+        old_owner = card.get("owner") or ""
+        at = self._assigned_at(card)          # 必须在清 owner 之前算（要读 inbox）
+        stamp = iso()
+        wait_min = minutes
+        if at is not None:
+            try:
+                wait_min = max(0, int((now() - at).total_seconds() // 60))
+            except (TypeError, ValueError):
+                wait_min = minutes
+        miss = _int_or_zero(card.get("dispatch_miss")) + 1
+        card["dispatch_miss"] = miss
+        card["owner"] = None
+        # 收件箱里那张「你有一张卡」的纸必须撕掉，不然 agent 下一轮还会照着它来领
+        if old_owner:
+            inbox = self.dir / "inbox" / old_owner / f"{tid}.md"
+            if inbox.exists():
+                inbox.unlink()
+        note = (f"\n\n---\n\n**dispatch_miss（{stamp}）**：第 {miss} 次派发给 "
+                f"{old_owner or '（无主）'} 后 {wait_min} 分钟无人领取")
+        if miss >= DISPATCH_MISS_BLOCK_AT:
+            card["state"] = "blocked"
+            body = card["_body"] + note + (
+                f"，连续 {DISPATCH_MISS_BLOCK_AT} 次派发无人领取，转人工（不再自动派发）\n")
+            self.save_card(card, body)
+            self.commit_and_push(f"watchdog block {tid}: dispatch_miss={miss}",
+                                 self._card_paths(tid, old_owner))
+            log(f"{tid} 连续 {miss} 次派发无人领取，转 blocked 等人工")
+            return
+        card["state"] = "ready"
+        body = card["_body"] + note + "，退回 ready（TTL 内不再重复派发）\n"
+        self.save_card(card, body)
+        self.commit_and_push(f"watchdog dispatch-miss {tid}", self._card_paths(tid, old_owner))
+        log(f"{tid} 派发 {wait_min} 分钟无人领取，退回 ready（dispatch_miss={miss}）")
+
     def cmd_watchdog(self, minutes: int = 0, apply: bool = False,
                      as_json: bool = False, orphan_grace: int = 30) -> int:
         """看门狗：找出死掉 / 孤儿 / 僵尸的 in-flight 卡。
@@ -3447,12 +3589,16 @@ class Hive:
         dry-run（默认）只报告、不改动；`--apply` 才把候选卡退回 ready。
         回收的判定（都满足「卡还在 in-flight、且没有 res 结果」为前提）：
           - orphan_running：state=running 但 claim 分支没了（崩溃 / 被 gc 清掉）
+          - dispatch_unclaimed：state=assigned 但一直没 claim，且分派时间早于
+                             now-HIVE_DISPATCH_UNCLAIMED_MINUTES（默认 10）——
+                             累计 dispatch_miss，连续 2 次转 blocked 等人工（T-0220）
           - orphan_assigned：state=assigned 但一直没 claim，且分派时间早于 now-orphan_grace
                              （worker 一直没来领；刚分派的卡在 grace 内不回收，留给它领）
           - zombie：claim 的 agent 没在 agents/ 登记
           - stale：claim 的 lease_until 早于 now-minutes（心跳保证活着的 worker 不会过期）
           - land_lag（只 warn 不回收）：已经有 res 结果却还停在 in-flight，那是 land 的活
-        `minutes` 只管 stale；`orphan_grace`（默认 30）只管 orphan_assigned。
+        `minutes` 只管 stale；`orphan_grace`（默认 30）只管 orphan_assigned；
+        `dispatch_unclaimed` 的阈值走环境变量，不新增必填参数（向后兼容）。
         返回将被/已被回收的卡数量。
         """
         self.fetch()
@@ -3460,6 +3606,7 @@ class Hive:
         nowdt = now()
         grace = timedelta(minutes=minutes)
         ograce = timedelta(minutes=orphan_grace)
+        unclaimed = timedelta(minutes=self._dispatch_unclaimed_minutes())
         candidates: list[dict] = []
         for tid, c in cards.items():
             if c.get("state") not in IN_FLIGHT_STATES:
@@ -3471,9 +3618,14 @@ class Hive:
             if claim is None:
                 if c.get("state") == "running":
                     candidates.append({"id": tid, "reason": "orphan_running", "action": "reclaim"})
-                else:  # assigned 但还没 claim：可能刚分派，按 orphan_grace 阈值判断
+                else:  # assigned 但还没 claim：可能刚分派，按两个阈值判断
                     at = self._assigned_at(c)
-                    if at is not None and at < nowdt - ograce:
+                    if at is not None and at < nowdt - unclaimed:
+                        # 快速通道：派了 10 分钟还没人领，记一次 dispatch_miss
+                        candidates.append({"id": tid, "reason": "dispatch_unclaimed",
+                                          "action": "reclaim_miss"})
+                    elif at is not None and at < nowdt - ograce:
+                        # 兜底：把阈值调大时仍沿用原 orphan 语义（不记 miss）
                         candidates.append({"id": tid, "reason": "orphan_assigned",
                                           "action": "reclaim"})
                 continue
@@ -3501,29 +3653,35 @@ class Hive:
                 c["max_retries"] = self._max_retries(card)
 
         to_reclaim = [c for c in candidates if c["action"] == "reclaim"]
+        to_miss = [c for c in candidates if c["action"] == "reclaim_miss"]
         to_block = [c for c in candidates if c["action"] == "block"]
         if as_json:
             print(json.dumps({
                 "candidates": candidates,
-                "would_reclaim": len(to_reclaim) if not apply else 0,
+                "would_reclaim": (len(to_reclaim) + len(to_miss)) if not apply else 0,
+                "would_reclaim_miss": len(to_miss) if not apply else 0,
                 "would_block": len(to_block) if not apply else 0,
-                "reclaimed": len(to_reclaim) if apply else 0,
+                "reclaimed": (len(to_reclaim) + len(to_miss)) if apply else 0,
                 "blocked": len(to_block) if apply else 0,
             }, ensure_ascii=False, indent=2))
         if not apply:
             for c in candidates:
-                tag = {"reclaim": "回收", "block": "转blocked"}.get(c["action"], "提示")
+                tag = {"reclaim": "回收", "reclaim_miss": "回收(无人领)",
+                       "block": "转blocked"}.get(c["action"], "提示")
                 log(f"[watchdog] {tag} {c['id']}：{c['reason']}")
-            log(f"[watchdog] dry-run：{len(to_reclaim)} 张将被回收、"
+            log(f"[watchdog] dry-run：{len(to_reclaim) + len(to_miss)} 张将被回收、"
                 f"{len(to_block)} 张将转 blocked（--apply 才动手）")
-            return len(to_reclaim) + len(to_block)
+            return len(to_reclaim) + len(to_miss) + len(to_block)
         for c in to_reclaim + to_block:
             self._reenqueue_ready(c["id"], c["reason"])
             verb = "已转 blocked" if c["action"] == "block" else "已回收"
             log(f"[watchdog] {verb} {c['id']}：{c['reason']}")
-        log(f"[watchdog] 完成，回收 {len(to_reclaim)} 张、"
+        for c in to_miss:
+            self._reclaim_dispatch_miss(c["id"])
+            log(f"[watchdog] 已回收 {c['id']}：{c['reason']}")
+        log(f"[watchdog] 完成，回收 {len(to_reclaim) + len(to_miss)} 张、"
             f"转 blocked {len(to_block)} 张")
-        return len(to_reclaim) + len(to_block)
+        return len(to_reclaim) + len(to_miss) + len(to_block)
 
     # -- 总控进程 ---------------------------------------------------------- #
     def _cluster_gate(self) -> dict:
