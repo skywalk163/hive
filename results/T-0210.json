@@ -1,0 +1,70 @@
+{
+  "task": "T-0210",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0210",
+  "base": "main",
+  "head": "d50591d27beafacd51cdf7155ac8788cc541cbbe",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-10-31T09:35:54+08:00",
+  "finished_at": "2026-10-31T10:19:40+08:00",
+  "duration_s": 2626.4,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/unit/test_LH34_中文关键字参数.py",
+      "code": 0,
+      "tail": [
+        "0.11s setup    tests/unit/test_LH34_中文关键字参数.py::test_中文形参名可作关键字[\\u8bfb\\u53d6\\u6587\\u4ef6]",
+        "0.10s call     tests/unit/test_LH34_中文关键字参数.py::test_公开函数形参名全中文[\\u5b57\\u7b26\\u4e32\\u91cd\\u590d]",
+        "0.09s call     tests/unit/test_LH34_中文关键字参数.py::test_公开函数形参名全中文[\\u5b57\\u5178\\u521b\\u5efa]",
+        "0.09s call     tests/unit/test_LH34_中文关键字参数.py::test_公开函数形参名全中文[\\u5b57\\u7b26\\u4e32\\u53cd\\u8f6c]",
+        "391 passed in 40.96s"
+      ]
+    },
+    {
+      "cmd": "python3 scripts/sync_builtins.py",
+      "code": 0,
+      "tail": [
+        "",
+        "[自检] ...",
+        "  [自检] 全部通过",
+        "",
+        "同步完成，exit 0"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest -q tests/unit/test_builtins_drift.py",
+      "code": 0,
+      "tail": [
+        "0.01s call     tests/unit/test_builtins_drift.py::test_boot_no_light_forward_leak",
+        "0.01s call     tests/unit/test_builtins_drift.py::test_lh_public_body_hash_equals_main",
+        "",
+        "(11 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "8 passed in 13.93s"
+      ]
+    }
+  ],
+  "summary": "# T-0210 光明P1：内置形参名中英混杂，中文关键字参数调不通 [L-256]\n\n## 做了什么\n\n### 1. `stdlib/builtins.py`：形参名全量归一为中文（token 级重命名，不动语义）\n\n190 个顶层函数里，改前 **73 个纯英文形参 / 2 个中英混杂**（`序列化JSON(value, 缩进)`、\n`设置文件所有者(路径, uid, gid)`）/ 92 个纯中文。改后 **纯英文 0、混杂 0、纯中文 167**\n（余下 23 个无参）。共动 **75 个函数、241 处 token**。\n\n改法不是手敲：用 `ast` 取每个顶层函数的行区间 + `tokenize` 逐 token 换名，显式跳过\n三类不该动的东西 —— 属性名（`os.path` 里的 `path`）、关键字实参标签\n（`open(encoding=...)` 里的 `encoding`）、字符串/注释里的同名字样。\n`git diff --stat` 是 **180 插入 / 180 删除、文件行数 2125 不变**，纯一对一换名，\n顶层 `def` 数量 190 不变（`tests/unit/test_R158_地板证据窗口漂移.py` 的地板分母不受影响）。\n\n命名取自三处权威，不自己发明：`stdlib/*.light` 门面的段落签名\n（`段落 读取文件(路径)`、`段落 字典获取(映射, 键, 默认值)`）、\n`docs/stdlib.md`（`设置环境变量(名称, 值)`）、\n以及 `src/enhanced_errors.py` 给用户看的报错示范\n（`读取文件(路径, 编码=\"utf-8\")`）。\n\n主要映射：`path→路径`、`encoding→编码`、`content→内容`、`text→文本`、`value→值`、\n`separator→分隔符`、`default→默认值`、`substring→子串`、`width→宽度`、\n`fillchar→填充字符`、`start/end→起始/结束`、`old/new→旧串/新串`、`count/times→次数`、\n`uid/gid→用户ID/组ID`、`a/b→甲/乙`、`n→数`、`d/key→字典/键`、`*paths→*路径们`。\n\n### 2. `scripts/sync_builtins.py`：把「形参名归一」变成可复现的同步步骤\n\nboot 副本有 109 个「自包含保留体」不走逐字同步（模块 docstring 里写明的原因：真源对应\n函数是地板转发体，release 环境没有光导入钩子）。所以只改真源 + 跑 sync，boot 那 109 个\n函数的英文签名**修不掉**。因此：\n\n- 新增 `PARAM_RENAME`（与真源同一张表）与 `normalize_param_names()`，\n  `sync_boot()` 写完 boot 后按同一张表把 boot 全文件的英文形参名改成中文；\n  幂等 —— 已是中文的不产生改动（连跑两次 md5 相同，第二次不再打印「形参名归一」）。\n- `self_checks()` 新增一条：**真源 / boot / lh 三份副本都不得留英文形参名**，\n  留一个就 exit 非 0。这是「防再犯」的机器判据，不靠人记。\n\n### 3. 顺手修掉一处既有红：boot 的 `皆空` 是转发体\n\n`bootstrap/release/stdlib/builtins.py` 里 `皆空` 原本是逐字搬自真源的\n`import 内置核心判型` 转发体 —— release 环境没有光导入钩子，运行期必\n`ModuleNotFoundError`。这本来就是 `test_boot_no_light_forward_leak` 的既有红\n（**基线实证**：主仓 `36d2b5429` 未改动时跑 `tests/unit/test_builtins_drift.py`\n是 `1 failed, 7 passed`，红的正是这一条）。\n\n本卡把它补进 `BOOT_PORTED`，按 `stdlib/内置核心判型.light:55-70` 逐条落成自包含实现\n（null / `\"\"` / 空 list / 空 dict 为真；纯空白串、`0`、空 bytes 不算空）。\n现在该文件 **8 passed**，基线那 1 红清零。这条是「改形参名会动 boot」时的附带收获，\n不是本卡的主线；如果不修，本卡的 verify 第 3 条会一直红着，卡根本 land 不了。\n\n### 4. 新增 `tests/unit/test_LH34_中文关键字参数.py`（391 用例）\n\n四组断言：\n\n1. **代表函数中文关键字真调**：`读取文件 / 写入文件 / 分割字符串 / 字典获取 / 原子写入`\n   五个，断言返回值（不是「没抛异常」就算过）。`原子写入` 是\n   `stdlib/路径护栏.light` 的段落，它的形参本来就是中文，这里钉住别被改回去。\n2. **形参名全中文**（参数化到每个公开顶层函数）：失败信息直接列出函数名 + 英文形参名。\n3. **中文名可作关键字**：每个公开函数的每个中文形参名都能\n   `inspect.signature(...).bind(**{中文名: None})` 成功；并做**反向自证** ——\n   把中文名换成 `path`/`text` 必须 `TypeError`，否则这条门禁是空的。\n4. **三份副本一致**：boot / LH 副本形参名全中文；LH 与真源逐字相同；\n   boot 与真源的差异只允许 `{是数字: (['值'], ['字符'])}` 这一条已知保留体差异\n   （boot 的是旧版单字符判型，两者都中文、语义等价，不强行拉平）。\n\n另加 `test_boot副本中文关键字可调` 与 `test_boot副本皆空是自包含实现`，\n把「boot 不只是静态改了名、运行期真能中文关键字调」钉住。\n\n**为什么第 3 组用 `bind()` 而不是真调用**：`删除文件` / `退出程序` / `执行命令`\n这类函数真调会删文件、退出进程、跑 shell，门禁不能拿它们做实验。`bind()` 成功已经\n足以证明「`编码=` 这种写法不会再 `TypeError: unexpected keyword argument`」。\n真实调用留给第 1 组和第 5 组（5 个代表 + boot 3 个），都是无破坏性的。\n\n## 验证（全部实跑，不是推演）\n\n| 命令 | 结果 |\n| --- | --- |\n| `python3 -m pytest -q tests/unit/test_LH34_中文关键字参数.py` | **391 passed** |\n| `python3 scripts/sync_builtins.py` | **exit 0**，自检全部通过，连跑两次幂等（md5 相同） |\n| `python3 -m pytest -q tests/unit/test_builtins_drift.py` | **8 passed**（基线 `1 failed, 7 passed`，那 1 红被本卡修掉） |\n\n邻接回归（确认换名没打断调用方）：\n\n| 命令 | 本卡 | 基线 `36d2b5429` |\n| --- | --- | --- |\n| `tests/unit/test_R158_地板证据窗口漂移.py` | 4 passed / 6 failed | **同样 4 passed / 6 failed（同名同数）** |\n| `tests/test_codegen.py` | 22 passed | — |\n| `tests/test_path_guard_light.py` + `tests/unit/test_bootstrap_compiler.py` | 全绿 | — |\n\n`test_R158_地板证据窗口漂移.py` 那 6 红是**既有红**：主仓 `36d2b5429` 未改动时逐条同名\n同数复现，与本卡无关（本卡没增删顶层 `def`，地板分母 190 不变）。\n\n### 换名的破面排查（先扫后改，不是改完再撞）\n\n改前扫了全仓 `.py`（`src/ stdlib/ tests/ tools/ bootstrap/`）里对这 75 个函数名的\n**关键字调用**，只有 7 处命中，逐条核实后**全部是别的模块的同名函数**：\n\n- `stdlib/外部命令.py` 的 `执行命令(捕获输出=…, 工作目录=…)` → 该文件 `:40` 自己定义了\n  `执行命令`（5 参），不是地板的 `执行命令(命令)`。\n- `tests/test_new_modules.py:445` / `tests/test_stdlib_phase13.py:226` 的\n  `美化JSON(数据, 缩进=2)` → 调的是 `美化输出`/`JSON` 模块的 `美化JSON`，不是地板那个。\n\n`.light` 门面调地板一律按位置传参，不受影响。\n\n## 没做 / 风险（诚实声明）\n\n1. **`lightharness` 独立仓没有提交**。本卡工作区里的 LH 副本\n   （`<worktree>/../lightharness/stdlib/builtins.py`）是由 `scripts/sync_builtins.py`\n   生成的、与真源逐字一致（`test_LH形参名与真源逐字相同` 钉住），但**真正的\n   `G:/dswork/duan-light-merge/lightharness` 仓我没动**：它当前是\n   `## main...myrepo/main [ahead 7, behind 1]` 且 `stdlib/builtins.py` /\n   `stdlib/内置核心判型.light` 已有**上一轮遗留的未提交改动**，\n   直接覆盖会吞掉别人的工作。LH 仓的落地需要单独一张卡（或由该仓 owner 跑一次\n   `scripts/sync_builtins.py` 后提交）。本卡的 3 条 verify 都不依赖 LH 仓的 git 状态。\n2. **`原子写入` 不在 `stdlib/builtins.py` 里**，它是 `stdlib/路径护栏.light:296` 的段落\n   （`段落 原子写入(路径, 内容)`，形参本来就是中文）。卡面把它列进代表函数，\n   我按「它已经是中文、别改回去」来钉，没有改 `.light`（`.light` 不在本卡允许路径内）。\n   卡面说的「原子写入内部 encoding + 权限 混着」在当前 `main` 上已不复现。\n3. **`阶乘(数)` / `十进制加(甲, 乙)` 与 `.light` 门面的 `阶乘(n)` / `十进制加(a, b)`\n   不同名**。门面是独立实现（不在本卡允许路径内），地板这侧按「形参必须全中文」的\n   要求改成了中文名；两边都能用位置参数互调，但关键字名不一致这一点如实记在这里。\n4. **`dir_path` 这类函数内局部变量仍是英文**，本卡只管形参（门禁也只判形参）。\n5. 没有跑 LH 全量（2100+ 用例，本机 ~53 分钟）—— 本卡只动形参名、不动语义，\n   已用上面 4 组邻接回归 + 全仓关键字调用扫描覆盖破面。若需要全量对拍，建议送 0.88。",
+  "error": "",
+  "declared_paths": [
+    "stdlib/builtins.py",
+    "bootstrap/release/stdlib/builtins.py",
+    "lightharness/stdlib/builtins.py",
+    "scripts/sync_builtins.py",
+    "tests/unit/test_LH34_中文关键字参数.py"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "bootstrap/release/stdlib/builtins.py",
+    "scripts/sync_builtins.py",
+    "stdlib/builtins.py",
+    "tests/unit/test_LH34_中文关键字参数.py"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md"
+  ],
+  "lease_id": "012968ab156d45808ef6a6ff575b714d",
+  "fence": 4
+}
