@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -104,6 +105,25 @@ CLAIM_BACKOFF_BASE_ENV = "HIVE_CLAIM_BACKOFF_BASE"
 CLAIM_BACKOFF_MAX_ENV = "HIVE_CLAIM_BACKOFF_MAX"
 CLAIM_BACKOFF_JITTER_ENV = "HIVE_CLAIM_BACKOFF_JITTER"
 CLAIM_MAX_RETRIES_ENV = "HIVE_CLAIM_MAX_RETRIES"
+
+# T-0216：status / sync-repos 的 fetch 前置比对（SHA + TTL）。
+#
+# 看板每 30s 跑一次 `hive status --json`，而 cmd_status 第一行就是 self.fetch() →
+# git fetch --prune origin。远端一个字都没变也照样发网络请求。
+#
+# 做法：
+#   1. remote_head(path)：`git ls-remote origin refs/heads/main refs/heads/master`，
+#      超时 10s，GIT_TERMINAL_PROMPT=0，失败返回 ""。
+#   2. fetch_if_changed(path, ttl=10)：先 remote_head()，与本地
+#      refs/remotes/origin/main 比对；相同就不启动 fetch 子进程。
+#      ls-remote 失败 → 回落无条件 fetch（网络抖动不能让跨机卡消失）。
+#      10s 内重复调用只做一次 ls-remote（进程内按路径记 TTL）。
+#
+# 为什么不比 HEAD：本地落后但远端没动时，比 HEAD 会永远认为"需要 fetch"
+# （HEAD 永远落后于 origin/main），导致每次都重 fetch —— 这正是要消除的浪费。
+# 我们比的是「远端 main 的 SHA」和「本地缓存的 origin/main SHA」，跟本地 HEAD 无关。
+FETCH_ALWAYS_ENV = "HIVE_FETCH_ALWAYS"
+FETCH_IF_CHANGED_TTL_S = 10.0  # 进程内 ls-remote 结果缓存秒数
 
 TASK_FIELDS = [
     "id", "title", "repo", "base", "state", "owner", "agent", "fresh",
@@ -308,6 +328,87 @@ def net_timeout() -> float | None:
         log(f"{NET_TIMEOUT_ENV}={raw!r} 不是数字，按默认 {NET_TIMEOUT_S:g}s 处理")
         return NET_TIMEOUT_S
     return value if value > 0 else None
+
+
+# -- T-0216：fetch 前置比对（remote_head + fetch_if_changed） -------------- #
+
+# 进程内 ls-remote 结果缓存：{str(Path): (timestamp, remote_sha)}
+# 看板 30s 一轮、多仓 sync 时不至于 3×N 次往返。
+_ls_remote_cache: dict[str, tuple[float, str]] = {}
+
+
+def remote_head(path: str | Path) -> str:
+    """`git ls-remote origin refs/heads/main refs/heads/master` 取回远端主线 SHA。
+
+    超时 10s，GIT_TERMINAL_PROMPT=0（交互提示绝对不能弹出来）。
+    失败/分支不存在返回空串 ""。
+    """
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        p = run(["git", "ls-remote", "origin",
+                 "refs/heads/main", "refs/heads/master"],
+                cwd=str(path), check=False, timeout=10.0, env=env)
+    except Exception:
+        return ""
+    if p.returncode != 0 or not (p.stdout or "").strip():
+        return ""
+    # ls-remote 输出两行：`<sha>\trefs/heads/main` 和 `<sha>\trefs/heads/master`
+    # 取第一个非空行的 SHA（main 优先；有些仓只有 master）。
+    for line in (p.stdout or "").strip().splitlines():
+        sha = line.split("\t", 1)[0].strip()
+        if sha:
+            return sha
+    return ""
+
+
+def fetch_if_changed(path: str | Path, ttl: float = FETCH_IF_CHANGED_TTL_S) -> bool:
+    """远端主线 SHA 变了才 fetch；没变就不启动 fetch 子进程。
+
+    流程：
+      1. HIVE_FETCH_ALWAYS=1 → 无条件 fetch，返回 True。
+      2. 进程内 TTL 内 → 直接返回上次结论（不跑 ls-remote）。
+      3. remote_head() 拿远端 SHA；和本地 refs/remotes/origin/main（或 master）比对。
+      4. 相同 → 返回 False（不需要 fetch）。
+      5. 不同 / ls-remote 失败 → 回落无条件 fetch，返回 True。
+
+    返回 True 表示执行了 fetch（或要求调用方执行 fetch）；False 表示远端没变，
+    调用方不需要再 fetch。
+    """
+    # 回退阀：环境变量强制每次都 fetch
+    if (os.environ.get(FETCH_ALWAYS_ENV) or "").strip() in ("1", "true", "always"):
+        return True
+
+    path = Path(path).expanduser()
+    key = str(path)
+    now_s = time.monotonic()
+
+    # 进程内 TTL：直接返回上次结论
+    cached = _ls_remote_cache.get(key)
+    if cached is not None:
+        ts, sha = cached
+        if now_s - ts < ttl:
+            return sha != ""  # 缓存里有有效 SHA → 没变，不需要 fetch
+
+    # 本地已知的 origin/main（或 master）SHA
+    local_sha = (rev_parse(path, "refs/remotes/origin/main")
+                 or rev_parse(path, "refs/remotes/origin/master") or "")
+
+    # ls-remote 拿远端 SHA
+    remote_sha = remote_head(path)
+
+    # ls-remote 失败 → 回落无条件 fetch（网络抖动不能让跨机卡消失）
+    if not remote_sha:
+        _ls_remote_cache[key] = (now_s, "")  # 缓存失败结论，TTL 内不再重试
+        return True
+
+    # 写入缓存
+    _ls_remote_cache[key] = (now_s, remote_sha)
+
+    # 远端 SHA 和本地缓存的 origin/main 一致 → 没变，不需要 fetch
+    if remote_sha == local_sha:
+        return False
+
+    return True
 
 
 def _env_number(name: str, default, cast, minimum: float = 0.0):
@@ -2269,11 +2370,16 @@ class Hive:
         if not path.exists():
             return {"repo": name, "path": str(path), "status": "missing",
                     "reason": "本机路径不存在"}
-        try:
-            git_net(["fetch", "--prune", "origin"], path)
-        except HiveError as e:
-            return {"repo": name, "path": str(path), "status": "unreachable",
-                    "reason": str(e).splitlines()[0] if str(e).strip() else "fetch 失败"}
+
+        # T-0216：先 ls-remote 比对远端 SHA，没变就不白跑 git fetch --prune。
+        # fetch_if_changed 返回 True 的三种情况：HIVE_FETCH_ALWAYS=1、ls-remote
+        # 失败（网络抖动回落）、远端 SHA 确实变了。返回 False = 远端没动。
+        if fetch_if_changed(path):
+            try:
+                git_net(["fetch", "--prune", "origin"], path)
+            except HiveError as e:
+                return {"repo": name, "path": str(path), "status": "unreachable",
+                        "reason": str(e).splitlines()[0] if str(e).strip() else "fetch 失败"}
 
         remote = rev_parse(path, "origin/main") or rev_parse(path, "origin/master")
         head = rev_parse(path, "HEAD")
@@ -2996,7 +3102,10 @@ class Hive:
         return reports
 
     def cmd_status(self, as_json: bool = False, with_board: bool = False) -> None:
-        self.fetch()
+        # T-0216：先 ls-remote 比对远端 SHA，没变就不白跑 git fetch --prune。
+        # ls-remote 失败 / SHA 变化 / HIVE_FETCH_ALWAYS=1 时才真 fetch。
+        if fetch_if_changed(self.dir):
+            self.fetch()
         cards = self.cards()
         rows = []
         for tid, c in cards.items():
