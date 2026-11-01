@@ -372,6 +372,27 @@ MCP server 以「一个 agent 的身份」运行，所有写操作只作用在�
 > 停进程必须按 PID（禁 `/IM`、禁 `Stop-Process`）、轮转与生命周期行必须避开「日志文件正被看板
 > 占用」的那个窗口（否则 `-Stop` 会断在 `taskkill` 之前）、以及托盘只读接口 / 不自己杀进程。
 
+### 批处理脚本（`.cmd`）的三条硬规矩
+
+`scripts\dashboard-service.cmd` 的契约由 `tests/test_dashboard_bind.py` 钉住，
+2026-11-01 一天之内踩齐了三条，别再回来：
+
+1. **必须纯 ASCII**。cmd 按 OEM 代码页（zh-CN 是 cp936）**逐字节**解析批处理，而文件是
+   UTF-8。中文一旦让字节计数错位，`echo` 前缀会被吃掉 —— 实测 `echo 端口：%PORT%`
+   变成执行 `端口：?PORT`，屏幕上一句 `'绔彛锛?PORT' 不是内部或外部命令`，端口反而没打印。
+   中文提示交给 `hive.py` 打（`看板地址：…`）。
+2. **不许用管道**（`tasklist | find` 这类）。管道右半边是一个 helper 进程；父 cmd 没有
+   控制台时它**会拿到一扇可见的控制台窗口**，然后永久阻塞在读 stdin 上。现场就是屏幕上
+   凭空多出两扇标题 `find  "11916"` 的窗口，其中一扇从 00:52 挂到 10:07。判活改用
+   `Get-Process -Id`（一次调用，无管道）。
+3. **`if (...)` 块里的 `echo` 不能带 ASCII 括号**。`echo not running (stale pid file)`
+   里的 `)` 会提前把块闭合，整段静默失效（rc 对、屏幕空白）。要么 `^(` `^)` 转义，
+   要么干脆别用括号 —— 中文全角 `（）` 反而安全，所以以前没炸。
+
+配套的 Python 侧：`_dashboard_run_script` 给子进程 `CREATE_NO_WINDOW` + `stdin=DEVNULL`，
+输出走**临时文件**再转发 —— 直接继承 stdout 时无控制台 cmd 的 `echo` 会静默丢失；
+用 `PIPE` 又会被 `Start-Process` 起的看板继承句柄、`run()` 永远等不到 EOF。
+
 ## 4. 快照与回滚
 
 ```powershell

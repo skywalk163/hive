@@ -1,14 +1,14 @@
 @echo off
-rem 蜂巢 Hive 看板 —— Windows 服务控制脚本（start / stop / restart / status）
+rem Hive dashboard - Windows service control script (start / stop / restart / status)
 rem
 rem   scripts\dashboard-service.cmd start [port]
 rem   scripts\dashboard-service.cmd stop
 rem   scripts\dashboard-service.cmd restart
 rem   scripts\dashboard-service.cmd status
 rem
-rem 说明：Windows 没有 POSIX shell 去跑刷新循环，所以这里直接让 serve.py 自带的
-rem       --auto-refresh 线程负责定期重生成状态文件（等价于 Linux 下的 INTERVAL 循环）。
-rem       停止用 taskkill /T —— 杀整棵进程树，避免子进程变孤儿继续占端口。
+rem Note: Windows has no POSIX shell to drive a refresh loop, so serve.py's own
+rem       --auto-refresh thread regenerates the status file (same as INTERVAL on Linux).
+rem       Stop uses taskkill /T to kill the whole tree, so no orphan keeps the port.
 
 setlocal EnableDelayedExpansion
 
@@ -20,7 +20,7 @@ set "STATUS=%DASH%\status.json"
 set "PORT=%PORT%"
 if "%PORT%"=="" set "PORT=%HIVE_DASHBOARD_PORT%"
 if "%PORT%"=="" set "PORT=8787"
-rem 绑定地址：默认 0.0.0.0（局域网可访问）。收回本机：set HIVE_DASHBOARD_HOST=127.0.0.1
+rem Bind address: default 0.0.0.0 (LAN reachable). Loopback only: set HIVE_DASHBOARD_HOST=127.0.0.1
 set "HOST=%HIVE_DASHBOARD_HOST%"
 if "%HOST%"=="" set "HOST=0.0.0.0"
 set "INTERVAL=%INTERVAL%"
@@ -28,9 +28,13 @@ if "%INTERVAL%"=="" set "INTERVAL=20"
 set "STATE=%USERPROFILE%\.hive"
 set "RUN=%STATE%\run"
 set "PIDFILE=%RUN%\dashboard.pid"
+rem Crash logs: serve.py banner -> dashboard.log, tracebacks -> dashboard.err.log
+rem (no redirect before, so a dashboard that died on startup left nothing behind).
+set "LOGOUT=%STATE%\logs\dashboard.log"
+set "LOGERR=%STATE%\logs\dashboard.err.log"
 
 if not exist "%SERVEPY%" (
-    echo 找不到 %SERVEPY% 1>&2
+    echo serve.py not found: %SERVEPY% 1>&2
     exit /b 1
 )
 if "%~2"=="" goto :noports
@@ -47,54 +51,53 @@ if /i "%ACTION%"=="start" goto :do_start
 if /i "%ACTION%"=="stop" goto :do_stop
 if /i "%ACTION%"=="restart" goto :do_restart
 if /i "%ACTION%"=="status" goto :do_status
-echo 用法: %~nx0 {start^|stop^|restart^|status} [port] 1>&2
+echo usage: %~nx0 {start^|stop^|restart^|status} [port] 1>&2
 exit /b 2
-rem 给人看的地址：绑 0.0.0.0 时本机/局域网各给一个（具体 IP 用 hive dash url）
+rem Human-facing URLs: when bound to 0.0.0.0 print both loopback and LAN (hive dash url for the IP)
 :show_url
 if "%HOST%"=="0.0.0.0" goto :show_url_all
-echo     地址   : http://%HOST%:%PORT%/
+echo     bind  : http://%HOST%:%PORT%/
 goto :eof
 :show_url_all
-echo     本机   : http://127.0.0.1:%PORT%/
-echo     局域网 : http://^<本机IP^>:%PORT%/（hive dash url 会给具体地址）
+echo     local : http://127.0.0.1:%PORT%/
+echo     lan   : http://^<this-host^>:%PORT%/  (hive dash url prints the exact IP)
 goto :eof
 
 
 :do_start
-if exist "%PIDFILE%" (
-    set /p PID=<"%PIDFILE%"
-    tasklist /FI "PID eq !PID!" 2>nul | find "!PID!" >nul
-    if not errorlevel 1 (
-        echo 看板已在运行（pid=!PID!），端口 %PORT%
-        call :show_url
-        exit /b 0
-    )
-)
+rem Liveness check + start in ONE shell call. Do NOT use `tasklist | find`:
+rem the right-hand side of a pipe is a helper process, and when the parent cmd
+rem has no console that helper gets a *visible* console window of its own and
+rem then blocks on stdin forever. 2026-11-01: a stray window titled
+rem `find  "11916"` sat on screen since 00:52 while the dashboard was down.
 powershell -NoProfile -Command ^
-  "$d='%DASH%'; $a=@('%SERVEPY%','--status','%STATUS%','--port','%PORT%','--host','%HOST%','--auto-refresh','--refresh-interval','%INTERVAL%');" ^
-  "$p=Start-Process -FilePath 'python' -ArgumentList $a -WorkingDirectory $d -PassThru -WindowStyle Hidden;" ^
-  "Set-Content -Path '%PIDFILE%' -Value $p.Id; Write-Host ('看板已启动（pid=' + $p.Id + '），端口 %PORT%')"
+  "$d='%DASH%'; $a=@('-u','%SERVEPY%','--status','%STATUS%','--port','%PORT%','--host','%HOST%','--auto-refresh','--refresh-interval','%INTERVAL%');" ^
+  "$pf='%PIDFILE%'; $old=if(Test-Path $pf){Get-Content $pf -TotalCount 1 -ErrorAction SilentlyContinue}else{$null};" ^
+  "if($old -and (Get-Process -Id $old -ErrorAction SilentlyContinue)){Write-Host ('dashboard already running (pid=' + $old + '), port %PORT%'); exit 0};" ^
+  "$p=Start-Process -FilePath 'python' -ArgumentList $a -WorkingDirectory $d -PassThru -WindowStyle Hidden -RedirectStandardOutput '%LOGOUT%' -RedirectStandardError '%LOGERR%';" ^
+  "Set-Content -Path $pf -Value $p.Id; Write-Host ('dashboard started (pid=' + $p.Id + '), port %PORT%')"
 if errorlevel 1 (
-    echo 启动失败 1>&2
+    echo start failed 1>&2
     exit /b 1
 )
 call :show_url
 exit /b 0
 
+
 :do_stop
 if not exist "%PIDFILE%" (
-    echo 看板未在运行
+    echo dashboard not running
     exit /b 0
 )
 set /p PID=<"%PIDFILE%"
 if "%PID%"=="" (
-    echo 看板未在运行
+    echo dashboard not running
     del "%PIDFILE%" 2>nul
     exit /b 0
 )
 taskkill /PID %PID% /T /F >nul 2>&1
 del "%PIDFILE%" 2>nul
-echo 看板已停止
+echo dashboard stopped
 exit /b 0
 
 :do_restart
@@ -103,17 +106,22 @@ call :do_start
 exit /b 0
 
 :do_status
+rem Same reason as :do_start - no pipe, no tasklist/find pair.
 if not exist "%PIDFILE%" (
-    echo 未运行
+    echo not running
     exit /b 1
 )
 set /p PID=<"%PIDFILE%"
-tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul
-if errorlevel 1 (
-    echo 未运行（PID 文件残留）
+if "%PID%"=="" (
+    echo not running ^(stale pid file^)
     exit /b 1
 )
-echo 运行中（pid=%PID%）
-echo 端口：%PORT%
+powershell -NoProfile -Command "if (Get-Process -Id %PID% -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
+if errorlevel 1 (
+    echo not running ^(stale pid file^)
+    exit /b 1
+)
+echo running (pid=%PID%)
+echo port: %PORT%
 call :show_url
 exit /b 0

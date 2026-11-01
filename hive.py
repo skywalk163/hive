@@ -52,7 +52,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.15.1"
+VERSION = "0.15.2"
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 
@@ -5429,6 +5429,10 @@ def cmd_land(args) -> None:
 def cmd_status(args) -> None:
     Hive(args.dir).cmd_status(args.json, args.board, summary=args.summary,
                               include_archived=args.include_archived)
+    # 看板地址只在人类可读输出里追加一行：--json 必须保持「顶层是数组」，
+    # app.js 与既有脚本都对 Array.isArray 硬校验，多一个对象就整页白屏。
+    if not args.json:
+        print(dashboard_status_line())
 
 
 def cmd_archive(args) -> None:
@@ -5608,9 +5612,23 @@ def cmd_cluster(args) -> int:
             "找不到 hive_cluster.py；集群是随仓库走的可选件，"
             "请确认它和 hive.py 在同一目录（或重新 clone 工具仓）") from exc
     try:
-        return hive_cluster.run_cli(args)
+        rc = hive_cluster.run_cli(args)
     except hive_cluster.ClusterError as exc:
         raise HiveError(str(exc)) from exc
+    # `cluster start/restart` 顺带把看板也拉起来：看板与集群是两个进程，
+    # 但人的心智里「重启服务」= 一切恢复。此前 cluster 在 DASH_AUTOSTART_SKIP 里，
+    # 于是「重启完还是打不开看板」，只能再想起来手动 `hive dash start`。
+    # `cluster stop` 不动看板（只停集群，看板照旧可读），要停用 `hive dash stop`。
+    if rc == 0 and getattr(args, "action", "") in ("start", "restart"):
+        if os.environ.get("HIVE_DASH_AUTOSTART", "1").lower() not in ("0", "false", "no", "off"):
+            try:
+                # force=True：显式 start 不该被 autostart 的 5 分钟节流挡住——
+                # 否则「刚跑过别的命令 → cluster start → 看板还是没起」，人只会更困惑。
+                dashboard_ensure(wait=3.0, force=True)
+            except Exception:      # noqa: BLE001 —— 看板起不来不该把集群启动判失败
+                pass
+        print(dashboard_status_line())
+    return rc
 
 
 # --------------------------------------------------------------------------- #
@@ -5708,6 +5726,40 @@ def dashboard_script() -> Path | None:
     return None
 
 
+def _decode_console(raw: bytes) -> str:
+    """把服务脚本的输出解成 str。
+
+    脚本是 `cmd` / `sh` 跑的，中文按**控制台代码页**输出（简体中文机器是 cp936），
+    而 hive 自己的 stdout 通常是 UTF-8。以前直接把子进程的字节转发给终端，于是
+    `未运行（PID 文件残留）` 显示成 `未运行（PID 文件残留�?` —— 看着像编码坏了，
+    实际只是没解码。顺序：UTF-8 严格 → OEM/GBK → replace，绝不为一个坏字符丢整行。
+    """
+    if not raw:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    for enc in ("oem", "gbk", "cp936"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", "replace")
+
+
+def _emit(stream, text: str) -> None:
+    """把解码后的文本写回调用方的流；编码装不下就按 replace 写，绝不抛。"""
+    if not text:
+        return
+    enc = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        stream.write(text)
+    except UnicodeEncodeError:
+        stream.write(text.encode(enc, "replace").decode(enc, "replace"))
+    stream.flush()
+
+
 def _dashboard_run_script(action: str, port: int | None = None,
                           interval: int | None = None) -> int:
     """调用服务脚本（PID/日志/幂等都在脚本里，命令行走同一条路，避免两套实现打架）。"""
@@ -5727,10 +5779,28 @@ def _dashboard_run_script(action: str, port: int | None = None,
     else:
         cmd = ["/bin/sh", str(script), action]
     try:
-        return subprocess.run(cmd, env=env, timeout=120).returncode
+        # 三件事必须一起做，缺一个就出事故（2026-11-01 实测）：
+        #   * no_window_kwargs()：父进程没有控制台时，console 子进程会各自新建
+        #     一个**可见**控制台（现场那两扇标题 `find "11916"` 的窗口就是这么来的）；
+        #   * stdin=DEVNULL：给不到真正的 stdin 时，管道右半边会阻塞在读 stdin 上；
+        #   * stdout/stderr 走**临时文件**而不是 PIPE —— 用 PIPE 的话，脚本里
+        #     `Start-Process` 起的看板会继承管道句柄，`run()` 于是等到天荒地老
+        #     （实测 120s 超时都等不到 EOF）。文件句柄没人等它关，读完就走。
+        # 顺带：直接继承 stdout 也不行 —— 无控制台的 cmd 的 echo 会静默丢失。
+        with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
+            proc = subprocess.run(cmd, env=env, timeout=120,
+                                  stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr,
+                                  **no_window_kwargs())
+            fout.seek(0)
+            ferr.seek(0)
+            out_raw = fout.read()
+            err_raw = ferr.read()
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"执行 {script.name} {action} 失败：{exc}", file=sys.stderr)
         return 1
+    _emit(sys.stdout, _decode_console(out_raw))
+    _emit(sys.stderr, _decode_console(err_raw))
+    return proc.returncode
 
 
 def _dashboard_spawn(port: int | None = None, interval: int | None = None) -> bool:
@@ -5751,7 +5821,14 @@ def _dashboard_spawn(port: int | None = None, interval: int | None = None) -> bo
     kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
               "stderr": subprocess.DEVNULL, "env": env, "cwd": str(Path(__file__).resolve().parent)}
     if os.name == "nt":
-        kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | \
+        # 这里曾经用 DETACHED_PROCESS「彻底脱离会话」，结果是**看板根本起不来**：
+        # DETACHED 的 cmd 没有控制台，而 .cmd 里紧接着调 powershell 的 Start-Process
+        # —— 无控制台的 powershell 会卡在控制台分配上（2026-11-01 实测：cmd 进程
+        # 30 秒不退出、dashboard 永远不通、日志一个字都没有，PID 文件倒是写了个死 pid）。
+        # 改 CREATE_NO_WINDOW：给一个**不可见但真实存在**的控制台，powershell 正常返回
+        # （实测 1.0s 内就绪）；dashboard 由 Start-Process -WindowStyle Hidden 起，
+        # 自带独立控制台，父进程退出后照旧活着。
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0) | \
             getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     else:
         kwargs["start_new_session"] = True
@@ -5794,6 +5871,26 @@ def dashboard_ensure(port: int | None = None, wait: float = 0.0,
     return dashboard_probe(port)
 
 
+def dashboard_status_line() -> str:
+    """给人看的一行：**看板地址 + 在不在跑**。
+
+    为什么单独抽出来：端口规划里 8787 是看板、8788 是集群 HTTP，两个都长成
+    `http://<ip>:87xx`。此前 `hive status` / `cluster status` 只报集群地址
+    （8788），人照着敲成 `http://192.168.0.100:8787` 还是 `:8788` 全靠记——
+    敲错了浏览器只会转圈，看起来就像「看板挂了」。所以这里把**当前真实可用的
+    看板 URL**直接打出来，端口/绑定地址都以 `dashboard_url()` 为准（唯一来源
+    `hive_ports.py`），不需要任何人再背一遍。
+    """
+    port = dashboard_port()
+    url = dashboard_url(port)
+    if dashboard_probe(port):
+        return f"看板 {url}  运行中"
+    host = dashboard_host()
+    if host in ("127.0.0.1", "::1"):
+        return f"看板 {url}  未运行（只绑本机；远程用 ssh -L {port}:127.0.0.1:{port}）"
+    return f"看板 {url}  未运行（hive dash start 拉起）"
+
+
 def _dashboard_autostart(args) -> None:
     """挂在 main() 入口：任何子命令都顺手把看板兜住，失败绝不影响主流程。"""
     if os.environ.get("HIVE_DASH_AUTOSTART", "1").lower() in ("0", "false", "no", "off"):
@@ -5827,7 +5924,10 @@ def cmd_dash(args) -> int:
         return _dashboard_run_script("stop", port)
     if action == "restart":
         _dashboard_run_script("stop", port)
-        return _dashboard_run_script("start", port, args.interval)
+        rc = _dashboard_run_script("start", port, args.interval)
+        if rc == 0:
+            print(f"看板地址：{url}")
+        return rc
     # ensure / start
     if dashboard_probe(port):
         print(f"看板已在运行：{url}")
@@ -5837,9 +5937,14 @@ def cmd_dash(args) -> int:
         if ok:
             print(f"看板已就绪：{url}（绑定 {dashboard_host()}）")
             return 0
-        print(f"看板未能起来，看日志：{DEFAULT_STATE / 'logs' / 'dashboard.log'}", file=sys.stderr)
+        print(f"看板未能起来，看日志：{DEFAULT_STATE / 'logs' / 'dashboard.err.log'}", file=sys.stderr)
         return 1
-    return _dashboard_run_script("start", port, args.interval)
+    rc = _dashboard_run_script("start", port, args.interval)
+    # 脚本自己只报 pid/端口，不报「该在浏览器里敲什么」——这里补上确切地址，
+    # 免得又把 8787 记成 8788。
+    if rc == 0:
+        print(f"看板地址：{url}（绑定 {dashboard_host()}）")
+    return rc
 
 
 def build_parser() -> argparse.ArgumentParser:

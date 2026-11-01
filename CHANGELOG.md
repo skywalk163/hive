@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.15.2 — 2026-11-01
+
+> 这一版回应的是「看板打不开了」：**地址没写错，是两个进程 + 一道防火墙各自失守**，
+> 而 `status` 又只报了集群地址，人无从自查。
+
+### Added
+
+- **`hive status` / `hive cluster status` 末尾多一行看板地址**：形如
+  `看板 http://192.168.0.100:8787/  运行中` / `未运行（hive dash start 拉起）`。
+  端口与绑定地址都取自 `hive_ports.py`（唯一来源），人不用再记 8787/8788；
+  `--json` 不追加（`app.js` 与既有脚本对「顶层是数组」硬校验）。
+  只绑回环时额外提示 `ssh -L 8787:127.0.0.1:8787`，避免把「绑错地址」误判成「服务挂了」。
+- `hive dash start` / `dash restart` 成功后直接打印确切访问地址（以前只报 pid 与端口）。
+
+### Changed
+
+- **`hive cluster start` / `cluster restart` 顺带把看板拉起来**（`hive dash start` 等价）。
+  看板与集群是两个进程，但人的心智里「重启服务」= 一切恢复；此前 `cluster` 在
+  `DASH_AUTOSTART_SKIP` 里，于是「重启完还是打不开看板」。`cluster stop` 仍不动看板。
+
+### Fixed
+
+- **（根因）Windows 上「按需自愈」从来没真正生效**：`_dashboard_spawn` 用
+  `DETACHED_PROCESS` 拉起 `cmd /c dashboard-service.cmd start`，而脚本里紧接着调
+  powershell 的 `Start-Process` —— **无控制台的 powershell 卡在控制台分配上**。
+  实测：cmd 进程 30 秒不退出、8787 永远不通、日志一个字都没有，只留下一个死 pid 的
+  `dashboard.pid`。于是「看板没了」之后，任何 `hive` 命令的自动兜底都只是再挂一个
+  孤儿 cmd 进程，看板永远起不来（这也解释了此前「重启服务还是一样」）。
+  改为 `CREATE_NO_WINDOW`（不可见但真实的控制台）：实测 **1.0s 内就绪**。
+  dashboard 本身由 `Start-Process -WindowStyle Hidden` 起，自带独立控制台，父进程退出照旧活着。
+- **看板进程死掉后没有任何线索**：`dashboard-service.cmd` 的 `Start-Process` 没做重定向，
+  崩溃时 stdout/stderr 全部丢失，只剩一个残留的 `~/.hive/run/dashboard.pid`。
+  现在落到 `~/.hive/logs/dashboard.log`（启动横幅）与 `dashboard.err.log`（traceback），
+  并加 `python -u` 免缓冲——进程被秒杀也不会丢最后几行。
+- **`dashboard-service.cmd` 改纯 ASCII**（注释与 echo 全改）。cmd 按 OEM 代码页逐字节
+  解析批处理，UTF-8 中文会让字节计数错位：轻则 `rem` 片段被当命令执行（`'杀整棵进程树…'
+  不是内部或外部命令`），重则 `echo` 前缀被吃掉（`echo 端口：%PORT%` 变成执行 `端口：?PORT`）。
+  顺带修掉 `if (...)` 块里 `echo not running (stale pid file)` 的 `)` 提前闭合块导致的
+  静默失效。中文提示统一由 `hive.py` 打，脚本输出另外按 UTF-8→OEM 兜底解码，不再乱码。
+- **`_dashboard_run_script` 补 `no_window_kwargs()`**：无控制台父进程（agent/服务里跑
+  `hive`）连开 `cmd /c` 会撞 conhost 分配竞争，表现为 `hive dash start` 偶发永久挂起
+  （0 CPU、端口永远不通）。`tests/test_no_window.py` 的僵尸白名单条目随之移除。
+- **`dashboard-service.cmd` 里的 `tasklist | find` 会凭空造出一扇控制台窗口**（现场那两扇
+  标题 `find  "11916"` 的窗口，其中一扇从 00:52 挂到 10:07）：管道右半边是 helper 进程，
+  父 cmd 没有控制台时它拿到一个**可见**控制台，然后永久阻塞在读 stdin 上。判活改为一次
+  `Get-Process -Id`（无管道、无额外进程）。
+- **脚本输出「静默消失」与「永久挂起」是同一个改动的两副面孔**：给子进程 `CREATE_NO_WINDOW`
+  之后，直接继承 stdout 的 cmd 的 `echo` 会被丢弃（`dash start/status` 一个字都不输出、
+  rc 却是对的）；换成 `PIPE` 又会被 `Start-Process` 起的看板继承句柄、`run()` 永远等不到
+  EOF。最终方案：`CREATE_NO_WINDOW` + `stdin=DEVNULL` + **临时文件**重定向，读完转发。
+
+### Ops（fb98 / 0.88）
+
+- **pf 放行 8787/TCP**（仅 192.168.0.0/24 + 192.168.1.0/24）。0.15.1 把看板默认绑到
+  `0.0.0.0`，但 `/etc/pf.conf` 里仍写着「8787 只绑 127.0.0.1，由 lo0 覆盖，不在此开」——
+  前提失效、规则没跟上，于是本机 `curl 127.0.0.1:8787` 200、局域网访问全被末条
+  `block drop` 丢掉。备份 `/etc/pf.conf.bak.20261101-hive8787`。
+
 ## 0.15.1 — 2026-10-30
 
 ### Changed

@@ -3063,6 +3063,25 @@ def _local_state(config: Config):
     return (snap if isinstance(snap, dict) else raw), False
 
 
+def _dashboard_line() -> str:
+    """集群状态里补一行看板地址：8787 是看板、8788 才是集群 HTTP。
+
+    这两个端口长得几乎一样，光看「主节点地址 http://x:8788」很容易把看板也
+    敲成 8788（或反过来）。实现直接复用 hive.py 的 `dashboard_status_line()`
+    （端口唯一来源仍是 hive_ports），这里只做「单独跑 hive_cluster.py 时也要
+    能打印」的兜底，绝不让它把状态输出带崩。
+    """
+    try:
+        import hive
+        return hive.dashboard_status_line()
+    except Exception:      # noqa: BLE001 —— 兜底文案，宁可少一行也不抛
+        try:
+            from hive_ports import DASHBOARD_PORT
+            return f"看板 http://127.0.0.1:{DASHBOARD_PORT}/  （状态未知）"
+        except Exception:  # noqa: BLE001
+            return "看板 -"
+
+
 def _status_line(snap: dict, running: bool, stopped: bool = False) -> str:
     if not snap:
         return ("集群未运行（已手动停止）" if stopped
@@ -3467,6 +3486,7 @@ def run_cli(args) -> int:
                 print(f"store {store.get('path') or '-'}  tasks={store.get('tasks')} "
                       f"claims={store.get('claims')} results={store.get('results')} "
                       f"last_seq={store.get('last_seq')}")
+            print(_dashboard_line())
         return 0 if snap is not None else 1
 
     if action == "peers":

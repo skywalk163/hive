@@ -59,11 +59,9 @@ WHITELIST: dict[tuple[str, str, str], str] = {
         "worker 执行 agent 命令（交互式 agent 拉起）：实时输出要给人看，"
         "CREATE_NO_WINDOW 会把输出吞掉",
     ("hive.py", "_dashboard_spawn", "Popen"):
-        "看板 daemon 拉起：用 DETACHED_PROCESS 脱离会话，与 CREATE_NO_WINDOW "
-        "互斥（混用起不来）",
-    ("hive.py", "_dashboard_run_script", "run"):
-        "daemon 控制脚本（start/stop/status）：前景调用、由用户在终端里执行，"
-        "卡明确划出边界（改它等于改 daemon 拉起方式）",
+        "看板 daemon 拉起：creationflags 拼在 **kwargs 里（AST 看不到），实际是 "
+        "CREATE_NO_WINDOW|CREATE_NEW_PROCESS_GROUP —— 见 2026-11-01 那条注释："
+        "DETACHED_PROCESS 会让 .cmd 里的 Start-Process 卡死在控制台分配上",
     ("hive_cluster.py", "_spawn_background", "Popen"):
         "集群 daemon 拉起：DETACHED_PROCESS，与 CREATE_NO_WINDOW 互斥",
     ("hive_pr.py", "git_remote", "run"):

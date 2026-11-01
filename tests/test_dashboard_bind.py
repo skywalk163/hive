@@ -170,3 +170,89 @@ def test_hive_dash_accepts_host_flag():
     assert args.host == "127.0.0.1" and args.action == "restart"
     args = hive.build_parser().parse_args(["dash"])
     assert args.host is None and args.action == "ensure"
+
+# --------------------------------------------------------------------------- #
+# 看板地址要出现在 status 里（2026-11-01）
+#
+# 现场症状：`cluster status` 只报集群地址 http://192.168.0.88:8788，人照着把看板
+# 也敲成 8788（或反过来 8787），浏览器只会转圈，看起来就像「看板挂了」。
+# 所以 status 必须直接给出**当前真实可用**的看板 URL 与运行状态。
+# --------------------------------------------------------------------------- #
+def test_dashboard_status_line_running(monkeypatch):
+    monkeypatch.delenv(hp.DASHBOARD_HOST_ENV, raising=False)
+    monkeypatch.setattr(hive, "dashboard_probe", lambda *a, **k: True)
+    line = hive.dashboard_status_line()
+    assert ":8787/" in line, "必须带端口，否则又得靠人记"
+    assert "0.0.0.0" not in line, "给人点的地址不能是 0.0.0.0"
+    assert "运行中" in line
+
+
+def test_dashboard_status_line_down_gives_action(monkeypatch):
+    monkeypatch.delenv(hp.DASHBOARD_HOST_ENV, raising=False)
+    monkeypatch.setattr(hive, "dashboard_probe", lambda *a, **k: False)
+    line = hive.dashboard_status_line()
+    assert ":8787/" in line
+    assert "未运行" in line
+    assert "hive dash start" in line, "不能只说没起，要给出怎么起"
+
+
+def test_dashboard_status_line_loopback_hints_tunnel(monkeypatch):
+    """只绑回环时，局域网访问必然不通 —— 提示 SSH 隧道，别让人怀疑服务挂了。"""
+    monkeypatch.setenv(hp.DASHBOARD_HOST_ENV, "127.0.0.1")
+    monkeypatch.setattr(hive, "dashboard_probe", lambda *a, **k: False)
+    line = hive.dashboard_status_line()
+    assert "127.0.0.1:8787" in line
+    assert "ssh -L" in line
+
+
+def test_cluster_status_prints_dashboard_line():
+    """`cluster status` 里也要有（走 hive_cluster._dashboard_line 的复用路径）。"""
+    import hive_cluster
+    line = hive_cluster._dashboard_line()
+    assert ":8787/" in line
+
+
+# --------------------------------------------------------------------------- #
+# Windows 服务脚本的「无窗」契约（2026-11-01）
+#
+# 现场：屏幕上凭空多出两扇标题为 `find  "11916"` 的控制台窗口，其中一扇从 00:52
+# 一直挂到 10:07。根因是脚本里 `tasklist | find` 的**管道右半边**：父 cmd 没有
+# 控制台时，这个 helper 会拿到一个可见控制台，然后永久阻塞在读 stdin 上。
+# 下面三条把它钉死，别再回来。
+# --------------------------------------------------------------------------- #
+def test_dashboard_cmd_is_pure_ascii():
+    """cmd 按 OEM 代码页逐字节解析批处理，UTF-8 中文会让 `echo` 前缀错位。
+
+    实测：`echo 端口：%PORT%` 被解析成执行 `端口：?PORT`，屏幕上一句
+    `'绔彛锛?PORT' 不是内部或外部命令`，端口反而没打印出来。
+    """
+    text = SCRIPT_CMD.read_text(encoding="utf-8")
+    bad = [(i + 1, ln) for i, ln in enumerate(text.splitlines())
+           if any(ord(c) > 127 for c in ln)]
+    assert not bad, "dashboard-service.cmd 必须保持纯 ASCII：\n" + \
+        "\n".join(f"  {i}: {ln}" for i, ln in bad)
+
+
+def test_dashboard_cmd_has_no_unescaped_pipes():
+    """脚本里不许有真管道：管道右半边会多开一扇可见控制台并卡在 stdin。"""
+    text = SCRIPT_CMD.read_text(encoding="utf-8")
+    for i, ln in enumerate(text.splitlines(), 1):
+        if ln.strip().lower().startswith("rem"):
+            continue
+        assert not re.search(r"(?<!\^)\|", ln), f"第 {i} 行仍有真管道：{ln}"
+
+
+def test_dashboard_cmd_does_not_shell_out_to_tasklist():
+    """判活走 Get-Process；注释里提到 tasklist 不算（那是在解释为什么不能用）。"""
+    code = [ln for ln in SCRIPT_CMD.read_text(encoding="utf-8").splitlines()
+            if not ln.strip().lower().startswith("rem")]
+    assert not any("tasklist" in ln.lower() for ln in code), \
+        "判活改用 Get-Process，别再 tasklist|find"
+
+
+def test_decode_console_survives_both_encodings():
+    """脚本输出可能是 UTF-8（文件编码）或 GBK（控制台代码页），都得解对。"""
+    assert hive._decode_console("看板已停止".encode("utf-8")) == "看板已停止"
+    assert hive._decode_console("看板已停止".encode("gbk")) == "看板已停止"
+    assert hive._decode_console(b"") == ""
+    assert hive._decode_console(b"\xff\xfe\x00broken")  # 不抛，兜底 replace
