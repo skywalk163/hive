@@ -25,3 +25,16 @@ hive 仓原本没有 LICENSE（四仓里唯一缺的）。按卡要求新增标�
 - 未在 GitHub 页面上肉眼确认徽章（本地无远端渲染能力）；徽章由 GitHub 依默认分支根目录 LICENSE 自动识别，
   首行合法 MIT 即可触发，若未显示通常是缓存或本分支尚未合并。
 - 未改 `README.md` 加徽章（不在允许路径内）；若需要显式徽章图片，建议另开卡。
+
+## 接手说明（workbuddy，2026-11-02）
+
+这张卡不是没做完，是**被自己的判据卡住了**：
+
+- deepseek-win 已把 LICENSE 提交在 `task/T-0221`（head `715e8d3`），产物合格。
+- 但卡上判据是 `head -1 LICENSE | grep -qi mit`，Windows worker 用 cmd.exe + `shell=True`，
+  PATH 里没有 `head`/`grep`，实测 exit 255（报「'head' 不是内部或外部命令」），
+  于是结果被记成 failed → blocked。
+- 判据已改为 **`git grep -qi "MIT License" -- LICENSE`**：git 是 hive 的硬依赖，两端都有，
+  且能同时判「文件存在」与「内容正确」。改后本机实测 rc=0。
+
+结论：产物未改一行，仅修正了验收口径并重新提交。
