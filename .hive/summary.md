@@ -1,69 +1,76 @@
-# T-0242 hive_compat 支持 test -x（T-0237 假失败的治本）
+# T-0237 hive 加 smoke.sh（第二次提交）
 
 ## 结论
 
-`hive_compat` 现在认识 `test -x`（含 `! test -x`）：Windows 上用
-`os.access(arg, os.X_OK)` 求值，不再把整条命令原样丢给 `cmd.exe`。
-改动 3 个文件，全在卡面 `paths` 内。
+`smoke.sh` 已在仓库根目录（`100755`），四步冒烟在 **Windows（Git Bash）** 与
+**FreeBSD 15.1（0.88）** 上都跑过 4/4。
 
-## 改了什么
+第一次提交记 failed：判据 `test -x smoke.sh` 在 Windows 上被原样丢给 `cmd.exe`，
+报 `'test' 不是内部或外部命令`——**平台假失败，不是产物问题**。治本已落地：
+T-0242 给 `hive_compat` 补了 `test -x`（`os.access(path, os.X_OK)`），已 land 到 main。
+本次是 `hive retry T-0237` 之后的重提，判据现在由垫片执行，应当为 0。
 
-### `hive_compat.py`
-- `_TEST_SUB` / `_NEG_TEST_SUB` 的 flag 字符类 `[efdrs]` → `[efdrsx]`；
-- `evaluate()` 加 `x` 分支：`ok = os.access(arg, os.X_OK)`；
-- 模块 docstring 补一行「覆盖范围」，把 `-x` 的语义弱化写在门口，而不是等人踩坑。
+## 做了什么
 
-### `tests/test_compat.py`
-- 参数化表补两条：`test -x no_such_file_xyz` → 1、`! test -x no_such_file_xyz` → 0；
-- `test_evaluate_x_flag_semantics`：显式 `chmod 0644` 造「不可执行」，钉住平台差异
-  （POSIX 上 644 → 1、755 → 0；Windows 上「存在」→ 0）；
-- `test_x_flag_is_wrapped_not_dropped_to_cmd`：T-0237 回归——`should_wrap("test -x smoke.sh")`
-  必须为真，且 `hive.verify_command` 必须把它包成垫片调用；
-- `should_wrap` 的平台开关用例里补 `test -x x`、`! test -x x`。
+`smoke.sh`（唯一改动文件）只做四件事，全程在 `mktemp -d` 的临时目录里：
 
-### `docs/判据与平台.md`
-- 平台表加 `test -x x` 一行；
-- 「垫片覆盖范围」补 `-x`；
-- 新增 ⚠️ 段：Windows 上 `test -x` 的语义是**弱化**的（NTFS 没有执行位，
-  `os.access(X_OK)` 对文件等价于「存在」），能挡「文件没生成」，挡不住「忘了 chmod /
-  提交里是 100644」；要验后者得看 `git ls-tree HEAD <file>` 的 `100755`。
-  并记下 T-0237 这次事故（0.88 rc=0、Windows 上假失败）的因果。
+1. `git init --bare` 造临时远端 → `hive init --remote` 起临时协调仓；
+2. `hive doctor`：要求 exit 0、输出里有 `[ OK ]`、**没有** `[ERR ]`；
+3. `hive task new`（会真 commit + push，所以必须临时裸仓）→ `task list` 必须看得到；
+4. 删掉这张卡（`git rm` + commit + push）→ `task list` 必须看不到（防第 3 步假阳性）。
 
-## 关键取舍
+跑完整个临时目录删掉，真实队列零写入（`KEEP=1` 或失败时保留目录并打印路径）。
 
-`-x` 在 Windows 上没有可信的文件系统来源，所以只能退化为「存在即可执行」。
-这个弱化**写进了代码注释和文档**，不假装 Windows 上能测出 exec 位。
-另外没有改 `hive.py`：`verify_command` 本来就只是问垫片 `should_wrap`，加 flag 是唯一改动点。
+刻意的写法：
 
-## 验证
+- 除 `case` 子串判断外不用 `grep/sed/head/awk/!/$()` 做断言，脚本自己在 Windows 上也得能跑；
+- `PATH="/usr/bin:/bin:$PATH"`：Git Bash 里 `sh smoke.sh` 时 PATH 常只有 Windows 那份，
+  拿不到 `mkdir`/`rm`/`mktemp`；
+- 本机状态全关进临时目录（`HIVE_STATE`/`HIVE_CLUSTER_STATE`/`HIVE_LEASE_DIR`/
+  `HIVE_CLAIM_BACKEND=git`/`HIVE_CLUSTER_AUTOSTART=0`），不碰 `~/.hive`，
+  也不会顺手拉起看板/集群；
+- Python 先探测再选（Windows 上 `python3` 可能是应用商店占位 stub），判据是版本 ≥ 3.8；
+- MSYS 路径（`/tmp/x`）用 `cygpath -m` 转成原生形式再交给原生 `python.exe`。
+
+## 证据
+
+### Windows 10 / Git MSYS 2.55.0 / Python 3.13.14
 
 ```
-$ python -m pytest -q tests/test_compat.py -k "not worker_true_verify_is_done"
-22 passed, 1 deselected in 2.73s
-
-$ python -m pytest -q tests/test_compat.py        # 含 Windows 端到端（World/worker）
-23 passed in 133.77s（改前基线 19 passed / 451.75s，新增 4 条）
-
-$ python -m pytest -q tests/test_docs.py tests/test_verify_command_quotes.py \
-      tests/test_compat.py -k "not worker_true_verify_is_done"
-47 passed, 1 skipped, 1 deselected in 56.85s
-
-# 端到端预演：用垫片跑 T-0237 的真实判据
-$ python hive_compat.py run "test -x hive.py"          → 0
-$ python hive_compat.py run "test -x no_such_file"     → 1
-$ python hive_compat.py run "! test -x no_such_file"   → 0
-$ hive.verify_command("test -x smoke.sh")
-  → C:\Python314\python.exe "...\hive_compat.py" run 'test -x smoke.sh'
-  → 在 T-0237 工作树里 rc=0；把文件名换成 no_such_file_xyz 则 rc=1
+$ "C:\Program Files\Git\bin\sh.exe" ./smoke.sh
+== 1/4 临时裸仓 ==      ok  裸仓：C:/Users/skywalk/AppData/Local/Temp/tmp.okTpPQVbVB/hive.git
+                        ok  hive init --remote（临时仓，不动真实队列）
+== 2/4 hive doctor 无 ERR ==                      ok
+== 3/4 建卡 + task list 看得到 ==                 ok  task new T-9001 / list 看得到
+== 4/4 删卡 + task list 看不到 ==                 ok
+smoke: ✓ 全部通过（4/4）
 ```
 
-## 落地后要做的
+### FreeBSD 15.1-RELEASE-p1（192.168.0.88，git 2.54.0 / Python 3.12.13）
 
-1. `hive retry T-0237`，T-0237 重新提交时 verify 就会是 0（不再是 `'test' 不是内部或外部命令`）。
-2. **MCP server 要重启才吃到这个修复**：`mcp_server.py` 在启动时 `import hive_compat`，
-   跑着的进程里是旧模块；本次我用同一套 `cmd_submit` 代码的 CLI 入口验证。
+用 `git bundle` 把任务分支传过去 clone，验的是**提交里记录的 100755**：
+
+```
+$ git ls-tree HEAD smoke.sh      → 100755 blob bc0a4401…  smoke.sh
+$ ls -l smoke.sh                 → -rwxr-xr-x  1 workbuddy wheel  7342 smoke.sh
+$ test -x smoke.sh; echo $?      → rc=0
+$ sh -n smoke.sh; echo $?        → rc=0
+$ sh smoke.sh                    → 4/4 全通过，rc=0
+```
+
+### 本次重提前的自查
+
+```
+$ git log --oneline -1           → a42e34d take T-0237 -> deepseek-win (via mcp)   # 已与 origin/main 同步
+$ git ls-files -s smoke.sh       → 100755 bc0a4401… 0  smoke.sh
+$ git status --short             → A  smoke.sh        （改动尚未提交，由 submit 落成一个提交）
+$ T-0242 已 land：hive_compat.py 含 [efdrsx] 与 os.access(X_OK)
+$ python hive_compat.py run "test -x smoke.sh"   → 0
+```
 
 ## 边界自查
 
-- 只改 `hive_compat.py`、`tests/test_compat.py`、`docs/判据与平台.md`（卡面 `paths`）；
-- 没动 `hive.py`、没动其它卡、没动 agents 配置、没写任何 token。
+- 只改 `smoke.sh`（卡面 `paths`）；`.hive/summary.md` 是 hive submit 自带的既有约定
+  （T-0231/T-0226 的提交里同样带它）；
+- 没动其它任务卡、没动 agents 配置、没写任何 token；
+- 冒烟全程临时裸仓，真实队列未被写入。
