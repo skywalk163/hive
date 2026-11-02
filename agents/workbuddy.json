@@ -17,7 +17,9 @@
   ],
   "repos": {
     "hive": "/home/skywalk/dswork/hive",
-    "lightharness": "/home/skywalk/dswork/lightharness"
+    "lightharness": "/home/skywalk/dswork/lightharness",
+    "lightmem": "/home/skywalk/dswork/lightmem",
+    "light": "/home/skywalk/dswork/light"
   },
   "launch": "",
   "worktrees": "/home/skywalk/.hive/wt/workbuddy",
