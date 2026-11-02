@@ -1,0 +1,30 @@
+{
+  "task": "T-0227",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0227",
+  "base": "main",
+  "head": "baa26fff89c545ef1bbf8b7c3030ff2826f731e3",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-02T04:02:10+00:00",
+  "finished_at": "2026-11-02T04:02:24+00:00",
+  "duration_s": 14.6,
+  "verify": [
+    {
+      "cmd": "git rev-parse -q --verify refs/tags/v0.1.0",
+      "code": 0,
+      "tail": [
+        "9336dbe66438e9df3f976880c1d718c4d55d040d"
+      ]
+    }
+  ],
+  "summary": "（人工 submit，未写 summary）",
+  "error": "",
+  "declared_paths": [],
+  "changed_files": [],
+  "out_of_paths": [],
+  "lease_id": "4588b3f992cf47c4ae2bf89970b5bdef",
+  "fence": 5
+}
