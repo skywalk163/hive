@@ -1,0 +1,39 @@
+{
+  "task": "T-0224",
+  "agent": "dumate-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0224",
+  "base": "main",
+  "head": "e4e362b2e3d4f7188c95868f2232a15aa7feb03c",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-02T10:27:01+08:00",
+  "finished_at": "2026-11-02T10:29:56+08:00",
+  "duration_s": 175.8,
+  "verify": [
+    {
+      "cmd": "test -f .github/ISSUE_TEMPLATE/bug_report.md",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "test -f .github/ISSUE_TEMPLATE/feature_request.md",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0224 交付说明（lightmem 补 issue 模板）\n\n## 做了什么\n\n给 lightmem 仓补上 GitHub issue 模板两份，结构照 hive 仓 T-0223 的同一套，字段换成 lightmem 相关。\n\n## 改了哪些文件（仅卡面 paths 内）\n\n- `.github/ISSUE_TEMPLATE/bug_report.md`（新建）：复现步骤要求五条必填——平台 / Go 版本 / 档位 / 复现命令 / 完整报错与日志；\n  环境信息给 Go 版本、档位（solo|family）、REST 7443 与 MCP 7444 端口、是否配了 `LIMS_AGENT_TOKENS`、存储后端、部署形态；\n  单列「完整日志」段（`_lightmem_run/lightmem.log` + `/healthz` + MCP 侧日志）。\n- `.github/ISSUE_TEMPLATE/feature_request.md`（新建）：适用场景与影响范围按 lightmem 拆（档位 / 接入面 REST·MCP·SDK / 记忆五型 / 可见性三元组 / 运维），\n  `labels: enhancement`。\n- 两份模板都带 front matter（`name/about/title/labels/assignees`），并都写了**不要把「记忆正文」贴进 issue（含隐私）**的提醒，\n  顺带提示不要贴 token 明文。\n\n## 跑了什么验证\n\n- 卡面判据：`test -f .github/ISSUE_TEMPLATE/bug_report.md`、`test -f .github/ISSUE_TEMPLATE/feature_request.md` 均通过。\n- front matter 五键齐全、YAML 块能闭合；文件为 UTF-8 + LF（本仓 `.gitattributes` 锁 `*.md` 为 LF）。\n- `git status --porcelain` 只有 `.github/` 一处新增，未越出 paths。\n\n## 遗留风险 / 说明\n\n- 只做了 GitHub 侧的 `.github/ISSUE_TEMPLATE/`；开发计划 1.4 提到的 GitCode 侧那份不在本卡 paths 内，未动。\n- 模板里的实例事实取自当前 main 的 README / GETTING_STARTED（Go 1.25+、REST 7443、MCP 7444、solo=SQLite、family=PG+pgvector）；\n  若后续端口/档位口径变了，模板里的示例值需要跟着更新。",
+  "error": "",
+  "declared_paths": [
+    ".github/ISSUE_TEMPLATE/bug_report.md",
+    ".github/ISSUE_TEMPLATE/feature_request.md"
+  ],
+  "changed_files": [
+    ".github/ISSUE_TEMPLATE/bug_report.md",
+    ".github/ISSUE_TEMPLATE/feature_request.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "506e002093d54271a88278e4c0c01d83",
+  "fence": 1
+}
