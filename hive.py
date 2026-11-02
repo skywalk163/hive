@@ -822,35 +822,77 @@ def store_close(tid: str, done: bool = True, note: str = "") -> dict | None:
 # verify 执行：Windows 上给 POSIX 惯用法垫一层（hive_compat.py）
 # --------------------------------------------------------------------------- #
 
-def _win_single_quote_fix(cmd: str) -> str:
-    """把「含 | 或 & 的单引号片段」换成双引号（仅 Windows 生效时调用）。
+_CMD_SPECIAL = "|&<>^"
 
-    起因（T-0225 实测）：`git grep -qE 'v4|v7' -- CHANGELOG.md` 在 cmd.exe 下
-    单引号不是引号，`|` 被当管道劈开，实际执行成
-    `git grep -qE 'v4` 管道给 `v7' -- CHANGELOG.md`，报「'v7'' 不是内部或外部命令」，
-    exit 255 —— 产物合格却判 failed。
+
+def _cmd_dq_mask(cmd: str) -> list[bool]:
+    """标出每个字符是否落在双引号区域内（cmd 里 `"` 才是引号，`'` 只是普通字符）。"""
+    mask = [False] * len(cmd)
+    dq = False
+    for idx, ch in enumerate(cmd):
+        mask[idx] = dq
+        if ch == '"':
+            dq = not dq
+    return mask
+
+
+def _requote_span(inner: str):
+    """把单引号片段的内容换成 cmd 能懂的双引号写法；不该换/换不了时返回 None。
+
+    三种情况：
+      1. 内容里没有空格也没有 cmd 元字符 —— 原样不动（单引号在 cmd 里等价于裸字符）；
+      2. 内容里没有双引号 —— 直接裹双引号，空格与 `|&<>^` 一起被保护；
+      3. 内容里有双引号 —— 把内层 `"` 转义成 `\\"` 再裹双引号 **仅当** 没有 cmd 元字符：
+         cmd 自己不认 `\\`，它会按「见 `"` 就翻转」的方式算一遍引号，
+         `"a \\"b\\""` 在 cmd 眼里是「开了又关、关了又开」，只要片段里没有
+         `|&<>^` 就无害，真正解析参数的是 git.exe 自己的 CRT，它认 `\\"`。
+         若同时含 `"` 和 `|&<>^`，翻转后的元字符会暴露成管道/重定向 —— 做不到既保语义
+         又让 cmd 不劈，只能原样交给 shell 让它报错（与本函数的历史行为一致）。
+    """
+    needs = any(ch.isspace() for ch in inner) or any(ch in _CMD_SPECIAL for ch in inner)
+    if not needs:
+        return None
+    if '"' not in inner:
+        return f'"{inner}"'
+    if any(ch in _CMD_SPECIAL for ch in inner):
+        return None
+    return '"' + inner.replace('"', '\\"') + '"'
+
+
+def _win_single_quote_fix(cmd: str) -> str:
+    """把「cmd 保护不了的 POSIX 单引号片段」换成双引号（仅 Windows 生效时调用）。
+
+    起因两次事故：
+      - T-0225：`git grep -qE 'v4|v7' -- CHANGELOG.md`，`|` 被 cmd 当管道劈开，
+        报「'v7'' 不是内部或外部命令」，exit 255。
+      - T-0228：`git grep -q 'version = "0.4.1"' -- pyproject.toml`，单引号不被剥，
+        空格把参数切成 `'version` / `=` / `0.4.1'`，git 报
+        `fatal: unable to resolve revision: =`，exit 128。
+
+    两条合起来说明：cmd 下「单引号 + 空格」和「单引号 + 元字符」是同一类病，
+    都得换成双引号；内层双引号则按 :func:`_requote_span` 的口径转义。
 
     逐字符扫描而不是正则：`'x' && 'y|z'` 这种一段命令里两组单引号，
     用正则会从第一个 `'` 一路吃到最后一个 `'`（把闭合引号当开引号），
     结果把 `&&` 也包进去，整条命令被改坏。
-    片段内若含双引号则跳过（换引号会破坏语义，宁可原样交给 shell 让它报错）。
+    双引号区域内的 `'`（`git grep -q "don't" -- f`）当普通字符跳过，不参与配对。
     """
     out: list[str] = []
+    mask = _cmd_dq_mask(cmd)
     i, n = 0, len(cmd)
     while i < n:
-        if cmd[i] != "'":
+        if cmd[i] != "'" or mask[i]:
             out.append(cmd[i])
             i += 1
             continue
         j = cmd.find("'", i + 1)
+        while j != -1 and mask[j]:      # 闭合引号落在双引号区域里：不是闭合引号
+            j = cmd.find("'", j + 1)
         if j == -1:            # 落单的引号：原样收尾
             out.append(cmd[i:])
             break
-        inner = cmd[i + 1:j]
-        if ("|" in inner or "&" in inner) and '"' not in inner:
-            out.append(f'"{inner}"')
-        else:
-            out.append(cmd[i:j + 1])
+        fixed = _requote_span(cmd[i + 1:j])
+        out.append(fixed if fixed is not None else cmd[i:j + 1])
         i = j + 1
     return "".join(out)
 
@@ -865,14 +907,20 @@ def verify_command(cmd: str) -> str:
     text = str(cmd or "")
     if str(os.environ.get("HIVE_COMPAT", "1")).lower() in ("0", "false", "no", "off"):
         return text
-    # Windows 专有：单引号不保护 | / &，先把这类片段换成双引号再交给 shell。
-    if os.name == "nt":
-        text = _win_single_quote_fix(text)
     try:
         import hive_compat
     except ImportError:
         return text
-    return hive_compat.rewrite(text) if hive_compat.should_wrap(text) else text
+    # 垫片认得的写法（`test -f` / 比较 / `true`）会被整条包进
+    # `python hive_compat.py run "<原文>"`，空格与元字符由外层双引号保护，
+    # 不必再转单引号——先转反而会让 `test -f 'v4|v7'` 变成
+    # `run 'test -f "v4|v7"'`，cmd 剥掉内层双引号后 `|` 暴露成管道（T-0228 复查发现）。
+    if hive_compat.should_wrap(text):
+        return hive_compat.rewrite(text)
+    # Windows 专有：单引号不保护空格 / `|` / `&`，把这类片段换成双引号再交给 shell。
+    if os.name == "nt":
+        text = _win_single_quote_fix(text)
+    return text
 
 
 def run_verify(cmd: str, cwd, timeout: int = 1800):

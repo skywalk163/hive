@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Windows 判据「单引号 + 空格」被判 failed（T-0228）**：`git grep -q 'version = "0.4.1"' --
+  pyproject.toml` 在 cmd.exe 下 exit 128（`fatal: unable to resolve revision: =`），
+  产物却是好的。老垫片只拦「单引号里有 `|` / `&`」的片段，这一段两个都没有，
+  于是原样放过；而 cmd 不剥单引号、空格照样切参数，argv 变成
+  `['git','grep','-q',"'version",'=','0.4.1'",'--','pyproject.toml']`。
+  现在 `_win_single_quote_fix` 把「含空格或 `|&<>^` 的单引号片段」一并换成双引号，
+  内层双引号转义成 `\"`（同时含 `"` 与 `|&<>^` 时不转，避免 cmd 引号翻转后元字符暴露）。
+  双引号区域内的 `'`（`git grep -q "don't"`）不再被误当引号配对。
+- **`test -f 'v4|v7'` 被垫片自己改坏**：旧顺序是「先转单引号、再交 `hive_compat.rewrite`」，
+  产出 `run 'test -f "v4|v7"'`，cmd 剥掉内层双引号后 `|` 暴露成管道。
+  改为垫片认得的写法先认领（`rewrite` 自带外层双引号保护），转引号只作用于其余命令。
+
 ## 0.15.2 — 2026-11-01
 
 > 这一版回应的是「看板打不开了」：**地址没写错，是两个进程 + 一道防火墙各自失守**，
