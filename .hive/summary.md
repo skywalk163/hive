@@ -1,88 +1,47 @@
-# T-0219 交付：冷热分离（摘要表 + 可回滚归档）
+# T-0223 hive 补 issue 模板（bug / feature）
 
-## 结论
+## 做了什么
 
-列表页不再为「历史」付全价：`hive status --summary` 只回 10 个摘要字段、默认只列热卡，
-冷卡移进 `tasks/archive/YYYY-MM/` 且**随时可 `--restore` 搬回来**。
-60 卡样本实测摘要通道 **17203 → 2873 B（下降 83.3%）**，冷卡 50 张仍全部可列出
-（`archived: true`）。
+照 `light/.github/ISSUE_TEMPLATE/` 的两个模板（`bug_report.md`、`feature_request.md`）补到 hive 仓，
+结构、frontmatter 字段（`name` / `about` / `title` / `labels` / `assignees`）按原样保留，
+把项目名、「光明」代码示例、`duan run` 之类的命令换成 hive 的：
 
-## 改了什么
+- `.github/ISSUE_TEMPLATE/bug_report.md`（新增）
+- `.github/ISSUE_TEMPLATE/feature_request.md`（新增）
 
-| 文件 | 改动 |
-| --- | --- |
-| `docs/冷热分离与归档.md`（新） | 10 节设计：摘要表口径与两张索引的真实查询、热窗口语义（用**完成时间**不是卡面 `updated`）、冷数据布局与分片键、详情懒加载契约、`--restore` 五步、迁移 v2 幂等来源、四条判据、风险边界 |
-| `hive_store.py` | `SCHEMA_VERSION = 2`；新增 `task_summary`（10 列）+ `idx_task_summary_state_finished` / `idx_task_summary_repo_state`；版本号落 `PRAGMA user_version`（`meta.schema_version` 同步写只为兼容旧读者）；新 API `schema_version()` / `refresh_summaries()` / `summary_rows()` / `summaries()` / `set_summary_archived()`；`summary()` 增 `tasks_hot` / `tasks_archived` / `schema_version`；摘要随 `_upsert_task` / `_upsert_result` / `ingest_cards` / `clear_result` / `archive` op 自动重算；`archived` 是生命周期标记，**不被**后续 claim/result 抹掉；`snapshot()` / `import_snapshot()` 带上 `summaries` 以免新节点把冷卡重算成热卡 |
-| `hive_archive.py`（新） | `plan()` / `apply_archive()` / `restore()` / `archived_cards()` / `hot_cards()` / `all_cards()` / `card_finished_at()` / `card_summary_head()` / `snapshot_tree()`；CLI `--dry-run`（默认）/ `--apply` / `--days N` / `--restore <tid>` / `--json`；`HIVE_ARCHIVE_DAYS` 覆盖、`DEFAULT_ARCHIVE_DAYS = 14`、`<=0` 是不归档的逃生阀 |
-| `hive.py` | `TASK_FIELDS` 追加 `archived` / `archived_at`；`Hive.archived_cards()`；`Hive.card()` 热→冷回退（归档过的卡 reopen/close 不再报「没有任务」）；`hive status --summary [--include-archived]`（顶层仍是数组，不破 dashboard 的 `Array.isArray`）；`hive archive` 子命令转发给 `hive_archive` |
-| `tests/test_store.py` | +5：迁移幂等、v1 老库原地升级、摘要跟随生命周期、`archived` 抗后续写入、快照往返保留冷标记 |
-| `tests/test_archive.py`（新） | 11 条：dry-run 零副作用（目录快照 diff）、JSON 报告、体积腰斩 + 冷卡仍在、冷卡退出 `cards()` 但详情可读、`--restore` 正文逐字还原、拒绝覆盖热卡、找不到卡零改动、只有「已完成且过窗口」才合格、`--days 0` 逃生阀、环境变量优先级、CLI `--apply` |
+## bug 模板的四个必填项
 
-## 判据与反证（每条都钉住「不做就红」）
+卡片要求「平台 / Python 版本 / 完整报错 / 复现命令」四项必须能填，落点如下：
 
-1. **迁移幂等**：同路径连开两次 `Store`，`PRAGMA user_version` 均 2，
-   `sqlite_master` 的 `(type,name,sql)` 集合**逐字相同**；另把库退化成 v1
-   （5 表 + `user_version=0`）再打开，升到 v2 且既有卡不丢。
-2. **体积腰斩 + 冷卡仍在**：60 卡（50 张 40 天前完成 + 10 张 1 天前）归档 50 张后
-   `status --summary` 体积 ≤ 50%；`--include-archived` 仍列 60 条、50 条
-   `archived: true`、50 个文件都在 `tasks/archive/<YYYY-MM>/`；摘要行键集恰为那 10 个。
-3. **可回滚**：`--restore` 后文件回 `tasks/`、frontmatter 无 `archived` 键、
-   正文唯一标记 `唯一正文标记-Z9Q7` 仍在、`Hive.card()` 详情可读、默认摘要重新包含它；
-   目标已存在时 exit 1 且两份都在；找不到卡时零改动。
-4. **dry-run 零副作用**：`tasks/` 全树 `(相对路径, 字节数, mtime_ns)` 快照前后
-   **逐项相同**（连 touch 都没发生），`tasks/archive/` 根本没被创建。
+| 四项 | 模板位置 |
+|---|---|
+| 平台 | `## 环境信息` → 操作系统（FreeBSD 15.1 / Ubuntu / macOS / Windows 11） |
+| Python 版本 | `## 环境信息` → Python 版本（`python3 --version`） |
+| 复现命令 | `## 复现步骤` → 第 1/2 步：`clone` + `init` + `python3 hive/hive.py --dir hive <子命令>` |
+| 完整报错 | `## 复现步骤` → 第 3 步的代码块，要求连 `Traceback` 一起贴、不要只贴最后一行 |
 
-## 实测数字
+「复现步骤」标题下加了一行显式提示：四条必填、缺任何一条排查成本翻倍，避免填卡人只写「跑了一下 work」。
+hive 特有的环境信息顺带进了模板：`hive --version`、`git --version`、部署形态（单机/多机、
+有没有 `hive cluster start`、claim 后端是 Git 还是 `--store`）、agent 模式（exec/verify/manual、`hive work` 还是 MCP）。
 
-`_r219_scratch/measure_219.py`（60 卡样本，每卡 304B `verify` tail + 20 行正文）：
+## feature 模板
 
-| 阶段 | 通道 | 字节 | 条目 | 毫秒 |
-| --- | --- | --- | --- | --- |
-| 归档前 | `status --json`（旧全量） | 77313 | 60 | 32229 |
-| 归档前 | `status --summary` | 17203 | 60 | 1727 |
-| 归档后 | `status --json`（旧全量） | 12893 | 10 | 6604 |
-| 归档后 | `status --summary` | 2873 | 10 | 3875 |
-| 归档后 | `status --summary --include-archived` | 17153 | 60 | 2328 |
-| 归档后 | `archive --dry-run`（再跑一次） | 68 | 1 | 1833 |
-
-`status --summary` 下降 **83.3%**；旧全量通道同步下降 83.3%，说明省下的正是被移走的
-50 张冷卡。耗时含进程启动 + `git ls-remote`，单次抖动大，只作量级参考；摘要通道的
-绝对耗时主要被这两项吃掉、与卡数几乎无关 —— 这是「列表页不该按卡数线性变慢」的验证点。
+保留「问题描述 / 建议方案 / 替代方案 / 适用场景 / 影响范围 / 附加上下文」六段；
+示例从 `.duan` 代码块换成 `python3 hive/hive.py --dir hive <子命令>`；
+适用场景与影响范围按 hive 的真实切面重写（多机抢卡、Windows verify 机、GUI manual、看板、MCP；
+任务卡与租约、dispatch、worker 生命周期、land/close/prune、集群、看板、MCP、windows/）。
 
 ## 验证
 
 ```
-python3 -m pytest -q tests/test_store.py tests/test_archive.py
-26 passed in 217.85s          （默认 basetemp，即 hive submit 的跑法）
-26 passed in 294.28s          （--basetemp=.hive/pt-0219-i）
+test -f .github/ISSUE_TEMPLATE/bug_report.md        -> rc=0
+test -f .github/ISSUE_TEMPLATE/feature_request.md   -> rc=0
 ```
 
-回归（改动涉及的周边）：`test_new_surfaces / test_docs / test_conflict / test_compat /
-test_status_git / test_store_overlay` → **87 passed, 1 failed**。唯一红是
-`test_status_git.py::test_remote_head_empty_on_bad_path`，**与本卡无关**，已实证：
+两条都真跑过：Windows 上没有 `sh`，经 `hive_compat` 把 `test -f` 改写成本机判断后执行，
+退出码均为 0（`hive_compat.py run 'test -f ...'`）。
 
-- 该用例要求 `remote_head(非 git 目录) == ""`；当 basetemp 放在 `.hive/pt-*`（仓内）时，
-  `git ls-remote` 会**沿目录向上**找到工作树自己的 `.git` 与 `origin`，于是返回真实 SHA；
-- 把 basetemp 换到仓外（`.../Temp/pt-0219-k`）同一用例 **1 passed**；
-- 本卡未触碰 `remote_head` / `fetch_if_changed`（`git diff` 可证）。
+## 边界
 
-## 实现期踩到的两个坑（已写进注释/文档）
-
-1. **`archived` 必须进 `TASK_FIELDS`**：`write_card` 只按这个列表遍历写盘，漏登记
-   就等于「标记写了但盘上没有」，列表永远看不到 `archived: true`。
-2. **归档不能用「写目标 + 删源」**：改成「原地打标 → `os.replace` 原子改名」。
-   语义上这是移动不是复制后删除，不会出现两份/零份的中间态；环境上批量 50 次
-   `unlink` 会撞安全守卫的批量删除阈值直接中断（实测 50 张卡时 `SystemExit: 1`，
-   `SAFE_DELETE_BULK_CONFIRM_REQUIRED count=50`）。改名失败会把刚打的标记撤回，
-   卡继续以热卡身份留在原处。
-
-## 边界与已知限制
-
-- 归档判据依赖 `finished_at`；解析不出时间的 done 卡一律留在热区（宁可漏移不误移）。
-- 归档是「读卡 → 打标 → 改名」三步非事务；期间有人 `reopen` 会出现「卡在冷目录但
-  状态已改」，`Hive.card()` 的热→冷回退让后续操作照常走。**未引入锁**（本卡不做）。
-- **没动**看板前端（列表分页/虚拟滚动是后续卡），**没改** `results/<tid>.json` 结构
-  （land/close 在写它）。
-- `hive archive` 只搬文件、不自动 `git commit`：批量归档后仍需一次
-  `git add tasks/ && git commit` 才进版本库（与 `hive gc`/`prune` 的「只动工作区」
-  风格一致；自动化归档可另开卡接进 orchestrate）。
+只新增 paths 内这两个文件，未改其它文件；未碰任务卡与 agents 配置；无 token / 密钥。
+`config.yml`（issue 选择器）没有加——不在卡片的 paths 里，需要的话另开卡。
