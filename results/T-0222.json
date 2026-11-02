@@ -1,0 +1,41 @@
+{
+  "task": "T-0222",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0222",
+  "base": "main",
+  "head": "baa26fff89c545ef1bbf8b7c3030ff2826f731e3",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-02T01:27:59+00:00",
+  "finished_at": "2026-11-02T01:28:42+00:00",
+  "duration_s": 43.9,
+  "verify": [
+    {
+      "cmd": "git grep -qi \"MIT License\" -- LICENSE",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "git grep -Li apache -- README.md",
+      "code": 0,
+      "tail": [
+        "README.md"
+      ]
+    }
+  ],
+  "summary": "### 补充（第二次接手）\n\n第一次提交被判「零改动」：`changed_files` 是 `git status --porcelain` 的结果，而产物早已被\nagent 提交在 `73b0057` 上，工作区是干净的 → 判定为空 → 记 failed。\n\n处理：`git reset --mixed origin/main` 把改动退回工作区，再 `git add` 暂存后提交。\n另注：`git grep` 只搜已跟踪文件，新增的 LICENSE 必须先 `git add` 才判得到。",
+  "error": "",
+  "declared_paths": [
+    "LICENSE",
+    "README.md"
+  ],
+  "changed_files": [
+    "LICENSE",
+    "README.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "32442e7624fd4aa29280b5d0352ca630",
+  "fence": 5
+}
