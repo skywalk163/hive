@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hive-cli"
+version = "0.1.0"
+description = "多机 AI Agent 协同任务总线 CLI（git 即队列）"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hive contributors" }]
+keywords = ["agent", "task-queue", "cli", "coordination", "multi-machine"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Build Tools",
+]
+# 整个 CLI 仅依赖 Python 标准库（hive / mcp_* / conflict 等模块
+# 全部 import stdlib 或仓库内兄弟模块），无需第三方依赖。
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/skywalk/hive"
+Repository = "https://github.com/skywalk/hive"
+
+# pipx install 后直接得到 `hive` 命令。
+# 入口点指向现有 hive.main(argv=None) -> int，签名即为 console_scripts
+# 所需（无参调用等价于命令行入口），无需在 hive.py 内再拆一层。
+[project.scripts]
+hive = "hive:main"
+
+# 仓库是「扁平模块」布局（hive.py + hive_*.py + mcp_*.py + conflict.py …），
+# 不是包目录。用 py-modules 把这些顶层模块一并打进 wheel，
+# 保证 pipx 装完后 `hive doctor` 以及 init 拷贝所需模块都不缺文件。
+# 「git 即队列」语义不变，只是把 CLI 变成可安装分发。
+[tool.setuptools]
+py-modules = [
+    "conflict",
+    "dispatch_prompt",
+    "dispatch_tracking",
+    "fake_agent",
+    "hive",
+    "hive_archive",
+    "hive_cluster",
+    "hive_compat",
+    "hive_ports",
+    "hive_pr",
+    "hive_store",
+    "hive_tui",
+    "llm_controller",
+    "mcp_auth",
+    "mcp_bridge",
+    "mcp_cache",
+    "mcp_http",
+    "mcp_server",
+    "pending_matcher",
+    "selftest",
+]
