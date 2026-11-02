@@ -1,0 +1,35 @@
+{
+  "task": "T-0231",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0231",
+  "base": "main",
+  "head": "111e4956858c3d9afd08d5ffd1c0d9c3a67d62ea",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-02T13:33:00+08:00",
+  "finished_at": "2026-11-02T17:43:34+08:00",
+  "duration_s": 15034.9,
+  "verify": [
+    {
+      "cmd": "test -f pyproject.toml",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0231 交付摘要 — hive 提供 pipx 安装通道\n\n## 交付物\n- 新增 `pyproject.toml`（仓库根，唯一改动文件），使 `hive` 可通过 pipx 安装：\n  - 分发名 `hive-cli`，`requires-python = \">=3.9\"`，**零第三方依赖**（全 CLI 仅用标准库）。\n  - 入口点 `hive = \"hive:main\"` → pipx 装完即得 `hive` 命令。\n  - `[tool.setuptools] py-modules` 列出全部扁平模块（conflict / dispatch_* / fake_agent /\n    hive / hive_* / llm_controller / mcp_* / pending_matcher / selftest，共 20 个），\n    保证 init 拷贝所需模块不缺文件；「git 即队列」语义不变。\n\n## 与任务卡描述的偏差（受执行契约约束）\n- 任务卡建议入口点 `hive = hive:hive_cli_main` 并「现有 main 需要拆一层」。\n- 执行契约限定**只允许修改 pyproject.toml**，故未在 `hive.py` 内新增 `hive_cli_main` 包装函数。\n- 现有 `hive.py::main(argv=None) -> int`（L6426）签名即为 console_scripts 所需（无参调用\n  等价于命令行入口），因此 `hive:main` 功能等价且可运行，无需拆层即可满足「pipx 装完 hive doctor 能跑」。\n- 若后续放开 paths 限制，可再把 `main` 薄包一层 `hive_cli_main` 以对齐卡面命名。\n\n## 验证（沙箱内）\n- `test -f pyproject.toml` → PASS（即本卡 verify 判据）。\n- `tomllib` 解析 TOML 通过；`[project.scripts] hive = \"hive:main\"` 解析为真实可调用函数。\n- 20 个 py-modules 均在仓库中存在对应 `.py`，无拼写导致构建失败的风险。\n- 运行时冒烟：`python -B hive.py --help` 正常加载全 CLI；`python -B hive.py doctor` 退出码 0\n  （无 ImportError、无崩溃），印证「hive doctor 能跑」。\n- 未执行：`pipx install` / `python -m build` 完整构建（沙箱无 build/setuptools 且出网受限）。\n  打包配置为标准 setuptools 扁平模块布局，已逐项核对。",
+  "error": "",
+  "declared_paths": [
+    "pyproject.toml"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "pyproject.toml"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md"
+  ],
+  "lease_id": "02a42d35cadf407884052d2bb5d91e2e",
+  "fence": 1
+}
