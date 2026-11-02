@@ -1,25 +1,69 @@
-# T-0231 交付摘要 — hive 提供 pipx 安装通道
+# T-0242 hive_compat 支持 test -x（T-0237 假失败的治本）
 
-## 交付物
-- 新增 `pyproject.toml`（仓库根，唯一改动文件），使 `hive` 可通过 pipx 安装：
-  - 分发名 `hive-cli`，`requires-python = ">=3.9"`，**零第三方依赖**（全 CLI 仅用标准库）。
-  - 入口点 `hive = "hive:main"` → pipx 装完即得 `hive` 命令。
-  - `[tool.setuptools] py-modules` 列出全部扁平模块（conflict / dispatch_* / fake_agent /
-    hive / hive_* / llm_controller / mcp_* / pending_matcher / selftest，共 20 个），
-    保证 init 拷贝所需模块不缺文件；「git 即队列」语义不变。
+## 结论
 
-## 与任务卡描述的偏差（受执行契约约束）
-- 任务卡建议入口点 `hive = hive:hive_cli_main` 并「现有 main 需要拆一层」。
-- 执行契约限定**只允许修改 pyproject.toml**，故未在 `hive.py` 内新增 `hive_cli_main` 包装函数。
-- 现有 `hive.py::main(argv=None) -> int`（L6426）签名即为 console_scripts 所需（无参调用
-  等价于命令行入口），因此 `hive:main` 功能等价且可运行，无需拆层即可满足「pipx 装完 hive doctor 能跑」。
-- 若后续放开 paths 限制，可再把 `main` 薄包一层 `hive_cli_main` 以对齐卡面命名。
+`hive_compat` 现在认识 `test -x`（含 `! test -x`）：Windows 上用
+`os.access(arg, os.X_OK)` 求值，不再把整条命令原样丢给 `cmd.exe`。
+改动 3 个文件，全在卡面 `paths` 内。
 
-## 验证（沙箱内）
-- `test -f pyproject.toml` → PASS（即本卡 verify 判据）。
-- `tomllib` 解析 TOML 通过；`[project.scripts] hive = "hive:main"` 解析为真实可调用函数。
-- 20 个 py-modules 均在仓库中存在对应 `.py`，无拼写导致构建失败的风险。
-- 运行时冒烟：`python -B hive.py --help` 正常加载全 CLI；`python -B hive.py doctor` 退出码 0
-  （无 ImportError、无崩溃），印证「hive doctor 能跑」。
-- 未执行：`pipx install` / `python -m build` 完整构建（沙箱无 build/setuptools 且出网受限）。
-  打包配置为标准 setuptools 扁平模块布局，已逐项核对。
+## 改了什么
+
+### `hive_compat.py`
+- `_TEST_SUB` / `_NEG_TEST_SUB` 的 flag 字符类 `[efdrs]` → `[efdrsx]`；
+- `evaluate()` 加 `x` 分支：`ok = os.access(arg, os.X_OK)`；
+- 模块 docstring 补一行「覆盖范围」，把 `-x` 的语义弱化写在门口，而不是等人踩坑。
+
+### `tests/test_compat.py`
+- 参数化表补两条：`test -x no_such_file_xyz` → 1、`! test -x no_such_file_xyz` → 0；
+- `test_evaluate_x_flag_semantics`：显式 `chmod 0644` 造「不可执行」，钉住平台差异
+  （POSIX 上 644 → 1、755 → 0；Windows 上「存在」→ 0）；
+- `test_x_flag_is_wrapped_not_dropped_to_cmd`：T-0237 回归——`should_wrap("test -x smoke.sh")`
+  必须为真，且 `hive.verify_command` 必须把它包成垫片调用；
+- `should_wrap` 的平台开关用例里补 `test -x x`、`! test -x x`。
+
+### `docs/判据与平台.md`
+- 平台表加 `test -x x` 一行；
+- 「垫片覆盖范围」补 `-x`；
+- 新增 ⚠️ 段：Windows 上 `test -x` 的语义是**弱化**的（NTFS 没有执行位，
+  `os.access(X_OK)` 对文件等价于「存在」），能挡「文件没生成」，挡不住「忘了 chmod /
+  提交里是 100644」；要验后者得看 `git ls-tree HEAD <file>` 的 `100755`。
+  并记下 T-0237 这次事故（0.88 rc=0、Windows 上假失败）的因果。
+
+## 关键取舍
+
+`-x` 在 Windows 上没有可信的文件系统来源，所以只能退化为「存在即可执行」。
+这个弱化**写进了代码注释和文档**，不假装 Windows 上能测出 exec 位。
+另外没有改 `hive.py`：`verify_command` 本来就只是问垫片 `should_wrap`，加 flag 是唯一改动点。
+
+## 验证
+
+```
+$ python -m pytest -q tests/test_compat.py -k "not worker_true_verify_is_done"
+22 passed, 1 deselected in 2.73s
+
+$ python -m pytest -q tests/test_compat.py        # 含 Windows 端到端（World/worker）
+23 passed in 133.77s（改前基线 19 passed / 451.75s，新增 4 条）
+
+$ python -m pytest -q tests/test_docs.py tests/test_verify_command_quotes.py \
+      tests/test_compat.py -k "not worker_true_verify_is_done"
+47 passed, 1 skipped, 1 deselected in 56.85s
+
+# 端到端预演：用垫片跑 T-0237 的真实判据
+$ python hive_compat.py run "test -x hive.py"          → 0
+$ python hive_compat.py run "test -x no_such_file"     → 1
+$ python hive_compat.py run "! test -x no_such_file"   → 0
+$ hive.verify_command("test -x smoke.sh")
+  → C:\Python314\python.exe "...\hive_compat.py" run 'test -x smoke.sh'
+  → 在 T-0237 工作树里 rc=0；把文件名换成 no_such_file_xyz 则 rc=1
+```
+
+## 落地后要做的
+
+1. `hive retry T-0237`，T-0237 重新提交时 verify 就会是 0（不再是 `'test' 不是内部或外部命令`）。
+2. **MCP server 要重启才吃到这个修复**：`mcp_server.py` 在启动时 `import hive_compat`，
+   跑着的进程里是旧模块；本次我用同一套 `cmd_submit` 代码的 CLI 入口验证。
+
+## 边界自查
+
+- 只改 `hive_compat.py`、`tests/test_compat.py`、`docs/判据与平台.md`（卡面 `paths`）；
+- 没动 `hive.py`、没动其它卡、没动 agents 配置、没写任何 token。

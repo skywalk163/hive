@@ -37,6 +37,9 @@ import hive_compat  # noqa: E402
     ("test 2 -eq 2", 0),
     ("test 2 -ne 2", 1),
     ("test 3 -gt 1", 0),
+    # T-0237：`test -x` 曾经不在映射表里，Windows 上整条命令丢给 cmd.exe 必红灯。
+    ("test -x no_such_file_xyz", 1),
+    ("! test -x no_such_file_xyz", 0),
 ])
 def test_evaluate_known_forms(cmd, want, monkeypatch):
     monkeypatch.chdir(ROOT)
@@ -56,6 +59,36 @@ def test_unknown_form_is_not_guessed():
     assert hive_compat.evaluate("") == 2
 
 
+def test_evaluate_x_flag_semantics(tmp_path, monkeypatch):
+    """`test -x`：POSIX 看执行位，Windows 上没有执行位 → 退化为「存在」。
+
+    这条把平台差异钉住，免得以后有人以为 Windows 上真能测出 exec 位。
+    """
+    monkeypatch.chdir(tmp_path)
+    f = tmp_path / "run.sh"
+    f.write_text("#!/bin/sh\n", encoding="utf-8")
+    f.chmod(0o644)          # 明确不可执行，别被 umask 带偏
+
+    if os.name == "nt":
+        # Windows：文件存在 → os.access(X_OK) 为真（CPython 的既定行为）
+        assert hive_compat.evaluate("test -x run.sh") == 0
+    else:
+        assert hive_compat.evaluate("test -x run.sh") == 1
+        f.chmod(0o755)
+        assert hive_compat.evaluate("test -x run.sh") == 0
+        f.chmod(0o644)      # 还原，别影响同目录里其它断言
+
+
+def test_x_flag_is_wrapped_not_dropped_to_cmd(monkeypatch):
+    """回归 T-0237：`test -x smoke.sh` 必须走垫片，不能原样丢给 cmd.exe。"""
+    monkeypatch.setattr(hive_compat.os, "name", "nt")
+    monkeypatch.delenv("HIVE_COMPAT", raising=False)
+    assert hive_compat.should_wrap("test -x smoke.sh") is True
+    assert hive_compat.should_wrap("! test -x smoke.sh") is True
+    wrapped = hive.verify_command("test -x smoke.sh")
+    assert "hive_compat.py" in wrapped and " run " in wrapped
+
+
 # --------------------------------------------------------------------------- #
 # 平台开关
 # --------------------------------------------------------------------------- #
@@ -66,6 +99,8 @@ def test_should_wrap_only_on_windows(monkeypatch):
     monkeypatch.setattr(hive_compat.os, "name", "nt")
     assert hive_compat.should_wrap("true") is True
     assert hive_compat.should_wrap("test -f x") is True
+    assert hive_compat.should_wrap("test -x x") is True
+    assert hive_compat.should_wrap("! test -x x") is True
     assert hive_compat.should_wrap("pytest -q") is False
     # 已经包过的别再套娃
     assert hive_compat.should_wrap(

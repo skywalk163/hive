@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """verify 命令的跨平台垫片（Windows 上用）。
 
@@ -9,6 +9,10 @@
 `cmd.exe` 没有 `true`，于是同一张卡在验收机上**必然**红灯——这不是业务失败，
 是平台口径不一致。hive 在这里补一个最小映射，只覆盖高频、语义明确的写法，
 未知写法原样交给 shell（绝不"猜一个成功"）。
+
+覆盖范围（**整条命令就是这一种写法**才生效）：`true` / `false` / `:`、
+`test -e/-f/-d/-r/-s/-x`（含 `! test ...`）、整数比较 `-eq/-ne/-lt/-gt/-le/-ge`。
+`-x` 是 T-0237 补的：Windows 上没有 POSIX 执行位，语义退化为「存在即可执行」。
 
 用法（hive.py 内部的 run_verify 会调）::
 
@@ -70,8 +74,8 @@ def no_window_kwargs() -> dict:
 # 只处理「整条命令就是这一种 POSIX 惯用法」的卡，避免误伤真实脚本。
 _PLAIN = re.compile(r"^\s*(true|false|:)\s*$")
 _NEG_PLAIN = re.compile(r"^\s*!\s*(true|false|:)\s*$")
-_TEST_SUB = re.compile(r"^\s*(?:!\s*)?test\s+-(?P<flag>[efdrs])\s+(?P<arg>.+?)\s*$")
-_NEG_TEST_SUB = re.compile(r"^\s*!\s*test\s+-(?P<flag>[efdrs])\s+(?P<arg>.+?)\s*$")
+_TEST_SUB = re.compile(r"^\s*(?:!\s*)?test\s+-(?P<flag>[efdrsx])\s+(?P<arg>.+?)\s*$")
+_NEG_TEST_SUB = re.compile(r"^\s*!\s*test\s+-(?P<flag>[efdrsx])\s+(?P<arg>.+?)\s*$")
 _COMPARE = re.compile(r'^\s*(?:test\s+)?"?(?P<a>[^"\s]+)"?\s*(?P<op>-eq|-ne|-lt|-gt|-le|-ge)\s*"?(?P<b>[^"\s]+)"?\s*$')
 
 
@@ -149,6 +153,13 @@ def evaluate(cmd: str) -> int:
                 ok = os.path.getsize(arg) > 0 if os.path.exists(arg) else False
             elif flag == "r":
                 ok = os.access(arg, os.R_OK)
+            elif flag == "x":
+                # T-0237：`test -x` 以前不在映射表里，于是整条命令原样丢给 cmd.exe，
+                # 变成「'test' 不是内部或外部命令」——产物合格却被记 failed。
+                # Windows 的 NTFS 没有 POSIX 执行位，CPython 的 os.access(X_OK) 在
+                # Windows 上对文件等价于「存在」（目录也算），所以这里就是「存在即可执行」。
+                # 想要「提交里记录的是 100755」这种更强口径得查 git 索引，不归垫片管。
+                ok = os.access(arg, os.X_OK)
             else:  # pragma: no cover - 正则里只有这几个
                 return 2
         except OSError:
