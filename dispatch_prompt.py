@@ -49,6 +49,20 @@ SUMMARY_CHARS = 200
 
 _FALLBACK_PATHS = "（验收卡，不改代码）"
 _FALLBACK_VERIFY = "见任务卡完成标准"
+_FALLBACK_PLATFORM = "判据在本机跑不了就去 192.168.0.88 跑（详见 docs/判据与平台.md）"
+
+#: 「平台与判据」契约条目（2026-11-02 起）。
+#:
+#: 起因：T-0221 / T-0222 两张卡产物合格却被判 failed —— 卡上的判据是 POSIX 写法
+#: （`head -1 x | grep -q y`、`! grep -q z`），而 Windows worker 用 cmd.exe + shell=True，
+#: `head`/`grep` 不在 PATH、`!` 不是 cmd 语法，一律 exit 255。
+#: 结论：判据不是产物的问题，是**执行平台**的问题，所以处置权交回 agent：
+#: 别改判据（改了丢验收强度），换台机器跑。
+_PLATFORM_HINT = [
+    "Windows 上 head/grep/awk 与 ! / $() 不可用，POSIX 判据会 exit 255 假失败——先别怀疑产物",
+    "确实跑不了就换 192.168.0.88（FreeBSD 15.1）跑：ssh workbuddy@192.168.0.88，"
+    "密码取 .env 的 SSH_PASS_WORKBUDDY（尾部带空格，取值先 strip）",
+]
 
 #: 失败策略的后半句（前半句带分钟数，卡上没写分钟数时整句降级成 `_FALLBACK_FAILURE`）。
 _FAILURE_TAIL = "失败时把卡住的位置写进 .hive/summary.md 并回 hive_submit，不要硬凑"
@@ -276,6 +290,9 @@ def _render_markdown(task_id: str, summary: str, contract: dict, agent: str | No
         "执行契约：",
         _contract_line("允许修改路径", contract["allowed_paths"], "、", _FALLBACK_PATHS),
         _contract_line("预期输出", contract["expected_output"], "；", _FALLBACK_VERIFY),
+        # 平台提示不是「卡上写了什么」，而是每次派发都该带的口径，所以不进 contract 字典，
+        # 直接由常量渲染 —— 契约层保持「只报卡面」的语义（见 test_contract_keeps_raw_*）。
+        _contract_line("平台与判据", list(_PLATFORM_HINT), "；", _FALLBACK_PLATFORM),
         _contract_line("失败策略", contract["failure_policy"], "；", _FALLBACK_FAILURE),
         _contract_line("禁止行为", contract["forbidden"] or list(DEFAULT_FORBIDDEN), "；", ""),
         f"领取方式：调用 MCP 工具 hive_claim，参数 task_id={task_id}",

@@ -2,7 +2,7 @@
 
 分三层测，坏在哪一层一眼能看出来：
 
-1. **逐字**：五段骨架、四段契约与任务卡规定的格式逐字符对齐（`test_markdown_*`）；
+1. **逐字**：六段骨架、五段契约与任务卡规定的格式逐字符对齐（`test_markdown_*`）；
 2. **回退**：缺 `paths` / 缺 `verify` / 缺「不要做什么」时各自的默认文案，
    以及「缺任何字段都不抛异常」（`test_missing_*` / `test_contract_*`）；
 3. **给粘贴服务的硬约束**：确定性、无 ANSI、无表格行、单行 ≤ 200、行尾 `\\n`
@@ -49,6 +49,7 @@ EXPECTED = "\n".join([
     "执行契约：",
     "- 允许修改路径：dispatch_prompt.py、tests/test_dispatch_prompt.py",
     "- 预期输出：python -m pytest -q tests/test_dispatch_prompt.py",
+    "- 平台与判据：Windows 上 head/grep/awk 与 ! / $() 不可用，POSIX 判据会 exit 255 假失败——先别怀疑产物；确实跑不了就换 192.168.0.88（FreeBSD 15.1）跑：ssh workbuddy@192.168.0.88，密码取 .env 的 SSH_PASS_WORKBUDDY（尾部带空格，取值先 strip）",
     "- 失败策略：90 分钟内未完成即放弃；失败时把卡住的位置写进 .hive/summary.md "
     "并回 hive_submit，不要硬凑",
     "- 禁止行为：不修改 hive.py；不加 CLI 参数",
@@ -73,9 +74,9 @@ def test_markdown_section_order_and_labels():
     assert lines[0] == "请领取任务 T-0184。"
     assert lines[1].startswith("任务摘要：")
     assert lines[2] == "执行契约："
-    labels = [ln.split("：", 1)[0] for ln in lines[3:7]]
-    assert labels == ["- 允许修改路径", "- 预期输出", "- 失败策略", "- 禁止行为"]
-    assert lines[7] == "领取方式：调用 MCP 工具 hive_claim，参数 task_id=T-0184"
+    labels = [ln.split("：", 1)[0] for ln in lines[3:8]]
+    assert labels == ["- 允许修改路径", "- 预期输出", "- 平台与判据", "- 失败策略", "- 禁止行为"]
+    assert lines[8] == "领取方式：调用 MCP 工具 hive_claim，参数 task_id=T-0184"
     assert lines[-1] == "完成后调用 hive_submit 提交。"
 
 
