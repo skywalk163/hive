@@ -1,0 +1,34 @@
+{
+  "task": "T-0232",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0232",
+  "base": "main",
+  "head": "c472ed61d3ffd50f082d5a1678a4cfe1ea22fb11",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-02T13:49:11+08:00",
+  "finished_at": "2026-11-02T14:01:13+08:00",
+  "duration_s": 722.8,
+  "verify": [
+    {
+      "cmd": "test -f scripts/fetch-deps.sh",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0232：lightharness 一键拉齐三仓脚本\n\n## 做了什么\n- 新增 `scripts/fetch-deps.sh`（POSIX sh）：克隆 light / lightplugin / lightharness 到同一层平铺，校验三仓标志物（`light/src`、`lightplugin/集成`、`lightharness/运行.py`），随后自动跑 `python 运行.py examples/冒烟.light`。\n- 选项：`--dir`（默认 `./lightharness-deps`）、`--mirror gitcode|github|<基址URL>`（默认 gitcode，本机 GitHub 不通）、`--depth`、`--branch`、`--no-pull`、`--no-run`、`--dry-run`、`-h`；环境变量 `LIGHTHARNESS_DEPS_DIR`/`*_REPO`/`GIT`/`PYTHON`。可重复执行（已有仓走 `pull --ff-only`）；克隆失败清半成品并提示换镜像；退出码 0/1/2。\n- `README.md`：环境准备改成先跑该脚本（步骤 + 选项表 + 平铺布局图），「一个容易踩的坑：缺 lightplugin 报 `No module named '生产挂载'`」移到脚本之后作排障；快速上手第 1 步的写死 Windows 路径改掉。\n\n## 验证\n- `bash -n`、`bash --posix -n` 通过；本地仓（file:// + `--depth 1`）端到端：平铺 + 布局 ok + 冒烟「自包含 stdlib 冒烟测试通过」，rc=0。\n- 默认 gitcode 镜像真实网络端到端（`--depth 1`）：克隆 + 校验 + 冒烟全过，rc=0。\n- 边界：重复执行 rc=0；`--mirror bogus`、缺 `--dir` 值 rc=2；目标里非 git 同名目录 rc=1；不可达 URL rc=1 且目录被清理；含空格路径（假仓）rc=0。\n\n## 遗留风险\n- 默认镜像取 gitcode（本机 GitHub 直连被 reset，未实测）；README 已给 `--mirror github`。\n- 仅 Windows Git Bash 实跑，FreeBSD/dash 未实机验证（纯 POSIX 写法 + `--posix` 语法检查）。冒烟依赖本机已有 python。",
+  "error": "",
+  "declared_paths": [
+    "scripts/fetch-deps.sh",
+    "README.md"
+  ],
+  "changed_files": [
+    "README.md",
+    "scripts/fetch-deps.sh"
+  ],
+  "out_of_paths": [],
+  "lease_id": "124ca58e5ad24efe8ea2d6e655fe951d",
+  "fence": 1
+}
