@@ -56,27 +56,29 @@ python3 hive\hive.py --dir hive cluster start
 
 ## 1. 协调仓库
 
-推荐做法：**把本工具仓直接推成 `skywalk/hive`**，这样 `hive.py`、`windows/`、`docs/`
-都跟着仓库走：
+推荐做法：**把本工具仓直接推成你自己的 `hive` 仓**，这样 `hive.py`、`windows/`、`docs/`
+都跟着仓库走（下面地址是本项目在用的 Gitea，换成你自己的）：
 
 ```sh
 # 在工作目录里
 cd hive
-git remote add origin http://192.168.1.5:3000/skywalk/hive.git
+git remote add origin <你的仓库地址>
 git push -u origin main
 ```
 
 任意机器在工作目录里 clone 成 `hive/`，再跑一次 `init` 补齐任务目录：
 
 ```sh
-# FreeBSD / Linux / macOS
-git clone http://192.168.1.5:3000/skywalk/hive.git hive
+# FreeBSD / Linux / macOS（公网）
+git clone https://github.com/skywalk163/hive.git hive
+# 内网可达时更快（作者自建 Gitea，外部访问不到）：
+# git clone http://192.168.1.5:3000/skywalk/hive.git hive
 python3 hive/hive.py --dir hive init
 ```
 
 ```powershell
-# Windows
-git clone http://192.168.1.5:3000/skywalk/hive.git hive
+# Windows（公网；国内慢可用 https://gitcode.com/skywalk163/hive.git）
+git clone https://github.com/skywalk163/hive.git hive
 python3 hive\hive.py --dir hive init
 ```
 
