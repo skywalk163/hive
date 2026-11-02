@@ -1,0 +1,32 @@
+{
+  "task": "T-0238",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0238",
+  "base": "main",
+  "head": "b550e8b9d46b7c9f8ec2eaf80a56a5878f03e3b9",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-03T01:00:40+08:00",
+  "finished_at": "2026-11-03T01:03:15+08:00",
+  "duration_s": 155.8,
+  "verify": [
+    {
+      "cmd": "test -x smoke.sh",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0238 完成小结\n\n## 做了什么\n在 lightharness 仓根新增 `smoke.sh`（POSIX sh，git mode 100755）。脚本分两段：\n1. **三仓依赖预检**：按 `运行.py:_find_light_merge` 同样的候选顺序探测光明编译器仓（标志物 `src/`）和 lightplugin（标志物 `集成/生产挂载.light`），缺哪个直接点名，并给出修法（`export LIGHT_MERGE=...` / `export LIGHTPLUGIN=...` 或平铺到兄弟目录）。\n2. **examples 冒烟**：依赖齐了才跑 `python 运行.py examples/冒烟.light`，要求退出码 0 且输出含「自包含 stdlib 冒烟测试通过」。\n\n## 为什么这样设计\n- 原来缺 lightplugin 时，`src/总入口.light` 的 `从 生产挂载 导入 挂载全部插件` 会抛 `No module named '生产挂载'`，几十个 example 集体红，看着像代码坏了。smoke.sh 在跑 examples 之前就把两个依赖仓的标志物逐一确认，缺了直接点名，不让这句迷惑性错误漏出来。\n- 纯 POSIX sh：用 `case` 做子串判断，不用 grep/sed/head/awk；MSYS 路径用 `cygpath` 转原生 Windows 路径。在 FreeBSD /bin/sh 和 Git Bash 下都验证过。\n\n## 改了哪些文件\n- `smoke.sh`（新增，worktree 根，mode 100755）。只碰这一个路径，未动其它文件。\n\n## 跑了什么验证\n- Windows Git Bash 缺依赖路径：worktree 下无兄弟仓 → 正确报\"缺光明编译器仓/缺 lightplugin 仓\"，列出所有已探测候选，退出码 1。\n- Windows Git Bash happy path：`LIGHT_MERGE=G:/dswork/duan-light-merge/light-merge LIGHTPLUGIN=G:/dswork/duan-light-merge/lightplugin sh smoke.sh` → 依赖预检 ok，examples/冒烟.light 退出码 0，输出含\"自包含 stdlib 冒烟测试通过\"，脚本退出码 0。\n- FreeBSD 192.168.0.88（15.1）：SFTP 上传后 `test -x smoke.sh` 返回 0；`sh smoke.sh` 在 /bin/sh 下无语法错误，正确识别依赖并报缺 lightplugin（0.88 上 `/tmp/duan-light-merge/light-merge/src` 在位，但兄弟 lightplugin 未平铺），退出码 1。\n\n## 遗留风险\n- smoke.sh 只校验两个外部仓的标志物（`src/`、`集成/生产挂载.light`）；若仓版本不对（例如 light 编译器与 lightharness stdlib 不兼容），仍会在 examples 阶段报错——但那种情况会直接打出 Python traceback，比 `No module named 生产挂载` 好定位。\n- 本机 worktree 下没有兄弟仓，直接 `sh smoke.sh` 会报缺依赖；这是预期行为，CI/FreeBSD 上需要先 `scripts/fetch-deps.sh` 平铺三仓。",
+  "error": "",
+  "declared_paths": [
+    "smoke.sh"
+  ],
+  "changed_files": [
+    "smoke.sh"
+  ],
+  "out_of_paths": [],
+  "lease_id": "f51c3f17136e4873bdf6eaa53e78f1ee",
+  "fence": 7
+}
