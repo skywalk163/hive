@@ -1,0 +1,32 @@
+{
+  "task": "T-0230",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0230",
+  "base": "main",
+  "head": "bfc3a8e4c13b3f5f287e9b87d7822719ec0bd897",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-02T13:25:32+08:00",
+  "finished_at": "2026-11-02T13:31:23+08:00",
+  "duration_s": 351.2,
+  "verify": [
+    {
+      "cmd": "test -f .github/workflows/release.yml",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0230 工作摘要\n\n## 任务\nlightmem 出四平台预编译二进制\n\n## 完成内容\n\n### 修改文件\n- `.github/workflows/release.yml`（新建）\n\n### 工作说明\n\n创建了 GitHub Actions 工作流，实现以下功能：\n\n1. **构建矩阵**：linux/darwin/windows × amd64/arm64，共 6 种平台组合\n2. **构建产物**：\n   - `lightmem-kernel` - 核心记忆服务\n   - `lightmem-mcp` - MCP 服务\n3. **每个 release 附带**：\n   - SHA256 校验和文件（`checksums.txt`）\n   - 一键安装脚本（`install.sh`）\n   - 健康检查说明\n\n### 关键设计决策\n\n- 使用 `kernel/go.mod` 构建，确保依赖正确\n- 通过 `-ldflags` 注入 `BuildVersion`（git commit hash）\n- Windows 二进制自动添加 `.exe` 后缀\n- Release notes 明确标注默认端口 **7443/7444**，并警告不要与 rc.d 端口 18443/18444 混淆\n\n### 验证\n- 验收命令：`test -f .github/workflows/release.yml` → PASS\n\n### 触发方式\n- 推送 tag `v*` 时自动构建发布\n- 支持 `workflow_dispatch` 手动触发\n\n### 遗留风险\n- 安装脚本中的仓库 URL 硬编码为 `skywalk163/lightmem`，需根据实际仓库修改\n- 未测试 FreeBSD 平台构建（任务提示中提到的 192.168.0.88 机器）",
+  "error": "",
+  "declared_paths": [
+    ".github/workflows/release.yml"
+  ],
+  "changed_files": [
+    ".github/workflows/release.yml"
+  ],
+  "out_of_paths": [],
+  "lease_id": "21b8d4c4af77496faa7e74df19903a0c",
+  "fence": 1
+}
