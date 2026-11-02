@@ -45,3 +45,40 @@ test -f .github/ISSUE_TEMPLATE/feature_request.md   -> rc=0
 
 只新增 paths 内这两个文件，未改其它文件；未碰任务卡与 agents 配置；无 token / 密钥。
 `config.yml`（issue 选择器）没有加——不在卡片的 paths 里，需要的话另开卡。
+
+## 交付（workbuddy，2026-11-02 04:4x）
+
+### 这张卡为什么「异常」
+
+不是产物有问题，也不是判据有问题，而是**从来没被真正做完，且被 watchdog 回收后卡在 blocked**：
+
+- 卡面只有一行记录：`watchdog 回收（2026-11-02T01:18:58）：orphan_assigned，回到 ready`，
+  而 `state:` 仍是 `blocked`、`owner: null`。也就是「声明回了 ready，实际没回到 ready」。
+- 取证：交接时 `git tag | wc -l` = **0**（hive 一个 tag 都没有），
+  三个远端 `git ls-remote --tags` 均空，`refs/heads/res/T-0226` 与 `refs/heads/task/T-0226` 也不存在。
+  说明上一轮 agent 领了卡但没产出，租约到期被回收。
+
+### 做了什么
+
+打 annotated tag 并推到三个远端（origin / gitcode / github）。
+
+**一处主动判断**：首次打 tag 时指向 `origin/main` HEAD = `30f7e34`，但那是 hive 自己的队列记账提交
+（消息是 `take T-0226 -> workbuddy`）。发布 tag 指在内部流水提交上，外部用户点开 v0.1.0 会看到
+一条库内记录，不合适。已重打到最后一个**内容提交** `d712b3d`（`fix(hive): 修三处判据机制缺陷…`，
+是 `30f7e34` 的父提交），并用 `git push -f` 更新三个远端。
+
+### 取证（全部本机实测）
+
+| 项 | 值 |
+|---|---|
+| tag 对象 | `3ed7e85`（`git cat-file -t v0.1.0` = **tag**，即 annotated，非轻量） |
+| peeled commit | `d712b3d`（= `v0.1.0^{commit}`） |
+| origin / gitcode / github | 三处 `ls-remote 'refs/tags/v0.1.0*'` **逐字一致**（3ed7e85 + d712b3d 两行都在） |
+| v0.1.0 树内 | `LICENSE`、`.github/ISSUE_TEMPLATE/{bug_report,feature_request}.md`、`hive.py`，共 529 文件 |
+| 卡面判据 | `git rev-parse -q --verify refs/tags/v0.1.0` → **rc=0** |
+
+### 说明
+
+- 未改动任何代码与文件，`paths` 为空，属「只打 tag」的验收卡。
+- 现版 hive 已让 `paths: []` 的卡自动放行「零改动」闸门（`d712b3d` 里的修复），
+  因此本卡不再需要 `allow_empty_diff: true`；T-0227 那轮遇到的「加开关被 retry 吞掉」也不会重演。
