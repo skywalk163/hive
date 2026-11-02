@@ -1,0 +1,37 @@
+{
+  "task": "T-0229",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0229",
+  "base": "main",
+  "head": "0f074fefef0453c1e1dcaca28ff1becb63a4484a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-02T12:58:20+08:00",
+  "finished_at": "2026-11-02T13:00:00+08:00",
+  "duration_s": 100.5,
+  "verify": [
+    {
+      "cmd": "git grep -L 'replace github.com/lightmem/kernel' -- go.mod",
+      "code": 0,
+      "tail": [
+        "go.mod"
+      ]
+    }
+  ],
+  "summary": "# T-0229 完成总结\n\n## 做了什么\n\n选择**选项 (b)**：移除 go.mod 中的 replace 指令，README 明确写「clone 后从源码构建」。\n\n### 原因\nkernel 模块内部所有 .go 文件均 import `github.com/lightmem/kernel/...`（40+ 处），\n在本任务只允许改 go.mod / kernel/go.mod / README.md 的约束下，无法将模块路径改为\n`github.com/skywalk163/lightmem/kernel`（会导致全部内部 import 断裂）。\n因此选项 (a)（独立发布 kernel 子模块）短期不可行，走选项 (b)。\n\n### 改动文件\n1. **go.mod**：删除 `replace github.com/lightmem/kernel => ./kernel` 一行。\n2. **README.md**：\n   - 安装部分加注意：`go install ...@latest` 暂不可用。\n   - 新增「从源码构建」小节，说明在 `kernel/` 目录下用 kernel/go.mod 独立构建。\n   - 更新测试命令为 `cd kernel && go build ./... && go test ./... -v`。\n\n### kernel/go.mod\n未改动。模块路径保持 `github.com/lightmem/kernel`，与全部内部 import 一致。\n\n## 验证\n\n```\ngit grep -L 'replace github.com/lightmem/kernel' -- go.mod  →  exit 0\n```\n\ngo.mod 中已不含 replace 指令，判据通过。\n\n## 遗留\n\n- kernel 模块尚未独立发布到 `github.com/skywalk163/lightmem/kernel` 路径，\n  `go install ...@latest` 仍不可用。需后续卡片完成模块路径迁移（涉及全量 .go import 重命名）+ 打 tag。\n- 预编译二进制发布见另一张卡。",
+  "error": "",
+  "declared_paths": [
+    "go.mod",
+    "kernel/go.mod",
+    "README.md"
+  ],
+  "changed_files": [
+    "README.md",
+    "go.mod"
+  ],
+  "out_of_paths": [],
+  "lease_id": "cac37097030844da8c20eb9936767008",
+  "fence": 3
+}
