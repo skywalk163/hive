@@ -822,6 +822,39 @@ def store_close(tid: str, done: bool = True, note: str = "") -> dict | None:
 # verify 执行：Windows 上给 POSIX 惯用法垫一层（hive_compat.py）
 # --------------------------------------------------------------------------- #
 
+def _win_single_quote_fix(cmd: str) -> str:
+    """把「含 | 或 & 的单引号片段」换成双引号（仅 Windows 生效时调用）。
+
+    起因（T-0225 实测）：`git grep -qE 'v4|v7' -- CHANGELOG.md` 在 cmd.exe 下
+    单引号不是引号，`|` 被当管道劈开，实际执行成
+    `git grep -qE 'v4` 管道给 `v7' -- CHANGELOG.md`，报「'v7'' 不是内部或外部命令」，
+    exit 255 —— 产物合格却判 failed。
+
+    逐字符扫描而不是正则：`'x' && 'y|z'` 这种一段命令里两组单引号，
+    用正则会从第一个 `'` 一路吃到最后一个 `'`（把闭合引号当开引号），
+    结果把 `&&` 也包进去，整条命令被改坏。
+    片段内若含双引号则跳过（换引号会破坏语义，宁可原样交给 shell 让它报错）。
+    """
+    out: list[str] = []
+    i, n = 0, len(cmd)
+    while i < n:
+        if cmd[i] != "'":
+            out.append(cmd[i])
+            i += 1
+            continue
+        j = cmd.find("'", i + 1)
+        if j == -1:            # 落单的引号：原样收尾
+            out.append(cmd[i:])
+            break
+        inner = cmd[i + 1:j]
+        if ("|" in inner or "&" in inner) and '"' not in inner:
+            out.append(f'"{inner}"')
+        else:
+            out.append(cmd[i:j + 1])
+        i = j + 1
+    return "".join(out)
+
+
 def verify_command(cmd: str) -> str:
     """返回真正要执行的命令行：Windows 上把 `true` / `test -f` 转成等价判断。
 
@@ -832,6 +865,9 @@ def verify_command(cmd: str) -> str:
     text = str(cmd or "")
     if str(os.environ.get("HIVE_COMPAT", "1")).lower() in ("0", "false", "no", "off"):
         return text
+    # Windows 专有：单引号不保护 | / &，先把这类片段换成双引号再交给 shell。
+    if os.name == "nt":
+        text = _win_single_quote_fix(text)
     try:
         import hive_compat
     except ImportError:
@@ -1335,10 +1371,8 @@ def _fmt_scalar(v) -> str:
 
 def write_card(path: Path, data: dict, body: str) -> None:
     lines = ["---"]
-    for k in TASK_FIELDS:
-        if k not in data:
-            continue
-        v = data[k]
+
+    def _emit(k: str, v) -> None:
         if isinstance(v, list):
             if not v:
                 lines.append(f"{k}:")
@@ -1347,6 +1381,20 @@ def write_card(path: Path, data: dict, body: str) -> None:
                 lines.extend(f"  - {_fmt_scalar(x)}" for x in v)
         else:
             lines.append(f"{k}: {_fmt_scalar(v)}")
+
+    for k in TASK_FIELDS:
+        if k in data:
+            _emit(k, data[k])
+
+    # 保留卡面上的自定义字段（如 allow_empty_diff）。
+    # 历史问题：这里只按 TASK_FIELDS 输出，retry / take 重写卡片时会把未登记字段吞掉 ——
+    # T-0227 因此在「加了开关 → retry → 开关消失 → 又判零改动」之间反复了一轮。
+    # 规则：只保留非 TASK_FIELDS 且不带下划线的键（下划线是内部字段，如 _body/_path）。
+    for k, v in data.items():
+        if k in TASK_FIELDS or k.startswith("_"):
+            continue
+        _emit(k, v)
+
     lines.append("---")
     path.write_text("\n".join(lines) + "\n" + body, encoding="utf-8")
 
@@ -3092,7 +3140,10 @@ class Hive:
         # 手动 submit 与 worker 走同一条产结果链路（deepseek-win 等 manual agent
         # 也在这里落地），所以同一套闸门必须在此生效，不能只在 worker 分支里加。
         if ok:
-            allow_empty = bool(card.get("allow_empty_diff"))
+            # 零改动闸门只该拦「该改文件却没改」的卡；paths 为空即验收/台账卡，
+            # 天然不产出文件改动（与 _FALLBACK_PATHS 的「验收卡，不改代码」同义），
+            # 自动放行，否则「只打 tag / 只做验收」的卡在现版 hive 上永远判不绿。
+            allow_empty = bool(card.get("allow_empty_diff")) or not (card.get("paths") or [])
             guard_ok, guard_err = guard_result_head(
                 repo, tid, head, allow_empty, changed)
             if not guard_ok:
@@ -4720,7 +4771,10 @@ class Worker:
         # 只对「会产出代码分支」的 exec 路径生效；verify-only 不产出 task 分支，
         # 零改动是常态，绕开。blocked（越界严格）已经判失败，不再叠加。
         if not blocked and not verify_only and ok:
-            allow_empty = bool(card.get("allow_empty_diff"))
+            # 零改动闸门只该拦「该改文件却没改」的卡；paths 为空即验收/台账卡，
+            # 天然不产出文件改动（与 _FALLBACK_PATHS 的「验收卡，不改代码」同义），
+            # 自动放行，否则「只打 tag / 只做验收」的卡在现版 hive 上永远判不绿。
+            allow_empty = bool(card.get("allow_empty_diff")) or not (card.get("paths") or [])
             guard_ok, guard_err = guard_result_head(
                 repo, tid, head, allow_empty, changed)
             if not guard_ok:
