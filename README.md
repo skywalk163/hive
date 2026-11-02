@@ -451,3 +451,13 @@ python3 hive/hive.py mcp --agent workbuddy --dir hive
 - [集群架构 v3.1](docs/集群架构-v3.1.md)：目标架构（P0/P1 + P2a 已落地，P2b 进行中）：hived、本地副本、OSPF 式自适应、Git 里程碑
 - [方案全文](../多机Agent协同开发方案.md)
 - [CHANGELOG](CHANGELOG.md)
+
+## 商业支持
+
+这套工具我们每天在用。开源部分永久免费，用不着为「使用」付钱——真的卡住了、或者要把它接进你自己的多机产线，
+可以让我们代跑一次或做定制（付费）：
+
+- 方案与陪跑：<http://aitest.quye.com/solutions.html>
+- 直接写信：hello@quye.com
+
+> 站点目前挂在这个测试域名上，正式域名 `quye.com` 迁移后链接会替换；`hello@quye.com` 长期有效。
