@@ -1,0 +1,23 @@
+{
+  "name": "mac-trae",
+  "host": "laiweilidemacbook-air.local",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify"
+  ],
+  "capabilities": [
+    "macos",
+    "gui"
+  ],
+  "repos": {
+    "hive": "/Users/skywalk/dswork/hive"
+  },
+  "launch": "",
+  "worktrees": "/Users/skywalk/.hive/wt/mac-trae",
+  "max_concurrency": 1,
+  "created": "2026-11-03T17:50:01+08:00"
+}
