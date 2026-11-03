@@ -204,7 +204,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "hive_land",
-        "description": "【总控】把已完成的任务分支合入代码仓 main 并 close。默认 dry-run 只预演（会真跑一遍 merge 看会不会冲突），传 apply=true 才真的推 main。遇到冲突会返回 error 和冲突文件清单，绝不自动解冲突、绝不 force push。",
+        "description": "【总控】把已完成的任务分支合入代码仓 main 并 close。默认 dry-run 只预演（会真跑一遍 merge 看会不会冲突），传 apply=true 才真的推 main。默认自动探测分支在哪个远端（origin → gitcode → github），分支不在 origin 时用 remote 显式指定。遇到冲突会返回 error 和冲突文件清单，绝不自动解冲突、绝不 force push。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -213,6 +213,8 @@ TOOLS: list[dict] = [
                         "description": "合入所有满足条件的卡（按优先级，遇冲突停下）"},
                 "apply": {"type": "boolean", "default": False,
                           "description": "false=只预演不动任何东西（默认）；true=真的推 main"},
+                "remote": {"type": "string",
+                           "description": "从哪个远端取分支、往哪个远端推 main；不给则自动探测"},
                 "note": {"type": "string", "description": "close 时的完成备注"},
             },
             "required": [],
@@ -825,7 +827,8 @@ class HiveMcp:
         h = self.hive()
         try:
             out = h.cmd_land(tid=tid or None, apply=apply, note=a.get("note") or "",
-                             all_tasks=bool(a.get("all")))
+                             all_tasks=bool(a.get("all")),
+                             remote=(a.get("remote") or None))
         except HiveError as e:
             return err(str(e))
         plans = out if isinstance(out, list) else [out]

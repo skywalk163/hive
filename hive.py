@@ -1159,6 +1159,25 @@ def remote_branch_head(repo: Path, ref: str) -> str | None:
     return None
 
 
+# 代码仓远端优先级：origin 仍是默认（历史行为），其余按此顺序再按字母序兜底。
+# 为什么需要这个：不同机器上的「同一个仓」远端名并不一致 —— 主控机的 origin 是内网
+# Gitea，而 Windows agent 的克隆里 origin 可能就是 gitcode，于是同一张卡的分支在两
+# 边落在不同远端名下。land 早期硬编码 origin，结果分支明明推上去了、却报「代码仓
+# 里没有 origin/task/<tid> 分支」（T-0238 就是这么卡住的）。
+LAND_REMOTE_ORDER = ("origin", "gitcode", "github")
+
+
+def code_remotes(repo: Path) -> list[str]:
+    """代码仓配置的远端名，按 land 的优先级排好（origin 优先，其余字母序）。
+
+    顺序必须稳定：land 的自动探测按这个顺序逐个找分支，日志/测试都依赖这一点。
+    """
+    p = git(["remote"], repo, check=False)
+    names = [ln.strip() for ln in (p.stdout or "").splitlines() if ln.strip()]
+    head = [n for n in LAND_REMOTE_ORDER if n in names]
+    return head + sorted(n for n in names if n not in head)
+
+
 # --------------------------------------------------------------------------- #
 # 任务卡：极简 Markdown frontmatter（只支持标量与标量列表）
 # --------------------------------------------------------------------------- #
@@ -1896,15 +1915,54 @@ class Hive:
             out.append(tid)
         return sorted(out)
 
-    def land_one(self, tid: str, apply: bool = False, note: str = "") -> dict:
+    def _pick_remote(self, repo: Path, branch_ref: str,
+                     want: str | None = None) -> str:
+        """决定这次 land 用哪个远端：显式指定优先，否则找分支实际落在哪个远端上。
+
+        - `want` 给了就只认它（名字不存在直接报错，不静默回落 —— 手滑打错远端名
+          却「成功了」，比失败更可怕）。
+        - 没给就按 `code_remotes()` 的顺序逐个 `fetch --prune` 再看 refs/remotes/
+          <remote>/<branch_ref>：第一个命中的就是它。全都探测不到时退回首选远端，
+          让上层照旧报「没有这个分支」，但报错里会带上真实远端清单。
+        - 探测失败的远端跳过并记一条日志：某个远端断网/没权限时，不该把整次 land
+          堵死在它身上。
+        """
+        remotes = code_remotes(repo)
+        if not remotes:
+            raise HiveError("代码仓没有配置任何远端（git remote 为空）")
+        if want:
+            if want not in remotes:
+                raise HiveError(
+                    f"代码仓没有远端 {want!r}；现有：{', '.join(remotes)}")
+            git_net(["fetch", "--prune", want], repo)
+            return want
+        for name in remotes:
+            try:
+                git_net(["fetch", "--prune", name], repo)
+            except HiveError as e:
+                log(f"探测远端 {name} 失败（跳过）：{e}")
+                continue
+            if rev_parse(repo, f"refs/remotes/{name}/{branch_ref}"):
+                if name != remotes[0]:
+                    log(f"{branch_ref} 在 {name} 上（不在 {remotes[0]}），"
+                        f"本次 land 用 {name}；要改就加 --remote")
+                return name
+        return remotes[0]
+
+    def land_one(self, tid: str, apply: bool = False, note: str = "",
+                 remote: str | None = None) -> dict:
         """把一张已完成的任务分支合进代码仓 main，再 close。
 
         默认不推任何东西：先在临时 worktree 里把合并做一遍，这样冲突是**真的**冲突，
         不是靠猜。 dry-run 时装作合并完就收工（并把这个 worktree 拆掉）。
+
+        `remote` 为 None 时自动探测（见 `_pick_remote`），显式给了就用它取分支 + 推 main。
         """
         plan: dict = {"task": tid, "repo": "", "branch": f"task/{tid}", "head": None,
                       "status": "blocked", "strategy": "", "problems": [],
-                      "conflicts": [], "merged": False, "closed": False}
+                      "conflicts": [], "merged": False, "closed": False,
+                      "remote": "", "hints": []}
+
         card = self.card(tid)
         plan["repo"] = card.get("repo") or ""
         target = card.get("base") or "main"
@@ -1942,12 +2000,22 @@ class Hive:
             plan["problems"].append(str(e))
             return plan
 
-        git_net(["fetch", "--prune", "origin"], repo)
-        base, branch = f"origin/{target}", f"origin/task/{tid}"
+        try:
+            remote_name = self._pick_remote(repo, f"task/{tid}", remote)
+        except HiveError as e:
+            plan["problems"].append(str(e))
+            return plan
+        # 远端一旦定下，取分支、算 base、推 main 全都跟着它走，不能一半 origin
+        # 一半 gitcode（那样会把 A 远端的提交推到 B 远端的 main 上）
+        plan["remote"] = remote_name
+        base, branch = f"{remote_name}/{target}", f"{remote_name}/task/{tid}"
         base_head = rev_parse(repo, base)
         task_head = rev_parse(repo, branch)
         if not task_head:
-            plan["problems"].append(f"代码仓里没有 {branch} 分支")
+            plan["problems"].append(
+                f"代码仓里没有 {branch} 分支（远端 "
+                f"{', '.join(code_remotes(repo)) or '无'} 都找过了；"
+                f"分支在别的远端时用 --remote 指定）")
             return plan
         if task_head == base_head:
             # task 分支与 base 一致：代码已在 main。但卡面可能仍在飞（上次 land
@@ -2018,15 +2086,15 @@ class Hive:
                 plan["status"] = "would-merge"
                 return plan
             try:
-                git_net(["push", "origin",
+                git_net(["push", remote_name,
                          f"{plan['head']}:refs/heads/{target}"], repo)
             except HiveError as e:
                 if getattr(e, "timed_out", False):
                     # push 超时 ≠ 没推上去：git 经常在远端已更新、但本地进程被
-                    # NET_TIMEOUT 杀掉没收到回执。fetch 一次再比 origin/main，
+                    # NET_TIMEOUT 杀掉没收到回执。fetch 一次再比 <remote>/<target>，
                     # 到了就当成功继续 close；真没到才判 failed（T-0211 踩过）。
                     try:
-                        git_net(["fetch", "origin"], repo)
+                        git_net(["fetch", remote_name], repo)
                     except HiveError:
                         pass
                     if rev_parse(repo, base) == plan["head"]:
@@ -2063,6 +2131,14 @@ class Hive:
             return plan
         plan["closed"] = True
         plan["status"] = "landed"
+        others = [r for r in code_remotes(repo) if r != remote_name]
+        if others:
+            # 只推一个远端是刻意的（不替用户决定往哪几台机器写）；但另外几个远端
+            # 的 main 就停在旧位置了 —— 说清楚，并直接给出可粘贴的命令。
+            plan["hints"].append(
+                f"只推了 {remote_name}；{', '.join(others)} 的 {target} 仍停在旧位置。"
+                f"要一并对齐：git push <远端> "
+                f"{str(plan.get('head'))[:12]}:refs/heads/{target}")
         self._after_land(plan)
         return plan
 
@@ -2104,7 +2180,8 @@ class Hive:
             log(f"[land] {tid} 集群不可用，repo.updated 未发出（等各机补偿）")
 
     def cmd_land(self, tid: str | None = None, apply: bool = False, note: str = "",
-                 all_tasks: bool = False, as_json: bool = False, limit: int | None = None):
+                 all_tasks: bool = False, as_json: bool = False, limit: int | None = None,
+                 remote: str | None = None):
         self.fetch()
         if not tid and not all_tasks:
             raise HiveError("land 需要给任务号，或加 --all")
@@ -2120,7 +2197,8 @@ class Hive:
             log("没有可以合入的卡")
             results = []
         else:
-            results = [self.land_one(t, apply=apply, note=note) for t in targets]
+            results = [self.land_one(t, apply=apply, note=note, remote=remote)
+                       for t in targets]
         if as_json:
             print(json.dumps(results if all_tasks else results[0],
                              ensure_ascii=False, indent=2))
@@ -2136,11 +2214,15 @@ class Hive:
                "conflict": "合并冲突", "failed": "合并失败",
                "blocked": "不满足合入条件"}.get(r["status"], r["status"])
         extra = f" [{r['strategy']}]" if r.get("strategy") else ""
-        print(f"{r['task']}  {tag}{extra}  branch={r['branch']}  head={r.get('head') or '-'}")
+        where = f" remote={r['remote']}" if r.get("remote") else ""
+        print(f"{r['task']}  {tag}{extra}{where}  branch={r['branch']}  "
+              f"head={r.get('head') or '-'}")
         for p in r["problems"]:
             print(f"    问题: {p}")
         for c in r["conflicts"]:
             print(f"    冲突文件: {c}")
+        for h in r.get("hints") or []:
+            print(f"    提示: {h}")
         if r["status"] == "would-merge":
             print("    加 --apply 真的合入")
 
@@ -5525,7 +5607,8 @@ def cmd_reopen(args) -> None:
 def cmd_land(args) -> None:
     Hive(args.dir).cmd_land(
         tid=getattr(args, "task", None), apply=args.apply,
-        note=args.note or "", all_tasks=args.all, as_json=args.json)
+        note=args.note or "", all_tasks=args.all, as_json=args.json,
+        remote=getattr(args, "remote", None) or None)
 
 
 def cmd_status(args) -> None:
@@ -6201,6 +6284,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="合入所有满足条件（依赖在前）的卡")
     s.add_argument("--apply", action="store_true",
                    help="真的推 main；默认只在临时 worktree 里预演")
+    s.add_argument("--remote", metavar="NAME",
+                   help="从哪个远端取分支、往哪个远端推 main（默认自动："
+                        "按 origin → gitcode → github 找分支实际所在的远端）")
     s.add_argument("--json", action="store_true")
     s.add_argument("--note", help="close 时的完成备注")
     s.set_defaults(func=cmd_land)

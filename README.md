@@ -248,6 +248,7 @@ python3 hive/hive.py --dir hive stats    # 成功率、中位耗时、按 agent/
 python3 hive/hive.py --dir hive land   T-0101            # 合入 dry-run（默认，不动东西）
 python3 hive/hive.py --dir hive land   T-0101 --apply    # 合入 main 并 close
 python3 hive/hive.py --dir hive land   --all --apply     # 把能合的都合掉
+python3 hive/hive.py --dir hive land   T-0101 --remote gitcode  # 分支在非 origin 远端
 
 python3 hive/hive.py --dir hive result T-0101      # 看摘要
 python3 hive/hive.py --dir hive retry  T-0101      # 失败重跑（清结果+租约，续用原分支）
@@ -270,6 +271,7 @@ python3 hive/hive.py --dir hive submit T-0101 --pr   # 提交后顺手开 PR
 `land` 是最后一步的自动化：在**临时 worktree** 里真跑一遍 merge（不是靠 `merge-tree` 猜），
 干净就推 main 并 `close`，冲突就把文件清单列出来交给人/回给 owner 开新卡 —— 不自动解、不 force。
 默认 dry-run，`--apply` 才动；详见 [`docs/操作手册.md`](docs/操作手册.md) §5.1。
+远端默认自动探测（`origin → gitcode → github → 其它`），分支只在别的远端上时用 `--remote` 点名。
 
 `close` 会把 `res/` 里的结果归档到 `main:results/T-0101.json`，然后删掉 `claim/T-0101`、`res/T-0101`
 两个分支——Gitea 分支列表里只留正在跑的任务，审计记录仍在 main 上。

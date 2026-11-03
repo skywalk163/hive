@@ -125,7 +125,7 @@ python3 hive/hive.py mcp --agent workbuddy --role controller
 
 | 工具 | 作用 | 默认行为 |
 |---|---|---|
-| `hive_land` | 合入已完成的卡 | **dry-run**，`apply=true` 才真推 |
+| `hive_land` | 合入已完成的卡 | **dry-run**，`apply=true` 才真推；`remote` 不给则自动探测远端 |
 | `hive_close` | 关闭一张卡 | 直接执行 |
 | `hive_retry` | 重跑（清结果和租约） | 直接执行 |
 | `hive_assign` | 指派给某个 agent | 直接执行 |
