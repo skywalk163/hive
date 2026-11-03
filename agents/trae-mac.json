@@ -1,6 +1,6 @@
 {
   "name": "trae-mac",
-  "host": "mac",
+  "host": "laiweilidemacbook-air.local",
   "command": "",
   "mode": "manual",
   "manual": true,
@@ -14,10 +14,10 @@
     "gui"
   ],
   "repos": {
-    "hive": "~/dswork/hive",
-    "lightmem": "~/dswork/lightmem",
-    "light": "~/dswork/light",
-    "lightharness": "~/dswork/lightharness"
+    "hive": "/Users/skywalk/dswork/hive",
+    "lightmem": "/Users/skywalk/dswork/lightmem",
+    "light": "/Users/skywalk/dswork/light",
+    "lightharness": "/Users/skywalk/dswork/lightharness"
   },
   "launch": "",
   "worktrees": "",
