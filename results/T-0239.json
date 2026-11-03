@@ -1,0 +1,34 @@
+{
+  "task": "T-0239",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0239",
+  "base": "main",
+  "head": "f5a197c1ee88c27b1aeed40f3dde2e4dee157336",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-03T07:16:54+08:00",
+  "finished_at": "2026-11-03T07:33:19+08:00",
+  "duration_s": 985.7,
+  "verify": [
+    {
+      "cmd": "git grep -L 'duan-light-merge' -- README.md",
+      "code": 0,
+      "tail": [
+        "README.md"
+      ]
+    }
+  ],
+  "summary": "# T-0239 工作总结\n\n## 任务\nlightharness 清掉 README 里的个人路径（公开文档不应出现作者本地目录 `duan-light-merge`）。\n\n## 改动（仅 README.md）\n「项目定位」一节移除全部三处个人路径，并改写编译器探测顺序的措辞：\n- **复刻语言**：删掉作者开发机路径 `G:\\dswork\\duan-light-merge\\light-merge` 与探测顺序里的\n  `../duan-light-merge/light-merge`；改写为「先读 `$LIGHT_MERGE` 环境变量，再按仓库相对位置\n  （如 `../light`、`../light-merge`、`../../light`）探测，找不到就用环境变量显式指定」。\n- **工作目录**：删掉 `G:\\dswork\\duan-light-merge\\lightharness`，改写为「本仓库根目录（即 `lightharness/` 工程）」。\n- 全文不再出现 `duan-light-merge`，语义与核验判据保持一致。\n\n## 判据结果\n- `git grep -L 'duan-light-merge' -- README.md` → 列出 `README.md`，exit 0（通过）。\n\n## 过程备注\n- 本会话未加载 `hive_claim` MCP 工具，改用 `hive.py take`（等价：抢 claim 锁 + 写 owner + 备 worktree）。\n- 领取时 `w.prepare` 被 SIGTERM 中断，导致 worktree 的 git 索引被清空、`stdlib/` 等文件未检出，\n  `git status` 显示 2286 个 `D `；`git grep` 不搜未跟踪文件，判据会假性失败。\n  已用 `git reset` + 清理残留 `index.lock` + `git checkout -f HEAD -- .` 修复到干净基线，\n  最终仅保留 README.md 一处修改，无越界改动、无残留未跟踪文件。",
+  "error": "",
+  "declared_paths": [
+    "README.md"
+  ],
+  "changed_files": [
+    "README.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "22fd2a8a934d4f6da542b57a9c444994",
+  "fence": 1
+}
