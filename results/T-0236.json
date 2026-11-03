@@ -1,0 +1,32 @@
+{
+  "task": "T-0236",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0236",
+  "base": "main",
+  "head": "66af1629f00ed1f733722af965bed1bddeae71b3",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-03T08:53:15+08:00",
+  "finished_at": "2026-11-03T09:02:17+08:00",
+  "duration_s": 542.8,
+  "verify": [
+    {
+      "cmd": "test -x scripts/smoke.sh",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "（人工 submit，未写 summary）",
+  "error": "",
+  "declared_paths": [
+    "scripts/smoke.sh"
+  ],
+  "changed_files": [
+    "scripts/smoke.sh"
+  ],
+  "out_of_paths": [],
+  "lease_id": "70a41ad4545d4b2aa4017bba0c2e8925",
+  "fence": 1
+}
