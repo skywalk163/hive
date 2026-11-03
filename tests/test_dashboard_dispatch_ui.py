@@ -210,6 +210,132 @@ def test_real_card_T0184_renders():
     assert "hive_claim" in body["text"]
 
 
+# --------------------------------------------------------------------------- #
+# 1.5 状态感知（2026-11-03）：待合并 → 给主控的合并指令；异常 → 附溯源块
+# --------------------------------------------------------------------------- #
+
+def write_status(tmp_path, records):
+    """落一份临时状态快照，返回路径（serve 按此判断卡的运行时状态）。"""
+    p = tmp_path / "status-mode.json"
+    p.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
+    return p
+
+
+def test_dispatch_prompt_merging_is_merge_prompt(tasks_dir, tmp_path):
+    """待合并卡：复制出的是给主控的合并指令，不再是「请领取任务」。"""
+    status = write_status(tmp_path, [{"id": "T-0001", "state": "assigned",
+                                      "result_status": "done",
+                                      "claim_agent": "deepseek-win",
+                                      "head": "2c905a6fc1cd69923a1b",
+                                      "result_summary": "已修，实测见摘要。"}])
+    with board(status) as base:
+        code, body, _ = get(base, "/api/dispatch-prompt?task=T-0001")
+
+    assert code == 200
+    assert body["mode"] == "merge"
+    text = body["text"]
+    assert "任务 T-0001 已完成，请合并" in text
+    assert "hive land T-0001 --apply" in text       # 主控要跑的命令
+    assert "执行 agent：deepseek-win" in text        # 溯源：谁做完的
+    assert "res/T-0001" in text                     # 结果分支
+    assert "head 2c905a6fc1" in text                # head 截到 10 位
+    assert "hive_claim" not in text                 # 不该再喊人领取
+    assert "冲突处理" in text
+
+
+def test_dispatch_prompt_merging_json_payload(tasks_dir, tmp_path):
+    """format=json：merge 载荷带 mode / land_cmd / branch，text 与 markdown 同源。"""
+    status = write_status(tmp_path, [{"id": "T-0001", "state": "assigned",
+                                      "result_status": "done",
+                                      "claim_agent": "deepseek-win"}])
+    with board(status) as base:
+        _, body, _ = get(base, "/api/dispatch-prompt?task=T-0001&format=json")
+
+    payload = json.loads(body["text"])
+    assert payload["mode"] == "merge"
+    assert payload["land_cmd"] == "hive land T-0001 --apply"
+    assert payload["branch"] == "res/T-0001"
+    assert payload["agent"] == "deepseek-win"
+    assert "任务 T-0001 已完成，请合并" in payload["text"]
+
+
+def test_dispatch_prompt_abnormal_carries_trace(tasks_dir, tmp_path):
+    """异常卡：仍是派发指令，但末尾带异常溯源块（agent / 状态 / 摘要）。"""
+    status = write_status(tmp_path, [{"id": "T-0001", "state": "assigned",
+                                      "result_status": "failed",
+                                      "claim_agent": "fb88-dsh",
+                                      "claimed_at": "2026-10-27T22:00:00+08:00",
+                                      "result_summary": "agent fb88-dsh 没有配置仓库 'light' 的本地路径"}])
+    with board(status) as base:
+        code, body, _ = get(base, "/api/dispatch-prompt?task=T-0001")
+
+    assert code == 200
+    assert body["mode"] == "abnormal"
+    text = body["text"]
+    assert "请领取任务 T-0001" in text              # 重派语义保留
+    assert "异常信息（供溯源）" in text
+    assert "此前领取 agent：fb88-dsh" in text        # 用户要的溯源信息
+    assert "异常状态：failed" in text
+    assert "agent fb88-dsh 没有配置仓库" in text
+
+
+def test_dispatch_prompt_stale_is_abnormal(tasks_dir, tmp_path):
+    """租约过期也归异常：带溯源块，异常状态标成「租约过期」。"""
+    status = write_status(tmp_path, [{"id": "T-0001", "state": "running",
+                                      "claim_agent": "trae-win",
+                                      "stale": True}])
+    with board(status) as base:
+        _, body, _ = get(base, "/api/dispatch-prompt?task=T-0001")
+
+    assert body["mode"] == "abnormal"
+    assert "异常状态：租约过期" in body["text"]
+    assert "此前领取 agent：trae-win" in body["text"]
+
+
+def test_dispatch_prompt_ready_keeps_claim_text(tasks_dir, tmp_path):
+    """待领取 / 进行中 / 已关闭：mode=claim，正文与旧行为逐字一致。"""
+    for rec in ({"id": "T-0001", "state": "ready"},
+                {"id": "T-0001", "state": "running", "claim_agent": "trae-win"},
+                {"id": "T-0001", "state": "done", "result_status": "done"}):
+        status = write_status(tmp_path, [rec])
+        with board(status) as base:
+            code, body, _ = get(base, "/api/dispatch-prompt?task=T-0001")
+        assert code == 200
+        assert body["mode"] == "claim"
+        assert "请领取任务 T-0001" in body["text"]
+        assert "异常信息" not in body["text"]
+
+
+def test_dispatch_prompt_without_status_snapshot_falls_back(tasks_dir, tmp_path):
+    """快照缺失 / 坏掉：降级成 claim 渲染，不 500。"""
+    missing = tmp_path / "no-such.json"
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    for status in (missing, broken):
+        with board(status) as base:
+            code, body, _ = get(base, "/api/dispatch-prompt?task=T-0001")
+        assert code == 200
+        assert body["mode"] == "claim"
+
+
+def test_detect_mode_matches_board_columns():
+    """detect_mode 的判定与看板 classify 对齐（单测，不起服务）。"""
+    import dispatch_prompt
+    assert dispatch_prompt.detect_mode(None) == "claim"
+    assert dispatch_prompt.detect_mode({}) == "claim"
+    assert dispatch_prompt.detect_mode({"state": "assigned",
+                                        "result_status": "done"}) == "merge"
+    # 已经 close 的不算待合并（合完的卡再喊主控合并就是空转）
+    assert dispatch_prompt.detect_mode({"state": "done",
+                                        "result_status": "done"}) == "claim"
+    assert dispatch_prompt.detect_mode({"state": "closed",
+                                        "result_status": "done"}) == "claim"
+    assert dispatch_prompt.detect_mode({"state": "assigned",
+                                        "result_status": "failed"}) == "abnormal"
+    assert dispatch_prompt.detect_mode({"state": "blocked"}) == "abnormal"
+    assert dispatch_prompt.detect_mode({"state": "running", "stale": True}) == "abnormal"
+
+
 def test_dispatch_route_never_shells_out():
     """接口必须是进程内渲染：一旦 subprocess 调 hive.py，git fetch 会拖死 HTTP 线程。"""
     src = SERVE_PY.read_text(encoding="utf-8")
@@ -281,6 +407,18 @@ def test_app_js_calls_dispatch_prompt_api():
     assert "api/dispatch-prompt?task=" in body
     assert "/api/task" not in body
     assert "writeClipboard" in body
+
+
+def test_app_js_merge_button_for_merging_cards():
+    """待合并卡的按钮文案是「复制合并指令」，复制提示按 mode 区分收件人。"""
+    card = js_function("cardInner")
+    assert "复制合并指令" in card
+    assert "col === 'merging'" in card
+    drawer = js_function("drawerHTML")
+    assert "复制合并指令" in drawer
+    copy = js_function("copyDispatch")
+    assert "body.mode === 'merge'" in copy
+    assert "主控 agent" in copy
 
 
 def test_app_js_renders_stage_badge_and_dispatched_to():

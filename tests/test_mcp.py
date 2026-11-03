@@ -26,6 +26,7 @@ EXPECTED_TOOLS = {
     "hive_claim", "hive_submit", "hive_block", "hive_unblock",
     "hive_abort", "hive_extend_lease",
     "hive_progress", "hive_result", "hive_stats", "hive_doctor",
+    "hive_chat_post", "hive_chat_read",
 }
 
 

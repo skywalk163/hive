@@ -91,6 +91,11 @@ except ImportError:  # pragma: no cover
 
 DEFAULT_CLUSTER_ID = "hive"
 EVENT_LIMIT = 500
+# 聊天（跨机留言）在内存里保留多少条；磁盘 chat.jsonl 只追加不删，
+# 进程启动时读回最后 CHAT_LIMIT 条。留言是低频的人类/agent 文本，2000 条够回溯很久。
+CHAT_LIMIT = 2000
+CHAT_MAX_TEXT = 8000
+CHAT_SCOPE_RE = re.compile(r"^(hall|task:T-\d{3,6}|agent:[A-Za-z0-9._-]{1,64})$")
 MAX_BODY = 2 * 1024 * 1024
 DEFAULT_STATE = Path.home() / ".hive" / "cluster"
 DEFAULT_LEASE_GRACE = 120.0
@@ -139,6 +144,22 @@ def _epoch(value) -> float:
 def _log(msg: str) -> None:
     print(f"[hive-cluster {datetime.now():%H:%M:%S}] {msg}",
           file=sys.stderr, flush=True)
+
+
+def _chat_id() -> str:
+    """消息 id 必须全网唯一：节点 + 微秒 + 随机后缀，重复投递靠它去重。"""
+    return "%s-%d-%s" % (socket.gethostname().split(".")[0], int(_now() * 1e6),
+                         uuid.uuid4().hex[:6])
+
+
+def _norm_scope(value) -> str:
+    """频道：hall（大厅） / task:T-0231（某张卡的讨论） / agent:fb88-dsh（私信）。
+
+    不合法的频道不报错，统一落到 hall —— 留言是给人用的，别让人因为
+    写错一个冒号就发不出去。
+    """
+    text = str(value or "").strip()
+    return text if CHAT_SCOPE_RE.match(text) else "hall"
 
 
 def _read_json(path: Path, default=None):
@@ -993,6 +1014,9 @@ class Cluster:
         self.event_seq = 0
         self.progress: dict[str, dict] = {}
         self.leases: dict[str, dict] = {}
+        self.chat: deque = deque(maxlen=CHAT_LIMIT)
+        self._chat_ids: set[str] = set()
+        self._chat_last_epoch = 0.0
         self.generation = 0
         self.updated_at = _iso()
 
@@ -1010,6 +1034,7 @@ class Cluster:
         self.advertise_host = config.advertise or (
             "" if config.bind_host in ("0.0.0.0", "", "::") else config.bind_host)
         self._load_state()
+        self._load_chat()
         self._put_self_node()
 
     # -- 生命周期 ---------------------------------------------------------- #
@@ -1085,7 +1110,8 @@ class Cluster:
 
         for target, name in ((self._loop_heartbeat, "hive-cluster-heartbeat"),
                              (self._loop_maintenance, "hive-cluster-maintenance"),
-                             (self._loop_discovery, "hive-cluster-discovery")):
+                             (self._loop_discovery, "hive-cluster-discovery"),
+                             (self._loop_chat_sync, "hive-cluster-chat")):
             t = threading.Thread(target=target, name=name, daemon=True)
             t.start()
             self._threads.append(t)
@@ -1542,6 +1568,204 @@ class Cluster:
         self._trim_event_ids_locked()
         self._mark_dirty_locked()
         return True
+
+    # -- 聊天 / 跨机留言 --------------------------------------------------- #
+    #
+    # 为什么不用 git 送留言：worker 的 worktree、MCP 的独占 clone 每轮都会
+    # `reset --hard origin/main`，写在仓里的留言随时被冲掉；而 `git push`
+    # 一分钟只能走几次，聊天要的是秒级。所以留言走集群：内存列表 + 本地
+    # chat.jsonl 追加日志（每个节点各自一份，天然分片、不会冲突），
+    # follower 每 2 秒向主节点增量拉一次（leader 是唯一的写入汇聚点）。
+    def _chat_path(self) -> Path:
+        return Path(self.config.state_dir) / "chat.jsonl"
+
+    def _load_chat(self) -> None:
+        path = self._chat_path()
+        if not path.exists():
+            return
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            _log(f"chat: 读取 {path} 失败（忽略）: {exc}")
+            return
+        for line in lines[-CHAT_LIMIT:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(msg, dict) or not msg.get("id"):
+                continue
+            mid = str(msg["id"])
+            if mid in self._chat_ids:
+                continue
+            self.chat.append(msg)
+            self._chat_ids.add(mid)
+            self._chat_last_epoch = max(self._chat_last_epoch,
+                                        float(msg.get("epoch") or 0.0))
+
+    def _chat_append_locked(self, msg: dict) -> bool:
+        """落一条消息：内存 + 磁盘追加。同 id 视为重复（多节点回传时常见）。"""
+        mid = str(msg.get("id") or "")
+        if not mid or mid in self._chat_ids:
+            return False
+        item = {
+            "id": mid,
+            "ts": str(msg.get("ts") or _iso()),
+            "epoch": float(msg.get("epoch") or _now()),
+            "from": str(msg.get("from") or "")[:80],
+            "node": str(msg.get("node") or self.node_id),
+            "node_name": str(msg.get("node_name") or self.config.name),
+            "scope": _norm_scope(msg.get("scope")),
+            "kind": str(msg.get("kind") or "note"),
+            "text": str(msg.get("text") or "")[:CHAT_MAX_TEXT],
+            "reply_to": str(msg.get("reply_to") or ""),
+        }
+        self.chat.append(item)
+        self._chat_ids.add(mid)
+        if len(self._chat_ids) > CHAT_LIMIT * 2:
+            self._chat_ids = {str(m.get("id")) for m in self.chat}
+        self._chat_last_epoch = max(self._chat_last_epoch, item["epoch"])
+        try:
+            with self._chat_path().open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            _log(f"chat: 追加写盘失败: {exc}")
+        self._mark_dirty_locked()
+        return True
+
+    def chat_meta(self) -> dict:
+        with self.lock:
+            return {"last_epoch": self._chat_last_epoch, "count": len(self.chat)}
+
+    def chat_list(self, since: float = 0.0, scope: str = "",
+                  limit: int = 200) -> list[dict]:
+        scopes = {s.strip() for s in (scope or "").split(",") if s.strip()}
+        with self.lock:
+            items = [m for m in self.chat
+                     if float(m.get("epoch") or 0) > since
+                     and (not scopes or str(m.get("scope")) in scopes)]
+        items.sort(key=lambda m: (float(m.get("epoch") or 0), str(m.get("id"))))
+        if limit > 0:
+            items = items[-limit:]
+        return copy.deepcopy(items)
+
+    def handle_chat_post(self, body: dict) -> tuple[int, dict]:
+        """发一条留言。follower 转发给主节点（保证全网同一份日志），
+        主节点不可达时本地留存——本地看板照样看得见，等它当上主节点时再服务别人。"""
+        if not isinstance(body, dict):
+            return 400, {"ok": False, "error": "请求体必须是对象"}
+        text = str(body.get("text") or "").strip()
+        if not text:
+            return 400, {"ok": False, "error": "text 不能为空"}
+        if len(text) > CHAT_MAX_TEXT:
+            return 400, {"ok": False,
+                         "error": f"text 太长（{len(text)} > {CHAT_MAX_TEXT}）"}
+        with self.lock:
+            role, leader_url = self.role, str(self.leader_url or "")
+        # 复制模式：别的节点把自己写的、主节点还没有的留言原样送过来，
+        # 保留原 id / 时间戳（按 id 去重，重复投递无害）。
+        if body.get("replicate") and body.get("id"):
+            msg = {
+                "id": str(body["id"]),
+                "ts": str(body.get("ts") or _iso()),
+                "epoch": float(body.get("epoch") or _now()),
+                "from": str(body.get("from") or "")[:80],
+                "node": str(body.get("node") or ""),
+                "node_name": str(body.get("node_name") or ""),
+                "scope": _norm_scope(body.get("scope")),
+                "kind": str(body.get("kind") or "note"),
+                "text": text,
+                "reply_to": str(body.get("reply_to") or ""),
+            }
+            with self.lock:
+                created = self._chat_append_locked(msg)
+                if created:
+                    self._persist()
+            return 200, {"ok": True, "message": msg, "replicated": created}
+        if role != "leader" and leader_url and not body.get("forwarded"):
+            fwd = dict(body)
+            fwd["forwarded"] = True
+            # 记下真正的发起方：主节点只是代写，不该把留言算到自己头上
+            fwd["origin_node"] = self.node_id
+            fwd["origin_name"] = self.config.name
+            try:
+                code, resp = http_json(
+                    leader_url.rstrip("/") + "/api/cluster/chat", "POST", fwd,
+                    2.0, self.config.token)
+            except Exception:  # noqa: BLE001  主节点刚挂：落到本地
+                code, resp = 0, None
+            if code == 200 and isinstance(resp, dict) and resp.get("message"):
+                with self.lock:
+                    self._chat_append_locked(resp["message"])
+                return 200, {"ok": True, "message": resp["message"],
+                             "forwarded": True}
+        msg = {
+            "id": _chat_id(),
+            "ts": _iso(),
+            "epoch": _now(),
+            "from": str(body.get("from") or "").strip()[:80],
+            "node": str(body.get("origin_node") or self.node_id),
+            "node_name": str(body.get("origin_name") or self.config.name),
+            "scope": _norm_scope(body.get("scope")),
+            "kind": str(body.get("kind") or "note"),
+            "text": text,
+            "reply_to": str(body.get("reply_to") or ""),
+        }
+        with self.lock:
+            self._chat_append_locked(msg)
+            self._persist()
+        return 200, {"ok": True, "message": msg, "forwarded": False}
+
+    def _chat_pull_once(self) -> None:
+        with self.lock:
+            role = self.role
+            base = str(self.leader_url or "")
+            since = self._chat_last_epoch
+        if role == "leader" or not base:
+            return
+        url = "%s/api/cluster/chat?since=%.6f&limit=%d" % (
+            base.rstrip("/"), since, CHAT_LIMIT)
+        code, body = http_json(url, "GET", None, 3.0, self.config.token)
+        if code != 200 or not isinstance(body, dict):
+            return
+        msgs = body.get("messages") or []
+        if not isinstance(msgs, list):
+            return
+        with self.lock:
+            n = 0
+            for m in msgs:
+                if isinstance(m, dict) and self._chat_append_locked(m):
+                    n += 1
+            if n:
+                self._persist()
+        if n:
+            _log(f"chat: 从主节点同步 {n} 条")
+        # 反方向：主节点没有、我这儿有的（通常是我这边短暂失去主节点时发的）。
+        # 送过去让全网都能看到，不丢消息。
+        try:
+            leader_last = float(body.get("last_epoch") or 0.0)
+        except (TypeError, ValueError):
+            leader_last = 0.0
+        with self.lock:
+            orphans = [m for m in self.chat
+                       if float(m.get("epoch") or 0) > leader_last
+                       and str(m.get("node") or "") == self.node_id][-20:]
+        for m in orphans:
+            payload = dict(m)
+            payload["replicate"] = True
+            http_json(base.rstrip("/") + "/api/cluster/chat", "POST", payload,
+                      3.0, self.config.token)
+
+    def _loop_chat_sync(self) -> None:
+        """留言不要等 git fetch：每 2 秒向主节点要一次增量。"""
+        while not self._stop.wait(2.0):
+            try:
+                self._chat_pull_once()
+            except Exception as exc:  # noqa: BLE001  网络抖一下不算故障
+                _log(f"chat: 同步失败（忽略）: {exc}")
 
     # -- 进度 / 租约 -------------------------------------------------------- #
     @staticmethod
@@ -2886,6 +3110,23 @@ def build_handler(cluster: Cluster):
                     events = [e for e in events if int(e.get("seq") or 0) > since]
                 self._send(200, {"ok": True, "events": events, "generation": snap["generation"]})
                 return
+            if path == "/api/cluster/chat":
+                q = query
+                try:
+                    since = float((q.get("since") or ["0"])[0] or 0)
+                except (TypeError, ValueError):
+                    since = 0.0
+                try:
+                    limit = int((q.get("limit") or ["200"])[0] or 200)
+                except (TypeError, ValueError):
+                    limit = 200
+                scope = (q.get("scope") or [""])[0]
+                msgs = cluster.chat_list(since=since, scope=scope, limit=limit)
+                meta = cluster.chat_meta()
+                self._send(200, {"ok": True, "messages": msgs,
+                                 "last_epoch": meta["last_epoch"],
+                                 "total": meta["count"], "count": len(msgs)})
+                return
             if path == "/api/cluster/wait":
                 self._send(200, {"ok": True, "state": cluster.handle_wait(query)})
                 return
@@ -2960,6 +3201,8 @@ def build_handler(cluster: Cluster):
                     code, payload = cluster.handle_release(body)
                 elif path == "/api/cluster/event":
                     code, payload = cluster.handle_event(body)
+                elif path == "/api/cluster/chat":
+                    code, payload = cluster.handle_chat_post(body)
                 elif path == "/api/cluster/op":
                     code, payload = cluster.handle_op(body)
                 elif path == "/api/cluster/op/commit":

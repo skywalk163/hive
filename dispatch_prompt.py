@@ -41,6 +41,17 @@ MARKDOWN = "markdown"
 JSON = "json"
 FORMATS = (MARKDOWN, JSON)
 
+# ---- 渲染模式（2026-11-03，看板「复制派发指令」按钮状态感知） ----
+#
+# 同一个按钮在不同状态的卡上复制出的文本不该是同一段话：
+#   * claim    = 发给干活 agent 的领取指令（原有行为，向后兼容的默认值）
+#   * merge    = 发给主控 agent 的合并指令（卡已完成待 land，再喊人领取就闹笑话了）
+#   * abnormal = 领取指令 + 异常溯源块（重派前让新 agent 知道上一个 agent 栽在哪）
+CLAIM = "claim"
+MERGE = "merge"
+ABNORMAL = "abnormal"
+MODES = (CLAIM, MERGE, ABNORMAL)
+
 #: 单行上限。超过就换缩进子项，不硬挤。
 LINE_LIMIT = 200
 
@@ -338,3 +349,175 @@ def render_dispatch_prompt(card: dict, *, agent: str | None = None,
     if output_format == MARKDOWN:
         return payload["text"]
     return json.dumps(payload, ensure_ascii=False)
+
+
+# --------------------------------------------------------------------------- #
+# 状态感知渲染：merge（给主控）/ abnormal（带溯源）
+# --------------------------------------------------------------------------- #
+
+
+def detect_mode(record) -> str:
+    """按状态快照里的运行时记录判定渲染模式，判定口径与看板 classify 对齐。
+
+    record 来自 `hive status --json` 的单卡记录；没有记录（None / 空对象 /
+    字段缺失）一律回 claim —— 和旧行为完全一致，快照坏了不影响复制按钮。
+
+    * merge    = result_status=done 且还没 close（看板「待合并」列）
+    * abnormal = result_status=failed / state=blocked / 租约过期（看板「异常」列）
+    * claim    = 其余所有状态（待领取 / 进行中 / 已关闭…）
+    """
+    if not isinstance(record, dict):
+        return CLAIM
+    state = str(record.get("state") or "")
+    result_status = str(record.get("result_status") or "")
+    if result_status == "done" and state not in ("done", "closed"):
+        return MERGE
+    if result_status == "failed" or state == "blocked" or record.get("stale"):
+        return ABNORMAL
+    return CLAIM
+
+
+def _pick(record, *names: str) -> str:
+    """从记录里取第一个非空字符串字段（claim_agent → owner → dispatched_to 这类回退）。"""
+    for n in names:
+        s = _clean((record or {}).get(n))
+        if s:
+            return s
+    return ""
+
+
+def _truncate(text, limit: int = SUMMARY_CHARS) -> str:
+    """按字符截断（与 extract_task_summary 同口径），不切坏 UTF-8。"""
+    s = _clean(text)
+    if len(s) <= limit:
+        return s
+    if limit <= 1:
+        return "…"
+    return s[: limit - 1].rstrip() + "…"
+
+
+def _result_summary(record) -> str:
+    """结果摘要：result_summary 优先，summary 兜底；都按字符截断。"""
+    return _truncate((record or {}).get("result_summary")
+                     or (record or {}).get("summary"))
+
+
+def render_merge_payload(card: dict, record: dict) -> dict:
+    """渲染「给主控 agent 的合并指令」载荷（text 与 markdown 输出逐字一致）。
+
+    收件人不是干活 agent 而是负责收尾的主控：所以正文不再讲领取契约，
+    而是给出结果分支、head、执行 agent 这些 land 需要的溯源信息。
+    """
+    card = card if isinstance(card, dict) else {}
+    record = record if isinstance(record, dict) else {}
+    task_id = _clean(card.get("id"))
+    agent = _pick(record, "claim_agent", "owner", "dispatched_to")
+    head = _clean(record.get("head"))
+    payload = {
+        "mode": MERGE,
+        "task_id": task_id,
+        "agent": agent or None,
+        "summary": extract_task_summary(card, ""),
+        "repo": _clean(card.get("repo") or record.get("repo")),
+        "branch": f"res/{task_id}",
+        "head": head or None,
+        "result_summary": _result_summary(record),
+        "land_cmd": f"hive land {task_id} --apply",
+        "text": _render_merge(task_id, card, record),
+    }
+    return payload
+
+
+def _render_merge(task_id: str, card: dict, record: dict) -> str:
+    agent = _pick(record, "claim_agent", "owner", "dispatched_to")
+    head = _clean(record.get("head"))
+    repo = _clean(card.get("repo") or record.get("repo"))
+    lines = [
+        f"任务 {task_id} 已完成，请合并（land）。",
+        f"任务摘要：{extract_task_summary(card, '')}",
+    ]
+    if agent:
+        lines.append(f"执行 agent：{agent}")
+    if repo:
+        lines.append(f"代码仓：{repo}")
+    branch = f"res/{task_id}"
+    lines.append(f"结果分支：{branch}" + (f"（head {head[:10]}）" if head else ""))
+    rs = _result_summary(record)
+    if rs:
+        lines.append(f"结果摘要：{rs}")
+    lines += [
+        f"合并方式：在协调仓运行 CLI 命令 hive land {task_id} --apply"
+        "（合入代码仓 main 并自动关闭任务卡）",
+        "冲突处理：先解决冲突再重跑同一命令；解决不了就把冲突现场写进该任务的留言线程。",
+    ]
+    return "\n".join(lines)
+
+
+def render_merge_prompt(card: dict, record: dict, *,
+                        output_format: str = MARKDOWN) -> str:
+    """渲染合并指令：markdown 返正文，json 返载荷的 JSON 字符串。"""
+    if output_format not in FORMATS:
+        raise ValueError(
+            f"不支持的 output_format: {output_format!r}（可选：{'/'.join(FORMATS)}）"
+        )
+    payload = render_merge_payload(card, record)
+    if output_format == MARKDOWN:
+        return payload["text"]
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _abnormal_block(record: dict) -> list[str]:
+    """异常溯源块：谁领的、什么时候、栽在哪 —— 重派前先让新 agent 知道前情。"""
+    record = record if isinstance(record, dict) else {}
+    agent = _pick(record, "claim_agent", "owner", "dispatched_to")
+    claimed_at = _clean(record.get("claimed_at"))
+    finished_at = _clean(record.get("finished_at"))
+    result_status = _clean(record.get("result_status"))
+    if not result_status and record.get("stale"):
+        result_status = "租约过期"
+    if not result_status:
+        result_status = "异常"
+    reason = _result_summary(record)
+    lines = ["异常信息（供溯源）："]
+    if agent:
+        lines.append(f"- 此前领取 agent：{agent}")
+    if claimed_at:
+        lines.append(f"- 领取时间：{claimed_at}")
+    if finished_at:
+        lines.append(f"- 异常时间：{finished_at}")
+    lines.append(f"- 异常状态：{result_status}")
+    if reason:
+        lines.append(f"- 异常摘要：{reason}")
+    return lines
+
+
+def render_status_prompt(card: dict, record, *, agent: str | None = None,
+                         output_format: str = MARKDOWN, body: str = "") -> str:
+    """按运行时状态选渲染模式，是看板「复制」按钮的总入口。
+
+    * merge    → render_merge_prompt（发给主控）
+    * abnormal → 派发指令 + 异常溯源块（重派时新 agent 知道前情）
+    * claim    → render_dispatch_prompt（原有行为，逐字不变）
+    """
+    mode = detect_mode(record)
+    if mode == MERGE:
+        return render_merge_prompt(card, record, output_format=output_format)
+    if mode == ABNORMAL:
+        text = render_dispatch_prompt(card, agent=agent,
+                                      output_format=MARKDOWN, body=body)
+        text += "\n" + "\n".join(_abnormal_block(record))
+        if output_format == JSON:
+            payload = render_dispatch_payload(card, agent=agent, body=body)
+            payload["mode"] = ABNORMAL
+            payload["abnormal"] = {
+                "agent": _pick(record, "claim_agent", "owner", "dispatched_to") or None,
+                "claimed_at": _clean((record or {}).get("claimed_at")) or None,
+                "finished_at": _clean((record or {}).get("finished_at")) or None,
+                "result_status": _clean((record or {}).get("result_status")) or None,
+                "summary": _result_summary(record),
+            }
+            payload["text"] = text
+            return json.dumps(payload, ensure_ascii=False)
+        return text
+    return render_dispatch_prompt(card, agent=agent,
+                                  output_format=output_format, body=body)

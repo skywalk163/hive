@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -19,7 +20,7 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 BASE_DIR = Path(__file__).resolve().parent
 HIVE_ROOT = BASE_DIR.parent  # dashboard 的上一级就是 hive 仓库根
@@ -85,6 +86,15 @@ API_TASK = "/api/task"
 API_PUSH = "/api/push"
 API_CLUSTER = "/api/cluster"
 API_DISPATCH_PROMPT = "/api/dispatch-prompt"
+API_CHAT = "/api/chat"
+
+# ---- 看板聊天框（跨机留言）----
+# 真身住在集群（每个节点 ~/.hive/cluster/chat.jsonl + 2 秒增量同步），
+# 看板只是它的一个前端。集群没跑时降级到 hive/chat/chat.jsonl，
+# 保证「本机单人也能留言」，等集群起来不影响已有留言。
+CHAT_SCOPE_RE = re.compile(r"^(hall|task:T-\d{3,6}|agent:[A-Za-z0-9._-]{1,64})$")
+CHAT_MAX_TEXT = 8000
+CHAT_KINDS = ("note", "question", "answer")
 
 # 任务卡目录：默认就是协调仓根的 tasks/；测试可以替换这个模块级变量指向临时目录。
 TASKS_DIR = HIVE_ROOT / "tasks"
@@ -302,6 +312,82 @@ def cluster_progress_map(state):
     return out
 
 
+# ---- 聊天（跨机留言）桥接 ---------------------------------------------- #
+def chat_local_path():
+    """集群不在时的本地留言文件（每台机器各一份，不会被 git 同步覆盖）。"""
+    raw = (os.environ.get("HIVE_CHAT_LOCAL") or "").strip()
+    return Path(raw).expanduser() if raw else (
+        Path.home() / ".hive" / "chat" / "chat.jsonl")
+
+
+def _cluster_chat_http(method, query=None, payload=None, timeout=2.0):
+    """问本机集群要留言。/ 发留言。集群不在返回 (False, None)，由调用方降级。"""
+    import urllib.error as _urlerror
+    from urllib import request as _request
+    url = "http://127.0.0.1:%d/api/cluster/chat" % cluster_port()
+    if query:
+        url += "?" + urlencode(query)
+    headers = {"Accept": "application/json"}
+    token = cluster_token()
+    if token:
+        headers["X-Hive-Cluster-Token"] = token
+    data = None
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json; charset=utf-8"
+    try:
+        opener = _request.build_opener(_request.ProxyHandler({}))
+        req = _request.Request(url, data=data, headers=headers, method=method)
+        with opener.open(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return True, body if isinstance(body, dict) else None
+    except (_urlerror.URLError, OSError, ValueError):
+        return False, None
+
+
+def chat_local_read(since=0.0, scope="", limit=200):
+    path = chat_local_path()
+    scopes = {s.strip() for s in (scope or "").split(",") if s.strip()}
+    items = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(msg, dict) or not msg.get("id"):
+                    continue
+                if float(msg.get("epoch") or 0) <= since:
+                    continue
+                if scopes and str(msg.get("scope")) not in scopes:
+                    continue
+                items.append(msg)
+    except OSError:
+        return []
+    items.sort(key=lambda m: (float(m.get("epoch") or 0), str(m.get("id"))))
+    return items[-limit:] if limit > 0 else items
+
+
+def chat_local_append(msg):
+    path = chat_local_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        return True
+    except OSError:
+        return False
+
+
+def norm_chat_scope(value):
+    text = str(value or "").strip()
+    return text if CHAT_SCOPE_RE.match(text) else "hall"
+
+
 def write_status_atomic(status_path, text):
     """原子替换写状态文件（T-0191 §4）。
 
@@ -357,6 +443,27 @@ def render_dispatch(card, agent, fmt, body):
         card, agent=agent or None, output_format=fmt, body=body)
 
 
+def load_status_record(status_path, tid):
+    """从状态快照里找一张卡的运行时记录；读不到就返回 None。
+
+    快照是 `hive status --json` 落的盘（refresh_loop 维护），这里只读不写。
+    任何读盘/解析失败都降级成 None —— 复制按钮退回纯卡面渲染，不该因为
+    快照坏了就 500。状态根节点兼容两种形态：裸数组 / {tasks: [...]}。
+    """
+    try:
+        raw = Path(status_path).read_text(encoding="utf-8-sig")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    tasks = data.get("tasks") if isinstance(data, dict) else data
+    if not isinstance(tasks, list):
+        return None
+    for rec in tasks:
+        if isinstance(rec, dict) and rec.get("id") == tid:
+            return rec
+    return None
+
+
 def build_handler(status_path, write_auth="off"):
     """用闭包把状态文件路径注入请求处理器（避免全局变量）。
 
@@ -409,6 +516,9 @@ def build_handler(status_path, write_auth="off"):
                 return
             if path == API_DISPATCH_PROMPT:
                 self.serve_dispatch_prompt()
+                return
+            if path == API_CHAT:
+                self.serve_chat_get()
                 return
             entry = STATIC_FILES.get(path)
             if entry is None:
@@ -466,6 +576,9 @@ def build_handler(status_path, write_auth="off"):
                 return
             if path == API_PUSH:
                 self.serve_push()
+                return
+            if path == API_CHAT:
+                self.serve_chat_post()
                 return
             self._send_json(404, {"error": "未找到资源: %s" % path})
 
@@ -702,11 +815,19 @@ def build_handler(status_path, write_auth="off"):
                 return
             try:
                 card, body = load_card_file(card_path)
-                text = render_dispatch(card, agent, fmt, body)
+                # 状态感知：待合并的卡渲染「给主控的合并指令」，异常卡附带溯源块，
+                # 其余状态保持原派发指令（逐字不变）。快照读不到就当没记录。
+                import dispatch_prompt
+                record = load_status_record(status_path, tid)
+                mode = dispatch_prompt.detect_mode(record)
+                text = dispatch_prompt.render_status_prompt(
+                    card, record, agent=agent or None,
+                    output_format=fmt, body=body)
             except Exception as exc:  # noqa: BLE001 —— 卡面坏掉也是 400，不是 500 裸栈
                 self._send_json(400, {"error": "渲染失败: %s" % exc})
                 return
-            self._send_json(200, {"task": tid, "format": fmt, "text": text})
+            self._send_json(200, {"task": tid, "format": fmt,
+                                  "mode": mode, "text": text})
 
         # ---- /api/status：每次请求都重新读盘 ----
         def serve_status(self):
@@ -860,6 +981,95 @@ def build_handler(status_path, write_auth="off"):
             data[tid] = cur
             save_pushed(data)
             self._send_json(200, {"ok": True, "pushed": cur})
+
+        # ---- /api/chat：跨机留言（读免鉴权，写要 token，与 /api/task 同口径）----
+        def serve_chat_get(self):
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                since = float((q.get("since") or ["0"])[0] or 0)
+            except (TypeError, ValueError):
+                since = 0.0
+            try:
+                limit = int((q.get("limit") or ["200"])[0] or 200)
+            except (TypeError, ValueError):
+                limit = 200
+            limit = max(1, min(limit, 500))
+            scope = (q.get("scope") or [""])[0]
+            ok, body = _cluster_chat_http(
+                "GET", {"since": "%.6f" % since, "limit": str(limit), "scope": scope})
+            if ok and isinstance(body, dict) and body.get("ok"):
+                self._send_json(200, {
+                    "ok": True, "source": "cluster",
+                    "messages": body.get("messages") or [],
+                    "last_epoch": body.get("last_epoch") or 0.0,
+                })
+                return
+            # 集群没跑：退回本地文件。看板因此永远有得看、有得发。
+            msgs = chat_local_read(since=since, scope=scope, limit=limit)
+            self._send_json(200, {
+                "ok": True, "source": "local", "offline": True,
+                "messages": msgs,
+                "last_epoch": max([float(m.get("epoch") or 0) for m in msgs] or [0.0]),
+            })
+
+        def serve_chat_post(self):
+            length = self._read_length()
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": "请求体不是合法 JSON: %s" % exc})
+                return
+            if not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "error": "顶层必须是对象"})
+                return
+            who = self.require_write_auth()
+            if who is None:
+                return
+            text = str(body.get("text") or "").strip()
+            if not text:
+                self._send_json(400, {"ok": False, "error": "text 不能为空"})
+                return
+            scope = norm_chat_scope(body.get("scope"))
+            kind = str(body.get("kind") or "note")
+            if kind not in CHAT_KINDS:
+                kind = "note"
+            sender = str(body.get("from") or "").strip()
+            if not sender:
+                agent = str((who or {}).get("agent") or "").strip()
+                sender = ("human:%s" % agent) if agent and agent != "loopback" else "human"
+            payload = {
+                "text": text[:CHAT_MAX_TEXT],
+                "from": sender,
+                "scope": scope,
+                "kind": kind,
+                "reply_to": str(body.get("reply_to") or ""),
+            }
+            ok, resp = _cluster_chat_http("POST", None, payload)
+            if ok and isinstance(resp, dict) and resp.get("ok") and resp.get("message"):
+                append_audit({"action": "chat.post", "ok": True, "agent": sender,
+                              "source": self.client_address[0],
+                              "detail": "%s %s" % (scope, payload["text"][:60])})
+                self._send_json(200, {"ok": True, "source": "cluster",
+                                      "message": resp["message"]})
+                return
+            msg = {
+                "id": "%s-%d" % (socket.gethostname().split(".")[0], time.time_ns()),
+                "ts": _iso_now(),
+                "epoch": time.time(),
+                "from": sender,
+                "node": "dashboard-local",
+                "node_name": "local",
+                "scope": scope,
+                "kind": kind,
+                "text": payload["text"],
+                "reply_to": payload["reply_to"],
+            }
+            if not chat_local_append(msg):
+                self._send_json(500, {"ok": False, "error": "本地留言文件写不进去"})
+                return
+            self._send_json(200, {"ok": True, "source": "local", "offline": True,
+                                  "message": msg})
 
             # ---- /api/task：看板按钮 -> 调用 hive CLI 真正执行任务操作 ----
         def serve_task_post(self):

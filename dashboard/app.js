@@ -278,6 +278,18 @@
     el.theme = document.getElementById('theme-toggle');
     el.overlay = document.getElementById('overlay');
     el.drawer = document.getElementById('drawer');
+    // 留言面板
+    el.chatFab = document.getElementById('chat-fab');
+    el.chatBadge = document.getElementById('chat-badge');
+    el.chatPanel = document.getElementById('chat-panel');
+    el.chatClose = document.getElementById('chat-close');
+    el.chatScope = document.getElementById('chat-scope');
+    el.chatKind = document.getElementById('chat-kind');
+    el.chatFeed = document.getElementById('chat-feed');
+    el.chatForm = document.getElementById('chat-form');
+    el.chatInput = document.getElementById('chat-input');
+    el.chatSend = document.getElementById('chat-send');
+    el.chatSrc = document.getElementById('chat-src');
   }
 
   function buildColumns() {
@@ -499,10 +511,20 @@
     });
     h += '</div>';
 
-    // 复制派发指令：每张卡都有（含已完成/已关闭），只复制文本，不领卡不改状态。
+    // 复制指令：每张卡都有（含已完成/已关闭），只复制文本，不领卡不改状态。
+    // 待合并的卡复制的是「给主控 agent 的合并指令」（让它跑 hive land），
+    // 其余状态复制派发指令 —— 文案跟着语义走，别再让主控收到一句「请领取任务」。
+    var chatN = chatCountFor(t.id);
+    var isMerging = col === 'merging';
     h += '<div class="card-copy">' +
       '<button type="button" class="act act-copy" data-copy="' + esc(t.id) +
-      '" title="把这张卡的派发指令复制到剪贴板，粘到 agent 对话框即可">复制派发指令</button>' +
+      '" title="' + (isMerging
+        ? '把合并指令复制到剪贴板，粘给主控 agent 执行 hive land 合并'
+        : '把这张卡的派发指令复制到剪贴板，粘到 agent 对话框即可') + '">' +
+      (isMerging ? '复制合并指令' : '复制派发指令') + '</button>' +
+      '<button type="button" class="act act-chat" data-chat="' + esc(t.id) +
+      '" title="打开这张卡的留言线程：留提示 / 看 agent 的疑问">讨论' +
+      (chatN ? '<span class="n">' + chatN + '</span>' : '') + '</button>' +
       '</div>';
 
     // 操作按钮。
@@ -596,7 +618,13 @@
       .then(function (body) {
         return writeClipboard(body.text || '').then(function () {
           flashCopied(btn);
-          flash('已复制 ' + tid + ' 的派发指令，切到 agent 粘贴即可');
+          // mode 由服务端按卡的状态定：merge=给主控的合并指令，abnormal=附带溯源块
+          var msg = body.mode === 'merge'
+            ? '已复制 ' + tid + ' 的合并指令，切到主控 agent 粘贴即可'
+            : (body.mode === 'abnormal'
+              ? '已复制 ' + tid + ' 的派发指令（含异常溯源信息），切到 agent 粘贴即可'
+              : '已复制 ' + tid + ' 的派发指令，切到 agent 粘贴即可');
+          flash(msg);
         });
       })
       .catch(function (e) {
@@ -618,6 +646,14 @@
       e.preventDefault();
       e.stopImmediatePropagation();
       copyDispatch(btn.getAttribute('data-copy') || t.id, btn);
+    });
+    // 「讨论」同理：必须先于 openDrawer 拦下，否则点一下就变成打开详情
+    card.addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest('[data-chat]') : null;
+      if (!btn || !card.contains(btn)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      openChat('task:' + (btn.getAttribute('data-chat') || t.id));
     });
     card.addEventListener('click', function () { openDrawer(t.id); });
     card.addEventListener('keydown', function (e) {
@@ -854,6 +890,7 @@
     renderFilters();
     renderBanner();
     renderBoard();     // 早退分支（loading/error/empty）也要走，旧快照在这里静默隐藏
+    renderChatScopes(); // 任务/agent 列表变了，留言频道下拉跟着重算（内部按签名去抖）
 
     if (state.loading && !state.tasks.length) { showPanel('loading'); renderStats({}); return; }
     if (!state.tasks.length && state.error) { showPanel('error', state.error); renderStats({}); return; }
@@ -1187,8 +1224,20 @@
     h += '<div class="drawer-body">';
 
     h += '<div class="drawer-copy">' +
-      '<button type="button" class="act act-copy" data-copy="' + esc(t.id) + '">复制派发指令</button>' +
+      '<button type="button" class="act act-copy" data-copy="' + esc(t.id) + '">' +
+      (col === 'merging' ? '复制合并指令' : '复制派发指令') + '</button>' +
+      '<button type="button" class="act act-chat" data-chat="' + esc(t.id) + '">讨论' +
+      (chatCountFor(t.id) ? '<span class="n">' + chatCountFor(t.id) + '</span>' : '') +
+      '</button>' +
       '</div>';
+
+    // 这张卡的留言线程：人给 agent 的指点、agent 提出的疑问都在这儿
+    var tmsgs = chatMessagesFor('task:' + t.id);
+    if (tmsgs.length) {
+      h += '<section class="block"><h3>讨论（' + tmsgs.length + '）</h3>';
+      h += tmsgs.slice(-8).map(chatMsgHTML).join('');
+      h += '</section>';
+    }
 
     h += kvBlock('概览', [
       ['所在列', COL_TITLE[col]],
@@ -1245,13 +1294,20 @@
     return h;
   }
 
-  /** 抽屉里的「复制派发指令」：抽屉不套在卡片里，单独绑一次即可 */
+  /** 抽屉里的「复制派发指令」/「讨论」：抽屉不套在卡片里，单独绑一次即可 */
   function bindDrawerCopy() {
     var btn = el.drawer.querySelector('[data-copy]');
-    if (!btn) return;
-    btn.addEventListener('click', function () {
-      copyDispatch(btn.getAttribute('data-copy') || drawerId, btn);
-    });
+    if (btn) {
+      btn.addEventListener('click', function () {
+        copyDispatch(btn.getAttribute('data-copy') || drawerId, btn);
+      });
+    }
+    var chatBtn = el.drawer.querySelector('[data-chat]');
+    if (chatBtn) {
+      chatBtn.addEventListener('click', function () {
+        openChat('task:' + (chatBtn.getAttribute('data-chat') || drawerId));
+      });
+    }
   }
 
   function openDrawer(id) {
@@ -1262,23 +1318,30 @@
     el.drawer.innerHTML = drawerHTML(t);
     bindDrawerCopy();
     el.drawer.classList.add('open');
+    document.body.classList.add('drawer-open');   // 浮标让位，别压在详情上
     el.drawer.setAttribute('aria-hidden', 'false');
     el.overlay.classList.add('open');
     document.getElementById('drawer-close').addEventListener('click', closeDrawer);
     document.getElementById('drawer-close').focus();
   }
 
-  /** 抽屉开着时数据刷新了，就地更新内容（不打断阅读位置以外的状态） */
-  function refreshDrawer() {
+  /** 抽屉开着时数据刷新了，就地更新内容（不打断阅读位置以外的状态）
+   *
+   *  `force`：留言变化时用。平时怕把焦点弄丢会跳过重建（焦点常在关闭按钮上），
+   *  但讨论区必须跟着新留言更新，这时重建后把焦点放回关闭按钮即可。
+   */
+  function refreshDrawer(force) {
     var t = findTask(drawerId);
     if (!t) return;
-    // 焦点还在抽屉里（例如停留在关闭按钮上）时不要重建，免得把焦点弄丢
-    if (el.drawer.contains(document.activeElement)) return;
+    if (!force && el.drawer.contains(document.activeElement)) return;
     var scroll = el.drawer.querySelector('.drawer-body');
     var top = scroll ? scroll.scrollTop : 0;
+    var hadFocus = el.drawer.contains(document.activeElement);
     el.drawer.innerHTML = drawerHTML(t);
     bindDrawerCopy();
-    document.getElementById('drawer-close').addEventListener('click', closeDrawer);
+    var close = document.getElementById('drawer-close');
+    close.addEventListener('click', closeDrawer);
+    if (hadFocus) close.focus();
     var body = el.drawer.querySelector('.drawer-body');
     if (body) body.scrollTop = top;
   }
@@ -1287,6 +1350,7 @@
     if (!drawerId) return;
     drawerId = null;
     el.drawer.classList.remove('open');
+    document.body.classList.remove('drawer-open');
     el.drawer.setAttribute('aria-hidden', 'true');
     el.overlay.classList.remove('open');
     if (lastFocus && lastFocus.focus) lastFocus.focus();
@@ -1990,6 +2054,353 @@
     }, true);
   }
 
+  // ---------- 留言（跨机聊天） ----------
+  //
+  // 场景：机器 A 的 agent 对某张卡有疑问、或想指点机器 B 上另一个 agent 的活，
+  // 以前只能把文本贴到某个聊天窗口里再口口相传。现在统一走这里：
+  //   频道 = 大厅 / task:T-0231 / agent:<名字>
+  // 读取走 GET /api/chat（真身在集群，各机器 2 秒内同步）；写入要 token（与其它写操作同口径）。
+  var CHAT_MS = 6000;                    // 面板打开时的轮询间隔
+  var CHAT_LIMIT = 300;                  // 一次拉最近多少条
+  var STORE_CHAT_SEEN = 'hive.chat.lastSeen';
+  var STORE_CHAT_SCOPE = 'hive.chat.scope';
+  var CHAT_KIND_LABEL = { note: '说明', question: '提问', answer: '回答' };
+
+  var chat = {
+    open: false,
+    scope: 'hall',
+    messages: [],
+    source: '',
+    busy: false,
+    lastSeen: 0,
+    timer: null,
+    ticks: 0
+  };
+
+  function chatScopeLabel(scope) {
+    if (!scope || scope === 'hall') return '大厅';
+    if (scope.indexOf('task:') === 0) {
+      var tid = scope.slice(5);
+      var t = findTask(tid);
+      return tid + (t && t.title ? ' · ' + t.title : '');
+    }
+    if (scope.indexOf('agent:') === 0) return scope.slice(6) + '（私信）';
+    return scope;
+  }
+
+  function chatScopeShort(scope) {
+    if (!scope || scope === 'hall') return '大厅';
+    if (scope.indexOf('task:') === 0) return scope.slice(5);
+    if (scope.indexOf('agent:') === 0) return '@' + scope.slice(6);
+    return scope;
+  }
+
+  /** 下拉里的频道：大厅 → 智能体（私信）→ 任务卡讨论 */
+  function chatScopeOptions() {
+    var h = '<option value="hall">大厅（所有机器都看得到）</option>';
+    var agents = [];
+    if (state.system && state.system.agents) {
+      state.system.agents.forEach(function (a) {
+        if (a && a.name) agents.push(a.name);
+      });
+    }
+    state.tasks.forEach(function (t) { if (t.owner) agents.push(t.owner); });
+    agents = uniq(agents).sort();
+    if (agents.length) {
+      h += '<optgroup label="私信某个 agent">';
+      agents.forEach(function (n) {
+        h += '<option value="agent:' + esc(n) + '">' + esc(n) + '</option>';
+      });
+      h += '</optgroup>';
+    }
+    var tasks = state.tasks.slice(0).sort(function (a, b) {
+      return a.id < b.id ? 1 : -1;
+    });
+    if (tasks.length) {
+      h += '<optgroup label="某张卡的讨论">';
+      tasks.forEach(function (t) {
+        h += '<option value="task:' + esc(t.id) + '">' + esc(t.id) + ' · ' +
+             esc((t.title || '').slice(0, 28)) + '</option>';
+      });
+      h += '</optgroup>';
+    }
+    return h;
+  }
+
+  function renderChatScopes() {
+    var sel = el.chatScope;
+    if (!sel) return;
+    var html = chatScopeOptions();
+    if (sel.dataset.sig !== html) {
+      sel.innerHTML = html;
+      sel.dataset.sig = html;
+    }
+    // 选中的频道可能来自卡片点击（任务不在下拉里就临时补一个）
+    if (chat.scope && !sel.querySelector('option[value="' + chat.scope.replace(/"/g, '\\"') + '"]')) {
+      var extra = document.createElement('option');
+      extra.value = chat.scope;
+      extra.textContent = chat.scope;
+      sel.appendChild(extra);
+    }
+    sel.value = chat.scope;
+  }
+
+  function chatMessagesFor(scope) {
+    return chat.messages.filter(function (m) { return m.scope === scope; });
+  }
+
+  function chatCountFor(tid) {
+    var scope = 'task:' + tid;
+    var n = 0;
+    for (var i = 0; i < chat.messages.length; i++) {
+      if (chat.messages[i].scope === scope) n++;
+    }
+    return n;
+  }
+
+  function chatUnread() {
+    var n = 0;
+    for (var i = 0; i < chat.messages.length; i++) {
+      if (Number(chat.messages[i].epoch || 0) > chat.lastSeen) n++;
+    }
+    return n;
+  }
+
+  function renderChatBadge() {
+    if (!el.chatBadge) return;
+    var n = chatUnread();
+    if (n > 0 && !chat.open) {
+      el.chatBadge.textContent = n > 99 ? '99+' : String(n);
+      el.chatBadge.hidden = false;
+    } else {
+      el.chatBadge.hidden = true;
+    }
+  }
+
+  function chatMsgHTML(m) {
+    var kind = m.kind || 'note';
+    var mine = String(m.from || '').indexOf('human') === 0;
+    var cls = 'chat-msg' + (mine ? ' is-mine' : '') +
+              (kind === 'question' ? ' is-question' : '') +
+              (kind === 'answer' ? ' is-answer' : '');
+    var t = Number(m.epoch || 0) * 1000;
+    var h = '<div class="' + cls + '" data-mid="' + esc(m.id) + '">';
+    h += '<div class="chat-msg-meta">';
+    h += '<span class="chat-msg-from">' + esc(m.from || '匿名') + '</span>';
+    if (m.node_name) h += '<span class="chat-msg-node">@' + esc(m.node_name) + '</span>';
+    if (kind !== 'note') h += '<span class="chat-msg-kind">' + esc(CHAT_KIND_LABEL[kind] || kind) + '</span>';
+    h += '<span class="chat-msg-time">' + esc(relTime(t)) + '</span>';
+    h += '<button type="button" class="chat-msg-copy" data-chat-copy="' + esc(m.id) +
+         '" title="复制这段话，粘给任意 agent">复制</button>';
+    h += '</div>';
+    h += '<div class="chat-msg-text">' + esc(m.text || '') + '</div>';
+    if (chat.scope === 'hall' && m.scope !== 'hall') {
+      h += '<div class="chat-msg-scope">来自 ' + esc(chatScopeShort(m.scope)) + '</div>';
+    }
+    h += '</div>';
+    return h;
+  }
+
+  function renderChatFeed() {
+    var feed = el.chatFeed;
+    if (!feed) return;
+    var list = chatMessagesFor(chat.scope);
+    if (!list.length) {
+      feed.innerHTML = '<div class="chat-empty">这个频道还没有留言。<br>' +
+        '在下面粘一段 prompt / 说明 / 疑问，点「发送」——<br>' +
+        '其它机器上的 agent 用 <code>hive chat list</code> 或 MCP 的 ' +
+        '<code>hive_chat_read</code> 就能读到。</div>';
+      return;
+    }
+    var nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+    feed.innerHTML = list.map(chatMsgHTML).join('');
+    if (nearBottom || chat.open) feed.scrollTop = feed.scrollHeight;
+  }
+
+  function renderChatSource() {
+    if (!el.chatSrc) return;
+    if (!chat.source) {
+      el.chatSrc.textContent = '—';
+      el.chatSrc.className = 'chat-src';
+      return;
+    }
+    if (chat.source === 'cluster') {
+      el.chatSrc.textContent = '集群同步';
+      el.chatSrc.className = 'chat-src';
+    } else {
+      el.chatSrc.textContent = '本地（集群未运行）';
+      el.chatSrc.className = 'chat-src is-local';
+    }
+  }
+
+  function renderChat() {
+    renderChatScopes();
+    renderChatFeed();
+    renderChatSource();
+    renderChatBadge();
+    if (el.chatFab) {
+      el.chatFab.classList.toggle('is-open', chat.open);
+      el.chatFab.setAttribute('aria-expanded', chat.open ? 'true' : 'false');
+    }
+    if (el.chatPanel) {
+      el.chatPanel.classList.toggle('open', chat.open);
+      el.chatPanel.setAttribute('aria-hidden', chat.open ? 'false' : 'true');
+    }
+  }
+
+  function loadChat() {
+    if (chat.busy) return;
+    chat.busy = true;
+    fetch('/api/chat?since=0&limit=' + CHAT_LIMIT, { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        var incoming = (data && data.messages) || [];
+        var changed = incoming.length !== chat.messages.length;
+        if (!changed) {
+          for (var i = 0; i < incoming.length; i++) {
+            if (incoming[i].id !== chat.messages[i].id) { changed = true; break; }
+          }
+        }
+        chat.messages = incoming;
+        chat.source = (data && data.source) || '';
+        if (changed) {
+          renderChat();
+          // 卡片上的「讨论 n」、详情抽屉里的讨论区跟着变
+          if (!state.inflight) render();
+          if (drawerId) refreshDrawer(true);
+          if (chat.open) {
+            chat.lastSeen = incoming.reduce(function (a, m) {
+              return Math.max(a, Number(m.epoch || 0));
+            }, chat.lastSeen);
+            storeSet(STORE_CHAT_SEEN, String(chat.lastSeen));
+            renderChatBadge();
+          }
+        }
+      })
+      .catch(function () { /* 看板其它部分不受影响 */ })
+      .then(function () { chat.busy = false; });
+  }
+
+  /** 懒轮询：面板开着每 CHAT_MS 拉一次；收起时降频到 5 倍，只为了角标 */
+  function startChatPolling() {
+    if (chat.timer) return;
+    chat.timer = setInterval(function () {
+      chat.ticks++;
+      if (chat.open || chat.ticks % 5 === 0) loadChat();
+    }, CHAT_MS);
+  }
+
+  function openChat(scope) {
+    if (scope) chat.scope = scope;
+    else chat.scope = storeGet(STORE_CHAT_SCOPE) || 'hall';
+    chat.open = true;
+    closeDrawer();
+    renderChat();
+    loadChat();
+    chat.lastSeen = chat.messages.reduce(function (a, m) {
+      return Math.max(a, Number(m.epoch || 0));
+    }, chat.lastSeen);
+    storeSet(STORE_CHAT_SEEN, String(chat.lastSeen));
+    renderChatBadge();
+    if (el.chatInput) setTimeout(function () { el.chatInput.focus(); }, 120);
+  }
+
+  function closeChat() {
+    chat.open = false;
+    renderChat();
+  }
+
+  function sendChat() {
+    if (!el.chatInput) return;
+    var text = (el.chatInput.value || '').trim();
+    if (!text) { flash('内容不能为空', true); return; }
+    var payload = {
+      text: text,
+      scope: chat.scope,
+      kind: (el.chatKind && el.chatKind.value) || 'note'
+    };
+    if (el.chatSend) { el.chatSend.disabled = true; el.chatSend.textContent = '发送中…'; }
+    fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (d) {
+          return { ok: r.ok, status: r.status, data: d };
+        });
+      })
+      .then(function (res) {
+        if (!res.ok) {
+          if (res.status === 401) {
+            flash('发送需要登录：点右上角「登录」填 token', true);
+          } else {
+            flash('发送失败：' + ((res.data && res.data.error) || res.status), true);
+          }
+          return;
+        }
+        el.chatInput.value = '';
+        if (res.data && res.data.offline) {
+          flash('已存到本机（集群没运行，别的机器暂时看不到）', true);
+        }
+        loadChat();
+      })
+      .catch(function (err) {
+        flash('发送失败：' + ((err && err.message) || err), true);
+      })
+      .then(function () {
+        if (el.chatSend) { el.chatSend.disabled = false; el.chatSend.textContent = '发送'; }
+      });
+  }
+
+  function bindChat() {
+    if (el.chatFab) el.chatFab.addEventListener('click', function () {
+      if (chat.open) closeChat(); else openChat();
+    });
+    if (el.chatClose) el.chatClose.addEventListener('click', closeChat);
+    if (el.chatScope) el.chatScope.addEventListener('change', function () {
+      chat.scope = el.chatScope.value || 'hall';
+      storeSet(STORE_CHAT_SCOPE, chat.scope);
+      renderChatFeed();
+      if (el.chatInput) el.chatInput.focus();
+    });
+    if (el.chatFeed) el.chatFeed.addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('[data-chat-copy]') : null;
+      if (!btn) return;
+      var mid = btn.getAttribute('data-chat-copy');
+      var msg = null;
+      for (var i = 0; i < chat.messages.length; i++) {
+        if (chat.messages[i].id === mid) { msg = chat.messages[i]; break; }
+      }
+      if (!msg) return;
+      writeClipboard(msg.text || '').then(function () {
+        flash('已复制这条留言');
+      }).catch(function () { flash('复制失败', true); });
+    });
+    if (el.chatForm) el.chatForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      sendChat();
+    });
+    if (el.chatInput) el.chatInput.addEventListener('keydown', function (e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        sendChat();
+      }
+    });
+    // Esc 关面板（设置/集群面板优先级更高，交给全局那个 handler）
+    document.addEventListener('keydown', function (e) {
+      if ((e.key === 'Escape' || e.key === 'Esc') && chat.open &&
+          !state.settingsOpen && !state.clusterOpen && !drawerId) {
+        closeChat();
+      }
+    });
+    startChatPolling();
+    loadChat();
+  }
+
   // ---------- 启动 ----------
   // T-0207：把顶栏实际高度写进 --topbar-h，fixed 抽屉据此从顶栏下方起滑。
   // 顶栏会随窗口宽度换行（≤768px 筛选区换行、meta 行），固定 px 会错位，
@@ -2005,6 +2416,7 @@
     buildColumns();
     initTheme();
     bindEvents();
+    bindChat();                // 留言面板：浮标 / 频道 / 发送 / 轮询
     bindTaskActions();         // 异常卡操作按钮：终止 / 改派 / 退回未分配
     applyEffective();          // 落地主题/紧凑/CI/刷新间隔等生效设置
 
@@ -2022,6 +2434,15 @@
     loadCluster();
     setInterval(loadCluster, CLUSTER_MS);
     loadServerConfig();        // 拉取服务端共享默认与系统只读信息
+
+    // 深链：#chat=<hall|task:T-0231|agent:名字> 直接摊开对应的留言线程，
+    // 方便在群里甩一条链接让人「来这张卡的讨论里说」。
+    var m = /^#chat(?:=([^&]+))?$/.exec(location.hash || '');
+    if (m) {
+      var scope = 'hall';
+      try { scope = decodeURIComponent(m[1] || 'hall'); } catch (err) { scope = 'hall'; }
+      openChat(scope);
+    }
   }
 
   init();

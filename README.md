@@ -275,6 +275,25 @@ python3 hive/hive.py --dir hive submit T-0101 --pr   # 提交后顺手开 PR
 
 `close` 会把 `res/` 里的结果归档到 `main:results/T-0101.json`，然后删掉 `claim/T-0101`、`res/T-0101`
 两个分支——Gitea 分支列表里只留正在跑的任务，审计记录仍在 main 上。
+
+### 5.1 跨机留言：看板上的聊天框
+
+机器 A 对机器 B 上某张卡有话说（「你理解反了」「这个坑注意下」「这段 prompt 给你」），
+不用再找渠道转述：看板右下角点「留言」，选频道发即可。频道三种——
+`大厅`、`某张卡的讨论`（任务卡/详情里的「讨论 n」直达）、`私信某 agent`。
+
+留言走**集群**而不是 git（worker 的 worktree 和 MCP 的 clone 每轮 `reset --hard`，
+写仓里会被冲掉），别的机器 1~2 秒就能看到；集群没起时自动降级到本机文件，看板照样能发。
+
+```sh
+python3 hive/hive.py --dir hive chat post --task T-0231 "判据不要改弱，换 git grep"
+python3 hive/hive.py --dir hive chat post --agent raccoon --file /tmp/prompt.md
+python3 hive/hive.py --dir hive chat list --unread --mark-read
+python3 hive/hive.py --dir hive chat wait --task T-0231 --timeout 300
+```
+
+agent 侧用 MCP 的 `hive_chat_post` / `hive_chat_read`；`hive_claim` 返回里带这张卡的
+留言，`hive prompt` 也会把留言附在派发指令末尾。详见 [`docs/跨机留言.md`](docs/跨机留言.md)。
 合并进代码仓 `main` 之后跑一次 `prune`：它只删「已合并且不在飞」的 `task/*`、`verify/*`
 分支（在飞的卡哪怕内容已并入也保留），默认 dry-run，`--apply` 才真删。
 

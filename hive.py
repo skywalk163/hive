@@ -2644,6 +2644,10 @@ class Hive:
         if fmt == "json":
             print(text)                          # stdout 只有一个 JSON 对象
         else:
+            # 有人在看板上给这张卡留过话 → 附在派发指令后面，接卡的 agent 一上手就看到
+            notes = render_chat_notes(chat_notes_for_task(tid))
+            if notes:
+                text += notes
             print(text, end="")
         return text
 
@@ -5583,6 +5587,207 @@ def cmd_stats(args) -> None:
     Hive(args.dir).cmd_stats(args.json, args.days)
 
 
+# --------------------------------------------------------------------------- #
+# hive chat：跨机留言（看板那个聊天框的命令行/MCP 同一份数据）
+# --------------------------------------------------------------------------- #
+CHAT_SCOPES = ("hall",)  # 说明用；实际频道是 hall / task:T-xxxx / agent:名字
+
+
+def chat_scope_or_raise(scope: str, task: str = "", agent: str = "") -> str:
+    """把 --task / --agent / --scope 收敛成一个频道名。"""
+    if task:
+        tid = task.strip()
+        if not re.match(r"^T-\d{3,6}$", tid):
+            raise HiveError(f"任务号不合法: {task}")
+        return f"task:{tid}"
+    if agent:
+        name = agent.strip()
+        if not re.match(r"^[A-Za-z0-9._-]{1,64}$", name):
+            raise HiveError(f"agent 名不合法: {agent}")
+        return f"agent:{name}"
+    s = (scope or "hall").strip()
+    if s in ("hall", ""):
+        return "hall"
+    if re.match(r"^(task:T-\d{3,6}|agent:[A-Za-z0-9._-]{1,64})$", s):
+        return s
+    raise HiveError(f"频道不合法: {scope}（可用 hall / task:T-0231 / agent:名字）")
+
+
+def chat_cluster_post(text: str, scope: str, kind: str, sender: str,
+                      timeout: float = 3.0):
+    payload = {"text": text, "scope": scope, "kind": kind}
+    if sender:
+        payload["from"] = sender
+    code, data = _cluster_http("POST", "chat", payload, timeout=timeout)
+    return code, data
+
+
+def chat_cluster_list(since: float = 0.0, scope: str = "", limit: int = 100,
+                      timeout: float = 3.0):
+    q = f"chat?since={float(since):.6f}&limit={int(limit)}"
+    if scope:
+        from urllib.parse import quote as _quote
+        q += "&scope=" + _quote(scope, safe="")
+    code, data = _cluster_http("GET", q, timeout=timeout)
+    return code, data
+
+
+def _chat_print(msgs, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(msgs, ensure_ascii=False, indent=2))
+        return
+    if not msgs:
+        print("（没有留言）")
+        return
+    for m in msgs:
+        ts = str(m.get("ts") or "")
+        stamp = ts[11:16] if len(ts) >= 16 else ts
+        kind = m.get("kind") or "note"
+        mark = {"question": "问", "answer": "答"}.get(kind, "·")
+        scope = str(m.get("scope") or "hall")
+        where = "" if scope == "hall" else f" [{scope}]"
+        who = m.get("from") or "匿名"
+        node = m.get("node_name") or ""
+        print(f"{stamp} {mark} {who}{('@' + node) if node else ''}{where}: "
+              f"{m.get('text') or ''}")
+
+
+def cmd_chat(args) -> None:
+    action = getattr(args, "chat_action", None) or "list"
+    scope = chat_scope_or_raise(getattr(args, "scope", "") or "",
+                                 getattr(args, "task", "") or "",
+                                 getattr(args, "agent", "") or "")
+    if action == "post":
+        text = args.text
+        if not text and getattr(args, "file", None):
+            text = Path(args.file).expanduser().read_text(encoding="utf-8")
+        if not text or not text.strip():
+            raise HiveError("内容为空：给一段文本，或用 --file 指定文件")
+        sender = args.sender or os.environ.get("HIVE_AGENT") or "human:cli"
+        code, data = chat_cluster_post(text.strip(), scope, args.kind, sender)
+        if code != 200 or not isinstance(data, dict) or not data.get("ok"):
+            err = (data or {}).get("error") if isinstance(data, dict) else None
+            raise HiveError(
+                "发不出去：%s（集群没起？看板那边也能发：hive dash）"
+                % (err or f"HTTP {code}"))
+        msg = data.get("message") or {}
+        if args.json:
+            print(json.dumps(msg, ensure_ascii=False, indent=2))
+        else:
+            print(f"已发到 {scope}：{msg.get('text', '')[:60]}")
+        return
+
+    if action == "list":
+        code, data = chat_cluster_list(getattr(args, "since", 0.0) or 0.0,
+                                       "" if args.all else scope,
+                                       getattr(args, "limit", 50) or 50)
+        if code != 200 or not isinstance(data, dict):
+            raise HiveError("读不到留言：集群没起（hive cluster serve）")
+        msgs = data.get("messages") or []
+        if getattr(args, "unread", False):
+            # 「未读」= 比本地记录的水位新。水位写在 ~/.hive/chat-seen.json，
+            # 每台机器各自记，互不干扰。
+            seen = chat_seen_get(scope)
+            msgs = [m for m in msgs if float(m.get("epoch") or 0) > seen]
+        _chat_print(msgs, args.json)
+        if getattr(args, "mark_read", False) and msgs:
+            chat_seen_set(scope, max(float(m.get("epoch") or 0) for m in msgs))
+        return
+
+    if action == "wait":
+        # 长轮询：agent 干到一半想知道「有人给我留话了吗」，用它比反复 list 省事。
+        # 基线 = 开始等的那一刻的最新一条（或 --since 明确给的）：
+        #   「等新消息」只看等的时候之后到的，别把历史积压当成刚有人说话。
+        #   积压用 `hive chat list --unread` 拿。
+        timeout = float(getattr(args, "timeout", 120) or 120)
+        since = float(getattr(args, "since", 0.0) or 0.0)
+        if not since:
+            _, head = chat_cluster_list(0.0, "" if args.all else scope, 1)
+            since = float((head or {}).get("last_epoch") or 0.0) if isinstance(
+                head, dict) else 0.0
+        deadline = time.time() + timeout
+        while True:
+            code, data = chat_cluster_list(since, "" if args.all else scope, 50)
+            if code == 200 and isinstance(data, dict):
+                msgs = data.get("messages") or []
+                if msgs:
+                    _chat_print(msgs, args.json)
+                    chat_seen_set(scope, max(float(m.get("epoch") or 0) for m in msgs))
+                    return
+            if time.time() >= deadline:
+                if not args.json:
+                    print(f"（{int(timeout)} 秒内没有新留言）")
+                return
+            time.sleep(2.0)
+
+    raise HiveError(f"未知的 chat 动作: {action}")
+
+
+def chat_seen_path() -> Path:
+    return Path(os.environ.get("HIVE_CHAT_SEEN")
+                or (DEFAULT_STATE / "chat-seen.json")).expanduser()
+
+
+def chat_notes_for_task(tid: str, limit: int = 10) -> list[dict]:
+    """取某张卡的留言（最近 limit 条）。集群没起就返回空表，绝不抛。"""
+    if not tid:
+        return []
+    try:
+        code, data = chat_cluster_list(0.0, f"task:{tid}", limit, timeout=1.2)
+    except Exception:  # noqa: BLE001  留言是增强，不能拖累领卡/渲染
+        return []
+    if code != 200 or not isinstance(data, dict):
+        return []
+    msgs = data.get("messages") or []
+    return [m for m in msgs if isinstance(m, dict)]
+
+
+def render_chat_notes(msgs: list[dict], title: str = "这张卡的留言") -> str:
+    """把留言渲染成 markdown 片段，拼到派发提示词/交接文件里。"""
+    if not msgs:
+        return ""
+    out = [f"\n## {title}（{len(msgs)} 条，来自 hive 看板的「讨论」）\n",
+           "> 有人在这张卡上留过话。先看完再动手；有疑问也用 "
+           "`hive chat post --task <任务号>` 或 MCP 的 hive_chat_post 回一句。\n"]
+    for m in msgs:
+        ts = str(m.get("ts") or "")
+        stamp = ts[11:16] if len(ts) >= 16 else ts
+        kind = {"question": "提问", "answer": "回答"}.get(str(m.get("kind") or ""), "说明")
+        out.append(f"- **{stamp} {m.get('from') or '匿名'}（{kind}）**："
+                   f"{m.get('text') or ''}")
+    return "\n".join(out) + "\n"
+
+
+
+def chat_seen_get(scope: str) -> float:
+    try:
+        data = json.loads(chat_seen_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0.0
+    try:
+        return float((data or {}).get(scope) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def chat_seen_set(scope: str, epoch: float) -> None:
+    path = chat_seen_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[scope] = float(epoch)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    except OSError:
+        pass
+
+
+
 def cmd_block(args) -> None:
     Hive(args.dir).cmd_block(args.task, args.reason or "", who="controller")
 
@@ -6306,6 +6511,52 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.add_argument("--reason", default="")
     s.set_defaults(func=cmd_unblock)
+
+    # —— 跨机留言（看板聊天框的命令行入口）——
+    s = sub.add_parser("chat", help="跨机留言：给某张卡/某个 agent/所有人留话，或读别人留的")
+    chat_sub = s.add_subparsers(dest="chat_action")
+
+    def _chat_scope_args(p, with_since=True):
+        p.add_argument("--scope", default="",
+                       help="频道：hall（默认）/ task:T-0231 / agent:名字")
+        p.add_argument("--task", default="", help="等价于 --scope task:T-xxxx")
+        p.add_argument("--agent", default="", help="等价于 --scope agent:名字")
+        if with_since:
+            p.add_argument("--since", type=float, default=0.0,
+                           help="只要比这个 epoch 新的（默认 0 = 全部）")
+
+    cp = chat_sub.add_parser("post", help="发一条留言")
+    cp.add_argument("text", nargs="?", default="", help="留言正文（也可用 --file）")
+    cp.add_argument("--file", default="", help="从文件读正文（粘长 prompt 用）")
+    cp.add_argument("--kind", choices=["note", "question", "answer"],
+                    default="note", help="note=说明（默认）/ question=提问 / answer=回答")
+    cp.add_argument("--from", dest="sender", default="",
+                    help="署名（默认 $HIVE_AGENT，否则 human:cli）")
+    _chat_scope_args(cp, with_since=False)
+    cp.add_argument("--json", action="store_true")
+    cp.set_defaults(func=cmd_chat)
+
+    cl = chat_sub.add_parser("list", help="读留言（默认只读当前频道）")
+    _chat_scope_args(cl)
+    cl.add_argument("--all", action="store_true", help="不分频道，读全部")
+    cl.add_argument("--limit", type=int, default=50, help="最多几条（默认 50）")
+    cl.add_argument("--unread", action="store_true",
+                    help="只给上次读过之后的新留言（水位记在 ~/.hive/chat-seen.json）")
+    cl.add_argument("--mark-read", dest="mark_read", action="store_true",
+                    help="读完把水位推到最新")
+    cl.add_argument("--json", action="store_true")
+    cl.set_defaults(func=cmd_chat)
+
+    cw = chat_sub.add_parser("wait", help="等新留言（最长 --timeout 秒，有就打印并退出）")
+    _chat_scope_args(cw)
+    cw.add_argument("--all", action="store_true", help="不分频道")
+    cw.add_argument("--timeout", type=float, default=120.0, help="最多等多少秒（默认 120）")
+    cw.add_argument("--json", action="store_true")
+    cw.set_defaults(func=cmd_chat)
+
+    s.set_defaults(func=cmd_chat, chat_action="list", scope="hall", task="",
+                   agent="", since=0.0, all=False, limit=50, unread=False,
+                   mark_read=False, json=False)
 
     s = sub.add_parser("status", help="看板")
     s.add_argument("--json", action="store_true")

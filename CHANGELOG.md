@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Added
+
+- **看板「留言」：跨机给 agent 递话的聊天框**。机器 A 对某张卡的理解/疑问、
+  对机器 B 上另一个 agent 的指点，以前只能贴到某个窗口再口口相传；现在看板右下角
+  点「留言」就能发。频道三种：`hall`（大厅）、`task:T-0231`（某张卡的讨论线程）、
+  `agent:名字`（私信）。任务卡和详情抽屉里都有「讨论 n」入口，点了直接进那张卡的线程。
+  - 存储走集群而不是 git：worker 的 worktree / MCP 的独占 clone 每轮都
+    `reset --hard origin/main`，写进仓里的留言会被冲掉；`git push` 也撑不起秒级。
+  - 每个节点 `~/.hive/cluster/chat.jsonl` 追加一份（一行一条 JSON），内存保留最近
+    2000 条；follower 每 2 秒向主节点增量拉取，主节点不可达时本地留存（看板照样能看能发）。
+  - 接口：`GET/POST /api/cluster/chat`（集群）、`GET/POST /api/chat`（看板，带写鉴权，
+    集群不在时降级到 `~/.hive/chat/chat.jsonl`）。
+- **`hive chat post / list / wait`**（`--task` / `--agent` / `--scope`、`--kind
+  note|question|answer`、`--unread --mark-read`、`--json`）。`wait` 是长轮询，
+  agent 干到一半想知道有没有人留话，用它比反复 list 省事；未读水位记在
+  `~/.hive/chat-seen.json`，每台机器各记各的。
+- **MCP 工具 `hive_chat_post` / `hive_chat_read`**：agent 可以直接把疑问、跨任务的
+  经验发出来，也能读到「大厅 + 私信 + 我名下各卡」的留言；`hive_claim` 会把这张卡的
+  留言回在 `chat` 字段里，并落一份到 worktree 的 `.hive/chat.md`。
+- `hive prompt` 渲染派发指令时，自动把该卡的留言附在末尾（最多 10 条）。
+- **看板「复制派发指令」状态感知**：同一个按钮按卡的运行时状态渲染不同文本
+  （判定口径与看板分列对齐）。待合并卡复制出的是给主控的**合并指令**
+  （`mode=merge`：结果分支 `res/<tid>`、head、执行 agent、`hive land <tid> --apply`、
+  冲突处理），不再是叫人领取的旧文案，按钮文案也跟着改成「复制合并指令」；
+  异常卡（failed / blocked / 租约过期）在派发指令末尾附**溯源块**（`mode=abnormal`：
+  此前领取 agent、领取/异常时间、异常状态与摘要），重派时新 agent 知道前情；
+  其余状态 `mode=claim` 与旧行为逐字一致。`/api/dispatch-prompt` 响应新增 `mode`
+  字段；状态快照读不到时自动降级为原渲染，不影响复制。
+
 ### Fixed
 
 - **Windows 判据「单引号 + 空格」被判 failed（T-0228）**：`git grep -q 'version = "0.4.1"' --

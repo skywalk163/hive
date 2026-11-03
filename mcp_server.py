@@ -193,6 +193,53 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "hive_chat_post",
+        "description": (
+            "留言：把一段文字发给某张卡（task_id）、某个 agent（to_agent）或所有人（都不给 = 大厅）。"
+            "用途：① 我对这张卡的理解/疑问要人或其他 agent 澄清；② 我发现某个坑，提醒别的 agent；"
+            "③ 把一段 prompt / 结论交给另一个任务。留言走集群，别的机器 1~2 秒内就能看到，"
+            "看板上也会实时出现，对方用 hive_chat_read 读。"
+            "留言不阻塞、不影响验收，但比闷头做错强。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "留言正文（可以贴整段 prompt/报错）"},
+                "task_id": {"type": "string", "description": "发到某张卡的讨论线程，如 T-0231"},
+                "to_agent": {"type": "string", "description": "私信某个 agent（名字见 hive_whoami）"},
+                "scope": {"type": "string",
+                          "description": "直接指定频道：hall / task:T-0231 / agent:名字（前两个参数优先）"},
+                "kind": {"type": "string", "enum": ["note", "question", "answer"],
+                         "default": "note",
+                         "description": "note=说明（默认）/ question=提问 / answer=回答"},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "hive_chat_read",
+        "description": (
+            "读留言。默认读跟我有关的：大厅 + 发给我的私信 + 我名下各卡的讨论。"
+            "开工前读一次能少走很多弯路；干到一半想知道有没有人给我留话也读它。"
+            "用 since_epoch 只取新的，unread_only=true 只给上次读过之后的。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "只看某张卡的讨论"},
+                "scope": {"type": "string", "description": "只看某个频道：hall / task:… / agent:…"},
+                "since_epoch": {"type": "number", "default": 0,
+                                "description": "只要比这个 epoch 新的（返回值里带 epoch）"},
+                "unread_only": {"type": "boolean", "default": False,
+                                "description": "只给上次读过之后的新留言"},
+                "mark_read": {"type": "boolean", "default": True,
+                              "description": "读完把水位推到最新（默认 true）"},
+                "limit": {"type": "integer", "default": 50, "description": "最多几条"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "hive_stats",
         "description": "吞吐与成功率：任务数、完成/失败、一次通过率、中位与 P90 耗时、按 agent 和按仓库分布。",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
@@ -628,16 +675,32 @@ class HiveMcp:
         if not (wt / ".hive" / "task.md").exists():
             w.prepare(tid)
 
+        # 有人在看板上给这张卡留过话：落一份到 worktree，并回给调用方。
+        # 集群没起时 notes 为空，领卡照常（留言是增强，不是前置条件）。
+        from hive import chat_notes_for_task, render_chat_notes
+        notes = chat_notes_for_task(tid)
+        chat_md = ""
+        if notes:
+            try:
+                chat_md = str(wt / ".hive" / "chat.md")
+                Path(chat_md).write_text(render_chat_notes(notes), encoding="utf-8")
+            except OSError:
+                chat_md = ""
+
         return ok(f"{tid} 已领取，worktree 备好",
                   task_id=tid,
                   worktree=str(wt),
                   task_md=str(wt / ".hive" / "task.md"),
                   summary_md=str(wt / ".hive" / "summary.md"),
+                  chat_md=chat_md,
+                  chat=notes,
                   branch=f"task/{tid}",
                   paths=card.get("paths") or [],
                   verify=card.get("verify") or [],
                   hint=("在 worktree 里改代码，把工作说明写进 summary.md，"
-                        "然后调 hive_submit；干不下去就调 hive_abort 把卡还回去"))
+                        "然后调 hive_submit；干不下去就调 hive_abort 把卡还回去"
+                        + ("。注意：这张卡有人留过话，先看 chat 字段/.hive/chat.md"
+                           if notes else "")))
 
     def t_submit(self, a: dict) -> dict:
         tid = a["task_id"]
@@ -949,6 +1012,85 @@ class HiveMcp:
         return ok("体检完成" + (f"，{len(issues)} 个问题" if issues else "，没发现问题"),
                   issues=issues, healthy=not issues)
 
+    # ---- 跨机留言 ----
+    #
+    # 不走 git：MCP 的独占 clone 每轮 reset --hard，写进仓里的东西会被冲掉；
+    # 留言统一走本机集群的 HTTP（127.0.0.1:<cluster port>），由集群同步到全网。
+    def t_chat_post(self, a: dict) -> dict:
+        from hive import chat_cluster_post, chat_scope_or_raise
+        text = str(a.get("text") or "").strip()
+        if not text:
+            return err("text 不能为空")
+        try:
+            scope = chat_scope_or_raise(str(a.get("scope") or ""),
+                                        str(a.get("task_id") or ""),
+                                        str(a.get("to_agent") or ""))
+        except HiveError as e:
+            return err(str(e))
+        kind = str(a.get("kind") or "note")
+        if kind not in ("note", "question", "answer"):
+            kind = "note"
+        code, data = chat_cluster_post(text, scope, kind, self.agent)
+        if code != 200 or not isinstance(data, dict) or not data.get("ok"):
+            detail = (data or {}).get("error") if isinstance(data, dict) else ""
+            return err(f"发不出去：{detail or ('HTTP %s' % code)}"
+                       "（本机集群没起？hive cluster serve）")
+        msg = data.get("message") or {}
+        return ok(f"已发到 {scope}", scope=scope, sent=msg)
+
+    def t_chat_read(self, a: dict) -> dict:
+        from hive import chat_cluster_list, chat_seen_get, chat_seen_set
+        scope_arg = str(a.get("scope") or "").strip()
+        task = str(a.get("task_id") or "").strip()
+        if task:
+            scope_arg = "task:" + task
+        try:
+            limit = max(1, min(int(a.get("limit") or 50), 200))
+        except (TypeError, ValueError):
+            limit = 50
+        if scope_arg:
+            scopes = [scope_arg]
+        else:
+            # 默认「跟我有关的」：大厅 + 私信 + 我名下各卡
+            scopes = ["hall", f"agent:{self.agent}"]
+            try:
+                cards = self.hive_view().cards()
+                for tid, c in cards.items():
+                    if c.get("owner") == self.agent or c.get("claim_agent") == self.agent:
+                        scopes.append("task:" + tid)
+            except Exception:  # noqa: BLE001  卡读不出来也要能读大厅
+                pass
+        code, data = chat_cluster_list(0.0, "", 300)
+        if code != 200 or not isinstance(data, dict):
+            return err("读不到留言：本机集群没起（hive cluster serve）")
+        msgs = [m for m in (data.get("messages") or [])
+                if str(m.get("scope") or "") in scopes]
+        try:
+            since = float(a.get("since_epoch") or 0)
+        except (TypeError, ValueError):
+            since = 0.0
+        if since > 0:
+            msgs = [m for m in msgs if float(m.get("epoch") or 0) > since]
+        if a.get("unread_only"):
+            msgs = [m for m in msgs
+                    if float(m.get("epoch") or 0) > chat_seen_get(str(m.get("scope") or "hall"))]
+        if a.get("mark_read", True) and msgs:
+            newest: dict[str, float] = {}
+            for m in msgs:
+                s = str(m.get("scope") or "hall")
+                newest[s] = max(newest.get(s, 0.0), float(m.get("epoch") or 0))
+            for s, e in newest.items():
+                chat_seen_set(s, e)
+        msgs = msgs[-limit:]
+        if not msgs:
+            return ok("没有新留言", messages=[], scopes=scopes)
+        lines = []
+        for m in msgs:
+            lines.append("[%s] %s: %s" % (
+                m.get("scope"), m.get("from") or "匿名", m.get("text") or ""))
+        return ok("\n".join(lines), messages=msgs, scopes=scopes,
+                  epoch=max(float(m.get("epoch") or 0) for m in msgs))
+
     HANDLERS = {
         "hive_whoami": t_whoami,
         "hive_list_tasks": t_list_tasks,
@@ -972,6 +1114,8 @@ class HiveMcp:
         "hive_gc": t_gc,
         "hive_watchdog": t_watchdog,
         "hive_doctor": t_doctor,
+        "hive_chat_post": t_chat_post,
+        "hive_chat_read": t_chat_read,
     }
 
 
@@ -1008,6 +1152,9 @@ class McpServer:
             "典型流程：hive_whoami 看自己 → hive_next 挑卡 → hive_claim 领取 → "
             "在返回的 worktree 里干活并写 .hive/summary.md → hive_submit 提交 → "
             "hive_result 看验收结果。干不下去就 hive_abort 把卡还回去，别干耗到租约过期。"
+            "另外：领卡后用 hive_chat_read 看一眼这张卡有没有人留言（可能是人的指点）；"
+            "对任务有疑问、或要提醒别的 agent 某个坑，用 hive_chat_post 留言——"
+            "它走集群，别的机器和看板 1~2 秒内就能看到，比闷头猜强。"
         )
 
     def handle(self, msg: dict):
