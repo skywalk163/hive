@@ -1,0 +1,40 @@
+{
+  "task": "T-0246",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0246",
+  "base": "main",
+  "head": "63e2667f87cee4fe1b5e18379fe1e27fc9fb0e79",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-03T23:05:37+08:00",
+  "finished_at": "2026-11-03T23:27:50+08:00",
+  "duration_s": 1333.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_submit_summary.py",
+      "code": 0,
+      "tail": [
+        "...                                                                      [100%]",
+        "3 passed in 12.71s"
+      ]
+    }
+  ],
+  "summary": "# T-0246 总结\n\n- 主改动（卡面要求）：`hive.py` 新增 `delivery_paths()` / `stage_paths()`，worker 自动提交与人工 `submit` 都改为「只 stage 交付文件」；已跟踪但非交付的 `.hive/` 运行时文件从索引移除（工作区保留），卡面 `paths` 显式点名的除外。\n- 为什么：旧实现 `git add -A` 会把改写后的 `.hive/summary.md` 带进 task 分支，`land` 每次被「上一张卡的小结」覆盖而撞车（T-0241/T-0245 同源）。\n- hive 仓自清：`git rm --cached .hive/summary.md`，`.gitignore` 增加 `.hive/`。\n- 回归测试 `tests/test_submit_summary.py`：真实跑「基底跟踪 `.hive/summary.md` → 改代码 + 写小结 → take → submit → 检查分支树」，断言分支上无 `.hive/summary.md`、代码改动在。\n- 额外修复（卡面外，但本卡 submit 被它挡住）：store 后端 `claim_info` 的 `lease_until` 是 epoch float，`iso(float)` 抛 AttributeError；引入已验证的 `lease_until_iso()` 收敛成 ISO，`submit` 才能跑通（`hive status` 崩溃同源）。\n- 验证：`pytest -q tests/test_submit_summary.py tests/test_store_overlay.py` 13 passed；`pytest -q tests/ -k \"summary or hive_dir or submit\"` 16 passed；`python3 selftest.py` PASS。\n- 风险/遗留：`.hive/` 只处理已跟踪文件，未跟踪的 summary 由 `.gitignore` 兜底；其他仍跟踪 `.hive/summary.md` 的仓库首次提交会自动移除，需维护者知悉；未动 `hive status` 以外的调度逻辑。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    ".gitignore",
+    ".hive/summary.md",
+    "tests/test_submit_summary.py"
+  ],
+  "changed_files": [
+    ".gitignore",
+    ".hive/summary.md",
+    "hive.py",
+    "tests/test_submit_summary.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "32c82ee199084d1b90ea60207d34b8d9"
+}
