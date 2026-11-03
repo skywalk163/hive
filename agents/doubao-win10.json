@@ -1,0 +1,24 @@
+{
+  "name": "doubao-win10",
+  "host": "win10",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify"
+  ],
+  "capabilities": [
+    "windows",
+    "gui",
+    "linux"
+  ],
+  "repos": {
+    "hive": "G:/dswork/hive"
+  },
+  "launch": "",
+  "worktrees": "C:/Users/skywalk/.hive/wt/doubao-win10",
+  "max_concurrency": 1,
+  "created": "2026-11-03T23:29:02+08:00"
+}
