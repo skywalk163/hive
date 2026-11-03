@@ -1,0 +1,26 @@
+{
+  "name": "trae-mac",
+  "host": "mac",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify"
+  ],
+  "capabilities": [
+    "macos",
+    "gui"
+  ],
+  "repos": {
+    "hive": "~/dswork/hive",
+    "lightmem": "~/dswork/lightmem",
+    "light": "~/dswork/light",
+    "lightharness": "~/dswork/lightharness"
+  },
+  "launch": "",
+  "worktrees": "",
+  "max_concurrency": 1,
+  "created": "2026-11-03T11:04:47+00:00"
+}
