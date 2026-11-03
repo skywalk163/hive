@@ -206,6 +206,31 @@ def parse_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
+def lease_until_iso(value) -> str:
+    """把「租约截止时间」统一成带时区的 ISO 串。
+
+    store 的 `claims.lease_until` 是 REAL（epoch 秒），Git 的 claims/<tid>.json
+    是 ISO 串；下游 submit / status / doctor 一律 `parse_iso(x) < now()`，
+    必须先收敛成同一种类型，否则 float 直接进 iso() 就是 AttributeError
+    （`hive status` 崩、T-0246 的 submit 也崩在同一处）。
+    None / 空串 / 0（没有租约）一律返回空串。
+    """
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        epoch = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if epoch <= 0:
+        return ""
+    try:
+        return iso(datetime.fromtimestamp(epoch, tz=timezone.utc).astimezone())
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
 def _int_or_zero(v) -> int:
     """把卡面字段宽松转成非负整数（缺省 / 脏数据一律当 0）。"""
     if v is None or v == "":
@@ -1404,6 +1429,37 @@ def changed_files(wt: Path) -> list[str]:
     return out
 
 
+def delivery_paths(declared, files) -> list[str]:
+    """提交时要 stage 的路径：从改动里剔除 `.hive/` 运行时文件，除非卡面显式点名。
+
+    `.hive/`（task.md、summary.md）是 worker 的运行目录，真正的归档在
+    `results/<tid>.json`；旧实现用 `git add -A`，会把改写后的 `.hive/summary.md`
+    一起带进 task 分支（T-0246）。
+    """
+    allow = {str(p).strip() for p in (declared or []) if str(p).strip()}
+    return [f for f in files if not (f.startswith(".hive/") and f not in allow)]
+
+
+def stage_paths(wt: Path, files, declared=()) -> None:
+    """只 stage 这些路径（含删除、重命名）；不存在且未被跟踪的跳过。
+
+    另外把**已跟踪但非交付**的 `.hive/` 运行时文件从索引移除（工作区文件保留），
+    这样 task 分支树上不会带上一张卡的小结；卡面显式点名的除外（T-0246）。
+    """
+    want = [f for f in files
+            if not f.startswith(".hive/")
+            and ((wt / f).exists()
+                 or git(["ls-files", "--", f], wt, check=False).stdout.strip())]
+    if want:
+        git(["add", "-A", "--", *want], wt)
+    allow = {str(p).strip() for p in (declared or []) if str(p).strip()}
+    tracked = git(["-c", "core.quotePath=false", "ls-files", "--", ".hive/"],
+                  wt, check=False).stdout.splitlines()
+    drop = [p for p in tracked if p.strip() and p.strip() not in allow]
+    if drop:
+        git(["rm", "--cached", "--ignore-unmatch", "--", *drop], wt)
+
+
 def out_of_paths(declared, files) -> list[str]:
     """改动里不在任务卡声明的 paths 白名单内的文件。
 
@@ -1721,7 +1777,7 @@ class Hive:
                     return None
                 out = dict(claim)
                 out["agent"] = out.get("owner") or ""
-                out["lease_until"] = iso(float(out.get("lease_until") or 0))
+                out["lease_until"] = lease_until_iso(out.get("lease_until"))
                 return out
         return read_ref_file(self.dir, f"origin/claim/{tid}", f"claims/{tid}.json")
 
@@ -3248,7 +3304,8 @@ class Hive:
                 if strict_paths(cfg):
                     raise HiveError(
                         "越界改动（严格模式），拒绝提交：" + ", ".join(oop[:8]))
-            git(["add", "-A"], wt)
+            stage_paths(wt, delivery_paths(card.get("paths"), changed),
+                        card.get("paths"))
             if git(["diff", "--cached", "--quiet"], wt, check=False).returncode != 0:
                 git([*IDENT, "commit", "-m",
                      f"hive({tid}): {card.get('title', '')} (manual submit)"], wt)
@@ -4855,7 +4912,8 @@ class Worker:
             head = rev_parse(wt, "HEAD")
         else:
             try:
-                git(["add", "-A"], wt)
+                stage_paths(wt, delivery_paths(card.get("paths"), changed),
+                            card.get("paths"))
                 if git(["diff", "--cached", "--quiet"], wt, check=False).returncode != 0:
                     git([*IDENT, "commit", "-m", f"hive({tid}): {card.get('title', '')}"], wt)
                 head = rev_parse(wt, "HEAD")

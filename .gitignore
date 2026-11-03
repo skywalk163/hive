@@ -4,6 +4,7 @@
 *.log
 .env
 .env.*
+.hive/
 dashboard/status.json
 dashboard/status.json.tmp*
 dashboard/status.err
