@@ -14,10 +14,13 @@
     "gui"
   ],
   "repos": {
-    "hive": "/Users/共享/dswork/hive"
+    "hive": "~/dswork/hive",
+    "lightmem": "~/dswork/lightmem",
+    "light": "~/dswork/light",
+    "lightharness": "~/dswork/lightharness"
   },
   "launch": "",
   "worktrees": "",
   "max_concurrency": 1,
-  "created": "2026-11-03T11:04:36+00:00"
+  "created": "2026-11-03T11:04:47+00:00"
 }
