@@ -1,0 +1,34 @@
+{
+  "task": "T-0245",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0245",
+  "base": "main",
+  "head": "c36653f1bab6ac66451f1c24255c80e15807ac94",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-04T10:34:31+08:00",
+  "finished_at": "2026-11-04T10:38:12+08:00",
+  "duration_s": 221.7,
+  "verify": [
+    {
+      "cmd": "python -c \"import subprocess,pathlib,sys; t=subprocess.run([\\\"git\\\",\\\"ls-files\\\",\\\".hive\\\"],capture_output=True,text=True).stdout.strip(); g=pathlib.Path(\\\".gitignore\\\").read_text(encoding=\\\"utf-8\\\"); sys.exit(0 if (not t and \\\".hive/\\\" in g) else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0245 · 把 worker 产物 `.hive/summary.md` 清出版本库并加 `.gitignore`\n\n## 结论\n`.hive/summary.md` 已从版本库移除（`git rm --cached`，历史保留、工作区文件保留），`.gitignore` 已加 `.hive/`。判据退出码 0。\n\n**以后 worker 仍会照常在 `.hive/summary.md` 写工作小结，但这个文件不再进版本库**——它已由 `.gitignore` 的 `.hive/` 规则挡住。小结的正式归档处是 hive 仓的 `results/<tid>.json`（`summary` 字段），仓内这份只是工作区临时稿，不再随 task 分支进 main，因此不会再成为每张卡 land 时的冲突源。\n\n## 改动（只动 paths 内两个文件）\n1. `.hive/summary.md`：`git rm --cached`（**只出索引，不删磁盘**；历史提交保留，可 `git log -- .hive/summary.md` 查档案）。\n2. `.gitignore`：末尾追加 4 行注释 + 一行 `.hive/`（沿用文件既有 CRLF 行尾，未改动任何既有规则）。\n\n```\n# hive 任务总线（T-0245 2026-11-04）：worker 产物\n# .hive/summary.md、.hive/task.md 等一律不进版本库\n# （小结已归档在 hive 的 results/<tid>.json），\n# 此前被跟踪导致每张卡 land 必冲突。\n.hive/\n```\n\n## 判据\n```\npython -c \"import subprocess,pathlib,sys; t=subprocess.run(['git','ls-files','.hive'],capture_output=True,text=True).stdout.strip(); g=pathlib.Path('.gitignore').read_text(encoding='utf-8'); sys.exit(0 if (not t and '.hive/' in g) else 1)\"\n```\n→ 退出码 0（`git ls-files .hive` 为空 且 `.gitignore` 含 `.hive/`）。本机 Windows 直接可跑，未走 192.168.0.88 备用腿。\n\n## 备注\n- 效果：下一张卡 land 时，`.hive/summary.md` 不再出现在 diff 里，历史上那类「每卡必撞」的冲突消失。\n- 未做：未改写历史、未删任何既有 ignore 规则、未碰其它任务卡与 agents 配置。\n- 遗留：各 agent worktree 里若有旧的已跟踪副本，`take` 会按新 main 重建；基线 `12fac8c08` 之后已开的其它 task 分支需自行 rebase 才吃到本改动。",
+  "error": "",
+  "declared_paths": [
+    ".gitignore",
+    ".hive/summary.md"
+  ],
+  "changed_files": [
+    ".gitignore",
+    ".hive/summary.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "951f6920fdcd4e489b657606cc8935e9",
+  "fence": 1
+}
