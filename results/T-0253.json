@@ -1,0 +1,31 @@
+{
+  "task": "T-0253",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0253",
+  "base": "main",
+  "head": "d23aa04d1e98cb40fbab117de8391ac402651c3d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-04T15:28:16+08:00",
+  "finished_at": "2026-11-04T07:38:05+00:00",
+  "duration_s": 589.7,
+  "verify": [
+    {
+      "cmd": "python -c \"import pathlib,sys; t=pathlib.Path('stdlib/builtins.py').read_text(encoding='utf-8'); sys.exit(0 if ('请用 转整数() 转换' in t and '请用 整数()' not in t and 'def 转整数(' in t) else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0253 工作说明\n\n- 目标：把 `stdlib/builtins.py` 中 `切片下标检查()` 的报错文案由「请用 整数() 转换」改为「请用 转整数() 转换」，与 light 真源 T-0247 逐字一致。\n- 做法：以 light 仓权威生成器 `scripts/sync_builtins.py` 的 `sync_lh()` 为准，把 `LH_PATH` 指向本 worktree 的 `stdlib/builtins.py` 后调用；生成器将真源「def 读取文件」到 EOF 的主体整段接管，未手改任何一行。\n- 为何没跑全量生成脚本：全量脚本会同时改写 `BOOT_PATH`（light bootstrap 副本）、lightharness 主工作区副本并同步两个 .light 依赖，超出本卡 paths 边界；本次只让 `sync_lh` 作用于 worktree，并把 `LH_LIGHT_SYNC` 置空避免落盘额外文件。生成器 dry-run 与落盘 diff 均恰好只有目标一行。\n- 改动文件：仅 `stdlib/builtins.py`（1 file changed, 1 insertion(+), 1 deletion(-)），第 556 行报错文案。\n- 验证 1：卡上 verify 命令原样执行，exit 0（新文案存在、旧文案不存在、`def 转整数(` 存在）。\n- 验证 2：light 侧 `tests/unit/test_builtins_drift.py` 的 LH 两条判据，把 `LH_PATH` 指向本 worktree 后 2 passed；`test_lh_public_body_hash_equals_main` 已绿，`切片下标检查` 不再漂移。\n- 环境：本机 Linux、python 3.13.12 可用；未出现 Windows 上 POSIX 判据 exit 255 的假失败，无需换机重跑。\n- 领取过程：集群 store 后端只在 hived 启动时摄入卡片，新卡 T-0253 尚未入库，首次 `hive_claim` 抢锁失败并误报「已被别人领取」；先用 MCP `hive_assign`（controller 身份）把卡登记进 store，再用 `hive_claim` 正常领取成功。\n- 遗留：light 主工作区里的 lightharness 副本（非本 worktree）仍有其它历史漂移，属别的任务范围，未改动；本分支合并后该副本才会同步到本行。",
+  "error": "",
+  "declared_paths": [
+    "stdlib/builtins.py"
+  ],
+  "changed_files": [
+    "stdlib/builtins.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "68967f6063924e8daa9bd11b6d2d5008"
+}
