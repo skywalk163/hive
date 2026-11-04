@@ -334,6 +334,22 @@ def test_detect_mode_matches_board_columns():
                                         "result_status": "failed"}) == "abnormal"
     assert dispatch_prompt.detect_mode({"state": "blocked"}) == "abnormal"
     assert dispatch_prompt.detect_mode({"state": "running", "stale": True}) == "abnormal"
+    # 搁置卡绝不能被生成领取指令，哪怕旧快照里还留着 done 结果
+    assert dispatch_prompt.detect_mode({"state": "shelved"}) == "shelved"
+    assert dispatch_prompt.detect_mode({"state": "shelved",
+                                        "result_status": "done"}) == "shelved"
+
+
+def test_shelved_prompt_never_asks_agent_to_claim():
+    import dispatch_prompt
+    text = dispatch_prompt.render_status_prompt(
+        {"id": "T-0001", "title": "等上游"},
+        {"state": "shelved", "shelve_reason": "上游没发版",
+         "shelved_at": "2026-11-04T10:00:00+00:00"})
+    assert "不要领取" in text and "hive_claim" in text  # 明确写出禁止动作
+    assert "上游没发版" in text
+    assert "hive unshelve T-0001" in text
+    assert "hive close T-0001" in text
 
 
 def test_dispatch_route_never_shells_out():

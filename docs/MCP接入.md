@@ -146,7 +146,9 @@ python3 hive/hive.py mcp --agent workbuddy --role controller
 3. `hive_retry` 会清掉结果和归档，对已 close 的卡尤其要谨慎。
 
 `hive_whoami` 在 controller 下会多返回 `todo`：待合入、conflict、blocked、
-needs_review、ready 各多少张 —— 总控 agent 开工前先看这个。
+needs_review、ready 各多少张，外加一份 `shelved` 卡号清单（封存中的卡不算挂账，
+但列在这里免得封着封着就忘了）—— 总控 agent 开工前先看这个。
+`hive_claim` 会拒绝 `shelved` 卡，要先 `hive unshelve` 才能领。
 
 ### 4.5.1 两种总控形态
 

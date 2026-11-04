@@ -67,6 +67,14 @@ def test_board_stage_unknown_state_falls_back_to_pending():
     assert dt.board_stage(card) == dt.STAGE_PENDING
 
 
+def test_board_stage_shelved_is_not_pending():
+    """搁置卡不能落进「待分配」：那样派发计数虚高，像还有活没人领。"""
+    assert dt.board_stage({"state": "shelved"}) == dt.STAGE_SHELVED
+    # 旧卡面残留 owner / 推送标记也不该盖过搁置
+    assert dt.board_stage({"state": "shelved", "owner": "a1",
+                           "dispatched_to": "a1"}) == dt.STAGE_SHELVED
+
+
 # ---- mark_dispatched ----------------------------------------------------
 
 def test_mark_dispatched_returns_new_dict_and_does_not_mutate_input():

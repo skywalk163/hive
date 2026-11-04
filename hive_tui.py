@@ -42,7 +42,9 @@ GROUP_READY = "待领取"
 GROUP_RUNNING = "进行中"
 GROUP_MERGE = "待合并"
 GROUP_BAD = "异常"
-GROUPS = (GROUP_READY, GROUP_RUNNING, GROUP_MERGE, GROUP_BAD)
+GROUP_SHELVED = "搁置"
+# 搁置放在最后一组：不抢前四组的注意力，但计数常驻 —— 别忘了还有几张卡封着
+GROUPS = (GROUP_READY, GROUP_RUNNING, GROUP_MERGE, GROUP_BAD, GROUP_SHELVED)
 
 # 结果状态里算「出了事」的取值：失败/超时/被 fence 掉都进异常组
 BAD_RESULTS = ("failed", "error", "timeout", "conflict")
@@ -138,6 +140,10 @@ def classify(task: dict) -> str | None:
     """
     state = task.get("state") or ""
     result = task.get("result") or ""
+    # 搁置优先判：旧快照里可能还带着 failed 结果或过期租约，但搁置卡不该
+    # 被算进「异常」——它不是出了事，是情况已知、暂时封存。
+    if state == "shelved":
+        return GROUP_SHELVED
     if task.get("stale") or task.get("fenced") or result in BAD_RESULTS:
         return GROUP_BAD
     if state in BAD_STATES:
@@ -353,8 +359,9 @@ def layout_counts(buckets: dict[str, list[dict]], height: int | None) -> dict[st
         return None
     height = max(int(height), 8)
     empty = [name for name in GROUPS if not buckets[name]]
-    # 头部 2 行 + 四个组标题 + 尾部 2 行；空组的「（无）」各占 1 行
-    room = max(0, height - 8 - len(empty))
+    # 头部 2 行 + 每组一个标题 + 尾部 2 行；空组的「（无）」各占 1 行。
+    # 用 len(GROUPS) 现算，以后再加组不用回来改这个魔法数字。
+    room = max(0, height - 4 - len(GROUPS) - len(empty))
     pending = [name for name in GROUPS if buckets[name]]
     counts = {name: 0 for name in GROUPS}
     if room >= len(pending):

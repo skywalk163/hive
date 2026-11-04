@@ -155,6 +155,9 @@ TASK_FIELDS = [
     # `archived_at` 记归档时刻。**必须列在这里**，否则 write_card 按 TASK_FIELDS
     # 遍历写盘时会把这两个字段直接丢掉——归档标记写不进去，列表就永远看不到它。
     "archived", "archived_at",
+    # 搁置（shelved）：当前做不了、但不想删的卡。这三个字段把「什么时候、
+    # 从什么状态、因为什么」钉在卡面上，日后翻出来才知道该放回还是废弃。
+    "shelved_at", "shelved_from", "shelve_reason",
 ]
 
 # 文件级锁（任务卡 `locks` 字段）的判定在 conflict.py。放 try 里是因为 hive.py 允许被
@@ -1578,12 +1581,14 @@ PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
 # 任务卡状态机。加新状态时务必同步改这几个集合，别让「在飞」的判断散落在各处字符串比较里。
 STATES = ("ready", "assigned", "running", "needs_review",
-          "conflict", "blocked", "done")
+          "conflict", "blocked", "done", "shelved")
 IN_FLIGHT_STATES = ("assigned", "running")   # 占了并发额度、worker 会去接的
-# 需要人或另一个 agent 介入才能继续的：dispatch / worker 都跳过，doctor 要报
-HANDOFF_STATES = ("needs_review", "conflict", "blocked")
+# dispatch / worker / MCP 一律跳过的状态。前三态是「需要人或另一个 agent 介入」，
+# shelved 是「情况已知、暂时封存」：doctor 只报前三态，搁置卡不算挂账、不进告警。
+HANDOFF_STATES = ("needs_review", "conflict", "blocked", "shelved")
 # blocked 与 conflict 分开：conflict 是「必须尽快解」，doctor 按 error 报；blocked 是等资源
 ERROR_STATES = ("conflict",)
+SHELVED_STATE = "shelved"                    # 单一真源，别在各处写裸字符串
 
 
 def _pct(values, p: int) -> float:
@@ -1726,6 +1731,10 @@ class Hive:
         规则见模块级 `overlay_store_state`：**只有 store 里存在有效租约时才覆盖**。
         """
         if claim_backend() != "store":
+            return data
+        # 搁置是人的决定，优先级最高：万一 store 里还留着一份旧租约（集群暂时
+        # 不可达导致 store_release 没成功），也不该把卡面覆盖回 running。
+        if data.get("state") == SHELVED_STATE:
             return data
         return overlay_store_state(data, local_store())
 
@@ -1956,7 +1965,9 @@ class Hive:
         cards = self.cards()
         out = []
         for tid, c in cards.items():
-            if c.get("state") == "done":
+            # 搁置卡不该被 land --all 顺手合入：它的结果已经被释放了，
+            # 真要复活得由人显式 unshelve，不能靠自动流程绕过。
+            if c.get("state") in ("done", SHELVED_STATE):
                 continue
             res = self.result_info(tid)
             if not res or res.get("status") != "done":
@@ -2026,6 +2037,9 @@ class Hive:
 
         if card.get("state") == "done":
             plan["problems"].append("已经 close 过了")
+            return plan
+        if card.get("state") == SHELVED_STATE:
+            plan["problems"].append("卡已搁置，先 hive unshelve 才能合入")
             return plan
         if not res:
             plan["problems"].append("还没有结果")
@@ -3227,6 +3241,8 @@ class Hive:
         """
         self.fetch()
         card = self.card(tid)
+        if card.get("state") == SHELVED_STATE:
+            raise HiveError(f"{tid} 已搁置，不会被派发；先 hive unshelve {tid} 取消搁置")
         if card.get("state") == "done" or self.result_info(tid):
             raise HiveError(f"{tid} 已经有结果或已关闭")
         claim_holder = _claim_holder(self.claim_info(tid))
@@ -3570,7 +3586,9 @@ class Hive:
             claim = self.claim_info(tid) or {}
             res = self.result_info(tid) or {}
             state = c.get("state")
-            if claim and not res and state not in ("done", "blocked"):
+            # 搁置时已经把 claim 删了，但旧快照/多机同步窗口里可能还残留一份，
+            # 绝不能让它把 shelved 推导回 running（那样卡又回到「进行中」了）。
+            if claim and not res and state not in ("done", "blocked", SHELVED_STATE):
                 state = "running"  # 看板推导，不写回任务卡
             lease_until = claim.get("lease_until")
             stale = bool(lease_until and not res and parse_iso(lease_until) < now())
@@ -3579,6 +3597,10 @@ class Hive:
                 "id": tid,
                 "state": state,
                 "owner": c.get("owner") or "",
+                # —— 搁置现场：看板的搁置面板靠这三个字段说清「为什么停、什么时候停」——
+                "shelved_at": c.get("shelved_at") or "",
+                "shelved_from": c.get("shelved_from") or "",
+                "shelve_reason": c.get("shelve_reason") or "",
                 # —— T-0188：派发流水线的派生阶段（pending/dispatched/claimed/...）——
                 "stage": (dt.board_stage(c) if dt is not None else state),
                 "dispatched_to": c.get("dispatched_to") or "",
@@ -3635,7 +3657,7 @@ class Hive:
             label = {
                 "pending": "待分配", "dispatched": "已推送", "claimed": "已领取",
                 "running": "在跑", "done": "已完成", "failed": "失败",
-                "conflict": "冲突", "blocked": "挂起",
+                "conflict": "冲突", "blocked": "挂起", "shelved": "搁置",
             }
             parts = [f"{label.get(s, s)} {n}" for s, n in board["counts"].items()]
             print(f"分组：{' / '.join(parts)}    合计 {board.get('total')}")
@@ -3656,6 +3678,10 @@ class Hive:
         self.sync_main()
         card = self.card(tid)
         old = card.get("state")
+        # 搁置卡是「封存」：block / conflict / needs_review 都不该悄悄把它解锁，
+        # 否则它又会回到异常列被人盯着。唯一出口是 unshelve。
+        if old == SHELVED_STATE:
+            raise HiveError(f"{tid} 已搁置；先 hive unshelve {tid} 才能改成 {state}")
         card["state"] = state
         if not keep_owner and state != "assigned":
             card["owner"] = None if state == "blocked" else card.get("owner")
@@ -3688,6 +3714,8 @@ class Hive:
 
     def cmd_retry(self, tid: str, agent: str | None = None, fresh: bool = False) -> None:
         card = self.card(tid)
+        if card.get("state") == SHELVED_STATE:
+            raise HiveError(f"{tid} 已搁置，不能重试；先 hive unshelve {tid} 取消搁置")
         if claim_backend() == "store":
             target = agent or card.get("owner") or ""
             store_retry(tid, target)
@@ -3747,6 +3775,8 @@ class Hive:
         self.fetch()
         card = self.card(tid)
         old_owner = card.get("owner") or ""
+        if card.get("state") == SHELVED_STATE:
+            raise HiveError(f"{tid} 已搁置；要放回待领取请 hive unshelve {tid}")
         if card.get("state") in ("done", "closed"):
             raise HiveError(f"{tid} 已是 {card.get('state')}，无法退回未分配")
         claim = self.claim_info(tid) or {}
@@ -3771,6 +3801,185 @@ class Hive:
                              self._card_paths(tid))
         cluster_release_lease(tid)
         log(f"{tid} 已退回 ready 并未分配（原 owner={old_owner or '无'}）")
+
+    # -- 搁置：当前做不了、但不想删的卡 ------------------------------------ #
+    def _release_card_files(self, tid: str) -> list[str]:
+        """释放一张卡占着的运行时文件，返回被删的工作区路径（供精确 stage）。
+
+        搁置和「退回待领取」最大的区别就在这里：卡不打算重排队，所以租约、
+        结果、进度上报、收件箱信号都不该继续挂着，否则看板上会残留进度条、
+        worker 复活后又来续跑、agent 收件箱里还躺着一张没人做的卡。
+        删的全是派生物，Git 历史里都在，审计不丢。
+        """
+        # 远端分支：租约 / 结果 / agent 主动上报的进度
+        for ref in (f"claim/{tid}", f"res/{tid}", f"status/{tid}"):
+            if not rev_parse(self.dir, f"origin/{ref}"):
+                continue
+            try:
+                p = git_net(["push", "origin", f":refs/heads/{ref}"], self.dir,
+                            check=False)
+                if p.returncode == 0:
+                    log(f"已删除分支 {ref}")
+                else:
+                    log(f"删不掉 {ref}（可能受保护），保留不影响搁置")
+            except HiveError as e:
+                # 卡面马上就要写成 shelved，删分支只是收口；网络问题不能把一次
+                # 成功的搁置报成失败（和 cmd_close 同一口径）。
+                log(f"删不掉 {ref}（{str(e).splitlines()[0]}），保留不影响搁置")
+
+        removed: list[str] = []
+        archived = self.dir / "results" / f"{tid}.json"
+        if archived.exists():
+            archived.unlink()
+            removed.append(f"results/{tid}.json")
+        # 收件箱信号按卡号全扫，不看 owner：改派 / 重试可能给不同 agent 都留过
+        # 一份，卡面 owner 也可能已经空了。漏一个就有人对着一张搁置卡发呆。
+        inbox_dir = self.dir / "inbox"
+        if inbox_dir.exists():
+            for sig in sorted(inbox_dir.glob(f"*/{tid}.md")):
+                sig.unlink()
+                removed.append(sig.relative_to(self.dir).as_posix())
+        clear_local_lease(tid)
+        return removed
+
+    def cmd_shelve(self, tid: str, reason: str = "", who: str = "controller") -> None:
+        """把「当前做不了」的卡封存为 shelved：清场、退出派发池，但保留卡面。
+
+        * 与 unassign 的区别：unassign 是还要做，放回 ready 等别人领；搁置是
+          现在做不了，放回去只会占位置、干扰 agent 领取。
+        * 与 blocked 的区别：blocked 是「等资源、还得盯着」的异常，看板进异常列、
+          doctor 会报；搁置是「情况已知、不用管」的封存，不算挂账。
+        * 与 close 的区别：close 是「这张卡不做了」；搁置是「别忘了，以后再说」。
+          所以卡面连同现场一起留着，日后可放回待领取 / 另立新卡 / 废弃。
+        """
+        self._sync_for_commit()
+        card = self.card(tid)
+        old_state = str(card.get("state") or "?")
+        old_owner = str(card.get("owner") or "")
+        if old_state in ("done", "closed"):
+            raise HiveError(f"{tid} 已是 {old_state}（终态），无需搁置；要重做请 reopen")
+        if old_state == SHELVED_STATE:
+            raise HiveError(f"{tid} 已搁置；要继续做请 hive unshelve {tid}")
+
+        claim = self.claim_info(tid) or {}
+        res = self.result_info(tid) or {}
+        # 文件要删，但「当时为什么停、做到哪」必须留在卡面上 —— 这是搁置
+        # 而不是删除的唯一理由：半年后翻出来，还认得出这张卡。
+        # 搁置会删掉 res/<tid> 分支，而 worker 的结论往往**只**存在那份 summary 里。
+        # 所以释放文件之前，把完整结论抄进卡面（折叠块，不干扰日常读卡）——
+        # 「不要忘记」不能只留一句 200 字的摘要，更不能指望 git gc 后的孤儿 commit。
+        summary_text = str(res.get("summary") or "").strip()
+        facts = [f"原状态 {old_state}", f"owner {old_owner or '（无主）'}"]
+        if claim:
+            facts.append(f"租约 {claim.get('agent') or '?'}"
+                         f"（claimed_at={claim.get('claimed_at') or '?'}）")
+        if res:
+            facts.append(f"结果 status={res.get('status') or '?'}")
+        if summary_text:
+            facts.append(f"结果摘要已全文抄录在下方（{len(summary_text)} 字）")
+        facts.append("已释放 claim/res/status 分支、归档结果、收件箱信号与本机租约")
+
+        paths = self._release_card_files(tid)
+        self._bump_fence(card, claim)     # 旧 worker 复活写进来的结果一律作废
+        card["state"] = SHELVED_STATE
+        card["owner"] = None
+        card["shelved_at"] = iso()
+        card["shelved_from"] = old_state
+        card["shelve_reason"] = reason or "（未填原因）"
+        # 派发流水线残留也清掉，免得恢复后看起来像「早已推送给某某」
+        for k in ("dispatched_to", "dispatched_at", "dispatch_miss"):
+            card.pop(k, None)
+
+        body = (str(card["_body"])
+                + f"\n\n---\n\n**搁置（{card['shelved_at']}，by {who}）**："
+                + f"{card['shelve_reason']}\n\n> 现场：{'；'.join(facts)}\n"
+                + f"\n> 日后处置：`hive unshelve {tid}` 放回待领取 / "
+                  f"`hive unshelve {tid} --spawn-new --title ...` 另立新卡 / "
+                  f"`hive close {tid}` 废弃。\n")
+        if summary_text:
+            body += ("\n<details><summary>搁置前的结果摘要（原文；"
+                     f"res/{tid} 分支即将释放）</summary>\n\n"
+                     + summary_text + "\n\n</details>\n")
+        self.save_card(card, body)
+        self.commit_and_push(f"shelve {tid}" + (f": {reason}" if reason else ""),
+                             [f"tasks/{tid}.md", *paths])
+        if claim_backend() == "store":
+            # requeue=False：别让 store 把卡顺手改回 ready/blocked，覆盖卡面的 shelved。
+            # agent 取 claim 里的持有者（store.release 会校验租约归属，传错会静默失败）。
+            store_release(tid, str(claim.get("agent") or old_owner or who),
+                          requeue=False)
+        else:
+            cluster_release_lease(tid)
+        log(f"{tid} 已搁置（原状态 {old_state}），运行时文件已释放")
+
+    def cmd_unshelve(self, tid: str, reason: str = "", who: str = "controller",
+                     spawn_new: bool = False, title: str = "") -> str:
+        """取消搁置：默认放回 ready；spawn_new 时另立新卡、原卡保持搁置。
+
+        返回最终「活过来」的任务号（普通恢复 = tid，另立新卡 = 新 tid）。
+        """
+        self._sync_for_commit()
+        card = self.card(tid)
+        if card.get("state") != SHELVED_STATE:
+            raise HiveError(
+                f"{tid} 当前是 {card.get('state') or '?'}，只有搁置卡能 unshelve")
+        if spawn_new:
+            return self._spawn_from_shelved(card, reason=reason, who=who,
+                                            title=title)
+
+        old_from = str(card.get("shelved_from") or "?")
+        for k in ("shelved_at", "shelved_from", "shelve_reason"):
+            card.pop(k, None)
+        card["state"] = "ready"
+        card["owner"] = None
+        body = (str(card["_body"])
+                + f"\n\n---\n\n**取消搁置（{iso()}，by {who}）**："
+                + f"{reason or '（未填原因）'}，从 {old_from} 放回待领取（ready）。\n")
+        self.save_card(card, body)
+        self.commit_and_push(f"unshelve {tid}" + (f": {reason}" if reason else ""),
+                             [f"tasks/{tid}.md"])
+        log(f"{tid} 已取消搁置，回到 ready（搁置前状态 {old_from}）")
+        return tid
+
+    def _spawn_from_shelved(self, card: dict, reason: str, who: str,
+                            title: str) -> str:
+        """以搁置卡为模板另立一张 ready 新卡，原卡保持搁置。
+
+        「变成另外的任务」往往意味着目标已经变了，直接复活旧卡会带着旧标题、
+        旧备注和旧的重试次数。派生新卡更干净；原卡不删（怕忘），由人确认后再 close。
+        """
+        tid = str(card.get("id") or "")
+        ids = [int(p.stem.split("-")[1])
+               for p in (self.dir / "tasks").glob("T-*.md")
+               if p.stem.split("-")[1].isdigit()]
+        new_id = f"T-{max(ids, default=0) + 1:04d}"
+        new_title = (title or "").strip() or f"（由 {tid} 拆分）{card.get('title') or ''}"
+
+        body = (f"> 源自搁置卡 {tid}"
+                f"（原因：{card.get('shelve_reason') or '未填原因'}），"
+                f"由 {who} 于 {iso()} 另立。原卡仍在搁置区，"
+                f"确认不再需要请 `hive close {tid}`。\n\n"
+                + str(card.get("_body") or ""))
+        keep = ("repo", "base", "priority", "needs", "paths", "locks",
+                "verify", "depends_on", "lease_minutes", "timeout_minutes",
+                "max_retries")
+        new_card = {k: card[k] for k in keep if k in card}
+        new_card.update({
+            "id": new_id, "title": new_title, "state": "ready",
+            "owner": None, "agent": None, "fresh": False, "created": iso(),
+            "retries": 0, "dispatch_miss": 0,
+        })
+        write_card(self.dir / "tasks" / f"{new_id}.md", new_card, body)
+        # 原卡上留一笔，日后翻到旧卡时知道它已经裂变过，不是被忘了
+        note = (str(card["_body"])
+                + f"\n\n---\n\n**另立新卡（{iso()}，by {who}）**："
+                + f"{reason or '（未填原因）'}，已派生 {new_id}（{new_title}）。"
+                + f" 本卡仍搁置，确认不再需要请 `hive close {tid}`。\n")
+        self.save_card(card, note)
+        self.commit_and_push(f"respawn {tid} -> {new_id}",
+                             [f"tasks/{new_id}.md", f"tasks/{tid}.md"])
+        log(f"{tid} 已派生新卡 {new_id}（原卡仍搁置）：{new_title}")
+        return new_id
 
     def cmd_gc(self, minutes: int) -> None:
         self.fetch()
@@ -5960,6 +6169,18 @@ def cmd_unassign(args) -> None:
     Hive(args.dir).cmd_unassign(args.task, args.reason or "", who="controller")
 
 
+def cmd_shelve(args) -> None:
+    Hive(args.dir).cmd_shelve(args.task, args.reason or "", who="controller")
+
+
+def cmd_unshelve(args) -> None:
+    new_tid = Hive(args.dir).cmd_unshelve(
+        args.task, args.reason or "", who="controller",
+        spawn_new=args.spawn_new, title=args.title or "")
+    if args.spawn_new:
+        print(f"NEW_TASK={new_tid}")
+
+
 def cmd_prompt(args) -> None:
     tid = args.task or args.task_flag
     if not tid:
@@ -6705,6 +6926,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.add_argument("--reason", default="", help="为什么退回（写进卡面备注）")
     s.set_defaults(func=cmd_unassign)
+
+    s = sub.add_parser("shelve", help="搁置：释放租约/结果/进度/信号，退出派发池，但保留卡面")
+    s.add_argument("task")
+    s.add_argument("--reason", default="", help="为什么现在做不了（写进卡面备注）")
+    s.set_defaults(func=cmd_shelve)
+
+    s = sub.add_parser("unshelve", aliases=["resume"],
+                       help="取消搁置：放回待领取，或 --spawn-new 另立一张新卡")
+    s.add_argument("task")
+    s.add_argument("--reason", default="", help="为什么现在能做了（写进卡面备注）")
+    s.add_argument("--spawn-new", action="store_true",
+                   help="以搁置卡为模板另立新卡（原卡保持搁置，之后可 close）")
+    s.add_argument("--title", default="", help="--spawn-new 时给新卡的标题")
+    s.set_defaults(func=cmd_unshelve)
 
     s = sub.add_parser("result", help="查看任务结果")
     s.add_argument("task")

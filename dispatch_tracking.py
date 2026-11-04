@@ -20,6 +20,7 @@ STAGE_DONE = "done"
 STAGE_FAILED = "failed"
 STAGE_CONFLICT = "conflict"
 STAGE_BLOCKED = "blocked"
+STAGE_SHELVED = "shelved"   # 已封存：不算待分配、不算异常，不进任何派发计数
 
 # ---- 内部工具 ----------------------------------------------------------
 
@@ -61,7 +62,11 @@ def board_stage(card: dict[str, Any]) -> str:
     # 1. done / closed
     if state in ("done", "closed"):
         return STAGE_DONE
-    # 2. blocked
+    # 2. shelved 必须早于所有兜底：旧的「未知态 -> pending」会把搁置卡
+    #    算进「待分配」，派发计数虚高，看上去像还有活没人领。
+    if state == "shelved":
+        return STAGE_SHELVED
+    # 3. blocked
     if state == "blocked":
         return STAGE_BLOCKED
     # 3. conflict

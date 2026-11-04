@@ -121,8 +121,13 @@ def hive_argv(*args):
     return [PYTHON, str(HIVE_PY), "--dir", str(HIVE_ROOT), *args]
 
 
-TASK_ACTIONS = ("close", "retry", "unassign", "reopen")  # 看板按钮暴露的操作
+# 看板按钮暴露的操作。shelve/unshelve/respawn 是「搁置」三件套：封存、放回、
+# 另立新卡。它们会释放或重建派发资源，一律只许 controller 角色做。
+TASK_ACTIONS = ("close", "retry", "unassign", "reopen",
+                "shelve", "unshelve", "respawn")
 TID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")  # 任务号允许字符
+SHELF_TITLE_MAX = 200                                    # 另立新卡的标题长度上限
+SHELF_ACTIONS = ("shelve", "unshelve", "respawn")
 
 # ---- 写操作鉴权（复用 mcp_auth 的本机 token 表）----
 #
@@ -1101,8 +1106,9 @@ def build_handler(status_path, write_auth="off"):
                               "source": self.client_address[0], "detail": "未鉴权"})
                 return
             # close/reopen 是不可逆或半不可逆的运维动作，只许 controller 角色做；
+            # 搁置三件套同理（会影响 agent 能领到什么卡）。
             # retry/unassign 退回待领取，worker 角色自己做自己的卡也合理。
-            if action in ("close", "reopen") and not self.is_controller(who):
+            if action in ("close", "reopen") + SHELF_ACTIONS and not self.is_controller(who):
                 self._send_json(403, {
                     "ok": False,
                     "error": "%s 需要 controller 角色（当前 %s）"
@@ -1136,6 +1142,22 @@ def build_handler(status_path, write_auth="off"):
                     argv += ["--fresh"]
             elif action == "reopen":
                 argv += ["reopen", tid, "--reason", note]
+            elif action in SHELF_ACTIONS:
+                # 搁置 / 取消搁置 / 另立新卡：前两个走独立 CLI，第三个是
+                # unshelve --spawn-new（原卡保持搁置，只派生一张新 ready 卡）。
+                argv += ["shelve" if action == "shelve" else "unshelve",
+                         tid, "--reason", note]
+                if action == "respawn":
+                    title = str(body.get("title") or "").strip()
+                    # 标题会原样写进卡面 frontmatter，换行/控制字符能把 YAML 打坏
+                    if (not title or len(title) > SHELF_TITLE_MAX
+                            or any(ord(c) < 32 for c in title)):
+                        self._send_json(400, {
+                            "ok": False,
+                            "error": "新卡标题不能为空、不能含控制字符，且不超过 %d 字"
+                                     % SHELF_TITLE_MAX})
+                        return
+                    argv += ["--spawn-new", "--title", title]
             else:  # unassign
                 argv += ["unassign", tid, "--reason", note]
 
@@ -1171,7 +1193,12 @@ def build_handler(status_path, write_auth="off"):
                           "note": note, "source": self.client_address[0]})
             # 成功：重新生成状态文件，让看板即时反映变化
             self._refresh_status()
-            self._send_json(200, {"ok": True, "output": out[-600:]})
+            resp = {"ok": True, "output": out[-600:]}
+            # 另立新卡时把新任务号回给前端，toast 里能直接点出来
+            m = re.search(r"NEW_TASK=(T-\d{4,})", out)
+            if m:
+                resp["new_task"] = m.group(1)
+            self._send_json(200, resp)
 
         def _refresh_status(self):
             """操作成功后重跑 `hive status --json` 覆盖状态文件，使看板即时更新。"""

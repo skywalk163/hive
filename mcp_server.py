@@ -30,7 +30,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from hive import (  # noqa: E402
-    DEFAULT_STATE, HANDOFF_STATES, IDENT, PRIORITY_ORDER, VERSION, Hive,
+    DEFAULT_STATE, HANDOFF_STATES, IDENT, PRIORITY_ORDER, SHELVED_STATE,
+    VERSION, Hive,
     HiveError, Worker,
     _claim_holder, _verify_verdict, claim_backend, commit_file_to_ref, git, iso, now,
     parse_iso, rev_parse,
@@ -487,7 +488,7 @@ class HiveMcp:
             if c.get("state") != "ready" or c.get("owner"):
                 continue
             if c.get("state") in HANDOFF_STATES:
-                continue  # blocked / conflict / needs_review 不是「能领」
+                continue  # blocked / conflict / needs_review / shelved 不是「能领」
             if h.result_info(tid) or h.claim_info(tid):
                 continue
             good, _ = self._can_do(cfg, c, h)
@@ -506,6 +507,10 @@ class HiveMcp:
                                  if c.get("state") == "needs_review"],
                 "ready": [t for t, c in h.cards().items()
                           if c.get("state") == "ready" and not c.get("owner")],
+                # 搁置不计入上面任何「今天该干什么」的口径（不算挂账），
+                # 但单列一份，免得封着封着就忘了。
+                "shelved": [t for t, c in h.cards().items()
+                            if c.get("state") == SHELVED_STATE],
             }
         return ok(
             f"我是 {self.agent}（{cfg.get('mode') or 'exec'} 模式）",
@@ -626,7 +631,7 @@ class HiveMcp:
             if c.get("state") != "ready" or c.get("owner"):
                 continue
             if c.get("state") in HANDOFF_STATES:
-                continue  # blocked / conflict / needs_review 不是「能领」
+                continue  # blocked / conflict / needs_review / shelved 不是「能领」
             if h.result_info(tid) or h.claim_info(tid):
                 continue
             good, why = self._can_do(cfg, c, h)
@@ -643,6 +648,8 @@ class HiveMcp:
         tid = a["task_id"]
         h = self.hive()
         card = h.card(tid)
+        if card.get("state") == SHELVED_STATE:
+            return err(f"{tid} 已搁置，不会被派发；先 hive unshelve {tid} 取消搁置")
         if card.get("state") == "done" or h.result_info(tid):
             return err(f"{tid} 已经有结果或已关闭")
 

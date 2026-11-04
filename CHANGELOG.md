@@ -4,6 +4,32 @@
 
 ### Added
 
+- **任务状态「搁置」（`shelved`）：不能忘，但大部分时候可以忽略**。有些卡当前确实
+  做不了：打回 `ready` 只白占一个名额、还会干扰 agent 领取；一直挂在异常里也不对（情况
+  已知，租约/结果/进度这些现场完全可以释放）；直接删更不行，删了就真忘了。
+  - `hive shelve <tid> --reason "…"`：卡面写 `shelved` + `shelved_at` /
+    `shelved_from` / `shelve_reason` 和现场备注；**释放** `claim/` / `res/` /
+    `status/` 远端分支、`results/<tid>.json` 归档、`inbox/*/<tid>.md` 分派信号、
+    本机与集群租约，并推进 fence 让旧 worker 复活写进来的结果一律作废。
+  - 三个出口：`hive unshelve <tid>` 放回 `ready`；
+    `hive unshelve <tid> --spawn-new --title "…"` 以搁置卡为模板另立一张
+    `ready` 新卡（继承 repo/base/priority/verify/depends_on，原卡保持搁置）；
+    `hive close <tid>` 废弃。卡面备注里也写着这三条命令。
+  - 不挂账：不进任何看板列、不进「共 N 个任务」活跃统计、`doctor` 不报、
+    不归档（冷热分离只收 `done`/`closed`）。`dispatch` / `hive take` /
+    MCP `hive_claim` / `hive land --all` 一律跳过；`retry` / `unassign` /
+    `block` 会拒绝搁置卡，唯一出口是 `unshelve`。`hive_whoami.todo` 单列
+    `shelved` 清单，免得封着封着就忘了。
+  - **排版用按钮，不加第 7 列**：六列已经够挤，搁置卡也不该跟活跃卡平级。
+    顶栏统计条常驻一枚低调的「搁置 N」，看板上方是一条默认收起的横条，点开才
+    展开卡片列表（原因 / 搁置时间 / 原状态 + 放回、另立、废弃三个按钮）；
+    搜索命中搁置卡时，折叠态会显示「有匹配」提示。详情抽屉也补了搁置信息块。
+  - 活跃列（待领取 / 进行中 / 待合并 / 异常）卡片加「搁置」按钮；
+    `/api/task` 白名单加 `shelve` / `unshelve` / `respawn`，均限 controller 角色，
+    `respawn` 校验标题并把新卡号回给前端。
+  - 派发指令加 `mode=shelved`：搁置卡的「复制」拿到的是写明**不要领取**的搁置说明，
+    而不是一句「请领取任务」把 agent 又勾回来（JSON 输出也不带 `claim_tool`）。
+  - `hive top`（TUI）加第五组「搁置」，计数常驻但排在最后，不抢前四组注意力。
 - **看板「留言」：跨机给 agent 递话的聊天框**。机器 A 对某张卡的理解/疑问、
   对机器 B 上另一个 agent 的指点，以前只能贴到某个窗口再口口相传；现在看板右下角
   点「留言」就能发。频道三种：`hall`（大厅）、`task:T-0231`（某张卡的讨论线程）、

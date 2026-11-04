@@ -26,6 +26,8 @@
   ];
   var COL_TITLE = {};
   COLUMNS.forEach(function (c) { COL_TITLE[c.key] = c.title; });
+  // 搁置不是第 7 列，但也得有个名字给 aria-label / 详情用
+  COL_TITLE.shelved = '搁置';
 
   // ---------- 设置：个人 local（稀疏，仅存改过的项）＋ 服务端共享默认（个人优先） ----------
   function loadPersonalRaw() {
@@ -115,6 +117,7 @@
     query: '',
     autoRefresh: true,
     closedOpen: false,
+    shelfOpen: false,     // 搁置面板默认收起：平时忽略，点开才看
     loading: true,
     error: '',
     lastUpdated: null,
@@ -187,6 +190,10 @@
       repo: t.repo || '',
       priority: t.priority || '',
       state: t.state || '',
+      // —— 搁置现场：旧快照没有这三个字段，空串即可，搁置面板会显示「未填原因」——
+      shelved_at: t.shelved_at || '',
+      shelved_from: t.shelved_from || '',
+      shelve_reason: t.shelve_reason || '',
       // —— 派发阶段（T-0188 的派生字段）：旧快照没有 stage，取空串后由徽标处静默跳过 ——
       stage: t.stage || '',
       dispatched_to: t.dispatched_to || '',
@@ -227,6 +234,9 @@
 
   /** 列的单向判定，一张卡只落一列 */
   function classify(t) {
+    // 搁置必须最先判：它不属于任何活跃列，也不能被「有结果 / 租约过期」
+    // 拽进异常列。漏了这条会落到最后 return 'ready'，正是搁置要避免的。
+    if (t.state === 'shelved') return 'shelved';
     if (t.state === 'done' || t.state === 'closed') {
       // done=真完成（最近完成的归 recent），closed=关闭作废（没产出结果就关了）
       // 两者都归档到「已关闭」。少判 closed 会让作废的卡掉进「待领取」，看着像还要人干。
@@ -237,6 +247,15 @@
     if (t.result_status === 'done') return 'merging';
     if (t.claim_agent || t.state === 'assigned' || t.state === 'running') return 'running';
     return 'ready';
+  }
+
+  /** 搁置排序：最近搁置的在前（捡起来时先看新的），无时间沉底，再按 id */
+  function sortShelved(a, b) {
+    var ta = parseTime(a.shelved_at), tb = parseTime(b.shelved_at);
+    if (ta === null && tb === null) return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);
+    if (ta === null) return 1;
+    if (tb === null) return -1;
+    return tb - ta;
   }
 
   /** 「最近完成」列排序：按完成时间倒序（最近的在前），无完成时间沉底，再按 id */
@@ -265,6 +284,14 @@
     el.banner = document.getElementById('banner');
     el.panel = document.getElementById('state-panel');
     el.columns = document.getElementById('columns');
+    // 搁置面板（独立于 .columns：不占列宽，也不参与列显隐设置）
+    el.shelf = document.getElementById('shelf');
+    el.shelfToggle = document.getElementById('shelf-toggle');
+    el.shelfBody = document.getElementById('shelf-body');
+    el.shelfList = document.getElementById('shelf-list');
+    el.shelfEmpty = document.getElementById('shelf-empty');
+    el.shelfCount = document.getElementById('shelf-count');
+    el.shelfHit = document.getElementById('shelf-hit');
     el.repo = document.getElementById('repo-filter');
     el.owner = document.getElementById('owner-filter');
     el.prio = document.getElementById('prio-filter');
@@ -335,6 +362,22 @@
     });
   }
 
+  /**
+   * 搁置面板做成「伪列」：复用 syncList 的增量渲染，但刻意不进 COLUMNS ——
+   * 它不占列宽、不进设置里的列显隐，也不参与顶部「只看该列」筛选。
+   */
+  function buildShelf() {
+    cols.shelf = { root: el.shelf, body: el.shelfList, empty: el.shelfEmpty,
+                   count: el.shelfCount, list: [], toggle: null, more: null,
+                   overflow: 0 };
+    if (el.shelfToggle) {
+      el.shelfToggle.addEventListener('click', function () {
+        state.shelfOpen = !state.shelfOpen;
+        render();
+      });
+    }
+  }
+
   // ---------- 卡片渲染 ----------
   function prioBadge(t) {
     var p = (t.priority || '').toUpperCase();
@@ -355,10 +398,10 @@
   var STAGE_LABEL = {
     pending: '待分配', dispatched: '已推送', claimed: '已领取',
     running: '在跑', done: '已完成', failed: '失败',
-    conflict: '冲突', blocked: '挂起'
+    conflict: '冲突', blocked: '挂起', shelved: '搁置'
   };
   var STAGE_ORDER = ['pending', 'dispatched', 'claimed', 'running',
-                     'done', 'failed', 'conflict', 'blocked'];
+                     'done', 'failed', 'conflict', 'blocked', 'shelved'];
 
   function stageLabel(s) { return STAGE_LABEL[s] || s || ''; }
 
@@ -443,7 +486,46 @@
       '" data-tid="' + esc(tid) + '">' + esc(label) + '</button>';
   }
 
+  /**
+   * 搁置卡用紧凑布局：重点不是「谁在做什么」，而是「为什么停、什么时候停、
+   * 现在能怎么捡起来」。不显示进度条 / 租约 / 验收结果（那些都已被释放）。
+   */
+  function shelfCardInner(t) {
+    var h = '<div class="card-row card-head-row">' +
+      '<span class="tid strong">' + esc(t.id) + '</span>' + prioBadge(t) +
+      '<span class="badge shelf-badge">搁置</span></div>';
+    h += '<h3 class="card-title">' + esc(t.title) + '</h3>';
+    h += '<div class="shelf-why">' + esc(t.shelve_reason || '（未填原因）') + '</div>';
+
+    h += '<div class="card-time">';
+    var at = parseTime(t.shelved_at);
+    h += at !== null ? ('搁置于 ' + relTime(at) + ' · ' + dtf.format(at)) : '搁置时间未知';
+    if (t.shelved_from) h += ' · 原状态 ' + esc(t.shelved_from);
+    h += '</div>';
+
+    h += '<div class="card-tags"><span class="pill pill-repo">' +
+         esc(t.repo || '—') + '</span></div>';
+
+    // 「复制说明」拿到的不是派发指令，而是一段明确写着「不要领取」的搁置说明
+    var chatN = chatCountFor(t.id);
+    h += '<div class="card-copy">' +
+      '<button type="button" class="act act-copy" data-copy="' + esc(t.id) +
+      '" title="复制搁置说明：原因 + 三个出口 + 不要领取">复制说明</button>' +
+      '<button type="button" class="act act-chat" data-chat="' + esc(t.id) +
+      '" title="打开这张卡的留言线程">讨论' +
+      (chatN ? '<span class="n">' + chatN + '</span>' : '') + '</button></div>';
+
+    // 三个出口：放回待领取 / 变成另外的任务 / 废弃
+    h += '<div class="card-actions">' +
+      actBtn('unshelve', t.id, '放回待领取', 'act-ok') +
+      actBtn('respawn', t.id, '另立新卡', 'act-reassign') +
+      actBtn('close', t.id, '废弃', 'act-close') +
+      '</div>';
+    return h;
+  }
+
   function cardInner(t) {
+    if (classify(t) === 'shelved') return shelfCardInner(t);
     var stale = isStale(t);
     var col = classify(t);
     var h = '';
@@ -532,8 +614,9 @@
     // 现在拆成两个语义清楚的动作：
     //   unassign=终止本次执行、放回待领取（想继续做就选这个）
     //   close   =这张卡不做了（有结果记 done，没结果记 closed 作废）
-    if (col === 'abnormal' || col === 'running' || col === 'ready' ||
-        col === 'closed' || col === 'recent') {
+    var isActive = (col === 'abnormal' || col === 'running' ||
+                    col === 'ready' || col === 'merging');
+    if (isActive || col === 'closed' || col === 'recent') {
       h += '<div class="card-actions">';
       if (col === 'abnormal') {
         h += actBtn('unassign', t.id, '退回待领取', 'act-unassign');
@@ -545,9 +628,12 @@
         h += actBtn('unassign', t.id, '强制收回', 'act-unassign');
       } else if (col === 'ready') {
         h += actBtn('reassign-open', t.id, '派给…', 'act-reassign');
-      } else {
+      } else if (col === 'closed' || col === 'recent') {
         h += actBtn('reopen', t.id, '重开', 'act-reopen');
       }
+      // 搁置入口只给活跃列：当前做不了、退回待领取又会占位置时用。
+      // 已关闭 / 搁置中的卡不需要这个按钮。
+      if (isActive) h += actBtn('shelve', t.id, '搁置', 'act-shelve');
       h += '</div>';
     }
     return h;
@@ -619,11 +705,13 @@
         return writeClipboard(body.text || '').then(function () {
           flashCopied(btn);
           // mode 由服务端按卡的状态定：merge=给主控的合并指令，abnormal=附带溯源块
-          var msg = body.mode === 'merge'
-            ? '已复制 ' + tid + ' 的合并指令，切到主控 agent 粘贴即可'
-            : (body.mode === 'abnormal'
-              ? '已复制 ' + tid + ' 的派发指令（含异常溯源信息），切到 agent 粘贴即可'
-              : '已复制 ' + tid + ' 的派发指令，切到 agent 粘贴即可');
+          var msg = body.mode === 'shelved'
+            ? '已复制 ' + tid + ' 的搁置说明（写着不要领取），别贴给 agent 派活'
+            : (body.mode === 'merge'
+              ? '已复制 ' + tid + ' 的合并指令，切到主控 agent 粘贴即可'
+              : (body.mode === 'abnormal'
+                ? '已复制 ' + tid + ' 的派发指令（含异常溯源信息），切到 agent 粘贴即可'
+                : '已复制 ' + tid + ' 的派发指令，切到 agent 粘贴即可'));
           flash(msg);
         });
       })
@@ -760,10 +848,12 @@
     el.board.hidden = false;
   }
 
-  function renderStats(counts) {
-    // 统计条既是仪表盘也是快捷筛选器：点某列只看该列，再点「共 N 个」恢复全部
+  function renderStats(counts, shelvedCount) {
+    // 统计条既是仪表盘也是快捷筛选器：点某列只看该列，再点「共 N 个」恢复全部。
+    // 搁置卡不计入「共 N 个任务」：它不算挂账，混进去会让活跃盘子看着虚高。
+    var active = Math.max(0, state.filtered.length - (shelvedCount || 0));
     var html = '<button type="button" class="stat stat-total' + (state.col ? '' : ' active') +
-      '" data-col="" title="显示全部列">共 <b>' + state.filtered.length + '</b> 个任务</button>';
+      '" data-col="" title="显示全部列（不含搁置）">共 <b>' + active + '</b> 个任务</button>';
     COLUMNS.forEach(function (c) {
       if (!settings.columns[c.key]) return;   // 隐藏的面板不计入统计条
       html += '<button type="button" class="stat' +
@@ -772,7 +862,36 @@
         '" data-col="' + esc(c.key) + '" title="只看「' + esc(c.title) + '」">' +
         esc(c.title) + ' <b>' + (counts[c.key] || 0) + '</b></button>';
     });
+    // 搁置入口常驻但低调：不参与列筛选、不用告警色，只负责「别忘了」。
+    html += '<button type="button" class="stat stat-shelf' +
+      (state.shelfOpen ? ' active' : '') + '" data-shelf="1"' +
+      ' title="展开 / 收起搁置区（' + shelvedCount +
+      ' 张，不计入活跃统计，也不会被 agent 领取）">' +
+      '搁置 <b>' + shelvedCount + '</b></button>';
     el.stats.innerHTML = html;
+  }
+
+  /** 搁置面板：默认只露一条横条，展开才渲染卡片列表 */
+  function renderShelf(list) {
+    var c = cols.shelf;
+    // 浏览器缓存了旧 index.html（没有搁置区）时别把整页 JS 打崩
+    if (!c || !el.shelf || !el.shelfBody || !c.count) return;
+    c.list = list;
+    c.count.textContent = list.length;
+    c.empty.textContent = '没有搁置的任务。';
+    if (el.shelfToggle) {
+      el.shelfToggle.setAttribute('aria-expanded', String(state.shelfOpen));
+    }
+    if (el.shelfBody) el.shelfBody.hidden = !state.shelfOpen;
+    el.shelf.classList.toggle('is-open', !!state.shelfOpen);
+    el.shelf.classList.toggle('has-items', list.length > 0);
+    // 正在筛选 / 搜索，且命中了搁置卡：折叠时给个提示，别让人以为卡丢了
+    var filtering = !!(state.query.trim() || state.repo || state.owner ||
+                       state.prio || state.unowned);
+    if (el.shelfHit) {
+      el.shelfHit.hidden = !(!state.shelfOpen && list.length > 0 && filtering);
+    }
+    if (state.shelfOpen) syncList(c);
   }
 
   /** 读服务端给的快照时刻（秒 → 毫秒）。拿不到返回 null，不影响主流程。 */
@@ -880,7 +999,9 @@
       if (state.prio && (t.priority || '').toUpperCase() !== state.prio) return false;
       if (state.unowned && ownerOf(t)) return false;   // 仅看无主
       if (!q) return true;
-      var hay = (t.id + ' ' + t.title + ' ' + t.summary + ' ' + t.result_summary).toLowerCase();
+      // 搁置原因也进搜索域：回忆一张封存卡时，往往只记得「为什么停」
+      var hay = (t.id + ' ' + t.title + ' ' + t.summary + ' ' + t.result_summary +
+                 ' ' + t.shelve_reason).toLowerCase();
       return hay.indexOf(q) !== -1;
     });
   }
@@ -906,7 +1027,15 @@
 
     var groups = {};
     COLUMNS.forEach(function (c) { groups[c.key] = []; });
-    state.filtered.forEach(function (t) { groups[classify(t)].push(t); });
+    // 搁置卡留在 state.filtered 里（这样搜索能搜到、统计能算到），
+    // 但不进任何一列 —— 分列时单独接走，交给折叠面板。
+    var shelvedList = [];
+    state.filtered.forEach(function (t) {
+      var key = classify(t);
+      if (key === 'shelved') shelvedList.push(t);
+      else if (groups[key]) groups[key].push(t);
+    });
+    shelvedList.sort(sortShelved);
 
     var counts = {};
     COLUMNS.forEach(function (c) {
@@ -931,7 +1060,8 @@
       if (!cols[c.key].body.hidden) syncList(cols[c.key]);
     });
 
-    renderStats(counts);
+    renderShelf(shelvedList);
+    renderStats(counts, shelvedList.length);
     renderMeta();
     if (drawerId) refreshDrawer();
   }
@@ -1225,7 +1355,8 @@
 
     h += '<div class="drawer-copy">' +
       '<button type="button" class="act act-copy" data-copy="' + esc(t.id) + '">' +
-      (col === 'merging' ? '复制合并指令' : '复制派发指令') + '</button>' +
+      (col === 'shelved' ? '复制搁置说明'
+        : (col === 'merging' ? '复制合并指令' : '复制派发指令')) + '</button>' +
       '<button type="button" class="act act-chat" data-chat="' + esc(t.id) + '">讨论' +
       (chatCountFor(t.id) ? '<span class="n">' + chatCountFor(t.id) + '</span>' : '') +
       '</button>' +
@@ -1251,6 +1382,17 @@
       ['耗时', formatDuration(t.duration_s)],
       ['依赖', t.depends_on.length ? t.depends_on.join('、') : '']
     ]);
+
+    // 搁置卡点开详情，第一眼就要看到「为什么停」和「以后怎么办」
+    if (col === 'shelved') {
+      h += kvBlock('搁置', [
+        ['原因', t.shelve_reason || '（未填原因）'],
+        ['搁置于', t.shelved_at],
+        ['搁置前状态', t.shelved_from],
+        ['运行时文件', '已释放（租约 / 结果 / 进度 / 收件箱信号）'],
+        ['日后处置', '放回待领取 · 另立新卡 · 废弃']
+      ]);
+    }
 
     h += '<section class="block"><h3>结果摘要</h3>' +
       (t.result_summary
@@ -1393,8 +1535,18 @@
     if (el.unowned) el.unowned.addEventListener('change', function () {
       state.unowned = el.unowned.checked; render();
     });
-    // 顶部统计条 = 快捷列筛选器：点某列只看该列，点「共 N 个」恢复
+    // 顶部统计条 = 快捷列筛选器：点某列只看该列，点「共 N 个」恢复；
+    // 「搁置」不是列，点它只展开折叠面板并滚过去。
     if (el.stats) el.stats.addEventListener('click', function (e) {
+      var s = e.target.closest('[data-shelf]');
+      if (s) {
+        state.shelfOpen = true;
+        render();
+        if (el.shelf && el.shelf.scrollIntoView) {
+          el.shelf.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+        return;
+      }
       var b = e.target.closest('[data-col]');
       if (!b) return;
       state.col = b.getAttribute('data-col') || '';
@@ -1902,7 +2054,8 @@
   function _verb(action, override) {
     return override ||
       ({ close: '关闭作废', retry: '重试', unassign: '退回待领取',
-         reopen: '重开' })[action] || action;
+         reopen: '重开', shelve: '搁置', unshelve: '取消搁置',
+         respawn: '另立新卡' })[action] || action;
   }
 
   /** 登录：token → POST /api/login → 服务端写 HttpOnly cookie，后续写操作自动带上。 */
@@ -1935,10 +2088,11 @@
   }
 
   // 调用后端 /api/task（后端再调用 hive CLI 真正执行）
-  function callTaskAction(action, tid, agent, label, note) {
+  function callTaskAction(action, tid, agent, label, note, extra) {
     var body = { action: action, tid: tid };
     if (agent) body.agent = agent;
     if (note) body.note = note;
+    if (extra) Object.keys(extra).forEach(function (k) { body[k] = extra[k]; });
     flash('正在' + _verb(action, label) + ' ' + tid + ' …');
     fetch('/api/task', {
       method: 'POST', cache: 'no-store',
@@ -1948,7 +2102,11 @@
       .then(function (r) { return r.json().then(function (j) { return { status: r.status, j: j }; }); })
       .then(function (res) {
         if (res.j && res.j.ok) {
-          flash('操作成功：' + tid + ' 已' + _verb(action, label), false);
+          var msg = '操作成功：' + tid + ' 已' + _verb(action, label);
+          if (res.j.new_task) msg += '，新卡 ' + res.j.new_task + ' 已进待领取';
+          flash(msg, false);
+          // 另立新卡后把搁置面板保持展开，方便接着决定原卡要不要废弃
+          if (action === 'respawn') state.shelfOpen = true;
           loadStatus();
         } else {
           flash('操作失败：' + ((res.j && res.j.error) || ('HTTP ' + res.status)), true);
@@ -1989,6 +2147,11 @@
       head += '\n\n卡会回到待领取，谁都能再领。';
     } else if (action === 'reopen') {
       head += '\n\n会把卡拉回待领取，并撤掉归档结果（原文仍在 git 历史里）。';
+    } else if (action === 'shelve') {
+      head += '\n\n卡会退出派发池：释放租约 / 结果 / 进度 / 收件箱信号，不再占待领取、也不算异常。'
+            + '\n请写清「现在为什么做不了」—— 这是日后判断能不能捡起来的唯一依据。';
+    } else if (action === 'unshelve') {
+      head += '\n\n卡会回到待领取，谁都能再领。搁置时释放的文件不会自动恢复，等于重新排队。';
     }
     var r = window.prompt(head + '\n\n请写清原因（会写进卡面备注）：', defaultReason(action, t));
     if (r === null) return null;
@@ -2012,46 +2175,72 @@
       '<button type="button" class="act act-cancel" data-action="reassign-cancel" data-tid="' + esc(tid) + '">取消</button>';
   }
 
-  // 事件委托：捕获阶段处理，命中操作按钮时阻止冒泡，避免触发卡片打开抽屉
-  function bindTaskActions() {
-    el.columns.addEventListener('click', function (e) {
-      // 依赖胶囊：点击直接定位到被依赖的任务（把搜索框填成那个 id）
-      var dep = e.target.closest('[data-dep]');
-      if (dep) {
-        e.stopPropagation();
-        e.preventDefault();
-        state.query = dep.getAttribute('data-dep') || '';
-        el.search.value = state.query;
-        state.col = '';
-        render();
-        flash('已定位到 ' + state.query, false);
-        return;
-      }
-      var btn = e.target.closest('[data-action]');
-      if (!btn) return;            // 非操作按钮，照常打开抽屉
+  // 事件委托：捕获阶段处理，命中操作按钮时阻止冒泡，避免触发卡片打开抽屉。
+  // 同一套 handler 挂在六列容器和搁置面板上（搁置面板在 .columns 外面）。
+  function taskActionHandler(e) {
+    // 依赖胶囊：点击直接定位到被依赖的任务（把搜索框填成那个 id）
+    var dep = e.target.closest('[data-dep]');
+    if (dep) {
       e.stopPropagation();
       e.preventDefault();
-      var action = btn.getAttribute('data-action');
-      var tid = btn.getAttribute('data-tid');
-      if (action === 'close' || action === 'unassign' || action === 'reopen') {
-        var reason = askReason(action, tid);
-        if (reason === null) return;            // 用户取消
-        callTaskAction(action, tid, null, null, reason);
-      } else if (action === 'retry') {
-        // retry 不带 agent：保留原 owner、复用原分支重跑
-        if (!window.confirm(_verb(action) + '任务 ' + tid + ' ？')) return;
-        callTaskAction(action, tid);
-      } else if (action === 'reassign-open') {
-        openReassign(btn);
-      } else if (action === 'reassign-confirm') {
-        var sel = btn.parentNode.querySelector('select.agent-pick');
-        var agent = sel ? sel.value : '';
-        if (!agent) { flash('请选择目标 agent', true); return; }
-        callTaskAction('retry', tid, agent, '改派');
-      } else if (action === 'reassign-cancel') {
-        render();
+      state.query = dep.getAttribute('data-dep') || '';
+      el.search.value = state.query;
+      state.col = '';
+      render();
+      flash('已定位到 ' + state.query, false);
+      return;
+    }
+    var btn = e.target.closest('[data-action]');
+    if (!btn) return;            // 非操作按钮，照常打开抽屉
+    e.stopPropagation();
+    e.preventDefault();
+    var action = btn.getAttribute('data-action');
+    var tid = btn.getAttribute('data-tid');
+
+    if (action === 'close' || action === 'unassign' || action === 'reopen' ||
+        action === 'shelve' || action === 'unshelve') {
+      var reason = askReason(action, tid);
+      if (reason === null) return;            // 用户取消
+      var extra = null;
+      // 搁置卡的「废弃」强制作废：搁置时结果已被释放，别让旧快照里残留的
+      // res 把它误判成 done（那就跟「真做完了」长得一样了）。
+      if (action === 'close') {
+        var tc = taskById(tid);
+        if (tc && tc.state === 'shelved') extra = { done: false };
       }
-    }, true);
+      callTaskAction(action, tid, null, null, reason, extra);
+    } else if (action === 'respawn') {
+      var src = taskById(tid);
+      var title = window.prompt(
+        '以搁置卡 ' + tid + ' 为模板另立一张「待领取」新卡。\n' +
+        '原卡会保持搁置（确认不再需要再点「废弃」）。\n\n' +
+        '原标题：' + ((src && src.title) || '') + '\n' +
+        '搁置原因：' + ((src && src.shelve_reason) || '未填') +
+        '\n\n新卡标题：', (src && src.title) || '');
+      if (title === null) return;
+      title = String(title).trim();
+      if (!title) { flash('新卡标题不能为空', true); return; }
+      callTaskAction('respawn', tid, null, null,
+                     '由搁置卡 ' + tid + ' 另立：' + title, { title: title });
+    } else if (action === 'retry') {
+      // retry 不带 agent：保留原 owner、复用原分支重跑
+      if (!window.confirm(_verb(action) + '任务 ' + tid + ' ？')) return;
+      callTaskAction(action, tid);
+    } else if (action === 'reassign-open') {
+      openReassign(btn);
+    } else if (action === 'reassign-confirm') {
+      var sel = btn.parentNode.querySelector('select.agent-pick');
+      var agent = sel ? sel.value : '';
+      if (!agent) { flash('请选择目标 agent', true); return; }
+      callTaskAction('retry', tid, agent, '改派');
+    } else if (action === 'reassign-cancel') {
+      render();
+    }
+  }
+
+  function bindTaskActions() {
+    el.columns.addEventListener('click', taskActionHandler, true);
+    if (el.shelfList) el.shelfList.addEventListener('click', taskActionHandler, true);
   }
 
   // ---------- 留言（跨机聊天） ----------
@@ -2414,6 +2603,7 @@
   function init() {
     cacheEls();
     buildColumns();
+    buildShelf();
     initTheme();
     bindEvents();
     bindChat();                // 留言面板：浮标 / 频道 / 发送 / 轮询

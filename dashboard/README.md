@@ -1,6 +1,7 @@
 # 蜂巢 Hive · 多机任务看板
 
-把 `hive status --json` 的输出渲染成一块「一眼看到全局」的五列看板。
+把 `hive status --json` 的输出渲染成一块「一眼看到全局」的六列看板，外加一个
+默认折叠的**搁置区**（`shelved`：不能忘，但大部分时候可以忽略）。
 纯静态、零依赖：没有 npm、没有构建步骤、没有 CDN、没有网络字体、没有图标库，也不请求任何外部域名。
 
 ## 目录
@@ -16,6 +17,7 @@ dashboard/
 ├── REPORT.md           WorkBuddy 的完成报告
 ├── VERIFICATION.md     fb88 实跑验收记录（服务端 + jsdom + 真实数据）
 ├── dev/ui-test.js      jsdom 前端行为测试（可选，需 npm i jsdom）
+├── dev/shelf-ui-test.js 搁置面板的 jsdom 行为测试（可选，需 npm i jsdom）
 └── verify.sh           一键复验服务端
 ```
 
@@ -88,18 +90,21 @@ ssh -L 8787:127.0.0.1:8787 skywalk@192.168.0.88
 任务对象字段（`hive status --json` 的每个元素）：
 
 ```
-id, title, repo, priority(P1/P2/P3), state(ready|assigned|running|done|blocked),
+id, title, repo, priority(P1/P2/P3),
+state(ready|assigned|running|done|blocked|shelved|...),
 owner, claim_agent, claimed_at, lease_until, stale, depends_on[],
 result_status(done|failed|""), duration_s, head, verify[{cmd, code, tail[]}],
 result_summary, summary（旧字段，仅用于搜索）
+shelved_at, shelved_from, shelve_reason（搁置卡才有；旧快照缺字段时显示「未填原因」）
 ```
 
 所有时间均为 ISO 8601 带时区。
 
-## 五列怎么分
+## 六列怎么分（外加搁置区）
 
 判定是**单向、互斥**的，按下列顺序命中即停，一张卡只出现在一列：
 
+0. **搁置**：`state === "shelved"` → 不进任何列，交给折叠搁置区（见下）
 1. **已关闭**：`state === "done"`
 2. **异常**：`result_status === "failed"` 或 `state === "blocked"` 或 租约过期
 3. **待合并**：`result_status === "done"` 且 `state !== "done"`
@@ -115,6 +120,24 @@ stale === true  ||  ( lease_until 已过  &&  result_status 为空 )
 也就是说即使 `status.json` 没刷新、时间已经过了租约，卡片也会自己变红并落进异常列。
 已经出结果的任务（`result_status` 非空）不再因为租约到期判为异常。
 卡片上显示「已过期 X 分钟」，不显示负的剩余时间；已关闭列默认折叠，点列头的「展开」可展开。
+
+## 搁置区：为什么不是第 7 列
+
+`state === "shelved"` 的卡当前做不了：打回待领取会白占一个名额、干扰 agent 领取；
+挂在异常列又太显眼（情况已知、租约和结果等现场都已释放）；直接删则怕忘。
+所以它要的是「**不能忘，但大部分时候可以忽略**」——加一列会跟活跃卡平级、
+还会把本来就挤的六列压得更窄。
+
+排版上做成两处**按钮**，平时只占一行：
+
+- 顶栏统计条末尾常驻一枚低调的「搁置 N」（计数始终可见，这是「别忘了」）。
+- 看板上方一条默认收起的横条，点开才展开卡片列表，用多列网格紧凑排布。
+  每张卡显示搁置原因、时间、原状态，以及三个出口：`放回待领取` / `另立新卡` /
+  `废弃`；「复制说明」拿到的是写明**不要领取**的搁置说明，不是派发指令。
+- 搁置卡**不计入**「共 N 个任务」活跃统计，也不进异常列；但仍参与搜索。
+  搜索/筛选命中搁置卡时，折叠态会显示「有匹配」提示，免得以为卡丢了。
+- 活跃列（待领取 / 进行中 / 待合并 / 异常）的卡片上有「搁置」按钮，写操作
+  走 `/api/task` 的 `shelve` / `unshelve` / `respawn`（限 controller 角色）。
 
 ## 其他行为
 

@@ -44,15 +44,23 @@ function assert(cond, msg) {
   assert(colCards('running').length === 1 && byId('T-0101'), '进行中 1 张（T-0101）');
   assert(colCards('abnormal').length === 2 && byId('T-0102') && byId('T-0104'), '异常 2 张（T-0102/T-0104）');
   assert(colCards('merging').length === 1 && byId('T-0103'), '待合并 1 张（T-0103）');
-  assert(colCards('ready').length === 1 && byId('T-0105'), '待领取 1 张（T-0105）');
+  // 样例后来加过 T-0189/T-0190 两张 ready 卡，别再按老版的 6 张硬编码
+  assert(colCards('ready').length === 3 && byId('T-0105') && byId('T-0189')
+         && byId('T-0190'), '待领取 3 张（T-0105/T-0189/T-0190）');
   const closedCol = doc.querySelector('.column[data-key="closed"]');
-  assert(closedCol.querySelector('.count').textContent === '1', '已关闭列计数 1');
+  // 唯一的 done 卡归「最近完成」，已关闭列是空的（默认展开条数仍是 N）
+  assert(closedCol.querySelector('.count').textContent === '0', '已关闭列计数 0');
   assert(closedCol.querySelector('.col-body').hidden === true, '已关闭列默认折叠');
   closedCol.querySelector('.col-head button').click();
   await new Promise(r => setTimeout(r, 50));
   assert(closedCol.querySelector('.col-body').hidden === false, '已关闭列可展开');
-  assert(colCards('closed').length === 1 && byId('T-0106'), '展开后出现 T-0106');
-  assert(cards().length === 6, '总共 6 张卡');
+  assert(colCards('recent').length === 1 && byId('T-0106'), '最近完成列有 T-0106');
+  assert(cards().length === 8, '总共 8 张卡');
+
+  // 搁置区：样例里没有搁置卡，应该是「计数 0 + 默认折叠」，不占列
+  assert(doc.getElementById('shelf-count').textContent === '0', '无搁置卡时计数 0');
+  assert(doc.getElementById('shelf-body').hidden === true, '搁置面板默认折叠');
+  assert(doc.querySelector('.stat-shelf'), '统计条里有常驻的搁置入口');
 
   assert(byId('T-0102').classList.contains('is-stale'), 'T-0102 有 is-stale 红边框类');
   assert(/已过期/.test(byId('T-0102').textContent), 'T-0102 文案是「已过期」');

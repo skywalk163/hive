@@ -251,6 +251,7 @@ def test_once_四组齐全且卡片数与快照一致(stub_url, tmp_path):
         "进行中": ["T-9010", "T-9011"],
         "待合并": ["T-9020", "T-9021"],
         "异常": ["T-9030", "T-9031"],
+        "搁置": [],
     }
     assert groups == expected
     # 组头数字必须等于实际行数（两边都错成同一个数也算错，所以还要对账）
@@ -347,4 +348,8 @@ def test_分类优先级():
                                   result_status="failed")) == "异常"
     assert hive_tui.classify(pick(state="ready", stale=True)) == "异常"
     assert hive_tui.classify(pick(state="blocked")) == "异常"
+    # 搁置优先于异常：旧快照里残留 failed 结果 / 过期租约也不该把它算成挂账
+    assert hive_tui.classify(pick(state="shelved")) == "搁置"
+    assert hive_tui.classify(pick(state="shelved", result_status="failed",
+                                  stale=True)) == "搁置"
     assert hive_tui.classify(pick(state="done", result_status="done")) is None

@@ -47,10 +47,12 @@ FORMATS = (MARKDOWN, JSON)
 #   * claim    = 发给干活 agent 的领取指令（原有行为，向后兼容的默认值）
 #   * merge    = 发给主控 agent 的合并指令（卡已完成待 land，再喊人领取就闹笑话了）
 #   * abnormal = 领取指令 + 异常溯源块（重派前让新 agent 知道上一个 agent 栽在哪）
+#   * shelved  = 已封存说明（绝不能给搁置卡生成领取指令，否则 agent 又去领了）
 CLAIM = "claim"
 MERGE = "merge"
 ABNORMAL = "abnormal"
-MODES = (CLAIM, MERGE, ABNORMAL)
+SHELVED = "shelved"
+MODES = (CLAIM, MERGE, ABNORMAL, SHELVED)
 
 #: 单行上限。超过就换缩进子项，不硬挤。
 LINE_LIMIT = 200
@@ -364,12 +366,17 @@ def detect_mode(record) -> str:
 
     * merge    = result_status=done 且还没 close（看板「待合并」列）
     * abnormal = result_status=failed / state=blocked / 租约过期（看板「异常」列）
+    * shelved  = 已搁置（不进任何看板列，也不该被领取）
     * claim    = 其余所有状态（待领取 / 进行中 / 已关闭…）
     """
     if not isinstance(record, dict):
         return CLAIM
     state = str(record.get("state") or "")
     result_status = str(record.get("result_status") or "")
+    # 搁置优先于一切：哪怕旧快照里还残留 done 结果或过期租约，也不能
+    # 让「复制」按钮吐出一句「请领取任务」把 agent 又勾回来。
+    if state == "shelved":
+        return SHELVED
     if result_status == "done" and state not in ("done", "closed"):
         return MERGE
     if result_status == "failed" or state == "blocked" or record.get("stale"):
@@ -491,15 +498,56 @@ def _abnormal_block(record: dict) -> list[str]:
     return lines
 
 
+def render_shelved_prompt(card: dict, record) -> str:
+    """搁置卡复制出来的文本：不是派发指令，是一张「别动它」的说明。
+
+    搁置卡已经退出派发池，如果复制按钮还吐出「请领取任务」，agent 会照着做，
+    于是又把它领走 —— 正好是搁置要防的事。这里把原因和三个出口写清楚，
+    方便人把这段贴到留言/工单里，日后按情况处置。
+    """
+    tid = _clean((card or {}).get("id")) or _clean((record or {}).get("id")) or "?"
+    title = _clean((card or {}).get("title")) or _clean((record or {}).get("title")) or "（无标题）"
+    at = (_clean((record or {}).get("shelved_at"))
+          or _clean((card or {}).get("shelved_at")) or "未知")
+    reason = (_clean((record or {}).get("shelve_reason"))
+              or _clean((card or {}).get("shelve_reason")) or "（未填原因）")
+    return "\n".join([
+        f"# {tid} 已搁置 —— 不要领取、不要重派",
+        "",
+        f"- 标题：{title}",
+        f"- 搁置时间：{at}",
+        f"- 原因：{reason}",
+        "",
+        "这张卡当前做不了，已从派发池移出；租约 / 结果 / 进度 / 收件箱信号均已释放。",
+        "它不属于异常，也不算挂账，agent 平时不用管它。",
+        "**请不要执行 `hive_claim` / `hive take`，也不要重派。**",
+        "",
+        "日后由人按情况处置：",
+        f"  - 放回待领取：`hive unshelve {tid}`",
+        f"  - 另立新卡：`hive unshelve {tid} --spawn-new --title \"新标题\"`",
+        f"  - 废弃：`hive close {tid} --note \"原因\"`",
+    ])
+
+
 def render_status_prompt(card: dict, record, *, agent: str | None = None,
                          output_format: str = MARKDOWN, body: str = "") -> str:
     """按运行时状态选渲染模式，是看板「复制」按钮的总入口。
 
     * merge    → render_merge_prompt（发给主控）
     * abnormal → 派发指令 + 异常溯源块（重派时新 agent 知道前情）
+    * shelved  → 搁置说明（明确告诉 agent 别领）
     * claim    → render_dispatch_prompt（原有行为，逐字不变）
     """
     mode = detect_mode(record)
+    if mode == SHELVED:
+        text = render_shelved_prompt(card, record)
+        if output_format == JSON:
+            # 别复用 render_dispatch_payload：它带 claim_tool=hive_claim，
+            # 脚本照着执行就等于把搁置卡又领走了。
+            return json.dumps({"task_id": tid, "mode": SHELVED,
+                               "text": text, "claimable": False},
+                              ensure_ascii=False)
+        return text
     if mode == MERGE:
         return render_merge_prompt(card, record, output_format=output_format)
     if mode == ABNORMAL:

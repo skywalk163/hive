@@ -923,9 +923,13 @@ def test_doctor_flags_conflict_as_error(world, fake_cmd):
 def test_states_are_centralised():
     """状态机要有集中的常量，别散落在各处字符串比较。"""
     assert "ready" in hive.STATES and "done" in hive.STATES
-    assert set(hive.HANDOFF_STATES) == {"needs_review", "conflict", "blocked"}
+    # shelved 也在 HANDOFF_STATES：worker / MCP 必须跳过它；但 doctor 不报
+    # （见 cmd_doctor 的分派），因为搁置是「情况已知、不算挂账」。
+    assert set(hive.HANDOFF_STATES) == {"needs_review", "conflict", "blocked",
+                                        "shelved"}
     assert set(hive.IN_FLIGHT_STATES) == {"assigned", "running"}
     assert hive.ERROR_STATES == ("conflict",)
+    assert "shelved" in hive.STATES
 
 
 # --------------------------------------------------------------------------- #

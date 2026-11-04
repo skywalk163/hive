@@ -91,6 +91,31 @@
 <main class="wrap">
   <div class="panel" id="state-panel" hidden></div>
   <div class="ci-strip" id="ci-strip" hidden></div>
+
+  <!-- 搁置：不占看板列。默认只收成一条低调横条，点开才展开。
+       计数常驻（不能忘），但不进异常列、不进活跃任务统计（不算挂账）。 -->
+  <section class="shelf" id="shelf" aria-labelledby="shelf-title">
+    <button type="button" class="shelf-toggle" id="shelf-toggle"
+            aria-expanded="false" aria-controls="shelf-body">
+      <svg class="shelf-icon" viewBox="0 0 24 24" width="16" height="16" fill="none"
+           stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+        <path d="M3 7.5h18v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" />
+        <path d="M2.5 4.5h19v3h-19z" /><path d="M9.5 12h5" />
+      </svg>
+      <strong id="shelf-title">搁置</strong>
+      <span class="shelf-count" id="shelf-count">0</span>
+      <span class="shelf-hint">当前做不了、但不想忘的卡 · 不占待领取，也不算异常</span>
+      <span class="shelf-hit" id="shelf-hit" hidden>有匹配</span>
+      <span class="shelf-caret" aria-hidden="true">▾</span>
+    </button>
+    <div class="shelf-body" id="shelf-body" hidden>
+      <p class="shelf-note">租约 / 结果 / 进度 / 收件箱信号已释放，不会被派发，agent 平时不用管。
+        时机成熟再按情况处置：放回待领取、另立新卡，或废弃。</p>
+      <div class="shelf-list" id="shelf-list"></div>
+      <div class="shelf-empty" id="shelf-empty" hidden>没有搁置的任务。</div>
+    </div>
+  </section>
+
   <div class="columns" id="columns"></div>
 </main>
 

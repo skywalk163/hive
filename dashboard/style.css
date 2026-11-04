@@ -987,3 +987,84 @@ body.no-verify .verify { display: none; }
 
 /* 详情抽屉摊开时，留言浮标让位（否则它压在详情正文右下角） */
 body.drawer-open .chat-fab { display: none; }
+
+/* ---------------- 搁置区（默认折叠，不占看板列宽） ----------------
+   设计意图：它是「不能忘，但大部分时候可以忽略」的一格，所以
+   * 不做第 7 列 —— 六列已经够挤，搁置卡也不该和活跃卡平级；
+   * 不用红/黄告警色 —— 它不是异常，不算挂账；
+   * 计数常驻在横条和统计条上 —— 收起也知道还封着几张。
+   ------------------------------------------------------------------ */
+.shelf {
+  margin-bottom: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.shelf.has-items { border-left-color: #8a94a2; }
+
+.shelf-toggle {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 9px 12px;
+  font: inherit; font-size: 13px; text-align: left;
+  color: var(--muted); background: transparent;
+  border: 0; cursor: pointer;
+}
+.shelf-toggle:hover { background: var(--panel-alt); }
+.shelf-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.shelf-icon { flex: 0 0 auto; color: var(--muted); }
+.shelf-toggle strong { color: var(--text); font-weight: 600; }
+.shelf-count {
+  min-width: 24px; padding: 0 8px; text-align: center;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--panel-alt); font-size: 12px; color: var(--muted);
+}
+.shelf.has-items .shelf-count { color: var(--text); }
+.shelf-hint { font-size: 11.5px; color: var(--muted); opacity: .85; }
+.shelf-hit {
+  padding: 0 7px; border: 1px solid var(--accent); border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); font-size: 11px;
+}
+.shelf-caret { margin-left: auto; font-size: 12px; transition: transform .18s ease; }
+.shelf.is-open .shelf-caret { transform: rotate(180deg); }
+
+.shelf-body { padding: 0 12px 12px; border-top: 1px solid var(--border); }
+.shelf-note { margin: 10px 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.shelf-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+.shelf-empty { padding: 10px 0; text-align: center; font-size: 12px; color: var(--muted); }
+
+/* 搁置卡比活跃卡更淡、更矮：信息够用，但不抢视觉 */
+.shelf-list .card { border-left-color: var(--border-strong); }
+.shelf-list .card-title { font-size: 13px; }
+.badge.shelf-badge {
+  background: var(--panel-alt); color: var(--muted);
+  border-color: var(--border-strong);
+}
+.shelf-why {
+  margin: 6px 0; padding: 6px 8px;
+  border-left: 2px solid var(--border-strong); border-radius: 4px;
+  background: var(--panel);
+  font-size: 12px; line-height: 1.5; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.act-shelve { color: var(--muted); border-color: var(--border-strong); }
+.act-shelve:hover { color: var(--text); background: var(--panel-alt); }
+
+.stat-shelf { border-style: dashed; opacity: .9; }
+.stat-shelf:hover { opacity: 1; }
+.stat-shelf.active { border-style: solid; border-color: var(--accent); opacity: 1; }
+
+@media (max-width: 768px) {
+  .shelf-hint { display: none; }
+  .shelf-list { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .shelf-caret { transition: none; }
+}
