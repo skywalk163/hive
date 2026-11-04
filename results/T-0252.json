@@ -1,0 +1,47 @@
+{
+  "task": "T-0252",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0252",
+  "base": "main",
+  "head": "be57ec8ea9a35addaa487b19cb00327426adf56e",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-04T11:28:06+08:00",
+  "finished_at": "2026-11-04T11:30:31+08:00",
+  "duration_s": 145.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/unit/test_R16x_L217_所有权收敛.py --timeout=600",
+      "code": 0,
+      "tail": [
+        "0.23s call     tests/unit/test_R16x_L217_所有权收敛.py::test_E1_具名槽一槽一所有权_IR佐证",
+        "0.16s call     tests/unit/test_R16x_L217_所有权收敛.py::test_丙_字面量走IMMORTAL常量池",
+        "",
+        "(5 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "8 passed, 2 skipped in 111.73s (0:01:51)"
+      ]
+    },
+    {
+      "cmd": "test -f tests/unit/test_R16x_L217_所有权收敛.py",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0252 · R16x L-217 内存斜率判据无分辨力：取证与降噪\n\n## 1. 卡面要求与执行结论\n\n- 卡面：同一份代码在 `macos-26-arm64` 上 P3/P4/P5 时红时绿（修前/修后 860~1434MB、方向翻转 ±50%，\n  另夹 `采样数: 0` 哨兵）；要定因、给出三次并列数据，并在「判据降噪」与「限平台」里裁决一条。\n- 结论：**P4'/P5' 在共享 mac/win runner 上无分辨力 ⇒ 限平台**（darwin/win32 skip，Linux/FreeBSD 保留\n  15% 容差的不倒退哨兵）；**P1'/P3'/P2' 不降级**（10 倍信号）；哨兵三态拆分（崩溃 fail / 采样不足\n  重采后 skip / 有效才判斜率）。详见 `docs/known-issues/R16x-L217-memory-slope-noise.md`。\n\n## 2. 取证：哨兵到底是什么\n\n旧 `_跑` 在 `采样数 < 2` 时返回 `增长MB=-1.0` 且**丢弃 rc 与 stdout/stderr**。最小复现（FreeBSD）：\n\n```\nm._跑('/usr/bin/true','P5')  -> {'增长MB': -1.0, '峰值MB': -1.0, '采样数': 0}   # 旧口径\n```\n\n即「探针 2s 内退出」与「反跑没牙」在断言里同形；`C_ROUNDS=2000` 也能复现。CI 的 `采样数: 0`\n最可能就是探针在第一个采样点前退出（崩溃/OOM/被调度），旧实现连 rc 都没留，无法自证。\n修复后同一入口（FreeBSD 实测）：\n\n```\n秒退 rc=0 : {'采样数': 1, 'rc': 0, '输出尾': ''}            -> skip「测量无效」\n崩溃 rc=7 : {'采样数': 1, 'rc': 7, '输出尾': 'boom-stderr'}  -> fail「探针异常退出 rc=7」\n```\n\nstderr 已捕获（`/tmp/crasher.sh` 的 `boom-stderr`）。\n\n## 3. 取证：三次并列（同命令连跑）\n\nFreeBSD 15.1 x86_64（fb98，clang 19.1.7，12s 窗口 6 采样）：\n\n| 种类 | 修后 (MB) | 中位 | 反跑 (MB) | 中位 | 单侧最大极差 |\n|---|---|---|---|---|---|\n| P4 | 1249 / 1324 / 1269 | 1269 | 1292 / 1350 / 1420 | 1350 | 9.5% |\n| P5 | 1189 / 1256 / 1277 | 1256 | 1441 / 1353 / 1307 | 1353 | 9.9% |\n\nIntel macOS 12.7.6 x86_64（本机，clang 19.1.7）：\n\n| 种类 | 修后 (MB) | 中位 | 反跑 (MB) | 中位 | 单侧最大极差 |\n|---|---|---|---|---|---|\n| P4 | 470.5 / 344.2 / 456.7 | 456.7 | 706.8 / 469.8 / 670.8 | 670.8 | 35.4% |\n| P5 | 448.1 / 326.9 / 370.0 | 370.0 | 715.5 / 474.7 / 630.1 | 630.1 | 38.2% |\n\nFreeBSD 上机制方向差只有 6.4%/7.7%，而重复极差 9.5%/9.9% ⇒ 信噪比 <1；\nIntel mac 极差 35~38%，最差一组配对只剩 -0.1%；CI mac arm64 甚至方向反了（-19.2%/-23.5%/-39.5%）。\n**没有任何一组机器能稳定分辨「机制有没有牙」**，这就是「同码不同果」。\n\n## 4. 改动（只动卡面 paths）\n\n1. `tests/unit/test_R16x_L217_所有权收敛.py`\n   - `_跑`：SIGTERM 主动终止与崩溃分离（rc 归一 0 记 `终止`）；t≈0 立即采一点只用于「是否启动」，\n     斜率仍从 2s 起算（与旧口径可比）；捕获 rc/stdout+stderr 尾 600 字；采样不足自动重采 1 次。\n   - 新增 `_断言测量有效`：`rc≠0` → fail（真崩溃）；`采样数<2` → skip（测量无效，带 rc/输出尾）。\n   - `P1/P3/P2`：加上述校验，阈值 ≤2MB / ≥20MB **不动**。\n   - `P4/P5`：darwin/win32 skip（带数字与本文件路径）；Linux/FreeBSD 容差 10% → **15%**（实测 9.9%\n     极差的 1.5 倍），断言文本保留。\n2. `docs/known-issues/R16x-L217-memory-slope-noise.md`（新增）：CI 4 台 job 原始数字、哨兵最小复现、\n   两平台三次并列、裁决依据、fake-green 声明、arm64 复验步骤。\n3. `docs/known_issues.md`：工程侧索引加 `KI-R166-01`。\n\n## 5. 验证\n\n- 本机（Intel macOS 12.7.6，`LIGHT_CLANG=/tmp/clang19env/bin/clang`（conda-forge LLVM 19.1.7）+\n  `SDKROOT=$(xcrun --show-sdk-path)`）：\n  `python -m pytest -q tests/unit/test_R16x_L217_所有权收敛.py --timeout=600`\n  → **8 passed, 2 skipped in 124.66s**（skip = P4'/P5' 的 darwin 限平台）。\n- FreeBSD（fb98，`LIGHT_CLANG=/usr/bin/clang` 19）：\n  `python3 -m pytest -q tests/unit/test_R16x_L217_所有权收敛.py -o addopts='' -p no:cacheprovider`\n  → **10 passed in 148.48s**（fb98 无 pytest-timeout/xdist，故覆盖 addopts；判据本身全跑）。\n- 既有失败策略：本次未碰 `test_block_skips_dispatch_and_worker` /\n  `test_git_timeout.py::test_network_git_calls_all_go_through_git_net`，也未改其它路径。\n\n## 6. 不具决定性的部分（诚实披露）\n\n- **arm64 仍不可测**：本机只有 Intel macOS 12.7.6。P4/P5 的 darwin skip 意味着 mac 上对\n  「容器路径不倒退」**零覆盖**；CI 绿只说明不再在信号不足处抖红，不代表 arm64 机制正确。\n- 方向在 Intel mac 与 FreeBSD 上一致（反跑 > 修后），但 CI arm64 反了；无法归因为机制，\n  只能归因为共享 runner 的 CPU 配额/负载。要把这条判据恢复成「能分辨」，必须换专用 arm64\n  或改成按完成轮数归一化的斜率（另开卡）。\n- 哨兵的「探针为何秒退」在 CI 上没有 rc 证据；本次只把取证位补齐（下次红会直接显示 rc/输出尾），\n  不能倒推这次 860/1420 那次哨兵的具体原因。\n\n## 7. 遗留\n\n1. arm64 专用机到位后：连跑 3 次 `-k P4P5 -s`，若极差 < 方向差则按实测重标容差并恢复 darwin 判定\n   （同时更新 `docs/known-issues/R16x-L217-memory-slope-noise.md` §6）。\n2. 若 arm64 上稳定复现「修前 < 修后」，按卡面要求**另开卡**定位容器路径代码缺陷，不得用更大容差吃掉。\n3. store/git：block 期间 T-0250 的 store 行仍为 submitted（与本卡无关，保留现状）。",
+  "error": "",
+  "declared_paths": [
+    "tests/unit/test_R16x_L217_所有权收敛.py",
+    "tools/ci/check_regression.py",
+    "docs/known-issues/",
+    "docs/known_issues.md"
+  ],
+  "changed_files": [
+    "docs/known_issues.md",
+    "tests/unit/test_R16x_L217_所有权收敛.py",
+    "docs/known-issues/R16x-L217-memory-slope-noise.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "eb2ad92a290948e8a5f834b3f56d3c65"
+}
