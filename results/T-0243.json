@@ -1,0 +1,39 @@
+{
+  "task": "T-0243",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0243",
+  "base": "main",
+  "head": "a2641d0ae601a37581bcb5878300fea6a6c792a5",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-04T00:07:43+08:00",
+  "finished_at": "2026-11-04T00:19:36+08:00",
+  "duration_s": 713.4,
+  "verify": [
+    {
+      "cmd": "python scripts/gen_native_capability_json.py --check",
+      "code": 0,
+      "tail": [
+        "能力清单与代码一致（含行号快照）"
+      ]
+    }
+  ],
+  "summary": "# T-0243 交付摘要\n\n## 结论\n`python scripts/gen_native_capability_json.py --check` **退出码 0**（\"能力清单与代码一致（含行号快照）\"）。\n关键：**不是「无脑重生成」**——直接重生成会把落盘版改小（丢 15 条 note、snapshot_date 从 2026-10-19 退回 2026-10-12）。\n改为让**生成器**负责产出 note / snapshot_date / 正确 category，再重生成清单，信息不丢。\n\n## 22 处漂移逐条处置（对齐 807f5e02a 实测报告）\n| # | 漂移 | 处置 |\n|---|------|------|\n| 1 | snapshot_date 2026-10-19→2026-10-12 | **改生成器**：日期常量改回 2026-10-19（保留落盘语义，不为变绿退旧日期） |\n| 2 | builtin_functions.count 594→595 | **改清单**：代码新增内置（用户参数等），重生成跟齐（worktree 基线 12fac8c08 已为 597） |\n| 3 | entries[用户参数] 落盘缺 | **改清单**：重生成补上（代码已有该内置） |\n| 4 | dv_copy_own.category Other→File | **改生成器**：'copy' 子串把值所有权原语误判为 File，显式覆盖回 Other |\n| 5–15,17–20 | dv_*.note 落盘多出 15 条（L-217 系列） | **改生成器**：15 条 note 写进 RUNTIME_NOTES，重生成保留（不许删信息） |\n| 16 | dv_take_copy.category Other→File | **改生成器**：同上（同一根因） |\n| 21 | statement_nodes.count 24→0 | **无需同步**：807f5e02a 的生成器抽不到语句分派链（bug），后续提交已修；基线 12fac8c08 现算=落盘=24 |\n| 22 | statement_nodes.entries 24→0 | 同 21 |\n\n计数：1(snapshot) + 1(builtin count) + 1(用户参数) + 2(category) + 15(note) + 2(statement) = 22，逐条对齐。\n\n## 改了哪些文件\n- `scripts/gen_native_capability_json.py`：新增 `RUNTIME_NOTES`（15 条）；`snapshot_date`→2026-10-19；`dv_copy_own`/`dv_take_copy` 归 `Other`。\n- `docs/原生腿能力清单.json`：重生成（15 条 note + snapshot_date 2026-10-19 + 2 处 category；builtin 597、statement 24 不变）。\n\n## 验证\n- `python scripts/gen_native_capability_json.py --check` → 退出码 0。\n- 语义未丢：15 条 note 全在、`snapshot_date=2026-10-19`；`dv_copy_file`/`dv_obj_deepcopy_self`/`dv_shallow_copy` 仍为 `File`（与 307af7932 口径一致，未被 'copy' 误伤）。\n\n## 风险 / 说明\n- `snapshot_date` 仍是硬编码常量（沿用原设计），后续重生成不会自动刷新；如需动态日期另开卡。\n- `dv_obj_deepcopy_self`/`dv_shallow_copy` 归 `File` 属历史口径，本次不动（只修被点名的 dv_copy_own/dv_take_copy）。\n- 附带修复：协调仓库存在一处重复「reopen T-0250」合并冲突（本地 fb238f8 与 origin 0a9deb6 内容等价），已 `merge --abort` 并由 take 的 sync_main 对齐 origin/main，未改任何其它任务卡内容。",
+  "error": "",
+  "declared_paths": [
+    "docs/原生腿能力清单.json",
+    "scripts/gen_native_capability_json.py"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "docs/原生腿能力清单.json",
+    "scripts/gen_native_capability_json.py"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md"
+  ],
+  "lease_id": "50c2b63f37264325b8ed3b4563646799",
+  "fence": 1
+}
