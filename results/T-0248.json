@@ -1,0 +1,46 @@
+{
+  "task": "T-0248",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0248",
+  "base": "main",
+  "head": "62d0b3004e820841234a9a3f094814ae5a6a0495",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-04T15:23:26+08:00",
+  "finished_at": "2026-11-04T15:43:48+08:00",
+  "duration_s": 1222.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/unit/test_LH34_中文关键字参数.py",
+      "code": 0,
+      "tail": [
+        "0.06s call     tests/unit/test_LH34_中文关键字参数.py::test_boot形参名与真源一致_除已知保留体差异",
+        "0.06s call     tests/unit/test_LH34_中文关键字参数.py::test_LH形参名与真源逐字相同",
+        "0.05s call     tests/unit/test_LH34_中文关键字参数.py::test_公开函数形参名全中文[\\u53bb\\u9664\\u7a7a\\u767d]",
+        "0.05s call     tests/unit/test_LH34_中文关键字参数.py::test_公开函数形参名全中文[\\u5199\\u5165\\u6587\\u4ef6]",
+        "393 passed in 16.82s"
+      ]
+    },
+    {
+      "cmd": "python -c \"import pathlib,sys; s=pathlib.Path('tests/unit/test_LH34_中文关键字参数.py').read_text(encoding='utf-8'); sys.exit(1 if '（不在 builtins.py 里）' in s else 0)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0248 · test_LH34 文档串过期：`原子写入` 说「不在 builtins.py 里」，其实 4 参版就在里面\n\n## 做了什么\n\n只动 `tests/unit/test_LH34_中文关键字参数.py` 的**说明性文字**，没有增删改任何断言、\n参数化清单或门禁逻辑（`git diff --stat` = 1 file / 25 insertions / 5 deletions）。\n\n### 1. `原子写入` 的归属改成分得清两份的说法（卡面主场）\n\n原来那句「`原子写入` 是 `stdlib/路径护栏.light` 的段落（不在 builtins.py 里）」删掉，\n换成分两份写：\n\n- `stdlib/builtins.py:205` 的 **4 参版** `原子写入(路径, 内容, 编码='utf-8', 权限=None)`\n  —— LH-28 自带实现（临时文件 → fsync → 设权限 → `os.replace`），\n  不 import 任何 stdlib 模块（三副本同步 + 同名 `.light` 遮蔽 `.py`，转发回来会无限递归，L-254）；\n- `stdlib/路径护栏.light:296` 的 **2 参版** `段落 原子写入(路径, 内容)` —— 带路径核准；\n- 明说**本组断言跑的是护栏那个 2 参版**（`test_原子写入` 走 `from 路径护栏 import 路径护栏`），\n  4 参版的形参由第 2/3 组（扫 `stdlib/builtins.py`）覆盖，两者不是同一条路径。\n\n`test_原子写入` 函数体内也加了三行同口径注释（钉的是 2 参护栏版，别和真源的 4 参版混）。\n\n### 2. 顺手核数字：「70 个纯英文形参 + 3 个中英混杂」不准，已更正\n\n按卡面要求复核。用 `ast` 取形参、口径 = 公开顶层函数，实测：\n\n| 口径 | 纯英文 | 中英混杂 | 纯中文 | 无参 | 英文形参词元 |\n|---|---|---|---|---|---|\n| T-0210 分支基线 `d50591d27^` | **72** | **2** | 92 | 23 | **114** |\n| 当前 HEAD | 0 | 0 | 167 | 23 | 0 |\n\n所以「70 / 3」两个数都对不上。**关键差异在 `原子写入`**：\n\n- `cd4ccdb96`（L-254 修）把 `原子写入(path, content, encoding, 权限)` 加进真源，\n  它是**中英混杂**的第 3 个；\n- 但 `d50591d27`（T-0210 改名）这条分支上 `原子写入` **根本还不存在**——\n  所以 T-0210 当时看到的混杂是 **2** 个（`序列化JSON` / `设置文件所有者`），不是 3；\n- `4be264311` 把两条分支合流，合流后 `原子写入` 是 4 个**全中文**形参。\n\n`原子写入` 那条是另一条分支（LH-28）的改动、**不是 T-0210 改的**；文档串里原来\n「历史上的 `原子写入`」这种写法会让人误记功劳/误判现状，一并改为实测口径 +\n一行「数字复核」小注（注明 T-0248 复核时间与口径，避免下一个人再算一遍）。\n\n## 判据\n\n两条都是纯 Python，在 Windows 上直接跑通，**没有**用到 `head`/`grep`/`awk`/`!`/`$()`，\n不需要转到 192.168.0.88。\n\n```\npython -m pytest -q tests/unit/test_LH34_中文关键字参数.py\n=> 393 passed in 18.71s\n\npython -c \"import pathlib,sys; s=pathlib.Path('tests/unit/test_LH34_中文关键字参数.py').read_text(encoding='utf-8'); sys.exit(1 if '（不在 builtins.py 里）' in s else 0)\"\n=> exit 0\n```\n\n耗时约 10 分钟，在 60 分钟红线内。\n\n## 未做 / 边界\n\n- 卡面提到「本次同步把 76 个英文形参全改成中文了」——本卡**没有**去核这个数：\n  `76` 在本仓里全是别处的口径（`stdlib/*.light` 文件数、CI 用例数、\n  `docs/POSIX验证报告.md` 的跨平台存量），与形参无关；形参的真实台账是上表的 114\n  （T-0210 分支基线）。\n- 只改 paths 内那一个文件；没动 `stdlib/builtins.py`、`docs/功能对标/语言缺陷账.md`\n  （后者 L-256 段里同样有「70 / 92 / 3」的旧数，但不在本卡 paths 内，未改）。",
+  "error": "",
+  "declared_paths": [
+    "tests/unit/test_LH34_中文关键字参数.py"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "tests/unit/test_LH34_中文关键字参数.py"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md"
+  ],
+  "lease_id": "6336d26adaaa4e7dba7d6ad69457f636",
+  "fence": 1
+}
