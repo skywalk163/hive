@@ -1,4 +1,4 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
 .pytest_cache/
 *.log
@@ -13,3 +13,6 @@ dashboard/ci.json.tmp
 dashboard/pushed-status.json
 temp/
 dashboard/audit.log
+dashboard/plans.json
+dashboard/plans.json.tmp
+dashboard/plans.json.tmp.*

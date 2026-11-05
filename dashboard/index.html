@@ -92,29 +92,85 @@
   <div class="panel" id="state-panel" hidden></div>
   <div class="ci-strip" id="ci-strip" hidden></div>
 
-  <!-- 搁置：不占看板列。默认只收成一条低调横条，点开才展开。
-       计数常驻（不能忘），但不进异常列、不进活跃任务统计（不算挂账）。 -->
+  <!-- 搁置 / 计划：同一区域的 Tab 切换，两者都不占看板列宽。
+       默认停在「搁置」且保持原有的折叠态（计数常驻、点开才展开）；
+       切到「计划」时显示计划面板（进行中在上、已完成在下）。 -->
   <section class="shelf" id="shelf" aria-labelledby="shelf-title">
-    <button type="button" class="shelf-toggle" id="shelf-toggle"
-            aria-expanded="false" aria-controls="shelf-body">
-      <svg class="shelf-icon" viewBox="0 0 24 24" width="16" height="16" fill="none"
-           stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-        <path d="M3 7.5h18v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" />
-        <path d="M2.5 4.5h19v3h-19z" /><path d="M9.5 12h5" />
-      </svg>
-      <strong id="shelf-title">搁置</strong>
-      <span class="shelf-count" id="shelf-count">0</span>
-      <span class="shelf-hint">当前做不了、但不想忘的卡 · 不占待领取，也不算异常</span>
-      <span class="shelf-hit" id="shelf-hit" hidden>有匹配</span>
-      <span class="shelf-caret" aria-hidden="true">▾</span>
-    </button>
-    <div class="shelf-body" id="shelf-body" hidden>
+    <div class="zone-bar" role="tablist" aria-label="搁置与计划">
+      <button type="button" class="zone-tab" id="shelf-toggle" role="tab"
+              aria-selected="true" aria-expanded="false" aria-controls="shelf-body"
+              data-zone="shelf">
+        <svg class="shelf-icon" viewBox="0 0 24 24" width="16" height="16" fill="none"
+             stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+          <path d="M3 7.5h18v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" />
+          <path d="M2.5 4.5h19v3h-19z" /><path d="M9.5 12h5" />
+        </svg>
+        <strong id="shelf-title">搁置</strong>
+        <span class="shelf-count" id="shelf-count">0</span>
+        <span class="shelf-hint">当前做不了、但不想忘的卡 · 不占待领取，也不算异常</span>
+        <span class="shelf-hit" id="shelf-hit" hidden>有匹配</span>
+        <span class="shelf-caret" aria-hidden="true">▾</span>
+      </button>
+      <button type="button" class="zone-tab" id="plan-toggle" role="tab"
+              aria-selected="false" aria-expanded="false" aria-controls="plan-body"
+              data-zone="plan">
+        <svg class="shelf-icon" viewBox="0 0 24 24" width="16" height="16" fill="none"
+             stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+          <path d="M5 4.5h14v15H5z" /><path d="M8.5 9h7M8.5 12.5h7M8.5 16h4" />
+        </svg>
+        <strong id="plan-title">计划</strong>
+        <span class="shelf-count" id="plan-count">0</span>
+        <span class="shelf-hint">跟踪一组任务 · 关联任务全完成可自动完成</span>
+        <span class="shelf-caret" aria-hidden="true">▾</span>
+      </button>
+    </div>
+
+    <div class="shelf-body" id="shelf-body" role="tabpanel" aria-labelledby="shelf-title" hidden>
       <p class="shelf-note">租约 / 结果 / 进度 / 收件箱信号已释放，不会被派发，agent 平时不用管。
         时机成熟再按情况处置：放回待领取、另立新卡，或废弃。</p>
       <div class="shelf-list" id="shelf-list"></div>
       <div class="shelf-empty" id="shelf-empty" hidden>没有搁置的任务。</div>
     </div>
+
+    <!-- 计划：进行中在上、已完成在下；关闭的计划也留在已完成区末尾（单独徽标）。 -->
+    <div class="shelf-body plan-pane" id="plan-body" role="tabpanel" aria-labelledby="plan-title" hidden>
+      <div class="plan-toolbar">
+        <p class="plan-note">一个计划跟踪一组任务：<b>任务总数 / 已完成数 / 完成率</b> 按看板快照实时算，
+          全部完成时可自动把计划标为已完成（可关）。留言里也能建：
+          <code>/plan create 前缀 标题</code></p>
+        <button type="button" class="btn primary" id="plan-new">新建计划</button>
+      </div>
+
+      <div class="plan-msg" id="plan-error" hidden></div>
+      <div class="plan-loading" id="plan-loading" hidden>
+        <span class="spinner"></span><span>正在加载计划…</span>
+      </div>
+
+      <section class="plan-group" id="plan-active-group" aria-labelledby="plan-active-head">
+        <header class="plan-group-head">
+          <h3 id="plan-active-head">进行中</h3>
+          <span class="plan-group-count" id="plan-active-count">0</span>
+          <span class="plan-group-hint">置顶在前，其余按更新时间倒序</span>
+        </header>
+        <div class="plan-list" id="plan-active-list"></div>
+        <div class="plan-empty" id="plan-active-empty" hidden>
+          还没有进行中的计划。点「新建计划」，或在留言里发
+          <code>/plan create 前缀 标题</code>。
+        </div>
+      </section>
+
+      <section class="plan-group" id="plan-done-group" aria-labelledby="plan-done-head">
+        <header class="plan-group-head">
+          <h3 id="plan-done-head">已完成</h3>
+          <span class="plan-group-count" id="plan-done-count">0</span>
+          <span class="plan-group-hint">按完成时间倒序</span>
+        </header>
+        <div class="plan-list" id="plan-done-list"></div>
+        <div class="plan-empty" id="plan-done-empty" hidden>还没有完成的计划。计划完成后会自动排到这里。</div>
+      </section>
+    </div>
   </section>
+
 
   <div class="columns" id="columns"></div>
 </main>
@@ -154,10 +210,14 @@
       </label>
     </div>
     <div class="chat-tip" id="chat-tip"></div>
+    <div class="chat-cmd-hint">留言也能操作计划：<code>/plan create 前缀 标题</code> ·
+      <code>@command:plan complete P-0001</code> ·
+      <code>@command:plan update P-0001 标题=… 置顶=on</code> ·
+      <code>@command:plan close|delete P-0001</code>（删除仅 controller）</div>
   </header>
   <div class="chat-feed" id="chat-feed" aria-live="polite"></div>
   <form class="chat-form" id="chat-form">
-    <textarea id="chat-input" rows="3" placeholder="粘一段 prompt / 任务理解 / 疑问… Ctrl+Enter 发送"></textarea>
+    <textarea id="chat-input" rows="3" placeholder="粘一段 prompt / 任务理解 / 疑问… 也能发 /plan create 前缀 标题 Ctrl+Enter 发送"></textarea>
     <div class="chat-actions">
       <span class="chat-hint" id="chat-hint">收件人看到后可用 hive chat list 读走</span>
       <button type="submit" class="btn primary" id="chat-send">发送</button>
@@ -167,6 +227,56 @@
 
 <div class="overlay" id="settings-overlay" aria-hidden="true"></div>
 <div class="modal" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-hidden="true" hidden></div>
+
+<!-- 计划新建 / 编辑弹窗：字段与 plan_store 的字段一一对应，不另立一套命名。 -->
+<div class="overlay" id="plan-overlay" aria-hidden="true"></div>
+<div class="modal plan-modal" id="plan-modal" role="dialog" aria-modal="true"
+     aria-labelledby="plan-modal-title" aria-hidden="true" hidden>
+  <form class="modal-card" id="plan-form" novalidate>
+    <header class="modal-head">
+      <h2 id="plan-modal-title">新建计划</h2>
+      <button type="button" class="btn icon" id="plan-modal-close" aria-label="关闭">×</button>
+    </header>
+    <div class="plan-form-body">
+      <div class="plan-field">
+        <label for="plan-prefix">前缀</label>
+        <input id="plan-prefix" name="prefix" maxlength="16" autocomplete="off"
+               placeholder="PAY / INFRA / DOC" required />
+      </div>
+      <div class="plan-field">
+        <label for="plan-title-input">标题</label>
+        <input id="plan-title-input" name="title" maxlength="200" autocomplete="off"
+               placeholder="支付链路改造" required />
+      </div>
+      <div class="plan-field">
+        <label for="plan-desc">描述</label>
+        <textarea id="plan-desc" name="description" rows="3" maxlength="4000"
+                  placeholder="目标、范围、验收口径…（可留空）"></textarea>
+      </div>
+      <div class="plan-field">
+        <label for="plan-tasks">关联任务</label>
+        <input id="plan-tasks" name="task_ids" autocomplete="off"
+               placeholder="T-0231, T-0232（逗号或空格分隔）" />
+        <p class="plan-field-hint">关联后卡片会显示任务总数 / 已完成数 / 完成率。</p>
+      </div>
+      <label class="plan-check">
+        <input type="checkbox" id="plan-auto" name="auto_complete" checked />
+        <span>关联任务全部完成时自动完成此计划</span>
+      </label>
+      <label class="plan-check">
+        <input type="checkbox" id="plan-pinned" name="pinned" />
+        <span>置顶（仅对进行中的计划生效）</span>
+      </label>
+      <div class="plan-form-error" id="plan-form-error" hidden></div>
+    </div>
+    <footer class="plan-form-foot">
+      <span class="plan-form-hint" id="plan-form-hint">建好后可直接在卡片上完成 / 关闭 / 删除 / 置顶</span>
+      <button type="button" class="btn" id="plan-form-cancel">取消</button>
+      <button type="submit" class="btn primary" id="plan-form-save">保存</button>
+    </footer>
+  </form>
+</div>
+
 <div class="drop-hint" id="drop-hint" aria-hidden="true">松开鼠标即载入 status.json</div>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 

@@ -1,7 +1,8 @@
 # 蜂巢 Hive · 多机任务看板
 
 把 `hive status --json` 的输出渲染成一块「一眼看到全局」的六列看板，外加一个
-默认折叠的**搁置区**（`shelved`：不能忘，但大部分时候可以忽略）。
+承载**搁置区**（`shelved`：不能忘，但大部分时候可以忽略）与**计划区**（`plan`：
+把一组任务当一个项目跟踪）的 Tab 区域。
 纯静态、零依赖：没有 npm、没有构建步骤、没有 CDN、没有网络字体、没有图标库，也不请求任何外部域名。
 
 ## 目录
@@ -10,6 +11,7 @@
 dashboard/
 ├── index.html          页面骨架（顶栏 / 状态面板 / 看板容器 / 详情抽屉）
 ├── app.js              全部前端逻辑：取数、分列、筛选、渲染、抽屉、主题、自动刷新
+├── plan_store.py       任务计划的存储与领域逻辑（JSON + 原子写 + 状态机 + 留言指令解析）
 ├── style.css           深浅双主题样式、卡片与抽屉、≤768px 单列响应式
 ├── serve.py            零依赖静态服务器（只吃 Python 3 标准库）
 ├── sample-status.json  固定样例数据（开发 / 验收用；T-0101 的租约见 VERIFICATION.md）
@@ -18,6 +20,7 @@ dashboard/
 ├── VERIFICATION.md     fb88 实跑验收记录（服务端 + jsdom + 真实数据）
 ├── dev/ui-test.js      jsdom 前端行为测试（可选，需 npm i jsdom）
 ├── dev/shelf-ui-test.js 搁置面板的 jsdom 行为测试（可选，需 npm i jsdom）
+├── dev/plans-ui-test.js 计划面板的 jsdom 行为测试（可选，需 npm i jsdom）
 └── verify.sh           一键复验服务端
 ```
 
@@ -139,6 +142,91 @@ stale === true  ||  ( lease_until 已过  &&  result_status 为空 )
 - 活跃列（待领取 / 进行中 / 待合并 / 异常）的卡片上有「搁置」按钮，写操作
   走 `/api/task` 的 `shelve` / `unshelve` / `respawn`（限 controller 角色）。
 
+## 计划区（与搁置同一个 Tab 区域）
+
+搁置和计划共用看板上方那一个 section，靠两个 Tab 切换：点「搁置」显示搁置卡列表
+（默认仍收起，点一下展开），点「计划」显示计划面板。切 Tab 不销毁对方的数据，
+搁置的折叠/计数/三个出口、搜索命中的「有匹配」提示全都保持原样。
+
+计划把一组任务当成一个项目跟踪：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | `P-0001`，由 `plan_store` 顺序分配 |
+| `prefix` | 短码，如 `PAY` / `INFRA`，给人看的分组线索 |
+| `title` / `description` | 标题必填，描述可留空 |
+| `status` | `active` 进行中 / `completed` 已完成 / `closed` 已关闭 / `deleted` 已删除（软删） |
+| `pinned` | 是否置顶；**只对进行中生效**，一完成/关闭自动撤掉 |
+| `task_ids` | 关联任务号数组，进度就按它算 |
+| `created_by` / `created_at` / `updated_at` / `completed_at` | 创建人、创建/更新时间、完成时间 |
+
+排序：进行中**置顶在前**，其余按 `updated_at` 倒序；已完成（含已关闭）按
+`completed_at` / `closed_at` 倒序。页面分组固定「进行中」在上、「已完成」在下。
+
+手动完成时如果还有关联任务没做完，卡片徽标写「**手动完成**」、进度文案写
+「N/M **关联任务完成**」并附一行提示 —— 不让「已完成」和 50% 的进度条互相打脸
+（自动完成只有在全部任务完成时才会触发，所以那种情况下进度必然是 100%）。
+
+进度：`total` / `done` / `rate` 每次读取时按当前 `status.json` 快照现算，
+**不另存一份计数**。快照里找不到的任务会单列在 `progress.missing` 并在卡片上提示，
+不会被静默算成「未完成」。全部关联任务完成且计划开了 `auto_complete` 时，
+`GET /api/plans` 会顺手把它标成已完成 —— 页面关着、agent 交完最后一张卡也一样。
+
+### 接口
+
+```http
+GET  /api/plans[?include_deleted=1&status=active]
+POST /api/plans   {"action": "create", "prefix": "PAY", "title": "支付改造",
+                   "task_ids": ["T-0231"], "pinned": false, "auto_complete": true}
+POST /api/plans   {"action": "update", "plan_id": "P-0001",
+                   "fields": {"title": "…", "task_ids": ["T-0231"], "pinned": true}}
+POST /api/plans   {"action": "complete" | "close" | "pin" | "unpin", "plan_id": "P-0001"}
+POST /api/plans   {"action": "delete", "plan_id": "P-0001", "confirm": true}
+```
+
+读免鉴权（和 `/api/status` 同口径）；写要 token（与 `/api/task` 一致）。
+权限：**创建者本人或 controller/admin** 可写，普通成员只读。删除额外要求
+`confirm=true`（页面上的二次确认）或 controller 身份。每次写操作都往
+`audit.log` 追加一行（含 `plan.*` / `chat.plan-cmd` 两类 action）。
+
+数据落在 `dashboard/plans.json`（可用 `HIVE_PLANS_FILE` 指到别处），写盘是
+tmp + `os.replace` 原子替换，进程内加锁串行化。文件已在 `.gitignore` 里 ——
+它是本机运行态数据，不进协调仓。
+
+### 留言指令
+
+agent 没有浏览器，只有留言通道，所以计划也能从留言里操作：
+
+```
+/plan create 前缀 标题                      # 新建（标题可含空格）
+@command:plan update P-0001 标题=… 描述=… 前缀=… 关联=T-0001,T-0002 置顶=on 自动完成=off
+@command:plan complete P-0001
+@command:plan close    P-0001
+@command:plan delete   P-0001               # 仅 controller
+@command:plan pin|unpin P-0001
+```
+
+指令不会当普通留言存掉：执行结果（成功/失败 + 用法）会作为一条 `📋` 系统留言
+发回同一频道，同时写审计。解析失败返回 400 + 完整用法；无权限返回 403；
+留言里没有「二次确认」这一步，所以删除只给 controller 做。
+
+**两条来源都算**：
+
+1. 看板留言框里直接发（走 `POST /api/chat`，当场执行）；
+2. 别的机器上 agent 用 `hive chat post` / MCP `hive_chat_post` 发进集群 ——
+   消息不经过看板，所以由**拥有计划文件的这台看板**在轮询留言时补执行
+   （`GET /api/plans` 内部会读 `since=游标` 的新留言）。首次启动只把游标定位到
+   当前最新，**不回头重放历史留言**；执行过的消息 id 记在 `plans.json` 的
+   `applied` 里，重复轮询不会重跑。身份取留言的 `from`，按本机 token 表查角色，
+   查不到就是普通成员（删不了东西）。
+
+**Agent 发布一组任务时建跟踪计划**：一条指令就够了 —— 建计划的同时把这一组
+任务号带进去，之后进度、完成率、自动完成都自动跟上：
+
+```
+@command:plan create 前缀=PAY 标题=支付二期 关联=T-0105,T-0106,T-0107
+```
+
 ## 其他行为
 
 - 顶栏：每列数量统计、最后更新时间、仓库筛选、owner 筛选、文本搜索（id / 标题 / 摘要）、
@@ -153,4 +241,6 @@ stale === true  ||  ( lease_until 已过  &&  result_status 为空 )
 
 ## 不做的事
 
-登录、编辑、拖拽改状态、后端数据库，以及任何伪造的实时数据——样例就是样例。
+登录（写操作只认 token/cookie）、拖拽改状态、后端数据库，以及任何伪造的实时数据
+——样例就是样例。计划不跨机同步：它跟 `settings.json` / `audit.log` 一样属于
+本机的看板运行态；跨机协作仍走任务卡与留言。

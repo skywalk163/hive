@@ -118,6 +118,13 @@
     autoRefresh: true,
     closedOpen: false,
     shelfOpen: false,     // 搁置面板默认收起：平时忽略，点开才看
+    zone: 'shelf',        // 搁置 / 计划 同一区域的 Tab：shelf | plan
+    planOpen: false,      // 计划面板是否展开（切到计划 Tab 时默认展开）
+    plans: [],            // GET /api/plans 的计划数组（服务端已排序）
+    planCounts: { active: 0, completed: 0, closed: 0 },
+    planLoading: false,
+    planError: '',
+    planEditing: null,    // 正在编辑的计划 id；null = 新建
     loading: true,
     error: '',
     lastUpdated: null,
@@ -292,6 +299,23 @@
     el.shelfEmpty = document.getElementById('shelf-empty');
     el.shelfCount = document.getElementById('shelf-count');
     el.shelfHit = document.getElementById('shelf-hit');
+    // 计划面板（与搁置同一区域的 Tab）
+    el.planToggle = document.getElementById('plan-toggle');
+    el.planBody = document.getElementById('plan-body');
+    el.planCount = document.getElementById('plan-count');
+    el.planActiveList = document.getElementById('plan-active-list');
+    el.planDoneList = document.getElementById('plan-done-list');
+    el.planActiveEmpty = document.getElementById('plan-active-empty');
+    el.planDoneEmpty = document.getElementById('plan-done-empty');
+    el.planActiveCount = document.getElementById('plan-active-count');
+    el.planDoneCount = document.getElementById('plan-done-count');
+    el.planLoading = document.getElementById('plan-loading');
+    el.planError = document.getElementById('plan-error');
+    el.planNew = document.getElementById('plan-new');
+    el.planModal = document.getElementById('plan-modal');
+    el.planOverlay = document.getElementById('plan-overlay');
+    el.planForm = document.getElementById('plan-form');
+    el.planFormError = document.getElementById('plan-form-error');
     el.repo = document.getElementById('repo-filter');
     el.owner = document.getElementById('owner-filter');
     el.prio = document.getElementById('prio-filter');
@@ -365,6 +389,9 @@
   /**
    * 搁置面板做成「伪列」：复用 syncList 的增量渲染，但刻意不进 COLUMNS ——
    * 它不占列宽、不进设置里的列显隐，也不参与顶部「只看该列」筛选。
+   *
+   * 计划与搁置共用同一个 section，靠 Tab 切换显示哪一个：这样既满足「同一区域
+   * 的 Tab」，又不动搁置原有的折叠语义（点搁置 Tab 仍是展开/收起，不是切走）。
    */
   function buildShelf() {
     cols.shelf = { root: el.shelf, body: el.shelfList, empty: el.shelfEmpty,
@@ -372,10 +399,31 @@
                    overflow: 0 };
     if (el.shelfToggle) {
       el.shelfToggle.addEventListener('click', function () {
+        if (state.zone !== 'shelf') { setZone('shelf'); return; }
         state.shelfOpen = !state.shelfOpen;
         render();
       });
     }
+    if (el.planToggle) {
+      el.planToggle.addEventListener('click', function () {
+        if (state.zone !== 'plan') { setZone('plan'); return; }
+        state.planOpen = !state.planOpen;
+        render();
+      });
+    }
+  }
+
+  /** 切换 Tab：进计划顺手展开并拉一次数据；进搁置保持它原来的开合状态。 */
+  function setZone(zone) {
+    state.zone = zone === 'plan' ? 'plan' : 'shelf';
+    if (state.zone === 'plan') {
+      state.planOpen = true;
+      // 每次进来都拉一次：计划进度依赖任务快照，页面可能已经放了很久。
+      loadPlans({ quiet: true });
+    } else {
+      state.shelfOpen = true;
+    }
+    render();
   }
 
   // ---------- 卡片渲染 ----------
@@ -864,10 +912,15 @@
     });
     // 搁置入口常驻但低调：不参与列筛选、不用告警色，只负责「别忘了」。
     html += '<button type="button" class="stat stat-shelf' +
-      (state.shelfOpen ? ' active' : '') + '" data-shelf="1"' +
-      ' title="展开 / 收起搁置区（' + shelvedCount +
+      (state.zone !== 'plan' && state.shelfOpen ? ' active' : '') + '" data-shelf="1"' +
+      ' title="切到搁置区（' + shelvedCount +
       ' 张，不计入活跃统计，也不会被 agent 领取）">' +
       '搁置 <b>' + shelvedCount + '</b></button>';
+    // 计划入口同样常驻：点它切到计划的 Tab（不占列筛选）
+    var planActive = (state.planCounts && state.planCounts.active) || 0;
+    html += '<button type="button" class="stat stat-plan' +
+      (state.zone === 'plan' ? ' active' : '') + '" data-plan="1"' +
+      ' title="切到计划区（进行中 ' + planActive + ' 个）">计划 <b>' + planActive + '</b></button>';
     el.stats.innerHTML = html;
   }
 
@@ -879,19 +932,31 @@
     c.list = list;
     c.count.textContent = list.length;
     c.empty.textContent = '没有搁置的任务。';
+    var onShelf = state.zone !== 'plan';
     if (el.shelfToggle) {
-      el.shelfToggle.setAttribute('aria-expanded', String(state.shelfOpen));
+      el.shelfToggle.setAttribute('aria-selected', String(onShelf));
+      el.shelfToggle.setAttribute('aria-expanded', String(onShelf && !!state.shelfOpen));
+      el.shelfToggle.classList.toggle('active', onShelf);
     }
-    if (el.shelfBody) el.shelfBody.hidden = !state.shelfOpen;
-    el.shelf.classList.toggle('is-open', !!state.shelfOpen);
+    if (el.planToggle) {
+      el.planToggle.setAttribute('aria-selected', String(!onShelf));
+      el.planToggle.setAttribute('aria-expanded', String(!onShelf && !!state.planOpen));
+      el.planToggle.classList.toggle('active', !onShelf);
+    }
+    if (el.shelfBody) el.shelfBody.hidden = !(onShelf && state.shelfOpen);
+    if (el.planBody) el.planBody.hidden = !(!onShelf && state.planOpen);
+    el.shelf.classList.toggle('is-open', !onShelf ? !!state.planOpen : !!state.shelfOpen);
     el.shelf.classList.toggle('has-items', list.length > 0);
+    el.shelf.classList.toggle('is-plan', !onShelf);
     // 正在筛选 / 搜索，且命中了搁置卡：折叠时给个提示，别让人以为卡丢了
     var filtering = !!(state.query.trim() || state.repo || state.owner ||
                        state.prio || state.unowned);
     if (el.shelfHit) {
-      el.shelfHit.hidden = !(!state.shelfOpen && list.length > 0 && filtering);
+      el.shelfHit.hidden = !(onShelf && !state.shelfOpen && list.length > 0 && filtering);
     }
-    if (state.shelfOpen) syncList(c);
+    // 沿用原行为：只有展开时才铺卡片（收起态不占 DOM，也避免与「卡在别的列」
+    // 混淆）。切回搁置 Tab 会重新 sync，卡片即时回来。
+    if (onShelf && state.shelfOpen) syncList(c);
   }
 
   /** 读服务端给的快照时刻（秒 → 毫秒）。拿不到返回 null，不影响主流程。 */
@@ -1013,9 +1078,16 @@
     renderBoard();     // 早退分支（loading/error/empty）也要走，旧快照在这里静默隐藏
     renderChatScopes(); // 任务/agent 列表变了，留言频道下拉跟着重算（内部按签名去抖）
 
-    if (state.loading && !state.tasks.length) { showPanel('loading'); renderStats({}); return; }
-    if (!state.tasks.length && state.error) { showPanel('error', state.error); renderStats({}); return; }
-    if (!state.tasks.length) { showPanel('empty'); renderStats({}); return; }
+    // 计划与任务相互独立：任务空/加载失败时，计划 Tab 仍要能打开看。
+    if (state.loading && !state.tasks.length) {
+      showPanel('loading'); renderStats({}); renderShelf([]); renderPlans(); return;
+    }
+    if (!state.tasks.length && state.error) {
+      showPanel('error', state.error); renderStats({}); renderShelf([]); renderPlans(); return;
+    }
+    if (!state.tasks.length) {
+      showPanel('empty'); renderStats({}); renderShelf([]); renderPlans(); return;
+    }
     hidePanel();
 
     // 计算「最近完成」集合：已完成任务按 finished_at 倒序取前 N 个，其余留在「已关闭」
@@ -1061,6 +1133,7 @@
     });
 
     renderShelf(shelvedList);
+    renderPlans();       // 任务的 done 状态变了，进度条要跟着变
     renderStats(counts, shelvedList.length);
     renderMeta();
     if (drawerId) refreshDrawer();
@@ -1074,6 +1147,9 @@
     state.source = source;
     state.loading = false;
     render();
+    // 计划进度是从任务快照派生的：任务变了就顺手刷一次计划（服务端会重算
+    // 完成数并可能自动完成），否则进度条要等到下次切 Tab 才更新。
+    loadPlans({ quiet: true });
     // 集群面板里的「任务数」来自 /api/status，任务刷新时同步重算（不额外请求）
     if (state.cluster) renderCluster(state.cluster);
   }
@@ -1540,8 +1616,17 @@
     if (el.stats) el.stats.addEventListener('click', function (e) {
       var s = e.target.closest('[data-shelf]');
       if (s) {
+        state.zone = 'shelf';
         state.shelfOpen = true;
         render();
+        if (el.shelf && el.shelf.scrollIntoView) {
+          el.shelf.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+        return;
+      }
+      var pn = e.target.closest('[data-plan]');
+      if (pn) {
+        setZone('plan');
         if (el.shelf && el.shelf.scrollIntoView) {
           el.shelf.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
@@ -1608,7 +1693,8 @@
     if (settingsOverlay) settingsOverlay.addEventListener('click', closeSettings);
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' || e.key === 'Esc') {
-        if (state.settingsOpen) closeSettings();
+        if (state.planEditing !== null || (el.planModal && !el.planModal.hidden)) closePlanForm();
+        else if (state.settingsOpen) closeSettings();
         else if (state.clusterOpen) { state.clusterOpen = false; renderCluster(state.cluster); }
         else closeDrawer();
       }
@@ -2526,6 +2612,10 @@
         if (!res.ok) {
           if (res.status === 401) {
             flash('发送需要登录：点右上角「登录」填 token', true);
+          } else if (res.data && res.data.usage &&
+                     /^\s*(?:\/plan|@command:plan)\b/i.test(text)) {
+            // 计划指令写错时把正确格式原样给出来，而不是只说「发送失败」
+            flash('计划指令格式不对：' + ((res.data && res.data.error) || res.status), true);
           } else {
             flash('发送失败：' + ((res.data && res.data.error) || res.status), true);
           }
@@ -2534,6 +2624,13 @@
         el.chatInput.value = '';
         if (res.data && res.data.offline) {
           flash('已存到本机（集群没运行，别的机器暂时看不到）', true);
+        }
+        // 计划指令执行后，计划区要立刻反映（/api/plans 已在服务端跑过同一条指令）
+        if (/^\s*(?:\/plan|@command:plan)\b/i.test(text)) {
+          flash((res.data && res.data.message) || '计划指令已执行');
+          state.zone = 'plan';
+          state.planOpen = true;
+          loadPlans();
         }
         loadChat();
       })
@@ -2590,6 +2687,372 @@
     loadChat();
   }
 
+  // ---------- 任务计划（计划 Tab） ----------
+  //
+  // 与搁置共用一个 section，靠 Tab 切换。计划数据来自 /api/plans（服务端已按
+  // 规则排序：进行中置顶在前、其余更新时间倒序；已完成按完成时间倒序），
+  // 前端只做「分组 + 渲染」，不重复实现排序，避免两套规则漂移。
+  var PLAN_STATUS_LABEL = { active: '进行中', completed: '已完成', closed: '已关闭', deleted: '已删除' };
+
+  function planById(pid) {
+    for (var i = 0; i < state.plans.length; i++) {
+      if (state.plans[i].id === pid) return state.plans[i];
+    }
+    return null;
+  }
+
+  function loadPlans(opts) {
+    if (state.planLoading) return;
+    state.planLoading = true;
+    state.planError = '';
+    renderPlans();
+    fetch('/api/plans', { cache: 'no-store', headers: { Accept: 'application/json' } })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (d) {
+          return { ok: r.ok, status: r.status, data: d };
+        });
+      })
+      .then(function (res) {
+        if (!res.ok || !res.data || res.data.ok === false) {
+          state.planError = (res.data && res.data.error) || ('HTTP ' + res.status);
+          state.planLoading = false;
+          renderPlans();
+          return;
+        }
+        state.plans = Array.isArray(res.data.plans) ? res.data.plans : [];
+        state.planCounts = res.data.counts || { active: 0, completed: 0, closed: 0 };
+        state.planLoading = false;
+        renderPlans();
+        if (!opts || !opts.quiet) renderMeta();
+      })
+      .catch(function (e) {
+        state.planError = '计划请求失败：' + ((e && e.message) ? e.message : e);
+        state.planLoading = false;
+        renderPlans();
+      });
+  }
+
+  /** 进度条 + 「已完成 3/8 · 38%」；缺任务时明确说「快照里没有」，不装作 0 */
+  function planProgressHTML(p) {
+    var g = p.progress || { total: 0, done: 0, rate: 0, missing: [] };
+    if (!g.total) {
+      return '<div class="plan-progress is-empty"><span class="plan-progress-text">' +
+        '未关联任务</span></div>';
+    }
+    var rate = Math.max(0, Math.min(100, Math.round(g.rate)));
+    // 手动提前完成时写「关联任务」而不是「已完成」：否则卡片上会同时出现
+    // 「已完成」徽标和「1/2 已完成」，读起来像数据自相矛盾。
+    var unit = (p.status === 'active') ? '已完成' : '关联任务完成';
+    var h = '<div class="plan-progress">' +
+      '<div class="bar"><i style="width:' + rate + '%"></i></div>' +
+      '<span class="plan-progress-text"><b>' + g.done + '</b>/' + g.total +
+      ' ' + unit + ' · ' + rate + '%</span></div>';
+    h += '<div class="plan-tasks">';
+    (p.task_ids || []).forEach(function (tid) {
+      var t = findTask(tid);
+      var cls = 'pill plan-task';
+      var title = tid;
+      // 任务还没加载完（首屏）时不判定「缺失」，否则会闪一片虚线胶囊
+      if (t) {
+        if (t.state === 'done' || t.result_status === 'done') cls += ' is-done';
+      } else if (state.tasks.length) {
+        cls += ' is-missing';
+        title = tid + '（当前快照里没有）';
+      }
+      h += '<button type="button" class="' + cls + '" data-plan-task="' + esc(tid) +
+        '" title="' + esc(title) + '">' + esc(tid) + '</button>';
+    });
+    h += '</div>';
+    if (g.missing && g.missing.length) {
+      h += '<div class="plan-warn">快照里找不到 ' + g.missing.length + ' 个关联任务：' +
+        esc(g.missing.join(', ')) + '</div>';
+    }
+    return h;
+  }
+
+  function planCardHTML(p) {
+    var isDone = p.status !== 'active';
+    var h = '<article class="plan-card' + (p.pinned ? ' is-pinned' : '') +
+      (isDone ? ' is-done' : '') + '" data-plan-id="' + esc(p.id) + '">';
+    h += '<div class="plan-head">';
+    if (p.pinned) h += '<span class="plan-pin" title="置顶">📌</span>';
+    // 手动完成时任务可能还没全做完：徽标直接写「手动完成」，别让人对着
+    // 一个 50% 的进度条怀疑「已完成」是不是坏了。
+    var pg0 = p.progress || {};
+    var manual = p.status === 'completed' && pg0.total && pg0.done < pg0.total;
+    var statusText = manual ? '手动完成' : (PLAN_STATUS_LABEL[p.status] || p.status);
+    h += '<span class="plan-id">' + esc(p.id) + '</span>' +
+      '<span class="plan-prefix">' + esc(p.prefix || '—') + '</span>' +
+      '<span class="badge plan-status" data-status="' + esc(p.status) + '"' +
+      (manual ? ' title="手动标记完成：仍有 ' + (pg0.total - pg0.done) + ' 个关联任务未完成"' : '') +
+      '>' + esc(statusText) + '</span>';
+    h += '</div>';
+    h += '<h4 class="plan-title">' + esc(p.title) + '</h4>';
+    if (p.description) h += '<div class="plan-desc">' + esc(p.description) + '</div>';
+    h += planProgressHTML(p);
+    // 手动完成时任务可能还没全做完：把「完成」和「进度」的矛盾说清楚，
+    // 而不是让人对着一个 50% 的进度条怀疑数据错了。
+    var pg = p.progress || {};
+    if (p.status !== 'active' && pg.total && pg.done < pg.total) {
+      h += '<div class="plan-warn">手动标记' +
+        (p.status === 'closed' ? '关闭' : '完成') + '，仍有 ' + (pg.total - pg.done) +
+        ' 个关联任务未完成</div>';
+    }
+
+    var created = parseTime(p.created_at);
+    var updated = parseTime(p.updated_at);
+    var doneAt = parseTime(p.completed_at || p.closed_at);
+    h += '<div class="plan-meta">';
+    h += '<span>创建人 ' + esc(p.created_by || '—') + '</span>';
+    if (created !== null) h += '<span>建于 ' + dtf.format(created) + '</span>';
+    if (updated !== null) h += '<span>更新 ' + relTime(updated) + '</span>';
+    if (doneAt !== null) h += '<span>' + (p.status === 'closed' ? '关闭于 ' : '完成于 ') +
+      dtf.format(doneAt) + '</span>';
+    h += '</div>';
+
+    h += '<div class="plan-actions">';
+    if (p.status === 'active') {
+      h += '<button type="button" class="act act-ok" data-plan-action="complete" data-plan-id="' +
+        esc(p.id) + '">完成</button>';
+      h += '<button type="button" class="act" data-plan-action="' +
+        (p.pinned ? 'unpin' : 'pin') + '" data-plan-id="' + esc(p.id) + '">' +
+        (p.pinned ? '取消置顶' : '置顶') + '</button>';
+    }
+    h += '<button type="button" class="act act-reassign" data-plan-action="edit" data-plan-id="' +
+      esc(p.id) + '">编辑</button>';
+    // 关闭只对进行中有意义：已完成/已关闭的再「关闭」一次是空操作，徒增困惑
+    if (p.status === 'active') {
+      h += '<button type="button" class="act" data-plan-action="close" data-plan-id="' +
+        esc(p.id) + '">关闭</button>';
+    }
+    h += '<button type="button" class="act act-close" data-plan-action="delete" data-plan-id="' +
+      esc(p.id) + '">删除</button>';
+    h += '</div></article>';
+    return h;
+  }
+
+  function renderPlans() {
+    if (!el.planBody) return;
+    if (el.planCount) {
+      var activeN = (state.planCounts && state.planCounts.active) || 0;
+      el.planCount.textContent = activeN;
+      var allN = state.plans.length;
+      el.planCount.title = '进行中的计划 ' + activeN + ' 个（全部 ' + allN + ' 个：' +
+        '已完成 ' + ((state.planCounts && state.planCounts.completed) || 0) +
+        '，已关闭 ' + ((state.planCounts && state.planCounts.closed) || 0) + '）';
+    }
+    if (el.planLoading) el.planLoading.hidden = !state.planLoading;
+    if (el.planError) {
+      el.planError.hidden = !state.planError;
+      el.planError.innerHTML = state.planError
+        ? '<span>计划加载失败：' + esc(state.planError) + '</span>' +
+          '<button type="button" class="btn" id="plan-retry">重试</button>'
+        : '';
+      var retry = document.getElementById('plan-retry');
+      if (retry) retry.addEventListener('click', function () { loadPlans(); });
+    }
+    var active = [], done = [];
+    state.plans.forEach(function (p) {
+      if (p.status === 'active') active.push(p);
+      else done.push(p);              // completed / closed 都进「已完成」区，徽标区分
+    });
+    if (el.planActiveCount) el.planActiveCount.textContent = active.length;
+    if (el.planDoneCount) el.planDoneCount.textContent = done.length;
+    if (el.planActiveList) {
+      el.planActiveList.innerHTML = active.map(planCardHTML).join('');
+      el.planActiveList.hidden = !active.length;
+      if (el.planActiveEmpty) el.planActiveEmpty.hidden = !!active.length || state.planLoading;
+    }
+    if (el.planDoneList) {
+      el.planDoneList.innerHTML = done.map(planCardHTML).join('');
+      el.planDoneList.hidden = !done.length;
+      if (el.planDoneEmpty) el.planDoneEmpty.hidden = !!done.length || state.planLoading;
+    }
+  }
+
+  // ---- 新建 / 编辑弹窗 ----
+  function openPlanForm(pid) {
+    var p = pid ? planById(pid) : null;
+    state.planEditing = p ? p.id : null;
+    if (!el.planModal || !el.planForm) return;
+    document.getElementById('plan-modal-title').textContent = p ? ('编辑计划 ' + p.id) : '新建计划';
+    el.planForm.reset();
+    document.getElementById('plan-prefix').value = p ? (p.prefix || '') : '';
+    document.getElementById('plan-title-input').value = p ? (p.title || '') : '';
+    document.getElementById('plan-desc').value = p ? (p.description || '') : '';
+    document.getElementById('plan-tasks').value = p ? (p.task_ids || []).join(', ') : '';
+    document.getElementById('plan-auto').checked = p ? p.auto_complete !== false : true;
+    document.getElementById('plan-pinned').checked = p ? !!p.pinned : false;
+    if (el.planFormError) { el.planFormError.hidden = true; el.planFormError.textContent = ''; }
+    el.planModal.hidden = false;
+    el.planModal.setAttribute('aria-hidden', 'false');
+    if (el.planOverlay) el.planOverlay.classList.add('open');
+    var first = document.getElementById('plan-prefix');
+    if (first && first.focus) first.focus();
+  }
+
+  function closePlanForm() {
+    state.planEditing = null;
+    if (!el.planModal) return;
+    el.planModal.hidden = true;
+    el.planModal.setAttribute('aria-hidden', 'true');
+    if (el.planOverlay) el.planOverlay.classList.remove('open');
+  }
+
+  function planFormError(msg) {
+    if (!el.planFormError) { flash(msg, true); return; }
+    el.planFormError.hidden = false;
+    el.planFormError.textContent = msg;
+  }
+
+  /** 任务号：允许中英文逗号 / 空格 / 换行分隔，统一大写并去重。 */
+  function parsePlanTasks(raw) {
+    var seen = Object.create(null), out = [];
+    String(raw || '').split(/[\s,，、;；]+/).forEach(function (s) {
+      var t = s.trim().toUpperCase();
+      if (!t) return;
+      if (!/^T-\d{3,6}$/.test(t)) { throw new Error('任务号不合法：' + s.trim() + '（应形如 T-0231）'); }
+      if (!seen[t]) { seen[t] = 1; out.push(t); }
+    });
+    return out;
+  }
+
+  function savePlanForm(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    var prefix = (document.getElementById('plan-prefix').value || '').trim();
+    var title = (document.getElementById('plan-title-input').value || '').trim();
+    var desc = document.getElementById('plan-desc').value || '';
+    var auto = document.getElementById('plan-auto').checked;
+    var pinned = document.getElementById('plan-pinned').checked;
+    if (!prefix) { planFormError('前缀不能为空（例：PAY）'); return; }
+    if (!title) { planFormError('标题不能为空'); return; }
+    var tasks;
+    try { tasks = parsePlanTasks(document.getElementById('plan-tasks').value); }
+    catch (err) { planFormError(err.message); return; }
+
+    var editing = state.planEditing;
+    var body = editing
+      ? { action: 'update', plan_id: editing,
+          fields: { prefix: prefix, title: title, description: desc,
+                    task_ids: tasks, pinned: pinned, auto_complete: auto } }
+      : { action: 'create', prefix: prefix, title: title, description: desc,
+          task_ids: tasks, pinned: pinned, auto_complete: auto };
+    var save = document.getElementById('plan-form-save');
+    if (save) { save.disabled = true; save.textContent = '保存中…'; }
+    fetch('/api/plans', {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body)
+    })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (d) {
+          return { status: r.status, data: d };
+        });
+      })
+      .then(function (res) {
+        if (!res.data || !res.data.ok) {
+          var msg = (res.data && res.data.error) || ('HTTP ' + res.status);
+          if (res.status === 401) msg = '需要登录：点右上角「登录」填 token';
+          planFormError(msg);
+          return;
+        }
+        flash((editing ? '已更新 ' : '已创建 ') + res.data.plan.id + ' · ' + res.data.plan.title);
+        closePlanForm();
+        loadPlans();
+      })
+      .catch(function (err) { planFormError('保存失败：' + ((err && err.message) || err)); })
+      .then(function () {
+        if (save) { save.disabled = false; save.textContent = '保存'; }
+      });
+  }
+
+  // ---- 卡片操作 ----
+  function callPlanAction(action, pid, confirmExtra) {
+    var p = planById(pid);
+    var body = { action: action, plan_id: pid };
+    if (confirmExtra) Object.keys(confirmExtra).forEach(function (k) { body[k] = confirmExtra[k]; });
+    var verb = { complete: '完成', close: '关闭', delete: '删除',
+                 pin: '置顶', unpin: '取消置顶' }[action] || action;
+    flash('正在' + verb + '计划 ' + pid + ' …');
+    fetch('/api/plans', {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body)
+    })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (d) {
+          return { status: r.status, data: d };
+        });
+      })
+      .then(function (res) {
+        if (!res.data || !res.data.ok) {
+          var msg = (res.data && res.data.error) || ('HTTP ' + res.status);
+          if (res.status === 401) msg = '需要登录：点右上角「登录」填 token';
+          else if (res.status === 403) msg = '权限不足：' + msg;
+          flash(verb + '失败：' + msg, true);
+          return;
+        }
+        flash('计划 ' + pid + ' 已' + verb + (p ? '（' + p.title + '）' : ''));
+        loadPlans();
+      })
+      .catch(function (err) { flash(verb + '失败：' + ((err && err.message) || err), true); });
+  }
+
+  /** 计划卡操作事件委托；捕获阶段拦下，避免冒泡到别处 */
+  function planActionHandler(e) {
+    var task = e.target.closest && e.target.closest('[data-plan-task]');
+    if (task) {
+      // 关联任务胶囊：和看板上的「依赖」一样，点一下就在搜索框里定位
+      e.stopPropagation();
+      e.preventDefault();
+      state.query = task.getAttribute('data-plan-task') || '';
+      if (el.search) el.search.value = state.query;
+      state.col = '';
+      render();
+      flash('已定位到 ' + state.query);
+      return;
+    }
+    var btn = e.target.closest && e.target.closest('[data-plan-action]');
+    if (!btn) return;
+    e.stopPropagation();
+    e.preventDefault();
+    var action = btn.getAttribute('data-plan-action');
+    var pid = btn.getAttribute('data-plan-id');
+    var p = planById(pid);
+    var label = (p && p.title) || '';
+    if (action === 'edit') { openPlanForm(pid); return; }
+    if (action === 'complete') {
+      if (!window.confirm('把计划 ' + pid + ' 标为已完成？\n' + label)) return;
+      callPlanAction('complete', pid);
+      return;
+    }
+    if (action === 'close') {
+      if (!window.confirm('关闭计划 ' + pid + '？\n关闭不是完成：它会带着「已关闭」标记留在已完成区。\n'
+                          + label)) return;
+      callPlanAction('close', pid);
+      return;
+    }
+    if (action === 'delete') {
+      if (!window.confirm('删除计划 ' + pid + '？\n这是软删除：记录仍保留，但不再出现在列表里。\n'
+                          + label)) return;
+      callPlanAction('delete', pid, { confirm: true });
+      return;
+    }
+    if (action === 'pin' || action === 'unpin') { callPlanAction(action, pid); return; }
+  }
+
+  function bindPlans() {
+    if (el.planActiveList) el.planActiveList.addEventListener('click', planActionHandler, true);
+    if (el.planDoneList) el.planDoneList.addEventListener('click', planActionHandler, true);
+    if (el.planNew) el.planNew.addEventListener('click', function () { openPlanForm(null); });
+    var close = document.getElementById('plan-modal-close');
+    var cancel = document.getElementById('plan-form-cancel');
+    if (close) close.addEventListener('click', closePlanForm);
+    if (cancel) cancel.addEventListener('click', closePlanForm);
+    if (el.planOverlay) el.planOverlay.addEventListener('click', closePlanForm);
+    if (el.planForm) el.planForm.addEventListener('submit', savePlanForm);
+  }
+
   // ---------- 启动 ----------
   // T-0207：把顶栏实际高度写进 --topbar-h，fixed 抽屉据此从顶栏下方起滑。
   // 顶栏会随窗口宽度换行（≤768px 筛选区换行、meta 行），固定 px 会错位，
@@ -2608,6 +3071,7 @@
     bindEvents();
     bindChat();                // 留言面板：浮标 / 频道 / 发送 / 轮询
     bindTaskActions();         // 异常卡操作按钮：终止 / 改派 / 退回未分配
+    bindPlans();               // 计划 Tab：新建/编辑弹窗 + 卡片操作
     applyEffective();          // 落地主题/紧凑/CI/刷新间隔等生效设置
 
     syncTopbarHeight();
@@ -2622,8 +3086,12 @@
     loadStatus();
     loadCI();
     loadCluster();
+    loadPlans({ quiet: true });   // 计划与任务解耦：任务快照失败也要能看计划
     setInterval(loadCluster, CLUSTER_MS);
     loadServerConfig();        // 拉取服务端共享默认与系统只读信息
+
+    // 深链：#plan 直接停在计划 Tab（贴给同事「看这个计划」时省一次点击）
+    if ((location.hash || '') === '#plan') setZone('plan');
 
     // 深链：#chat=<hall|task:T-0231|agent:名字> 直接摊开对应的留言线程，
     // 方便在群里甩一条链接让人「来这张卡的讨论里说」。

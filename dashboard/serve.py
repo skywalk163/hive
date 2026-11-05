@@ -87,6 +87,7 @@ API_PUSH = "/api/push"
 API_CLUSTER = "/api/cluster"
 API_DISPATCH_PROMPT = "/api/dispatch-prompt"
 API_CHAT = "/api/chat"
+API_PLANS = "/api/plans"
 
 # ---- 看板聊天框（跨机留言）----
 # 真身住在集群（每个节点 ~/.hive/cluster/chat.jsonl + 2 秒增量同步），
@@ -469,6 +470,48 @@ def load_status_record(status_path, tid):
     return None
 
 
+# ---- 任务计划（计划 Tab）----
+# 计划真身放在 plan_store里（JSON + 原子写），这里只负责路由、鉴权和审计。
+# 进度一律从当前状态快照现算：另存一份进度计数就会出现「快照更新了、
+# 计划还显示 3/8」的二义性。
+def load_status_map(status_path):
+    """快照 → {tid: 行}。读不到就返回空表（计划照常显示，进度按 0 算）。"""
+    try:
+        raw = Path(status_path).read_text(encoding="utf-8-sig")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return {}
+    tasks = data.get("tasks") if isinstance(data, dict) else data
+    if not isinstance(tasks, list):
+        return {}
+    return {str(r.get("id")): r for r in tasks if isinstance(r, dict) and r.get("id")}
+
+
+def plan_module():
+    """延迟导入 plan_store：单独拷走 dashboard 时也要给出清晰的 500 而不是 ImportError。"""
+    import plan_store  # noqa: WPS433  同目录模块，按需导入
+    return plan_store
+
+
+def _plan_actor(who):
+    """把鉴权结果整理成 plan_store 用的身份；本机回环也算 controller。
+
+    `require_write_auth` 在 auth=off 时返回 {agent: loopback, role: controller}，
+    这正是老行为（本机就是身份边界）。这里的额外处理只有一处：把空 agent
+    补成 loopback，避免计划记录出现 created_by="" 而在页面上无法判定归属。
+    """
+    who = dict(who or {})
+    if not str(who.get("agent") or "").strip():
+        who["agent"] = "loopback" if who.get("mode") == "off" else "anonymous"
+    return who
+
+
+# 计划指令的增量游标：只处理「上次之后」的集群留言。
+# 首次读到最新位置但不执行历史，避免把旧聊天里的 /plan 文本重放一遍。
+_INBOUND_CURSOR = 0.0
+_INBOUND_READY = False
+
+
 def build_handler(status_path, write_auth="off"):
     """用闭包把状态文件路径注入请求处理器（避免全局变量）。
 
@@ -524,6 +567,9 @@ def build_handler(status_path, write_auth="off"):
                 return
             if path == API_CHAT:
                 self.serve_chat_get()
+                return
+            if path == API_PLANS:
+                self.serve_plans_get()
                 return
             entry = STATIC_FILES.get(path)
             if entry is None:
@@ -584,6 +630,9 @@ def build_handler(status_path, write_auth="off"):
                 return
             if path == API_CHAT:
                 self.serve_chat_post()
+                return
+            if path == API_PLANS:
+                self.serve_plans_post()
                 return
             self._send_json(404, {"error": "未找到资源: %s" % path})
 
@@ -1050,6 +1099,19 @@ def build_handler(status_path, write_auth="off"):
                 "kind": kind,
                 "reply_to": str(body.get("reply_to") or ""),
             }
+
+            # 计划指令（/plan … 或 @command:plan …）：不当作普通留言存掉，
+            # 先执行再把「指令 + 结果」作为一条系统留言发回同一频道 ——
+            # 这样即使发起的人关了页面，频道里也留得下这次操作的痕迹。
+            try:
+                ps = plan_module()
+                is_cmd = ps.looks_like_plan_command(text)
+            except ImportError:
+                ps, is_cmd = None, False
+            if is_cmd:
+                self.serve_plan_command(text, ps, who, scope, sender)
+                return
+
             ok, resp = _cluster_chat_http("POST", None, payload)
             if ok and isinstance(resp, dict) and resp.get("ok") and resp.get("message"):
                 append_audit({"action": "chat.post", "ok": True, "agent": sender,
@@ -1058,25 +1120,231 @@ def build_handler(status_path, write_auth="off"):
                 self._send_json(200, {"ok": True, "source": "cluster",
                                       "message": resp["message"]})
                 return
-            msg = {
-                "id": "%s-%d" % (socket.gethostname().split(".")[0], time.time_ns()),
-                "ts": _iso_now(),
-                "epoch": time.time(),
-                "from": sender,
-                "node": "dashboard-local",
-                "node_name": "local",
-                "scope": scope,
-                "kind": kind,
-                "text": payload["text"],
-                "reply_to": payload["reply_to"],
-            }
-            if not chat_local_append(msg):
+            msg = self.deliver_chat_local(payload)
+            if msg is None:
                 self._send_json(500, {"ok": False, "error": "本地留言文件写不进去"})
                 return
             self._send_json(200, {"ok": True, "source": "local", "offline": True,
                                   "message": msg})
 
-            # ---- /api/task：看板按钮 -> 调用 hive CLI 真正执行任务操作 ----
+        def deliver_chat_local(self, payload):
+            msg = {
+                "id": "%s-%d" % (socket.gethostname().split(".")[0], time.time_ns()),
+                "ts": _iso_now(),
+                "epoch": time.time(),
+                "from": payload["from"],
+                "node": "dashboard-local",
+                "node_name": "local",
+                "scope": payload["scope"],
+                "kind": payload.get("kind") or "note",
+                "text": payload["text"],
+                "reply_to": payload.get("reply_to") or "",
+            }
+            return msg if chat_local_append(msg) else None
+
+        def post_chat_note(self, text, scope, sender="hive-plan"):
+            """把一条系统留言发到频道：先试集群，集群不在就落本地。"""
+            payload = {"text": text[:CHAT_MAX_TEXT], "from": sender, "scope": scope,
+                       "kind": "note", "reply_to": ""}
+            ok, resp = _cluster_chat_http("POST", None, payload)
+            if ok and isinstance(resp, dict) and resp.get("ok"):
+                return resp.get("message")
+            return self.deliver_chat_local(payload)
+
+        def serve_plan_command(self, text, ps, who, scope, sender):
+            """执行一条计划指令：结果既写审计，也作为一条系统留言回到频道。"""
+            who = _plan_actor(who)
+            result = ps.run_command(text, who, load_status_map(status_path))
+            ok = bool(result.get("ok"))
+            if ok:
+                reply = "📋 %s" % (result.get("message") or "计划指令已执行")
+            else:
+                reply = "📋 计划指令失败：%s\n%s" % (result.get("error") or "未知原因",
+                                                  result.get("usage") or "")
+            self.post_chat_note(reply, scope)
+            append_audit({"action": "chat.plan-cmd", "ok": ok, "agent": sender,
+                          "role": who.get("role"), "source": self.client_address[0],
+                          "plan": ((result.get("plan") or {}).get("id") or ""),
+                          "detail": text[:120]})
+            if not ok:
+                self._send_json(result.get("code") or 400, {
+                    "ok": False, "error": result.get("error") or "计划指令失败",
+                    "usage": result.get("usage") or ""})
+                return
+            self._send_json(200, {"ok": True, "plan_command": True,
+                                  "message": result.get("message") or "",
+                                  "plan": result.get("plan"),
+                                  "reply": reply})
+
+        # ---- /api/plans：任务计划（计划 Tab 的唯一读写口）----
+        #
+        # 读：GET /api/plans[?include_deleted=1&status=active]
+        #     顺带按当前快照做一次自动完成同步（满足规则的计划直接进「已完成」），
+        #     这样哪怕页面关着，agent 交完最后一张卡再打开也能看到计划已完成。
+        # 写：POST /api/plans {action, ...}；权限 = 创建者本人 或 controller。
+        def serve_plans_get(self):
+            q = parse_qs(urlparse(self.path).query)
+            include_deleted = (q.get("include_deleted") or ["0"])[0] in ("1", "true", "yes")
+            status = (q.get("status") or [""])[0].strip() or None
+            try:
+                ps = plan_module()
+            except ImportError as exc:
+                self._send_json(500, {"ok": False, "error": "计划模块不可用: %s" % exc})
+                return
+            tasks_by_id = load_status_map(status_path)
+            consumed = self.consume_plan_commands(ps, tasks_by_id)
+            try:
+                _progress, auto_done = ps.sync_progress(tasks_by_id, return_completed=True)
+                for pid in auto_done:
+                    # 自动完成也是一次状态变更：写一行审计，事后能解释「谁把它完成的」
+                    append_audit({"action": "plan.auto-complete", "plan": pid, "ok": True,
+                                  "agent": "rule", "role": "system",
+                                  "source": self.client_address[0],
+                                  "detail": "关联任务全部完成，按规则自动完成"})
+                items = ps.list_plans(tasks_by_id, include_deleted=include_deleted,
+                                     status=status)
+            except ps.PlanError as exc:
+                self._send_json(exc.code, {"ok": False, "error": exc.message})
+                return
+            except OSError as exc:
+                self._send_json(500, {"ok": False, "error": "计划文件读写失败: %s" % exc})
+                return
+            counts = {"active": 0, "completed": 0, "closed": 0}
+            for plan in items:
+                if plan["status"] in counts:
+                    counts[plan["status"]] += 1
+            payload = {"ok": True, "plans": items, "counts": counts,
+                       "source": "plan_store"}
+            if consumed:
+                payload["commands"] = consumed
+            self._send_json(200, payload)
+
+        def consume_plan_commands(self, ps, tasks_by_id):
+            """把集群留言里新到的计划指令执行掉（任意机器发的都算）。
+
+            agent 走 `hive chat post` / MCP，消息直接进集群、不经过看板输入框；
+            计划真身只在本机，所以由看板在读留言时补上这一步。
+
+            增量游标：只问「上次之后」的留言。首次运行直接把游标推到当前最新，
+            **不**回头执行历史留言 —— 否则一装上就会把几个月前聊天里随手写的
+            `/plan …` 全部重放一遍。消息 id 账本是第二道保险（防止游标丢失后重放）。
+            """
+            global _INBOUND_CURSOR, _INBOUND_READY
+            since = _INBOUND_CURSOR
+            try:
+                ok, body = _cluster_chat_http(
+                    "GET", {"since": "%.6f" % since, "limit": "200"})
+                if not ok or not isinstance(body, dict) or not body.get("ok"):
+                    return []
+                msgs = body.get("messages") or []
+                last = float(body.get("last_epoch") or 0.0)
+                if not _INBOUND_READY:
+                    # 首次：只记位置，不执行历史
+                    _INBOUND_READY = True
+                    _INBOUND_CURSOR = max(last, since)
+                    return []
+                if not msgs:
+                    _INBOUND_CURSOR = max(last, since)
+                    return []
+                results = ps.apply_inbound(msgs, tasks_by_id)
+                _INBOUND_CURSOR = max([last, since] + [
+                    float(m.get("epoch") or 0) for m in msgs if isinstance(m, dict)])
+            except Exception as exc:  # noqa: BLE001  指令消费失败不能拖垮读接口
+                sys.stderr.write("[hive-dashboard] 计划指令消费失败: %s\n" % exc)
+                return []
+            for res in results:
+                append_audit({"action": "chat.plan-cmd", "ok": bool(res.get("ok")),
+                              "agent": res.get("from"), "role": "inbound",
+                              "plan": ((res.get("plan") or {}).get("id") or ""),
+                              "msg": res.get("message_id"),
+                              "detail": (res.get("message") or res.get("error") or "")[:200]})
+                if res.get("ok"):
+                    self.post_chat_note("📋 %s" % res.get("message"), res.get("scope") or "hall")
+            return [{"id": r.get("message_id"), "ok": bool(r.get("ok")),
+                     "message": r.get("message") or r.get("error") or ""} for r in results]
+
+        def serve_plans_post(self):
+            length = self._read_length()
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": "请求体不是合法 JSON: %s" % exc})
+                return
+            if not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "error": "顶层必须是对象"})
+                return
+
+            action = str(body.get("action") or "").strip()
+            who = self.require_write_auth()
+            if who is None:
+                append_audit({"action": "plan.%s" % (action or "?"), "ok": False,
+                              "source": self.client_address[0], "detail": "未鉴权"})
+                return
+            who = _plan_actor(who)
+
+            try:
+                ps = plan_module()
+            except ImportError as exc:
+                self._send_json(500, {"ok": False, "error": "计划模块不可用: %s" % exc})
+                return
+
+            plan_id = str(body.get("plan_id") or body.get("id") or "").strip()
+            audit_base = {"action": "plan.%s" % (action or "?"), "plan": plan_id,
+                          "agent": who.get("agent"), "role": who.get("role"),
+                          "source": self.client_address[0]}
+            try:
+                if action == "create":
+                    plan = ps.create_plan(
+                        body.get("prefix"), body.get("title"),
+                        body.get("description") or "",
+                        task_ids=body.get("task_ids"),
+                        created_by=who.get("agent"),
+                        pinned=bool(body.get("pinned")),
+                        auto_complete=body.get("auto_complete") is not False)
+                    append_audit({**audit_base, "plan": plan["id"], "ok": True,
+                                  "detail": "新建 %s %s" % (plan["prefix"], plan["title"])})
+                    self._send_json(200, {"ok": True, "plan": plan})
+                    return
+                if action == "update":
+                    fields = body.get("fields")
+                    if not isinstance(fields, dict):
+                        # 也允许把字段直接铺在顶层（前端表单更省事）
+                        fields = {k: body[k] for k in
+                                  ("prefix", "title", "description", "task_ids",
+                                   "pinned", "auto_complete", "status") if k in body}
+                    plan = ps.update_plan(plan_id, who, fields)
+                    append_audit({**audit_base, "ok": True,
+                                  "detail": "更新 %s" % ",".join(sorted(fields.keys()))})
+                    self._send_json(200, {"ok": True, "plan": plan})
+                    return
+                if action == "complete":
+                    plan = ps.complete_plan(plan_id, who)
+                elif action == "close":
+                    plan = ps.close_plan(plan_id, who)
+                elif action == "delete":
+                    plan = ps.delete_plan(plan_id, who, confirm=bool(body.get("confirm")))
+                elif action in ("pin", "unpin"):
+                    plan = ps.set_pinned(plan_id, who, action == "pin")
+                else:
+                    append_audit({**audit_base, "ok": False, "detail": "不支持的动作"})
+                    self._send_json(400, {"ok": False,
+                                          "error": "不支持的计划操作: %s" % (action or "（空）")})
+                    return
+            except ps.PlanError as exc:
+                append_audit({**audit_base, "ok": False, "code": exc.code,
+                              "detail": exc.message})
+                self._send_json(exc.code, {"ok": False, "error": exc.message})
+                return
+            except OSError as exc:
+                append_audit({**audit_base, "ok": False, "detail": "写盘失败"})
+                self._send_json(500, {"ok": False, "error": "计划文件写入失败: %s" % exc})
+                return
+            append_audit({**audit_base, "ok": True,
+                          "detail": "%s %s" % (plan["id"], plan["title"])})
+            self._send_json(200, {"ok": True, "plan": plan})
+
+        # ---- /api/task：看板按钮 -> 调用 hive CLI 真正执行任务操作 ----
         def serve_task_post(self):
             try:
                 length = int(self.headers.get("Content-Length", "0"))

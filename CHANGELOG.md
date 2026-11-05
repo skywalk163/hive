@@ -4,6 +4,35 @@
 
 ### Added
 
+- **看板「任务计划」：把一组任务当一个项目跟踪**。搁置旁边多了「计划」Tab（同一区域
+  两个 Tab 切换，搁置原有的折叠/计数/出口全不动）：
+  - 字段：ID（`P-0001`）、前缀、标题、描述、状态、是否置顶、关联任务 ID 列表、创建人、
+    创建/更新时间、完成时间。状态 `active` / `completed` / `closed` / `deleted`（软删）。
+  - 页面上能新建、编辑、完成、关闭、删除、置顶/取消置顶。完成即移入下端的「已完成」
+    区；关闭与删除都要二次确认（删除只改状态，记录仍留在 `dashboard/plans.json`）。
+  - 排序：进行中置顶在前，其余按更新时间倒序；已完成按完成时间倒序。置顶只对进行中
+    生效，计划一完成/关闭就自动撤掉。
+  - 关联任务显示 **总数 / 已完成数 / 完成率**，进度从任务快照现算（不另存计数，
+    避免「快照更新了、计划还显示 3/8」）；全部完成时按规则自动把计划标为已完成
+    （每张计划可单独关掉 `auto_complete`）。
+  - 权限复用现有 token 模型：创建者本人或 controller/admin 可写，普通成员只读；
+    删除还要 `confirm=true` 或 controller。所有写操作逐条进 `dashboard/audit.log`。
+  - 留言通道也能操作计划（agent 没有浏览器，只有留言）：
+    `/plan create <前缀> <标题>`、`@command:plan update <ID> 标题=… 关联=T-0001,T-0002
+    置顶=on`、`@command:plan create 前缀=PAY 标题=… 关联=T-…`（一次带上被跟踪的任务组）、
+    `complete` / `close` / `delete` / `pin` / `unpin`。格式错会回一段带示例
+    的用法；权限不足直接拒；留言里删除只给 controller（没有二次确认这一步可用）。
+  - 指令从两条路进来都生效：看板留言框（当场执行），以及别的机器 agent 用
+    `hive chat post` / MCP 发进集群的（由拥有计划文件的看板在轮询时补执行，
+    增量游标 + 消息 id 账本保证不重放历史、不重复执行）。
+  - 新增 `dashboard/plan_store.py`（JSON + 原子写 + 进程内锁）、`/api/plans`、
+    `dashboard/plans.json`（已进 `.gitignore`）；测试见
+    `tests/test_dashboard_plans.py` 与 `tests/test_dashboard_plans_ui.py`。
+
+### Changed
+
+- 看板统计条多了常驻的「计划 N」入口（进行中数量），点它切到计划 Tab。
+
 - **任务状态「搁置」（`shelved`）：不能忘，但大部分时候可以忽略**。有些卡当前确实
   做不了：打回 `ready` 只白占一个名额、还会干扰 agent 领取；一直挂在异常里也不对（情况
   已知，租约/结果/进度这些现场完全可以释放）；直接删更不行，删了就真忘了。
