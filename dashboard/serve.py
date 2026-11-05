@@ -512,6 +512,33 @@ _INBOUND_CURSOR = 0.0
 _INBOUND_READY = False
 
 
+SERVE_STARTED_AT = time.time()
+
+
+def service_freshness():
+    """服务端代码是否比进程新：True 表示「改了 serve.py 但没重启」。
+
+    只看导入时刻与各模块 mtime 的先后，不做哈希 —— 目的是给一句可操作的提示
+    （`dashboard-service.sh restart`），不是做完整性校验。
+    """
+    stale = []
+    for name in ("serve.py", "plan_store.py"):
+        try:
+            mtime = (BASE_DIR / name).stat().st_mtime
+        except OSError:
+            continue
+        if mtime > SERVE_STARTED_AT + 1:      # +1s 容忍同一秒内的写入
+            stale.append(name)
+    return {
+        "started_at": datetime.fromtimestamp(SERVE_STARTED_AT).astimezone()
+                              .isoformat(timespec="seconds"),
+        "stale_modules": stale,
+        "restart_hint": ("改了 %s 但进程还是旧的：运行 "
+                         "`sh scripts/dashboard-service.sh restart`" % "、".join(stale))
+                        if stale else "",
+    }
+
+
 def build_handler(status_path, write_auth="off"):
     """用闭包把状态文件路径注入请求处理器（避免全局变量）。
 
@@ -686,6 +713,10 @@ def build_handler(status_path, write_auth="off"):
             return {
                 "status_file": status_path,
                 "dashboard_dir": str(BASE_DIR),
+                # 进程启动时刻 vs 磁盘上 serve.py 的 mtime：静态文件每请求重读、
+                # serve.py 常驻内存，改了代码不重启就会出现「页面是新代码、后端是旧
+                # 路由」（/api/plans 404 就这么来的）。前端据此提示重启，别让人干瞪眼。
+                "service": service_freshness(),
                 "hub": hc.get("hub", os.environ.get("HIVE_HUB", "")),
                 "repos": hc.get("repos", {}) or {},
                 "agents": agents,

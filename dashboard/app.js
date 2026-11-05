@@ -93,6 +93,14 @@
           if (!d) return;
           if (d.dashboard) { server = d.dashboard || {}; settings = computeEffective(); applyEffective(); render(); }
           if (d.system) state.system = d.system;
+          // 后端代码比进程新（改了 serve.py 没重启）时横幅提示：这类「页面
+          // 是新代码、接口是旧路由」的 404 光看页脚根本判断不出来。
+          var svc = d.system && d.system.service;
+          if (svc && svc.restart_hint && !state.staleWarned) {
+            state.staleWarned = true;
+            state.error = svc.restart_hint;
+            render();
+          }
           if (state.settingsOpen) renderSettings();
         })
         .catch(function () {});
@@ -125,6 +133,7 @@
     planLoading: false,
     planError: '',
     planEditing: null,    // 正在编辑的计划 id；null = 新建
+    staleWarned: false,   // 后端代码过期提示只弹一次
     loading: true,
     error: '',
     lastUpdated: null,
