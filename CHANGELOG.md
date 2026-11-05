@@ -88,6 +88,28 @@
 
 ### Fixed
 
+- **缺卡 claim 不再误报「已被别人领取，抢不到」，且会自动补摄入 leader store**。
+  现场：leader 进程只在启动时 `ingest_cards` 一次，启动后新增的 T-0254~T-0258
+  在 store 里缺行；`Store.claim` 抛的是「没有任务 T-0257」，但 `Worker.claim`
+  把原因丢进日志只回一个 `False`，`hive_claim` / `hive take` 又把一切失败兜底成
+  「已被 别人 领取，抢不到」——卡其实 `ready`、远端也没有 `claim/T-0257`，
+  误导人去找一个根本不存在的持有者。
+  - **补摄入**：`hive_store` 新增 `Store.ingest_card(tid, card)`，缺行才插入、
+    已有行只补卡面定义并保留运行时 `state/owner/retries`；**走 op 日志**，所以
+    复制到所有副本。旧 `ingest_cards` 直接写库不产生 op，正是本次现场
+    leader 138 张 / follower 134 张、两边 `commit_seq` 却都是 43（心跳追平条件
+    `target > commit_seq` 永不成立）的原因。`hive_cluster._store_op_for` 新增
+    `store/ingest` 动作；`Worker.claim` 遇 `E_NO_TASK` 时用本机 Git 卡面补登记一次
+    再重试；旧 leader 没有该动作时回退现成的 `store/assign`，follower 先升级也能自愈。
+  - **错误细分**：`StoreError` 带 `code`（`E_NO_TASK` / `E_TAKEN` / `E_CLOSED` /
+    `E_HAS_RESULT`），`ClusterError` 透传、`handle_store` 的 409 响应新增 `code`；
+    `hive.py` 新增 `StoreCallError(kind/code/http)` 与 `_classify_store_error`，
+    分成 `no_task` / `taken` / `unavailable` / `other`（旧 leader 无 code 时用
+    已知中文文案兜底）。`Worker.claim` 保留 `last_claim_error`，`cmd_take` 与
+    `hive_claim` 按类别出文案并给 `hint`；只有真被领走才说「已被 X 领取」，
+    git 模式行为逐字不变。
+  - 测试：新增 `tests/test_store_claim_errors.py`（24 项），store / cluster / mcp /
+    claim_backoff / store_overlay 回归 88 passed。
 - **Windows 判据「单引号 + 空格」被判 failed（T-0228）**：`git grep -q 'version = "0.4.1"' --
   pyproject.toml` 在 cmd.exe 下 exit 128（`fatal: unable to resolve revision: =`），
   产物却是好的。老垫片只拦「单引号里有 `|` / `&`」的片段，这一段两个都没有，

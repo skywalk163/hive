@@ -297,6 +297,39 @@ class HiveError(Exception):
     pass
 
 
+class StoreCallError(HiveError):
+    """store 调用失败，带机器可读的分类。
+
+    以前所有失败都被压成一句 HiveError 字符串，Worker.claim 再把字符串丢掉，
+    上层只能一律翻译成「已被别人领取，抢不到」——leader 明明是「没有这张卡」，
+    也会报成被抢。kind 让调用方能说人话：
+
+        no_task      leader store 没摄入这张卡（新卡）
+        taken        确实被别的 agent 领走了
+        unavailable  集群/store 不可用、无主、未达多数
+        other        其它业务错误（已关闭、已有结果…）
+    """
+
+    def __init__(self, message: str, kind: str = "other", code: str = "",
+                 http: int | None = None):
+        super().__init__(message)
+        self.kind = kind
+        self.code = code
+        self.http = http
+
+    def describe(self, tid: str) -> str:
+        if self.kind == "no_task":
+            return (f"{tid} 领取失败：leader store 里没有这张卡（新卡未摄入）。"
+                    f"已尝试自动补登记；如仍失败，可在 leader 上重跑摄入。"
+                    f"原始错误：{self}")
+        if self.kind == "taken":
+            return f"{tid} 已被别人领取：{self}"
+        if self.kind == "unavailable":
+            return (f"{tid} 领取失败：store / 集群不可用（无主、未达多数或服务未启），"
+                    f"不是被别人抢走。原始错误：{self}")
+        return f"{tid} 领取失败：{self}"
+
+
 class LeaseFenced(HiveError):
     """租约已被回收 / 被别的 agent 接管：本次结果写入被 fencing 拒绝。
 
@@ -782,13 +815,36 @@ def overlay_store_state(card: dict, store) -> dict:
     return out
 
 
+def _classify_store_error(ecode: str, msg: str, http: int | None) -> str:
+    """把 store 响应分成 no_task / taken / unavailable / other。
+
+    优先用结构化的 code；旧版 leader 没带 code，就用已知中文文案兜底，
+    这样 follower 先升级也能正确识别「没有任务 T-xxxx」。
+    """
+    if ecode == "E_NO_TASK" or msg.startswith("没有任务 "):
+        return "no_task"
+    if ecode == "E_TAKEN" or ("已被" in msg and "领取" in msg):
+        return "taken"
+    if (http is None or http in (502, 503, 504)
+            or ecode.startswith("E_NO_QUORUM")
+            or msg in ("没有主节点", "转发主节点失败", "store 未启用")
+            or "集群不可用" in msg or "超时" in msg):
+        return "unavailable"
+    return "other"
+
+
 def store_call(action: str, payload: dict, timeout: float = 3.0) -> dict:
     code, data = _cluster_http("POST", f"store/{action}", payload,
                                timeout=timeout)
     if code == 200 and isinstance(data, dict) and data.get("ok"):
         return data
-    msg = (data or {}).get("error") if isinstance(data, dict) else ""
-    raise HiveError(msg or f"store {action} 失败（集群不可用/无主，HTTP {code}）")
+    body = data if isinstance(data, dict) else {}
+    ecode = str(body.get("code") or "")
+    msg = str(body.get("error") or "")
+    if not msg:
+        msg = f"store {action} 失败（集群不可用/无主，HTTP {code}）"
+    raise StoreCallError(msg, kind=_classify_store_error(ecode, msg, code),
+                         code=ecode, http=code)
 
 
 def store_claim(tid: str, agent: str, lease_minutes: int) -> dict:
@@ -825,6 +881,17 @@ def store_retry(tid: str, agent: str = "") -> dict:
 
 def store_assign(tid: str, agent: str) -> dict:
     return store_call("assign", {"task": tid, "agent": agent})
+
+
+def store_ingest_card(tid: str, card: dict) -> dict:
+    """把本机 Git 卡面送进 leader store（缺行才插入，op 会复制到所有副本）。
+
+    leader 只在进程启动时摄入一次卡，启动后新建的卡会缺行。这里让 follower
+    在领卡遇到 E_NO_TASK 时把定义补上去，而不是靠人手工 POST store/assign。
+    """
+    clean = {k: v for k, v in (card or {}).items()
+             if not str(k).startswith("_")}
+    return store_call("ingest", {"task": tid, "card": clean})
 
 
 def store_result(tid: str, agent: str, lease_id: str,
@@ -3252,8 +3319,11 @@ class Hive:
         w = Worker(self.dir, agent)
         wt = Path(w.cfg.get("worktrees") or (w.state / "wt")).expanduser() / tid
         if not claim_holder and not w.claim(tid):
-            # Worker.claim 对「确认有主」的失败不重试、只返回 False；把主人带出来，
-            # 别让调用方只看到一句「可能刚被抢走」。
+            # store 模式：Worker.claim 留下了结构化原因，按类别说人话。
+            # 「leader 里没这张卡」「集群不可用」绝不能再报成「被别人抢走」。
+            failure = getattr(w, "last_claim_error", None)
+            if isinstance(failure, StoreCallError):
+                raise HiveError(failure.describe(tid))
             info = self.claim_info(tid)
             holder = _claim_holder(info) or "别人"
             raise HiveError(f"{tid} 已被 {holder} 领取，抢不到")
@@ -4596,6 +4666,39 @@ class Worker:
         return bool(res and res.get("status") == "done")
 
     # -- 领取 -------------------------------------------------------------- #
+    def _ingest_missing_card(self, tid: str) -> bool:
+        """leader store 缺这张卡时，把本机 Git 卡面补登记进去。
+
+        数据来自 follower（它的协调仓已是最新），写入与复制由 leader 完成，
+        所以所有副本会一起补齐，而不是只改本机副本。
+        """
+        try:
+            card = self.h.card(tid)
+        except HiveError as exc:
+            log(f"{tid} 补摄入失败：读不到卡面 {exc}")
+            return False
+        # _body / _path 是 parse_card 的内部字段，不该跨机器送进 store
+        clean = {k: v for k, v in card.items()
+                 if not str(k).startswith("_")}
+        try:
+            store_ingest_card(tid, clean)
+            log(f"{tid} 已补摄入 leader store（原缺卡）")
+            return True
+        except StoreCallError as exc:
+            # 旧版 leader 还没有 ingest 动作。退回现成的 store/assign 兜底：
+            # follower 先升级也能自愈，不必等 leader 重启（卡面定义会由
+            # 之后的 ingest_cards 补全）。
+            if "未知 store 动作" not in str(exc):
+                log(f"{tid} 补摄入失败：{exc}")
+                return False
+        try:
+            store_assign(tid, self.name)
+            log(f"{tid} 已用 store/assign 补登记（leader 尚不支持 ingest）")
+            return True
+        except HiveError as exc:
+            log(f"{tid} 补登记失败：{exc}")
+            return False
+
     def claim(self, tid: str) -> bool:
         """抢 claim/<tid> 锁：失败后带抖动指数退避，区分「被抢」和「暂时失败」。
 
@@ -4606,19 +4709,34 @@ class Worker:
         * push 的原子性完全不动：仍然是普通 push，非快进拒绝就是拒绝，绝不 force。
         """
         self._reload_cfg()  # T-0204：领卡前也刷新配置，与 pending 口径一致
+        self.last_claim_error = None   # 失败原因留给调用方说人话，别只回一个 False
         if claim_backend() == "store":
             info = self.h.claim_info(tid)
             holder = _claim_holder(info)
             if holder and holder != self.name:
                 log(f"{tid} 已被 {holder} 领取，不重试")
+                self.last_claim_error = StoreCallError(
+                    f"{tid} 已被 {holder} 领取", kind="taken", code="E_TAKEN")
                 return False
-            try:
-                out = store_claim(tid, self.name, STORE_LEASE_MINUTES)
-                log(f"{tid} store 领取成功（lease {out.get('claim', {}).get('lease_id', '')[:8]}）")
-                return True
-            except HiveError as exc:
-                log(f"{tid} store 领取失败：{exc}")
-                return False
+            for attempt in (1, 2):
+                try:
+                    out = store_claim(tid, self.name, STORE_LEASE_MINUTES)
+                    log(f"{tid} store 领取成功（lease {out.get('claim', {}).get('lease_id', '')[:8]}）")
+                    self.last_claim_error = None
+                    return True
+                except HiveError as exc:
+                    log(f"{tid} store 领取失败：{exc}")
+                    self.last_claim_error = exc
+                    # leader store 里没这张卡（启动后新增的卡没被摄入）：
+                    # 用本机 Git 卡面补登记一次，然后重试领取。只重试这一轮，
+                    # 不把「补登记」变成无限循环。
+                    if (attempt == 1 and isinstance(exc, StoreCallError)
+                            and exc.kind == "no_task"
+                            and self._ingest_missing_card(tid)):
+                        log(f"{tid} 已补登记进 leader store，重试领取")
+                        continue
+                    return False
+            return False
 
         cfg = claim_backoff_config()
         info = self.h.claim_info(tid)

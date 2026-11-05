@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hive import (  # noqa: E402
     DEFAULT_STATE, HANDOFF_STATES, IDENT, PRIORITY_ORDER, SHELVED_STATE,
     VERSION, Hive,
-    HiveError, Worker,
+    HiveError, StoreCallError, Worker,
     _claim_holder, _verify_verdict, claim_backend, commit_file_to_ref, git, iso, now,
     parse_iso, rev_parse,
 )
@@ -666,8 +666,19 @@ class HiveMcp:
 
         w = self.worker()
         if not claim_holder and not w.claim(tid):
-            # Worker.claim 对「确认有主」的失败不重试、只返回 False；把主人带出来，
-            # 别让调用方只看到一句「可能刚被抢走」。
+            # store 模式：按结构化原因分类，别把「leader 没这张卡」「集群不可用」
+            # 一律翻译成「已被 别人 领取，抢不到」（缺卡误导性最强，会让人去
+            # 找根本不存在的持有者，而卡其实还是 ready）。
+            failure = getattr(w, "last_claim_error", None)
+            if isinstance(failure, StoreCallError):
+                msg = failure.describe(tid)
+                hint = {
+                    "no_task": "leader store 缺这张新卡；worker 已尝试自动补登记，"
+                               "若仍失败请检查 leader 是否摄入了最新任务卡",
+                    "taken": "用 hive_list_tasks / hive_whoami 看当前持有者",
+                    "unavailable": "检查本机集群与 leader 是否在线（hive cluster status）",
+                }.get(failure.kind, "看 hive doctor 输出定位")
+                return err(msg, hint=hint)
             info = h.claim_info(tid)
             holder = _claim_holder(info) or "别人"
             return err(f"{tid} 已被 {holder} 领取，抢不到")

@@ -63,7 +63,17 @@ def summary_head(text, limit: int = SUMMARY_HEAD_MAX) -> str:
 
 
 class StoreError(Exception):
-    pass
+    """store 业务错误。code 给上层做机器可读的分类，别再去解析中文文案。
+
+    E_NO_TASK     leader store 里没有这张卡（常见于启动后新增的卡没被摄入）
+    E_TAKEN       已有其他 agent 持有有效租约
+    E_CLOSED      卡已 done/closed
+    E_HAS_RESULT  卡已有结果，不该再领
+    """
+
+    def __init__(self, message: str, code: str = "E_STORE"):
+        super().__init__(message)
+        self.code = code
 
 
 class Store:
@@ -619,18 +629,21 @@ class Store:
                             "seq": int(row["seq"])}
             task = self.task(tid)
             if task is None:
-                raise StoreError(f"没有任务 {tid}")
+                # 以前这句和「被别人领走」在调用侧一样被翻译成「抢不到」，
+                # 害人以为卡被占了，其实是 leader 压根没摄入这张新卡。
+                raise StoreError(f"没有任务 {tid}", code="E_NO_TASK")
             if str(task.get("state") or "") in ("done", "closed"):
-                raise StoreError(f"{tid} 已关闭")
+                raise StoreError(f"{tid} 已关闭", code="E_CLOSED")
             if self.result_info(tid):
-                raise StoreError(f"{tid} 已经有结果")
+                raise StoreError(f"{tid} 已经有结果", code="E_HAS_RESULT")
             cur = self.claim_info(tid)
             now = _now()
             if cur and cur.get("state") == "active" and cur.get("lease_until", 0) > now:
                 if cur.get("owner") == agent:
                     return {"ok": True, "idempotent": True, "claim": cur,
                             "task": task, "seq": self.last_seq()}
-                raise StoreError(f"{tid} 已被 {cur.get('owner')} 领取")
+                raise StoreError(f"{tid} 已被 {cur.get('owner')} 领取",
+                                 code="E_TAKEN")
             seq = int(cur.get("lease_seq") or 0) + 1 if cur else 1
             claim = {
                 "task_id": tid, "lease_id": uuid.uuid4().hex, "lease_seq": seq,
@@ -727,6 +740,47 @@ class Store:
                   "payload": {"task": task}}
             op["seq"] = self.apply_op(op) if commit else self.stage_op(op)
             return {"ok": True, "task": task, "seq": op["seq"]}
+
+    def ingest_card(self, tid: str, card: dict, term: int = 0,
+                    op_id: str = "", commit: bool = True) -> dict:
+        """把一张卡面登记进 store，走 op 日志（所以会复制到所有副本）。
+
+        用途：leader 进程启动后新增的卡，启动那次 ingest_cards 没扫到；
+        follower 手上有最新 Git 卡面，把定义发过来让 leader 补上。
+
+        * 缺行 → 按卡面插入（state/owner/retries 用卡面值）；
+        * 已有行 → **只补卡面定义**，保留 store 里的运行时 state/owner/retries，
+          绝不把 running/done 翻回 ready（和 ingest_cards 同一口径）。
+        """
+        with self._lock:
+            row = self.task(tid)
+            src = {k: v for k, v in (card or {}).items()
+                   if not str(k).startswith("_")}
+            if row is None:
+                task = {
+                    "id": tid,
+                    "state": str(src.get("state") or "ready"),
+                    "owner": str(src.get("owner") or ""),
+                    "retries": int(src.get("retries") or 0),
+                }
+            else:
+                task = {
+                    "id": tid,
+                    "state": str(row.get("state") or "ready"),
+                    "owner": str(row.get("owner") or ""),
+                    "retries": int(row.get("retries") or 0),
+                }
+            keep = ("id", "state", "owner", "retries", "updated", "def_hash")
+            task.update({k: v for k, v in src.items() if k not in keep})
+            task["def_hash"] = str(src.get("updated") or src.get("created")
+                                   or src.get("title") or "")
+            task["updated"] = _iso()
+            op = {"op_id": op_id or uuid.uuid4().hex, "type": "ingest",
+                  "task_id": tid, "term": int(term), "ts": _iso(),
+                  "payload": {"task": task}}
+            op["seq"] = self.apply_op(op) if commit else self.stage_op(op)
+            return {"ok": True, "ingested": row is None, "task": task,
+                    "seq": op["seq"]}
 
     def retry(self, tid: str, agent: str = "", term: int = 0, op_id: str = "",
               commit: bool = True, clear_result: bool = True) -> dict:

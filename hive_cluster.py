@@ -113,7 +113,15 @@ SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 class ClusterError(Exception):
-    """集群层的可预期错误（命令行直接打印，不抛 traceback）。"""
+    """集群层的可预期错误（命令行直接打印，不抛 traceback）。
+
+    code 是 store 业务错误的机器可读分类，经 handle_store 透到 HTTP 响应里，
+    调用方不必靠解析中文 error 文案区分「缺卡 / 被领走 / 集群不可用」。
+    """
+
+    def __init__(self, message: str, code: str = ""):
+        super().__init__(message)
+        self.code = code
 
 
 # --------------------------------------------------------------------------- #
@@ -2741,6 +2749,14 @@ class Cluster:
                                          commit=False)
             if action == "assign":
                 return self.store.assign(tid, agent, term, op_id, commit=False)
+            if action == "ingest":
+                # follower 把本机 Git 卡面送过来，补 leader 启动后新增的卡。
+                # 走 op 日志，handle_store 会把它复制到所有副本。
+                card = body.get("card")
+                if not isinstance(card, dict):
+                    raise ClusterError("ingest 需要 card 对象", code="E_BAD_REQUEST")
+                return self.store.ingest_card(tid, card, term, op_id,
+                                              commit=False)
             if action == "close":
                 return self.store.close(tid, bool(body.get("done", True)),
                                         str(body.get("note") or ""), term, op_id,
@@ -2753,8 +2769,8 @@ class Cluster:
                     tid, agent, term, op_id, commit=False,
                     clear_result=bool(body.get("clear_result", True)))
         except StoreError as exc:
-            raise ClusterError(str(exc)) from exc
-        raise ClusterError(f"未知 store 动作 {action}")
+            raise ClusterError(str(exc), code=getattr(exc, "code", "")) from exc
+        raise ClusterError(f"未知 store 动作 {action}", code="E_UNKNOWN_ACTION")
 
     def _replicate_op(self, op: dict) -> bool:
         with self.lock:
@@ -2831,7 +2847,10 @@ class Cluster:
         try:
             out = self._store_op_for(action, body)
         except ClusterError as exc:
-            return 409, {"ok": False, "error": str(exc), "term": self.term}
+            resp = {"ok": False, "error": str(exc), "term": self.term}
+            if getattr(exc, "code", ""):
+                resp["code"] = exc.code
+            return 409, resp
         seq = int(out.get("seq") or 0)
         if seq:
             ops = self.store.ops_since(seq - 1, 1)
