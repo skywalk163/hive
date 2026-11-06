@@ -16,5 +16,7 @@ dashboard/audit.log
 dashboard/plans.json
 dashboard/plans.json.tmp
 dashboard/plans.json.tmp.*
+# 手工演示时把 HIVE_PLANS_FILE 指到 .demo-* 留下的临时数据，不入库
+dashboard/.demo-*.json
 # 可选的 jsdom 前端测试依赖（dev/*-ui-test.js）；仓库本身零依赖
 node_modules/
