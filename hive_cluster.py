@@ -112,6 +112,30 @@ DEFAULT_ELECTION_JITTER_S = 0.8
 DEFAULT_LEADER_LEASE_S = 5.0
 DEFAULT_DISCOVERY_INTERVAL_S = 5.0
 
+# OSPF 的 DR/BDR 接口优先级是 0..255 的 8bit 无符号值：默认 1，越大越优先，
+# 0 = 放弃选举资格（只能当 DRother）。取值域照搬，避免有人填 999 把排序搅乱。
+MIN_LEADER_PRIORITY = 0
+MAX_LEADER_PRIORITY = 255
+DEFAULT_LEADER_PRIORITY = 1
+# 名次之间至少差这么多秒。election_jitter 若被人为设成 0，所有节点会同一刻
+# 发起选举，优先级就退化成「谁的网络快谁当」——给一个下限把这层语义保住。
+MIN_ELECTION_STEP_S = 0.05
+
+
+def normalize_leader_priority(value,
+                              default: int = DEFAULT_LEADER_PRIORITY) -> int:
+    """把任意来源的优先级规整到 OSPF 的 0..255。
+
+    CLI 入口会先严格校验并报错；这里负责让「已落盘的 config.json / 环境变量 /
+    别的节点广播过来的值」不至于破坏排序：解析不了回默认，越界 clamp 到边界。
+    """
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(MIN_LEADER_PRIORITY, min(MAX_LEADER_PRIORITY, n))
+
+
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -351,15 +375,13 @@ class Config:
         # 0 沿用 OSPF 的语义（DR priority 0 = 不参选）：这台可以当从属、可以被
         # 投票，但自己永不主动发起选举。留这个口子是因为「只读副本 / 弱机器」
         # 不该有机会当主控，而 electable=false 又太绝对（连被选举都不行）。
-        try:
-            raw_prio = kw.get("leader_priority")
-            if raw_prio is None:
-                raw_prio = os.environ.get("HIVE_CLUSTER_PRIORITY")
-            if raw_prio is None:
-                raw_prio = saved.get("leader_priority")
-            self.leader_priority = int(1 if raw_prio is None else raw_prio)
-        except (TypeError, ValueError):
-            self.leader_priority = 1
+        raw_prio = kw.get("leader_priority")
+        if raw_prio is None:
+            raw_prio = os.environ.get("HIVE_CLUSTER_PRIORITY")
+        if raw_prio is None:
+            raw_prio = saved.get("leader_priority")
+        self.leader_priority = normalize_leader_priority(
+            DEFAULT_LEADER_PRIORITY if raw_prio is None else raw_prio)
         # 抢主控时是否允许比现任主控落后（见 promoted 相关逻辑）：
         # store 只是缓存、git 才是事实账，所以允许，但要留下审计痕迹。
         self.allow_forced_promote = _env_bool(
@@ -2042,12 +2064,20 @@ class Cluster:
         刚改完优先级还没广播出去时会读到旧值，导致「明明改成 2 了却不生效」。
         """
         if nid == self.node_id:
-            return int(self.config.leader_priority)
+            return normalize_leader_priority(self.config.leader_priority)
         rec = self.nodes.get(nid) or {}
-        try:
-            return int(rec.get("priority") if rec.get("priority") is not None else 1)
-        except (TypeError, ValueError):
-            return 1
+        return normalize_leader_priority(rec.get("priority"))
+
+    def _priority_zero_excludes_locked(self) -> bool:
+        """priority 0 此刻是否意味着「禁赛」。
+
+        OSPF 里 0 是**硬资格**（放弃 DR/BDR 竞选），不只等于「懒得先开口」：
+        除了自己不发起选举，别的节点也不该把票投给它。唯一例外是全员都填 0，
+        那时退化成人人 1（见 _election_delay_locked），0 就不再是禁赛标志，
+        否则一个节点都不肯发起选举、集群永远没有主控。
+        """
+        voters = self._alive_voter_ids_locked()
+        return any(self._node_priority_locked(n) > 0 for n in voters)
 
     def _election_delay_locked(self) -> float:
         """本机在「当前无主控」时该等多久才发起选举。
@@ -2061,26 +2091,24 @@ class Cluster:
         否则会没有节点愿意发起选举、集群永远没有主控。
         """
         voters = sorted(self._alive_voter_ids_locked())
-        try:
-            rank = voters.index(self.node_id)
-        except ValueError:
-            rank = 0
         # 同优先级用 node_id 兜底定序，和 OSPF 用 Router ID 打平手一个道理。
         ordered = sorted(voters, key=lambda n: (-self._node_priority_locked(n), n))
-        if self.node_id in ordered:
-            rank = ordered.index(self.node_id)
+        rank = ordered.index(self.node_id) if self.node_id in ordered else 0
 
-        if all(self._node_priority_locked(n) <= 0 for n in voters):
-            mine = 1
-        else:
-            mine = self._node_priority_locked(self.node_id)
-        if mine <= 0:
-            # 不参选：等一个不可能的时长，选举由别人发起。
+        # 0 = 放弃竞选资格：只要集群里还有正常优先级的节点，就永不发起选举。
+        # 全员 0 时退化成人人 1（_priority_zero_excludes_locked 返回假），不拦。
+        if (self._node_priority_locked(self.node_id) <= 0
+                and self._priority_zero_excludes_locked()):
             return float("inf")
 
-        delay = self.config.election_min + rank * self.config.election_jitter
+        step = max(self.config.election_jitter, MIN_ELECTION_STEP_S)
+        delay = self.config.election_min + rank * step
 
         pref = self._preferred_leader_id_locked()
+        if pref and self._node_priority_locked(pref) <= 0:
+            # 被 preferred 指定的那台自己弃了权，还让全集群给它让路会导致
+            # 没人肯发起选举 —— 视同没配这个偏好，退回按优先级来。
+            pref = ""
         if not pref or pref not in voters:
             # 没配偏好，或首选节点当前不在线 / 不参选：按优先级规则来。
             # 这里必须退回原逻辑，否则一个永远离线的 preferred 会让整个集群
@@ -2287,6 +2315,11 @@ class Cluster:
             if self._stop.is_set() or self._election_inflight:
                 return False
             if not self.config.electable:
+                return False
+            # 双保险：0 是硬资格，自动通道靠 delay=inf 挡过一次，这里再挡一次。
+            # 防的是旧配置、老代码、或全员 0 退化边界时序让弃权节点抢跑。
+            if (self._node_priority_locked(self.node_id) <= 0
+                    and self._priority_zero_excludes_locked()):
                 return False
             if self.role == "leader" and self.leader_lease_until > _now():
                 return False
@@ -2743,6 +2776,15 @@ class Cluster:
         if cand.get("electable") is False:
             return 200, {"ok": True, "granted": False, "term": self.term,
                          "reason": "candidate_not_electable"}
+        # 0 = 放弃 DR/BDR 竞选资格，是硬资格。原先只靠候选人自己 delay=inf
+        # 「自觉不发起」，集群侧没有防线：跑老代码或配错的节点一抢跑，照样能
+        # 拿到多数票当上主控。本机自己是正优先级，就说明这轮该由正优先级
+        # 节点主导，不能把票投给一个声明弃权的候选人。
+        # 本机也是 0 时（全员弃权的退化路径）不拦，否则谁都选不出来。
+        if (normalize_leader_priority(cand.get("priority")) <= 0
+                and self.config.leader_priority > 0):
+            return 200, {"ok": True, "granted": False, "term": self.term,
+                         "reason": "candidate_priority_zero"}
         my_seq = self.store.commit_seq() if self.store else 0
         cand_seq = int(cand.get("last_store_seq") or 0)
         # 人工夺权通道：body 里带 force 才放行（且本机没禁用）。
@@ -2824,6 +2866,14 @@ class Cluster:
                 return 200, {"ok": True, "already": True, "role": "leader",
                              "term": self.term, "node": self.node_id,
                              "previous_leader": self.node_id}
+            # 人工 promote 也不越过 OSPF 的硬资格。提前拦在这里，比让选举
+            # 发起后被同伴拒票（term 白涨一轮、还留下半截状态）好排查。
+            if (self.config.leader_priority <= 0
+                    and self._priority_zero_excludes_locked()):
+                return 409, {"ok": False, "role": self.role, "node": self.node_id,
+                             "error": "本机 priority=0（OSPF 语义：放弃主控竞选资格）。"
+                                      "先执行 hive cluster priority --priority 1 "
+                                      "把优先级调回 1..255，再 promote"}
             leader_url = self.leader_url
             leader_id = self.leader_id or ""
             me = self.node_id
@@ -3505,6 +3555,16 @@ def build_handler(cluster: Cluster):
 # --------------------------------------------------------------------------- #
 
 def _config_from_args(args) -> Config:
+    prio = getattr(args, "priority", None)
+    if prio is not None:
+        try:
+            n = int(prio)
+        except (TypeError, ValueError):
+            n = -1
+        if not (MIN_LEADER_PRIORITY <= n <= MAX_LEADER_PRIORITY):
+            raise ClusterError(
+                f"--priority 必须在 {MIN_LEADER_PRIORITY}..{MAX_LEADER_PRIORITY} 之间"
+                f"（OSPF DR priority 是 8bit：0=放弃资格，1=默认，值大者优先）：{prio}")
     return Config(
         state_dir=getattr(args, "state_dir", None),
         name=getattr(args, "name", None),
@@ -3529,7 +3589,7 @@ def _config_from_args(args) -> Config:
         claim_backend=getattr(args, "claim_backend", None),
         coordinator_enabled=(True if getattr(args, "coordinator", False)
                              else None),
-        leader_priority=getattr(args, "priority", None),
+        leader_priority=prio,
         hive_dir=getattr(args, "dir", None),
     )
 
@@ -4089,13 +4149,12 @@ def _cmd_priority(config: Config, value: int | None = None,
         if not running or not nodes:
             return 0
         ranked = sorted(nodes,
-                        key=lambda n: (-(n.get("priority") if n.get("priority")
-                                         is not None else 1),
-                                       str(n.get("name") or "")))
+                        key=lambda n: (-normalize_leader_priority(
+                            n.get("priority")), str(n.get("name") or "")))
         print("\n按优先级排序（当前无主控时，最上面那台先发起选举）：")
         print(f"  {'NAME':<24} {'PRIO':<5} {'STATUS':<8} ROLE")
         for n in ranked:
-            prio = n.get("priority") if n.get("priority") is not None else 1
+            prio = normalize_leader_priority(n.get("priority"))
             print(f"  {str(n.get('name') or n.get('id'))[:24]:<24} "
                   f"{str(prio):<5} {str(n.get('status') or ''):<8} "
                   f"{n.get('role') or ''}")
@@ -4112,8 +4171,10 @@ def _cmd_priority(config: Config, value: int | None = None,
     except (TypeError, ValueError):
         print(f"优先级必须是整数：{value!r}", file=sys.stderr)
         return 2
-    if prio < 0:
-        print("优先级不能为负（0 表示不参选，1 是默认）", file=sys.stderr)
+    if not (MIN_LEADER_PRIORITY <= prio <= MAX_LEADER_PRIORITY):
+        print(f"优先级必须在 {MIN_LEADER_PRIORITY}..{MAX_LEADER_PRIORITY} 之间"
+              f"（OSPF DR priority 是 8bit：0=放弃竞选资格，1=默认，"
+              f"值大者优先）：{prio}", file=sys.stderr)
         return 2
 
     old = _read_json(config.state_dir / "config.json", {}) or {}
@@ -4402,7 +4463,8 @@ def add_parser(sub) -> None:
     p.add_argument("--clear", action="store_true",
                    help="prefer --clear：清除本机的首选主控设置")
     p.add_argument("--priority", type=int, default=None,
-                   help="主控优先级（OSPF 式：值大者优先，默认 1，0 = 不参选）。"
+                   help="主控优先级（OSPF 式 0-255：默认 1，值大者优先，"
+                        "0 = 放弃竞选资格）。"
                         "serve/start 时设定；cluster priority --priority N 改本机")
     p.add_argument("--no-restart", action="store_true",
                    help="cluster priority 改完不自动重启本机节点")

@@ -7308,7 +7308,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--clear", action="store_true",
                    help="prefer --clear：清除本机的首选主控设置")
     s.add_argument("--priority", type=int, default=None,
-                   help="主控优先级（OSPF 式：值大者优先，默认 1，0 = 不参选）。"
+                   help="主控优先级（OSPF 式 0-255：默认 1，值大者优先，"
+                        "0 = 放弃竞选资格）。"
                         "serve/start 时设定；cluster priority --priority N 改本机")
     s.add_argument("--no-restart", action="store_true",
                    help="cluster priority 改完不自动重启本机节点")

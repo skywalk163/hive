@@ -805,3 +805,96 @@ def test_hive_parser_exposes_priority():
     assert args.priority == 2
     args = parser.parse_args(["--dir", ".", "cluster", "serve", "--priority", "0"])
     assert args.priority == 0
+
+
+# --------------------------------------------------------------------------- #
+# OSPF DR priority 的取值域 0..255，以及 0 = 硬资格（不是「懒得先开口」）
+# --------------------------------------------------------------------------- #
+
+def test_priority_domain_is_0_to_255(cluster_factory):
+    """OSPF 的 DR/BDR 接口优先级是 8bit：0..255，默认 1。"""
+    assert (hc.MIN_LEADER_PRIORITY, hc.MAX_LEADER_PRIORITY,
+            hc.DEFAULT_LEADER_PRIORITY) == (0, 255, 1)
+    assert hc.normalize_leader_priority(None) == 1
+    assert hc.normalize_leader_priority("abc") == 1
+    assert hc.normalize_leader_priority(-7) == 0
+    assert hc.normalize_leader_priority(999) == 255
+    # 从 config.json / 环境变量 / 构造参数来的越界值都要被规整，不能混进排序
+    a = cluster_factory("a", leader_priority=300)
+    assert a.config.leader_priority == 255
+    assert a._self_node()["priority"] == 255
+    b = cluster_factory("b", seeds=[a.url], leader_priority=-3)
+    assert b.config.leader_priority == 0
+
+
+def test_cli_rejects_out_of_range_priority(cluster_factory, capsys):
+    """CLI 要当场报错，不能把 300 静默当成 255 —— 输错得让人看见。"""
+    cfg = cluster_factory("a").config
+    assert hc._cmd_priority(cfg, 256, restart=False) == 2
+    assert "0..255" in capsys.readouterr().err
+    assert hc._cmd_priority(cfg, -1, restart=False) == 2
+    assert cfg.leader_priority == 1, "被拒的值不能写进配置"
+
+
+def test_serve_args_reject_out_of_range_priority():
+    """serve/start --priority 也走同一道校验（ClusterError 会被 CLI 友好打印）。"""
+    with pytest.raises(hc.ClusterError):
+        hc._config_from_args(argparse.Namespace(priority=256))
+    with pytest.raises(hc.ClusterError):
+        hc._config_from_args(argparse.Namespace(priority=-1))
+
+
+def test_abstaining_candidate_cannot_get_votes(cluster_factory):
+    """0 是硬资格：集群侧要拒票，不能只靠候选人自己 delay=inf 自觉。
+
+    老代码 / 配错的节点抢跑时，正优先级节点必须挡住它，否则照样凑够多数当上主控。
+    """
+    a = cluster_factory("a", leader_priority=2)          # 投票方
+    b = cluster_factory("b", seeds=[a.url], leader_priority=0)  # 已弃权
+    assert wait_until(lambda: b.leader_id == a.node_id)
+    code, resp = a.handle_vote({"term": a.term + 1,
+                                "candidate": b._self_node()})
+    assert code == 200
+    assert resp["granted"] is False
+    assert resp["reason"] == "candidate_priority_zero"
+
+
+def test_promote_refused_for_abstaining_node(cluster_factory):
+    """人工 promote 也不越过硬资格，且要提前给出可照做的提示。"""
+    a = cluster_factory("a", leader_priority=2)
+    assert wait_until(lambda: a.role == "leader")
+    b = cluster_factory("b", seeds=[a.url], leader_priority=0)
+    assert wait_until(lambda: b.leader_id == a.node_id)
+    code, resp = b.handle_promote({})
+    assert code == 409 and resp["ok"] is False
+    assert "priority=0" in resp["error"]
+    assert "priority --priority 1" in resp["error"]
+    assert b.role != "leader"
+
+
+def test_preferred_pointing_at_abstaining_node_does_not_deadlock(cluster_factory):
+    """preferred 指向一台弃权节点时，全集群不能一起给它让路空等。"""
+    a = cluster_factory("a", leader_priority=2)
+    b = cluster_factory("b", seeds=[a.url], leader_priority=0)
+    assert wait_until(lambda: b.leader_id == a.node_id)
+    assert wait_until(lambda: a._node_priority_locked(b.node_id) == 0)
+    with a.lock:
+        a.config.preferred_leader = b.node_id
+        d_with = a._election_delay_locked()
+        a.config.preferred_leader = ""
+        d_without = a._election_delay_locked()
+    assert d_with == d_without
+
+
+def test_zero_jitter_still_orders_by_priority(cluster_factory):
+    """election_jitter 被设成 0 时，优先级不能退化成「同时开跑、谁快谁当」。"""
+    a = cluster_factory("a", leader_priority=1)
+    b = cluster_factory("b", seeds=[a.url], leader_priority=9)
+    assert wait_until(lambda: b.leader_id == a.node_id)
+    a.config.election_jitter = 0.0
+    b.config.election_jitter = 0.0
+    with a.lock:
+        da = a._election_delay_locked()
+    with b.lock:
+        db = b._election_delay_locked()
+    assert db < da, (da, db)
