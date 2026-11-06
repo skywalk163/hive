@@ -1,0 +1,40 @@
+{
+  "task": "T-0258",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0258",
+  "base": "main",
+  "head": "072c841edadf5b0a79160dc1b542f6e219fc3616",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-06T10:33:22+08:00",
+  "finished_at": "2026-11-06T10:33:22+08:00",
+  "duration_s": 0.5,
+  "verify": [
+    {
+      "cmd": "python 运行.py examples/test_补丁呈现.light",
+      "code": 0,
+      "tail": [
+        "--- 测试 补丁呈现 通过 ---"
+      ]
+    },
+    {
+      "cmd": "test -f src/补丁呈现.light",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0258 交付摘要 —— lightharness 0.2.2-rc.1 B6：apply_patch 呈现形状\n\n## 新增文件与行数\n- `src/补丁呈现.light`（250 行）—— 对标上游 `packages/fs/tool-fs/src/{apply-patch-output,apply-patch-presentation,diff}.ts`\n- `examples/test_补丁呈现.light`（129 行，50 条断言）\n- 未改任何既有文件；仅 `从 应用补丁 导入 解析补丁` 挂到既有导出，不改 `应用补丁.light` 语义。\n\n## 移植面（纯函数，均带「补丁」前缀）\n- 补丁预览调用（presentPatchCall）：裸路径预览，含移动两端去重计数；语法错→空。\n- 补丁预览结果 / 补丁差异自元 / 补丁停止自元（presentPatchResult / diffsFromMeta / stoppedFromMeta）：opaque meta 防御性收窄。\n- 补丁已停 / 补丁完成行 / 补丁渲染（patchStopped / completedLines / renderPatch）：成功与终止文案。\n- 补丁呈现元（patchPresentationMeta）：创作/无基线删除不留 diff，其余整块记 FileDiff。\n\n## 判据输出原文（worktree 内 `python 运行.py examples/test_补丁呈现.light`，rc=0）\n```\n--- 测试 补丁呈现 通过 ---\n```\n\n## 反跑两处（变异→红→还原→绿）\n1. **值反**：`补丁完成行` 里 A 族 `\"A \" + 落` 改成 `\"Z \" + 落`\n   → 复跑 rc=1，`断言失败: spec5 renderPatch 实际=\"...Completed:\\nZ d\\nD a...\" 期望=\"...A d...\"`。还原后 rc=0。\n2. **形状反**：`补丁差异自元` 空表守卫 `返回 空` 改成 `返回 候选`\n   → 复跑 rc=1，`断言失败: spec4 差异空表 实际=[] 期望=null`。还原后 rc=0。\n- 还原后 `src/补丁呈现.light` SHA256 = `C11D82A0EF9EF6E231FF581566A56A414DC6194CED37C37E8C332D9367F0B834`，与改反前一致，复跑绿。\n\n## 段落名冲突扫描\n跨 `src/*.light` 提取 `^段落 (名字)` 并集，本模块 12 个段落（补丁去重/补丁预览调用/补丁有效差异/补丁差异自元/补丁停止自元/补丁预览结果/补丁已停/补丁完成行/补丁渲染/补丁整块差异/补丁呈现元累计/补丁呈现元）无一出现在跨文件重复名单里，**冲突归零**。\n\n## 覆盖上游 spec\n对齐 `apply-patch-presentation.spec.ts`：[spec1] 调用前预览、[spec3] 出错/缺 meta 回退+已停标题、[spec4] 畸形停止旗标 7 例、[spec5] 创作/无基线删除不留 diff+renderPatch、[spec6] 取消+move 失败；另补成功路径两个样例。5/6 顶层用例（83%），断言 50 条 ≥20。\n\n## 没做 / 做不到（诚实列）\n- **B7（llm-deepseek 本轮 +216 行追补 `src/模型目录.light` / `src/模型列表缓存.light`）未做**：本卡 `paths` 白名单只含 `src/补丁呈现.light` + `examples/test_补丁呈现.light`，硬约束明令「不碰任何既有 src·examples 文件」，追补需改 `模型目录.light`，越界；建议另立卡追补。\n- **[spec2] propagates unexpected parser defects 未移植**：上游靠 `PatchParseError` 类区分语法错与「非解析缺陷」，光明 `解析补丁` 抛错不分类，无法区分；语法错已正确收为「预览返回空」。\n- **`computeHunkDiffs` 行级 hunk 切分未移植**：上游用 npm `diff` 的 `structuredPatch(context=3)` 把 before/after 切成多个 hunk；本模块对「前后皆非空」的更新简化为单个 FileDiff（`补丁整块差异`）。spec 中 `patchPresentationMeta` 唯一产出 diff 的路径是「后=null 的删除→空新文」，不依赖行级切分，故不影响 spec5 断言；后续如需逐行 hunk 再加。\n- 宿主面（读盘/preflight/沙箱/审计）按惯例不移植。",
+  "error": "",
+  "declared_paths": [
+    "src/补丁呈现.light",
+    "examples/test_补丁呈现.light"
+  ],
+  "changed_files": [
+    "examples/test_补丁呈现.light",
+    "src/补丁呈现.light"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
