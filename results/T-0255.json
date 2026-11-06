@@ -1,0 +1,40 @@
+{
+  "task": "T-0255",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0255",
+  "base": "main",
+  "head": "a0b6714d6343e2d74b683030202a952b72863076",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-06T09:53:21+08:00",
+  "finished_at": "2026-11-06T09:53:21+08:00",
+  "duration_s": 0.7,
+  "verify": [
+    {
+      "cmd": "python 运行.py examples/test_共享协议.light",
+      "code": 0,
+      "tail": [
+        "--- 测试 共享协议 通过 ---"
+      ]
+    },
+    {
+      "cmd": "test -f src/共享协议.light",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0255 交付摘要\n\n**做了什么**：把上游 `packages/experimental/liveshare-protocol/src/*`（锚点 `dsh-v0.2.2-rc.1` = `66491b05e3`，\n`tunnel-protocol.ts` 610 行 + `viewer-carrier.ts` 306 行 + `viewer-states.ts` 48 行）的**纯协议层**移植成光明模块，\n共 41 个段落：\n\n- **Relay ⇄ 网关帧**：`share-rpc-res`（信封 id 安全正整数 + status 100..599 + 体可选）、`share-rpc`\n  （缺 `actor` 整帧作废）、`share-rpc-cancel`、`share-access-state`（无 RPC id 的权威快照）。\n- **拒答**：本版本读不懂的帧必须答复——`share-rpc` 字段被拒 → 400 `invalid-request`；未知帧类型 → 501\n  `unsupported-frame`；无可用信封 / 本身是答复或取消 / 本就能服务 → 不答复。\n- **宿主 ⇄ worker IPC**：工令 `add-share`（含分享规格逐字段校验 + 缺 `connection` 补 `{mode:\"relay\"}`）/\n  `remove-share` / `share-rpc-response` / `shutdown`；工事 `ready` / `share-connected` / `share-closed` /\n  `share-error` / `share-rpc-cancel` / `share-rpc-request` / `share-access-state`（回带注册牌与分享号）。\n- **令牌与时间**：uuid v4 注册牌逐段校验；ISO-8601 子集过期时间逐段验范围。\n- **viewer 承载纯判定**：读通道目标路径、`carrier` vs `remote` 归类（401/403 恒终局，408/429/502/503/504 与\n  `stream-not-found`/`gateway/cancelled` 可重连，其余按对端裁决）、200 流帧 `failure` 槽分类、拒绝体两种形状解包、\n  `codeShaped` 编码形状、转发路由**路径段边界**匹配、调用路径取末处 `/api/`、流编号窗口起点。\n- **viewer 状态词表**：七态 + 每态 `retryable`/`terminal`。\n\n**改了哪些文件**（仅本卡 `paths`）：\n- `src/共享协议.light` 705 行（新增，41 段落；`导出` 24 个名字；sha256 `ea32ef72b73ccfb2f9bc23d7d8fab21831e08a5f965d81b5ab93da12b569bf7e`）\n- `examples/test_共享协议.light` 381 行（新增，164 条断言；sha256 `ee6727aaab70bc4d4395cbcaa18ec843b3bfe70799fd91756d0ccdd56e80a0c0`）\n\n未改动任何既有 `src`/`examples`/`对标清单.json`/`语言缺陷账.md`/`反跑判据.md`/CI；`git status --porcelain` 只有这两个 `??`。\n\n**跑了什么验证**（在 lightharness 工作树根目录）：\n- `python 运行.py examples/test_共享协议.light` → **rc=0**，输出原文：`--- 测试 共享协议 通过 ---`\n- `test -f src/共享协议.light` → **rc=0**\n- 回归自检：`python 运行.py examples/test_应用补丁.light` → rc=0（`--- 测试 应用补丁 通过 ---`），新模块未影响既有用例。\n\n**反跑三处**（每处单独跑必须 rc=1，还原后 sha256 与基线一致并复跑绿；基线 sha256 = `ea32ef72…`）：\n\n| 变异 | 结果 | 证据 |\n|---|---|---|\n| A 值反：`共享隧道拒答帧` 的 `501` → `500` | rc=1 | `断言失败: 未来帧 拒答状态 实际=500 期望=501` |\n| B 逻辑反：删掉 `共享承载失败归类` 的 401/403 终局前置判断 | rc=1 | `断言失败: 归类 401 终局 实际=\"承载\" 期望=\"远端\"` |\n| C 逻辑反：`共享承载段起点` 的尾段边界判断改恒真 | rc=1 | `断言失败: 转发 前缀邻居不认 实际=\"/api/present.hostile\" 期望=\"\"` |\n\n三处还原后 `sha256 == ea32ef72…`（一致）且复跑 `rc=0` / `--- 测试 共享协议 通过 ---`。\n\n**段落名冲突扫描**：扫 `src/*.light` 共 **256** 个文件、本模块 41 个段落名，跨文件交集 **0**（本模块段落全部带 `共享` 前缀）。\n\n**口径差异（已实测，写进测试头注释）**：\n1. 过期时间：上游 `Date.parse` 宽松，本移植收 ISO-8601 严格子集（不收 `Oct 3 2026` 这类自然语言日期，不验日历只验范围）。\n2. 缺键访问：光明缺键即抛错（2026-11-05 实测），故所有可选字段先问键在不在，不用「空即缺」。\n3. 分享号不做 `encodeURIComponent`（光明无此内置）：Relay 签发的 uuid 形状无需转义。\n4. `Number.isSafeInteger` 对 `1e3` 这类由 JSON 解析成浮点的整值数字放行（上游 JS 里是整数），非整值浮点与超界拒绝。\n\n**没做/做不到（诚实列）**：\n- `identity/*`（`keys.ts` 密钥派生、`mock.ts`）**未移植**：依赖 crypto/签名，属宿主面且不在本卡三文件范围内。\n- `viewer-carrier` 的**运行时**部分未移植：DOM 全局安装、`fetch` 覆写、`AsyncIterable` 流编排、`AbortSignal` 超时与\n  取消、`viewerCarrierScript` 的 `<` 转义、`crypto.getRandomValues` 随机源——只移植了其中的**纯判定**，随机源改入参（种子）。\n- 上游 `tests/viewer-carrier.client.spec.ts` 的异步开销行为（streams/pending/abort 时序）无对应用例，因运行时未移植。\n- `sendFrame`/`rawText`（socket 打开态与 Buffer 解码）未移植：依赖 `ws`/Node Buffer，属宿主面。\n- 断言行数为 164 条（远超 20），但对上游用例的覆盖是**按用例名逐条对齐**（见测试头「覆盖清单」），并非逐条断言等价；\n  上游 `viewer-carrier` 中与真实 fetch 往返绑定的用例无法在本模块断言。",
+  "error": "",
+  "declared_paths": [
+    "src/共享协议.light",
+    "examples/test_共享协议.light"
+  ],
+  "changed_files": [
+    "examples/test_共享协议.light",
+    "src/共享协议.light"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
