@@ -894,6 +894,8 @@ def test_block_skips_dispatch_and_worker(world, fake_cmd):
 
     world.hive("unblock", "T-0001", "--reason", "环境好了")
     assert world.card("T-0001")["state"] == "ready", "没 owner 就该回 ready"
+    assert not world.card("T-0001").get("dispatched_at"), \
+        "解挂要清掉推送痕迹，否则 dispatch 的 TTL 会再挡 60 分钟"
     out3 = world.hive_json("dispatch", "--agent", "fb")
     assert [p["task"] for p in out3["plan"]] == ["T-0001"], out3
 

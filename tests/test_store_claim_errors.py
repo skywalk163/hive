@@ -80,6 +80,8 @@ def test_ingest_card_never_resets_running_state(tmp_path):
     ("", "没有主节点", 409, "unavailable"),
     ("", "转发主节点失败", 502, "unavailable"),
     ("E_NO_QUORUM", "未达到多数 prepare", 503, "unavailable"),
+    ("E_UNKNOWN_ACTION", "未知 store 动作 ingest", 409, "unsupported"),
+    ("", "未知 store 动作 ingest", 409, "unsupported"),  # 旧 leader 无 code
     ("", "", None, "unavailable"),
     ("", "store claim 失败（集群不可用/无主，HTTP None）", None, "unavailable"),
     ("E_CLOSED", "T-0001 已关闭", 409, "other"),
@@ -98,6 +100,15 @@ def test_store_call_raises_classified_error(monkeypatch):
     text = e.value.describe("T-0257")
     assert "leader store 里没有这张卡" in text
     assert "已被别人领取" not in text, "缺卡绝不能再说成被抢"
+
+
+def test_store_call_marks_unknown_action_as_unsupported(monkeypatch):
+    monkeypatch.setattr(hive, "_cluster_http", lambda *a, **kw:
+                        (409, {"ok": False, "error": "未知 store 动作 ingest",
+                               "code": "E_UNKNOWN_ACTION"}))
+    with pytest.raises(hive.StoreCallError) as e:
+        hive.store_call("ingest", {"task": "T-0257"})
+    assert e.value.kind == "unsupported"
 
 
 def test_describe_unavailable_does_not_blame_other_agent():
@@ -163,7 +174,7 @@ def test_claim_falls_back_to_assign_on_old_leader(monkeypatch):
         return {"ok": True, "claim": {"lease_id": "L1"}}
 
     def fake_ingest(tid, card):
-        raise hive.StoreCallError("未知 store 动作 ingest", kind="other",
+        raise hive.StoreCallError("未知 store 动作 ingest", kind="unsupported",
                                   code="E_UNKNOWN_ACTION")
 
     monkeypatch.setattr(hive, "store_claim", fake_claim)
@@ -175,6 +186,27 @@ def test_claim_falls_back_to_assign_on_old_leader(monkeypatch):
     assert w.claim("T-0257") is True
     assert calls["claim"] == 2
     assert calls["assign"] == [("T-0257", "deepseek-win")]
+
+
+def test_claim_does_not_fall_back_on_non_version_errors(monkeypatch):
+    """补摄入失败若是「集群不可用」，不该误判成旧版节点去做 assign 兜底。"""
+    calls = {"claim": 0, "assign": 0}
+
+    def fake_claim(tid, agent, minutes):
+        calls["claim"] += 1
+        raise hive.StoreCallError("没有任务 T-0257", kind="no_task")
+
+    def fake_ingest(tid, card):
+        raise hive.StoreCallError("没有主节点", kind="unavailable", http=409)
+
+    monkeypatch.setattr(hive, "store_claim", fake_claim)
+    monkeypatch.setattr(hive, "store_ingest_card", fake_ingest)
+    monkeypatch.setattr(hive, "store_assign",
+                        lambda tid, agent: calls.__setitem__("assign", 1))
+
+    w = _stub_worker(monkeypatch)
+    assert w.claim("T-0257") is False
+    assert calls == {"claim": 1, "assign": 0}
 
 
 def test_claim_unavailable_does_not_retry_or_blame_others(monkeypatch):
@@ -251,6 +283,128 @@ def test_handle_store_exposes_error_code(tmp_path):
     assert code == 409 and resp["ok"] is False
     assert resp["code"] == "E_NO_TASK", "上层要能靠 code 而不是中文文案分类"
     assert "没有任务" in resp["error"]
+
+
+# --------------------------------------------------------------------------- #
+# 持续不变式：新卡摄入必须走 op，副本才追得上
+# --------------------------------------------------------------------------- #
+
+def _hive_dir_with_cards(tmp_path, ids):
+    (tmp_path / ".git").mkdir(exist_ok=True)
+    tasks = tmp_path / "tasks"
+    tasks.mkdir(exist_ok=True)
+    for tid in ids:
+        (tasks / f"{tid}.md").write_text(
+            f"---\nid: {tid}\ntitle: {tid} 标题\nstate: ready\n"
+            f"repo: light\n---\n正文\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_ingest_store_cards_emits_op_for_missing_rows(tmp_path):
+    """缺卡必须产生 op 并推进 commit_seq，否则 follower 永远追不上。"""
+    import hive_cluster
+
+    _hive_dir_with_cards(tmp_path, ["T-0001", "T-0254"])
+    c = object.__new__(hive_cluster.Cluster)
+    c.store = Store(tmp_path / "reconcile.db", "node-a")
+    c.config = SimpleNamespace(hive_dir=tmp_path)
+    c.store.ingest_cards({"T-0001": {"id": "T-0001", "state": "ready",
+                                     "title": "旧定义"}})
+    c.store.claim("T-0001", "agent-a", term=1, lease_minutes=10)
+    before = c.store.commit_seq()
+
+    n = c._ingest_store_cards()
+    assert n == 1, "只补 T-0254 这一张缺卡"
+    assert c.store.task("T-0254")["state"] == "ready"
+    assert c.store.task("T-0254")["title"] == "T-0254 标题"
+    assert c.store.task("T-0001")["state"] == "running", \
+        "已有行的运行时状态不能被启动摄入翻回 ready"
+    assert c.store.commit_seq() > before, \
+        "旧实现直接写库不产生 op → 水位相同内容不同，这是本次要根治的洞"
+    assert c._ingest_store_cards() == 0, "重复摄入要幂等，不制造重复 op"
+
+
+def test_reconcile_is_leader_only_and_throttled(tmp_path, monkeypatch):
+    import hive_cluster
+
+    c = object.__new__(hive_cluster.Cluster)
+    c.store = Store(tmp_path / "throttle.db", "node-a")
+    c.role = "leader"
+    c._last_store_reconcile = 0.0
+    calls = []
+    monkeypatch.setattr(c, "_ingest_store_cards",
+                        lambda: calls.append(1) or 0)
+
+    assert c._maybe_reconcile_store_cards() == 0
+    assert len(calls) == 1
+    assert c._maybe_reconcile_store_cards() == 0
+    assert len(calls) == 1, "同一周期内不该反复扫 Git"
+
+    c.role = "follower"
+    c._last_store_reconcile = 0.0
+    assert c._maybe_reconcile_store_cards() == 0
+    assert len(calls) == 1, "follower 不做摄入，写入只由 leader 发起"
+
+
+# --------------------------------------------------------------------------- #
+# doctor：让副本不一致自己喊出来
+# --------------------------------------------------------------------------- #
+
+def _fake_store(n, seq, ids=None):
+    rows = ({t: {"id": t} for t in ids} if ids is not None
+            else {f"T-{i:04d}": {"id": f"T-{i:04d}"} for i in range(n)})
+    return SimpleNamespace(tasks=lambda: rows, commit_seq=lambda: seq)
+
+
+def _doctor(monkeypatch, store, cards, cluster=None, node_summary=None):
+    monkeypatch.setattr(hive, "local_store", lambda: store)
+    if cluster is None:
+        monkeypatch.setattr(hive, "_cluster_http", lambda *a, **kw: (None, None))
+    else:
+        monkeypatch.setattr(hive, "_cluster_http", lambda *a, **kw: (200, cluster))
+        monkeypatch.setattr(hive, "_node_store_summary",
+                            lambda url, **kw: node_summary)
+    errors, warns = [], []
+    h = object.__new__(hive.Hive)
+    h._doctor_store_consistency(cards, errors, warns)
+    return errors, warns
+
+
+def test_doctor_lists_cards_missing_from_local_store(monkeypatch):
+    errors, warns = _doctor(monkeypatch, _fake_store(1, 43, ["T-0001"]),
+                            {"T-0001": {}, "T-0254": {}, "T-0255": {}})
+    assert not errors
+    assert any("缺 2 张卡" in w and "T-0254" in w for w in warns)
+    assert any("store/ingest" in w for w in warns)
+
+
+def test_doctor_flags_same_watermark_different_content(monkeypatch):
+    """这正是现场 43/43 但 138/134 的情形：水位相同，追平永不触发。"""
+    cluster = {"state": {"nodes": [
+        {"name": "leader", "url": "http://192.168.0.104:8788", "status": "alive"},
+        {"name": "offline", "url": "http://10.0.0.9:8788", "status": "dead"},
+    ]}}
+    errors, warns = _doctor(monkeypatch, _fake_store(134, 43), {},
+                            cluster=cluster,
+                            node_summary={"tasks": 138, "commit_seq": 43})
+    assert any("水位相同" in e and "不会自愈" in e for e in errors), errors
+    assert not any("尚未追平" in w for w in warns)
+
+
+def test_doctor_warns_when_replica_only_lags(monkeypatch):
+    cluster = {"state": {"nodes": [
+        {"name": "leader", "url": "http://192.168.0.104:8788", "status": "alive"},
+    ]}}
+    errors, warns = _doctor(monkeypatch, _fake_store(134, 41), {},
+                            cluster=cluster,
+                            node_summary={"tasks": 138, "commit_seq": 43})
+    assert not errors
+    assert any("尚未追平" in w for w in warns), warns
+
+
+def test_doctor_skips_peer_check_when_cluster_is_down(monkeypatch):
+    errors, warns = _doctor(monkeypatch, _fake_store(134, 43), {})
+    assert not errors and not warns, "集群不可达只做本机检查，不该报错"
 
 
 # --------------------------------------------------------------------------- #

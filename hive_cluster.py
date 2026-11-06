@@ -95,6 +95,9 @@ EVENT_LIMIT = 500
 # 进程启动时读回最后 CHAT_LIMIT 条。留言是低频的人类/agent 文本，2000 条够回溯很久。
 CHAT_LIMIT = 2000
 CHAT_MAX_TEXT = 8000
+# leader 多久从 Git 卡面补一次新卡到 store（秒）。启动时那一次摄入不够：
+# 卡是随时新增的，副本必须能持续收敛，不能靠一次性快照。
+STORE_RECONCILE_S = 60.0
 CHAT_SCOPE_RE = re.compile(r"^(hall|task:T-\d{3,6}|agent:[A-Za-z0-9._-]{1,64})$")
 MAX_BODY = 2 * 1024 * 1024
 DEFAULT_STATE = Path.home() / ".hive" / "cluster"
@@ -1037,6 +1040,7 @@ class Cluster:
         self._peer_errors: dict[str, float] = {}
         self._expired_reported: set[str] = set()
         self._last_store_sync = 0.0
+        self._last_store_reconcile = 0.0
 
         self.port = config.port
         self.advertise_host = config.advertise or (
@@ -1130,18 +1134,56 @@ class Cluster:
                          daemon=True).start()
         return self
 
-    def _ingest_store_cards(self) -> None:
+    def _ingest_store_cards(self) -> int:
+        """把 Git 卡面同步进 store，返回补摄入的新卡数。
+
+        多机协同的长期不变式：**Git 里有的卡，leader store 里也得有，
+        而且必须走 op 日志**。旧实现只对全量调 ingest_cards（直接写库、
+        不产生 op），于是出现过 leader 138 张 / follower 134 张、两边
+        commit_seq 却都是 43 的情况——follower 的追平条件
+        `target > commit_seq` 永远不成立，差异永远追不上，最后只能靠
+        claim 报「没有任务」才被人发现。
+
+        * 缺行 → ingest_card(commit=True)：产生 op、推进 commit_seq，
+          follower 下次心跳就能靠 /op/since 追平（全集群一起补齐）。
+        * 已有行 → 仍用 ingest_cards 只补卡面定义，不碰运行时
+          state/owner/retries，也不制造重复 op。
+        """
         if self.store is None:
-            return
+            return 0
         try:
             from hive import Hive
             if not (self.config.hive_dir / ".git").exists():
-                return
+                return 0
             cards = Hive(self.config.hive_dir).cards()
-            n = self.store.ingest_cards(cards)
-            _log(f"store: 从 Git 摄入 {n} 张卡")
+            existing = self.store.tasks()
+            known = {t: c for t, c in cards.items() if t in existing}
+            missing = {t: c for t, c in cards.items() if t not in existing}
+            if known:
+                self.store.ingest_cards(known)
+            for tid, card in sorted(missing.items()):
+                self.store.ingest_card(tid, card, commit=True)
+            if missing:
+                _log(f"store: 补摄入 {len(missing)} 张新卡"
+                     f"（op 已推进，follower 可追平）")
+            return len(missing)
         except Exception as exc:  # noqa: BLE001
             _log(f"store: 摄入任务卡失败（忽略）: {exc}")
+            return 0
+
+    def _maybe_reconcile_store_cards(self) -> int:
+        """leader 低频补摄入启动后新增的卡，返回本轮补了几张。
+
+        只做 leader、按 STORE_RECONCILE_S 节流；读的是本机 Git 卡面
+        （若本机工作区滞后，follower 侧 claim 的按需补摄入是第二道防线）。
+        """
+        if self.role != "leader" or self.store is None:
+            return 0
+        now_epoch = _now()
+        if now_epoch - self._last_store_reconcile < STORE_RECONCILE_S:
+            return 0
+        self._last_store_reconcile = now_epoch
+        return self._ingest_store_cards()
 
     def _store_catch_up(self, base: str) -> None:
         """新节点/重连：先 snapshot，再拉已 commit 的 op。"""
@@ -2360,6 +2402,8 @@ class Cluster:
         # 落盘不在锁内做（_persist 自己加锁），并且按 1s 节流；维护循环 5Hz，
         # 若每轮都写 state.json 会把磁盘打满。
         self._persist()
+        # 长期不变式：启动后新增的卡也要进 store 并让所有副本追平。
+        self._maybe_reconcile_store_cards()
         if need_election:
             self._start_election()
 

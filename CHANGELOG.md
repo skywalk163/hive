@@ -4,6 +4,24 @@
 
 ### Added
 
+- **多机副本一致性：把「启动时一次摄入」升级为持续不变式，并让 `doctor` 自己喊出不一致**。
+  承接缺卡 claim 误报的复盘，目标始终是让多机多 agent 看到同一份事实：
+  - `Cluster._ingest_store_cards()` 对**缺行**改走 `Store.ingest_card` 的 op 日志
+    （产生 op、推进 `commit_seq`），已有行仍只补卡面定义、不碰运行时状态；
+    leader 在维护循环里每 60s 低频 reconcile 启动后新增的卡。旧实现直接
+    `ingest_cards` 写库不产生 op，曾造成 leader 138 张 / follower 134 张而两边
+    `commit_seq` 都是 43 —— 追平条件 `target > commit_seq` 永不成立，差异不会自愈。
+  - `hive doctor` 新增 store 体检：列出「Git 有、store 没有」的卡号；对比本机与
+    各 alive 节点的 tasks 数 / `commit_seq`，**水位相同但内容不同按 error 报**，
+    只是水位落后按 warn 报；集群不可达时只做本机检查。真实 follower 上实跑已
+    报出现场的 134/138 差异。
+  - 协议适配收敛：新增 `unsupported` 类别，`_ingest_missing_card` 只看 `kind`
+    决定是否回退旧 leader；中文文案兼容只留在 `_classify_store_error` 一处，
+    业务代码不再解析错误字符串。
+  - 文档：`docs/架构与排障全景.md` 新增「多机副本一致性（store 模式）」章节，
+    写清三条不变式、按「下一步动作」划分的错误分类、体检输出与部署生效边界；
+    排障表补了三条对应现象。
+  - 测试：`tests/test_store_claim_errors.py` 增至 34 项。
 - **看板「任务计划」：把一组任务当一个项目跟踪**。搁置旁边多了「计划」Tab（同一区域
   两个 Tab 切换，搁置原有的折叠/计数/出口全不动）：
   - 字段：ID（`P-0001`）、前缀、标题、描述、状态、是否置顶、关联任务 ID 列表、创建人、
@@ -88,6 +106,11 @@
 
 ### Fixed
 
+- **`hive unblock` 之后卡派不出去（回归里暴露的既有问题）**：解挂只清了
+  `dispatch_miss`，没清 `dispatched_to` / `dispatched_at`；而 `dispatch` 的
+  「刚推送过（TTL 内不重复派）」看的是后者，于是刚解挂的卡又被挡 60 分钟。
+  现在解挂与 `shelve` 同一口径清掉推送痕迹，`tests/test_core.py` 加了断言钉住。
+  用未改动的 HEAD 复跑同一用例同样失败，确认与本次 store 改动无关。
 - **缺卡 claim 不再误报「已被别人领取，抢不到」，且会自动补摄入 leader store**。
   现场：leader 进程只在启动时 `ingest_cards` 一次，启动后新增的 T-0254~T-0258
   在 store 里缺行；`Store.claim` 抛的是「没有任务 T-0257」，但 `Worker.claim`

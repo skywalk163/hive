@@ -304,10 +304,11 @@ class StoreCallError(HiveError):
     上层只能一律翻译成「已被别人领取，抢不到」——leader 明明是「没有这张卡」，
     也会报成被抢。kind 让调用方能说人话：
 
-        no_task      leader store 没摄入这张卡（新卡）
-        taken        确实被别的 agent 领走了
-        unavailable  集群/store 不可用、无主、未达多数
-        other        其它业务错误（已关闭、已有结果…）
+        no_task       leader store 没摄入这张卡（新卡）
+        taken         确实被别的 agent 领走了
+        unavailable   集群/store 不可用、无主、未达多数
+        unsupported   对端是旧版节点，不认识这个动作（要兼容回退）
+        other         其它业务错误（已关闭、已有结果…）
     """
 
     def __init__(self, message: str, kind: str = "other", code: str = "",
@@ -327,6 +328,9 @@ class StoreCallError(HiveError):
         if self.kind == "unavailable":
             return (f"{tid} 领取失败：store / 集群不可用（无主、未达多数或服务未启），"
                     f"不是被别人抢走。原始错误：{self}")
+        if self.kind == "unsupported":
+            return (f"{tid} 领取失败：对端节点版本较旧、不支持本次操作；"
+                    f"已尝试兼容回退。原始错误：{self}")
         return f"{tid} 领取失败：{self}"
 
 
@@ -678,6 +682,25 @@ def _cluster_http(method: str, path: str, payload=None,
         return None, None
 
 
+def _node_store_summary(base: str, timeout: float = 0.8) -> dict | None:
+    """读某个集群节点的 store 摘要；不可达/超时返回 None（体检不该被卡住）。"""
+    from urllib import request as _request
+    try:
+        headers = {"Accept": "application/json"}
+        token = cluster_token()
+        if token:
+            headers["X-Hive-Cluster-Token"] = token
+        req = _request.Request(str(base).rstrip("/") +
+                               "/api/cluster/store/state",
+                               headers=headers, method="GET")
+        opener = _request.build_opener(_request.ProxyHandler({}))
+        with opener.open(req, timeout=max(0.2, float(timeout))) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data.get("summary") if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001  节点离线是常态，不该让 doctor 失败
+        return None
+
+
 def cluster_available(timeout: float = 0.3) -> bool:
     """本机集群是否在线（只探 health，免 token、短超时）。"""
     code, _ = _cluster_http("GET", "health", timeout=timeout)
@@ -825,6 +848,10 @@ def _classify_store_error(ecode: str, msg: str, http: int | None) -> str:
         return "no_task"
     if ecode == "E_TAKEN" or ("已被" in msg and "领取" in msg):
         return "taken"
+    # 旧版 leader 没有 ingest 动作。中文兜底只留在这一个协议适配点，
+    # 业务代码一律看 kind，不许再解析错误文案。
+    if ecode == "E_UNKNOWN_ACTION" or msg.startswith("未知 store 动作"):
+        return "unsupported"
     if (http is None or http in (502, 503, 504)
             or ecode.startswith("E_NO_QUORUM")
             or msg in ("没有主节点", "转发主节点失败", "store 未启用")
@@ -2918,6 +2945,63 @@ class Hive:
                         print(f"{r['repo']}: {status}")
         return {"results": results}
 
+    def _doctor_store_consistency(self, cards: dict, errors: list,
+                                  warns: list) -> None:
+        """store 副本一致性体检：让多机协同的不一致自己喊出来。
+
+        两类问题都曾真实出现过，且都不能靠水位发现：
+          1) Git 卡面有、store 没摄入 → claim 报「没有任务」；
+          2) 各节点 commit_seq 相同、tasks 数却不同 → follower 的追平条件
+             `target > commit_seq` 永不成立，差异永远不会自愈。
+        """
+        store = local_store()
+        if store is None:
+            warns.append("claim_backend=store，但本机 store 不可用")
+            return
+        rows = store.tasks()
+        missing = sorted(set(cards) - set(rows))
+        if missing:
+            shown = ", ".join(missing[:8]) + (" …" if len(missing) > 8 else "")
+            warns.append(
+                f"本机 store 缺 {len(missing)} 张卡（Git 有、store 没有）：{shown}"
+                " —— 这些卡在本机视图里 claim 会报「没有任务」；"
+                "重启 hived 或走 store/ingest 补齐")
+        local_n, local_seq = len(rows), store.commit_seq()
+
+        code, data = _cluster_http("GET", "state", timeout=1.0)
+        if not isinstance(data, dict):
+            return   # 集群没起 / 测试环境：跨节点检查优雅跳过
+        state = data.get("state") if isinstance(data.get("state"), dict) else data
+        seen: set[str] = set()
+        diffs: list[tuple[str, int, int]] = []
+        for n in state.get("nodes") or []:
+            if not isinstance(n, dict) or n.get("status") != "alive":
+                continue
+            url = str(n.get("url") or "").rstrip("/")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            s = _node_store_summary(url)
+            if not s:
+                continue
+            peer_n, peer_seq = int(s.get("tasks") or 0), int(s.get("commit_seq") or 0)
+            if (peer_n, peer_seq) != (local_n, local_seq):
+                diffs.append((str(n.get("name") or url), peer_n, peer_seq))
+        if not diffs:
+            return
+        detail = "、".join(f"{name}={n}张(seq={seq})"
+                          for name, n, seq in diffs[:3])
+        if all(seq == local_seq for _, _, seq in diffs):
+            errors.append(
+                f"store 副本内容不一致但水位相同：本机 {local_n} 张(seq={local_seq})；"
+                f"{detail} —— 两边 commit_seq 一样，follower 的追平条件"
+                " target > commit_seq 永不成立，差异不会自愈；"
+                "重启本机 hived，或对缺卡走 store/ingest")
+        else:
+            warns.append(
+                f"store 副本尚未追平：本机 {local_n} 张(seq={local_seq})；"
+                f"{detail} —— 等心跳同步，或手动触发追平")
+
     def cmd_doctor(self) -> bool:
         errors: list[str] = []
         warns: list[str] = []
@@ -3068,6 +3152,11 @@ class Hive:
                                  set(a.get("capabilities") or []))
                            for a in agents.values()):
                     warns.append(f"任务 {tid} 需要能力 {n!r}，但没有 agent 声明")
+
+        # 多机协同的核心不变式：store 副本要能随时被体检，而不是等
+        # 某个 agent 领卡失败、报出误导文案之后才被人发现。
+        if claim_backend() == "store":
+            self._doctor_store_consistency(cards, errors, warns)
 
         for w in warns:
             print(f"[WARN] {w}")
@@ -3776,6 +3865,10 @@ class Hive:
         # 否则「连续 2 次派发无人领」被自动转 blocked 的卡，解挂后仍永远派不出去。
         if card.get("dispatch_miss"):
             card["dispatch_miss"] = 0
+        # 同样要清掉推送痕迹：dispatch 的「刚推送过（TTL 内不重复派）」看的是
+        # dispatched_at，不清就会把刚解挂的卡再挡 60 分钟（与 shelve 同一口径）。
+        for k in ("dispatched_to", "dispatched_at"):
+            card.pop(k, None)
         body = (card["_body"] + f"\n\n---\n\n**unblock（{iso()}，by {who}）**："
                 f"{reason or '已解除挂起'}，回到 {card['state']}\n")
         self.save_card(card, body)
@@ -4686,9 +4779,9 @@ class Worker:
             return True
         except StoreCallError as exc:
             # 旧版 leader 还没有 ingest 动作。退回现成的 store/assign 兜底：
-            # follower 先升级也能自愈，不必等 leader 重启（卡面定义会由
-            # 之后的 ingest_cards 补全）。
-            if "未知 store 动作" not in str(exc):
+            # follower 先升级也能自愈，不必等 leader 重启。是否属于「版本
+            # 不支持」由 _classify_store_error 统一判定，这里只认 kind。
+            if exc.kind != "unsupported":
                 log(f"{tid} 补摄入失败：{exc}")
                 return False
         try:
