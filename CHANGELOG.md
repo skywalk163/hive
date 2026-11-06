@@ -4,6 +4,22 @@
 
 ### Added
 
+- **`scripts/agent-exec.py`：一处收口所有 AI CLI 差异，让「主控分配 → AI 完成」
+  真正闭环（T-0259）**。此前 `agents/*.json` 里 14 个 agent 的 `command` 和 `launch`
+  都是空字符串，worker 收到卡之后没有任何能把任务喂进 AI 的入口，只剩「复制到剪贴板」，
+  于是多机协同必然退化成人工粘贴。这个适配器按 `codebuddy` → `cbc` → `traecli` →
+  `dsh-exec` → `dsh-headless` → `dsh` 的顺序探测本机可用的 headless CLI（先查 `PATH`，
+  再查脚本同目录），把 prompt 交给它执行、把输出接到 stdout、把退出码原样传回。
+  **不把 prompt 拼进命令行**：Windows 的 cmd 上限 8191 字符，长卡必炸，中文还要过
+  cp936；改成只传一句固定短指令，让 AI 自己读 worktree 里的 `.hive/task.md`——
+  既绕开长度限制，也保证 AI 拿到的是卡面原文而非转述。`--probe` 自检这台机器
+  能走哪条路；`HIVE_AGENT_CLI` / `HIVE_AGENT_ARGS` / `HIVE_AGENT_MODEL` 可覆盖。
+- **`join-agent.{ps1,sh}` 支持 `-Mode auto`（默认）**：机器主人不需要知道
+  exec / manual 的区别。探测到 CLI 就自动切 exec（主控派卡后全程无人），探测不到
+  就切 manual，并在常见安装路径里找 Trae / WorkBuddy 自动填 `launch`。
+  Windows 侧额外生成本地 `agent-exec.cmd` 包装，避免 PowerShell 把带空格的路径
+  传给原生 exe 时断成两截，也让「以后调 CLI 参数」不必重新登记 agent。
+  两个脚本都新增 `-Probe` / `--probe`：只报告、不登记、不写文件。
 - **manual agent 也能被主控自动派卡（T-0259）**。此前 `dispatch` 里
   `if mode == "manual": continue` 一行，让 15 个 `mode: manual` 的机器全部不进候选，
   `dispatch --apply` 恒输出「没有可分派的任务」，人只能 `hive prompt` 再手工复制到

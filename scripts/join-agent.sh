@@ -19,7 +19,7 @@ set -u
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 COORD="${HIVE_COORD:-$DIR}"
-MODE="manual"
+MODE="auto"
 COMMAND=""
 LAUNCH=""
 WORKTREES=""
@@ -50,12 +50,17 @@ while [ $# -gt 0 ]; do
         --no-start)    NOSTART=1; shift ;;
         --status)      ACTION="status"; shift ;;
         --uninstall)   ACTION="uninstall"; shift ;;
+        --probe)       ACTION="probe"; shift ;;
         -h|--help)     usage; exit 0 ;;
         *)             AGENT="$1"; shift ;;
     esac
 done
 
-[ -n "$AGENT" ] || { usage; echo "" >&2; echo "缺少 agent 名" >&2; exit 2; }
+# --probe 不需要 agent 名：它只是看看这台机器能走哪条路，
+# 常在「还没决定叫什么名字」的时候先跑一次。
+if [ "$ACTION" = "join" ] && [ -z "$AGENT" ]; then
+    usage; echo "" >&2; echo "缺少 agent 名" >&2; exit 2
+fi
 
 STATE="${HIVE_STATE:-$HOME/.hive}"
 
@@ -72,7 +77,28 @@ case "$ACTION" in
         echo "已停 worker。agent 登记仍在 agents/$AGENT.json，要彻底删就 git rm 它。"
         exit 0
         ;;
+    probe)
+        # 自检：只看这台机器能走哪条路，不登记、不写任何文件。
+        exec python3 "$DIR/scripts/agent-exec.py" --probe
+        ;;
 esac
+
+# --- 0.5 自动选模式 -------------------------------------------------------------
+# 和 join-agent.ps1 的 -Mode auto 同一个语义：机器的主人不需要知道 exec / manual
+# 的区别，脚本看这台机器有什么，选能走通的最自动的那条路。
+if [ "$MODE" = "auto" ]; then
+    echo "自动探测本机 AI CLI…"
+    if python3 "$DIR/scripts/agent-exec.py" --probe >/dev/null 2>&1; then
+        MODE="exec"
+        # 统一走适配器：换机器、换 CLI、调参数都只改适配器，不动 agent 配置。
+        [ -n "$COMMAND" ] || COMMAND="python3 $DIR/scripts/agent-exec.py"
+        echo "  找到可用 CLI → exec：主控派卡后全程无人"
+    else
+        MODE="manual"
+        echo "  没找到 headless CLI → manual：worker 建好工作区并等 AI 接手"
+        echo "  想变全自动就装 codebuddy / traecli / dsh，然后重跑本脚本"
+    fi
+fi
 
 # --- 1. 登记 -------------------------------------------------------------------
 set -- agent add --name "$AGENT" --mode "$MODE" \
