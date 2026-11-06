@@ -1,0 +1,41 @@
+{
+  "task": "T-0254",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0254",
+  "base": "main",
+  "head": "3eacf2c835241c15262b741c6114aba3ccf6ee0a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-05T23:39:21+08:00",
+  "finished_at": "2026-11-05T23:41:07+08:00",
+  "duration_s": 106.2,
+  "verify": [
+    {
+      "cmd": "python 运行.py examples/test_消息引用.light",
+      "code": 0,
+      "tail": [
+        "--- 测试 消息引用 通过 ---"
+      ]
+    },
+    {
+      "cmd": "test -f src/消息引用.light",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0254 交付摘要\n\n**做了什么**：把上游 `packages/session/message-quotes`（dsh-v0.2.2-rc.1 = `66491b05e3`，9 个 src 文件）的纯逻辑移植成光明模块，剔除 React 组件 / CSS Modules / Slot 注册 / locale 运行时。\n- `引文文本` = quoteTextOf：行尾归一（`\\r\\n` 与孤立 `\\r` → `\\n`）+ 每行去一层「≤3 空格 + `>` + 可选空格/Tab」。\n- `引文区间` = messageQuoteRanges：连续显式引用行成段，字符偏移不含末行换行；剥完为空的段不登记。\n- `引文规则匹配` / `投影标记` = quoteRule.match：区间产出「引用」节点，紧邻的 `\\n\\n` 降级为显示空格（display=' '）。\n- `引用准入` / `引用插入` = index.ts 的 onInteraction 与 QuoteSelection 的 onClick 时序（成功才清选区并关闭）。\n- `引文文案` / `引文命名空间` = locales.ts（8 语言 + NS）。\n\n**改了哪些文件**（仅本卡 paths）：\n- `src/消息引用.light` 219 行（新增，14 个段落）\n- `examples/test_消息引用.light` 156 行（新增，61 条断言，覆盖上游 quote-text / browser-plugin / quote-selection / locales 用例）\n\n**跑了什么验证**：\n- `python 运行.py examples/test_消息引用.light` → rc=0，打印 `--- 测试 消息引用 通过 ---`（主仓与 task 工作树各跑一次）\n- `test -f src/消息引用.light` → rc=0\n- 反跑三处，每处单独 rc=1：A 缩进上限 3→2（三空格引用红）、B 准入触发判据翻转（非选区触发红）、C 空白段有效性翻转（区间段数 0≠2）。还原后 sha256 与基线一致（src `76995089…`），复跑绿。\n- 跨 `src/*.light`（257 个文件）`^段落\\s+名字` 集合交：0 冲突。\n\n**遗留 / 没做**：\n- 上游偏移按 UTF-16 code unit，光明按字符索引 → 增补平面（emoji）会差 1，属已知偏差，判据用 BMP 文本覆盖，未做代理对偏移换算。\n- 本模块无抛错路径，故卡里要求的「抛反」以「判据反」（准入布尔翻转 + 区间有效性判据翻转）替代。\n- UI 面（引用按钮、QuotePreview、Slot 生命周期、locale 运行时）按卡要求不移植，全留宿主。\n- 取证说明：上游 `66491b05e3` 在本机 fork 与 gitea 均无（fetch 失败），改用 api.github.com contents API 按 ref 取回 9 个源文件与 4 个 spec。",
+  "error": "",
+  "declared_paths": [
+    "src/消息引用.light",
+    "examples/test_消息引用.light"
+  ],
+  "changed_files": [
+    "examples/test_消息引用.light",
+    "src/消息引用.light"
+  ],
+  "out_of_paths": [],
+  "lease_id": "4caf8240ecdf496c8ef8e9f3b492db28",
+  "fence": 3
+}
