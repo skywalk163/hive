@@ -1,0 +1,40 @@
+{
+  "task": "T-0257",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0257",
+  "base": "main",
+  "head": "ec300b6b00024c1da7962791962383e2b380e8e0",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-05T23:41:34+08:00",
+  "finished_at": "2026-11-06T00:11:41+08:00",
+  "duration_s": 1807.3,
+  "verify": [
+    {
+      "cmd": "python 运行.py examples/test_推荐决策.light",
+      "code": 0,
+      "tail": [
+        "--- 测试 推荐决策 通过 ---"
+      ]
+    },
+    {
+      "cmd": "test -f src/推荐决策.light",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0257 工作说明：推荐决策与行动卡状态机（0.2.2-rc.1 B5）\n\n## 做了什么\n\n新增两个文件（只碰本卡 `paths` 里的这两个）：\n\n| 文件 | 行数 |\n|---|---|\n| `src/推荐决策.light` | 978 |\n| `examples/test_推荐决策.light` | 662（244 条断言 / 37 组用例） |\n\n移植面 = 上游 dsh-v0.2.2-rc.1（锚点 `66491b05e3`）「答案下面挂卡片」一族的**纯逻辑**部分：\n\n- **action-cards/projection.ts** —— 会话事件流的纯折叠 `荐初始状态` / `荐应用事件` / `荐折叠`：\n  `propose_action` 成功即准入（坏 JSON / 坏参数 / 别的工具 / 失败结果都不成卡）、一卡一轮（首卡胜）、\n  新卡把「未开工且无决策」的旧卡标派生成 `replaced`（跨种类同样替换）、`turn/start` 清在途、\n  `agent/inbox/spliced` 只算 `next-turn` 排队、卡片状态通知按水位清 `pendingStatus`、\n  继承前缀（fork 会话）不产卡、坏记录跳过不连锁。\n- **action-cards/index.ts** —— `荐记录决策`（未注册动作 / `replaced` 派生阶段拒记、退役种类仍可记）、\n  `荐裁定忽略`（终态或非开出阶段 settle 原决策，否则记 `dismissed` + kind 数据）、\n  `荐裁定动作`（未注册 → unavailable、缺全局许可 → access-denied、终态 → settled、\n  writes 动词在只读会话 → read-only）、`荐提议准入`（嵌套 / 非根 / 排队 / 未知动作 / 本轮未载技能 /\n  空标题 / details 非法 / 一卡一轮，八道闸各带上游 typed 错误码与原文案）。\n- **plugin-recommendations** —— `荐插件可荐`（official ∧ optional ∧ 非 missing ∧ 无 readOnlyReason ∧ 无 error）、\n  `荐插件目录`（title/description 三级回落）、`荐描述卡`（available / refused: unknown / unavailable /\n  not-live-root / closing）、`荐插件开启结果`（enabled / already-enabled / failed / unconfirmed /\n  restart-required / rejected，错误只记 code 不记诊断）、`荐插件对账`（unconfirmed → enabled）。\n- **creation-recommendations** —— `荐页面位置合法`（三槽位 + 自定义位置 1..1000）、`荐页面裁定`\n  （create 需合法位置、在途带 `取消` 标志、installed/kept 的 keep 与 undo、removed 的 restore、\n  cancel 的 settle）、`荐页面恢复` / `荐恢复失败`（重开会话拿已装事实对账 → installed /\n  interrupted / unconfirmed）、`荐页面忽略数据`（非法槽位与自定义位置回落）、`荐页面字段`。\n- **official-bundles** —— 五个 profile 模板、安装方持有的旧元组、退役包、可选包、按需包、\n  受保护/隐藏/扩展/更多/实验清单（逐字抄上游），`荐重写安装模板`、`荐剔除退役包`、\n  `荐目录条目问题`（离线目录五条不变量）。\n- **plugin-detail**（B5 清单同列）—— `荐语言链`（切前缀 + 兜底 en + 非法抛错）、\n  `荐校验详情路径` / `荐详情路径`（八类非法各一句上游规则，抛错版带标签）、`荐Markdown正文`\n  （去 BOM 与首个前置块）、`荐README名`（README_NAMES 序优先 + 同序按名升序）、\n  `荐图片去向`（去 ?/#、百分号解码、按文档目录解析、七种后缀、越界拒绝）。\n\n**与 #328 智能体指令的去重**：没有新造第二套。指令装载/作用域/渲染仍归 `src/智能体指令.light`；\n技能名合法性走 `src/技能清单.light` 的 `是技能名`；包名与安装规格走 `src/插件管理.light` 的\n`插校验规格`。本模块只保留「卡片」这一层新增语义。\n\n## 判据输出原文\n\n```\n$ python 运行.py examples/test_推荐决策.light\n--- 测试 推荐决策 通过 ---\nrc=0\n\n$ test -f src/推荐决策.light\ntest -f OK\n```\n\n## 反跑两处（变异 → 红 → 还原 → 绿）\n\n### A（值反）：`荐应用事件` 里「旧卡标 replaced」的条件取反\n\n```\n变异点: 如果 字典包含键(旧决策, 旧号) == 假:\n改成:   如果 字典包含键(旧决策, 旧号) == 真:\n变异前 sha256: 099bb9899f2b0b4c5b759e850457595b9f526427bb82bed3fcce2913d1564b36\n变异后 sha256: 6b8816a6fa7002e97c88e6c332d0153672dcffdce1c313b864c58dd6ce0d11bc\n变异后 rc: 1\n  | 错误: 键错误（Python 原始错误：'a'）\n  | 161  断言相等(决十一[\"a\"], {\"callId\": \"a\", \"action\": \"test_action\", \"phase\": \"replaced\"}, \"4 旧卡被 replaced\")\n还原后 sha256: 099bb9899f2b0b4c5b759e850457595b9f526427bb82bed3fcce2913d1564b36\n还原后 rc: 0\n  | --- 测试 推荐决策 通过 ---\n结论: 符合预期（变异红 / 还原绿 / sha 一致）\n```\n\n### B（抛反）：`荐语言链` 首片长度上界 8 → 9（`abcdefghi` 本该抛错却不再抛）\n\n```\n变异点: 如果 首长 > 8:\n改成:   如果 首长 > 9:\n变异前 sha256: 099bb9899f2b0b4c5b759e850457595b9f526427bb82bed3fcce2913d1564b36\n变异后 sha256: d796d3514d1e52930c1db5a4782d1f4e5b983adc7f411e09cea8afc0616b6ff4\n变异后 rc: 1\n  | 错误: Exception\n  | 应抛错未抛: 32 首片过长\n还原后 sha256: 099bb9899f2b0b4c5b759e850457595b9f526427bb82bed3fcce2913d1564b36\n还原后 rc: 0\n  | --- 测试 推荐决策 通过 ---\n结论: 符合预期（变异红 / 还原绿 / sha 一致）\n```\n\n还原后两文件 sha256（BOM 已确认均无）：\n`src/推荐决策.light` = `099bb989…1564b36`，`examples/test_推荐决策.light` = `333c3244…f35f87`。\n\n## 段落名冲突扫描结果\n\n```\n本卡模块段落数: 53\n跨仓段落名总数: 3989\n与其它 src/*.light 同名的段落数: 0\n结论: 冲突归零\n```\n\n（本模块段落名一律带 `荐` 前缀。仓库里另有 119 处**历史遗留**跨模块同名，均与本卡文件无关，\n未改动——那属于别的任务范围。）\n\n## 没做 / 做不到（诚实列）\n\n1. **不移植的部分**（按卡面「不含任何 React 组件」+ 宿主面剔除）：\n   Cordis Service/fiber 生命周期、zod schema 执行、Session 日志写盘、Agent 注册表、\n   pluginManager 真实启停与安装、subagents（Creator 子会话）、文件系统与 HTTP 读取、\n   `isPluginStopping` 的 fiber 链判定。这些在本模块里都退化成参数化的纯判定\n   （例如「存活 / 是根 / 只读 / 全局许可 / 已注册」作为入参传入），**没有**真实副作用。\n2. **`decodeURIComponent` 只做到 ASCII 段**：`荐百分解码` 只解 `%00`–`%7F`，`%80` 以上与残缺转义\n   一律判非法。上游能解完整 UTF-8；本模块对非 ASCII 图片名的行为是「拒绝」而不是「正确解码」，\n   上游 spec 里 `%E0%A4%A.png` 那条**恰好**也是拒绝，所以那条用例是绿的，但覆盖口径比上游窄。\n3. **`posix.normalize` 只做根内相对路径规整**：不解析符号链接、不判实际可读性（那是宿主面）。\n4. **zod 的 `safeParse` 语义用手写谓词近似**：`details` / `data` 只校验「必须是对象」，\n   不校验各 kind 自己的字段 schema（上游是每个 kind 传自己的 zod type，这里由调用方\n   通过 `细节问题` 入参注入，等价但不在本模块内实现）。\n5. **`creation-recommendations/tests/creation.spec.ts` 29 条里只覆盖 9 条**：其余 20 条都需要\n   真实 Creator 子会话、真实安装器、真实档案目录、HMR 重载，属宿主面，本模块无法表达。\n   全仓口径仍过 60% 门槛（见下方覆盖表）。\n6. **没跑跨机 POSIX 判据**：本卡判据是 `python 运行.py …` + `test -f`，Windows 上原生可跑，\n   无需换 192.168.0.88。未做的是「在 FreeBSD 上复跑一遍」这一额外交叉验证。\n7. **`荐应用事件` 的事件 wire 是本模块自定的最小形状**（`型/序号/轮/调用号/工具名/参数文本/…`），\n   不是上游 `SessionEvent` 的完整序列化；移植的是折叠语义，不是事件的完整 schema。\n\n## 上游用例覆盖表（按 spec 文件计）\n\n| 上游 spec | 用例数 | 覆盖 | 说明 |\n|---|---|---|---|\n| action-cards/tests/projection.spec.ts | 5 | 5 | 准入/一卡一轮/replaced/排队/继承/待报/视图 |\n| action-cards/tests/act.spec.ts | 11 | 10 | 缺 1 条「并发合并同一 Promise + 卸载 drain」（本模块不建 Promise） |\n| action-cards/tests/tool.spec.ts | 7 | 6 | 缺 1 条「工具声明与 developer/message 日志」（宿主面） |\n| plugin-recommendations/tests/recommendations.spec.ts | 9+ | 8 | 缺工具声明/技能发现快照类 |\n| creation-recommendations/tests/creation.spec.ts | 29 | 9 | 其余需宿主（Creator/安装器/档案/HMR） |\n| official-bundles/tests/official-bundles.spec.ts | 2 | 2 | 模板五条 + 目录五条不变量 |\n| plugin-detail/tests/document.spec.ts | 5 | 5 | 语言链/Markdown/meta.detail/README/图片 |\n\n合计 7 个 spec、68 条用例，覆盖 45 条 ≈ **66%**，过卡面「至少 60%」的线。\n\n## 语言坑（本轮实测，与卡面提示第 2 条相反）\n\n- **`\\uXXXX` 在本编译器里是会解释的**（实测 `字符串长度(\"\\uFEFF\") == 1`、`字符串长度(\"A\\uFEFFB\") == 3`），\n  与卡面「字符串不解释 `\\uXXXX`」相反。本模块仍按仓库惯例写成转义（`设 荐BOM 为 \"\\uFEFF\"`），\n  两种口径下都对。\n- **`写` 只吃字面量或已赋值变量**：`写 首[\"k\"]` 不报语法错，而是静默把 `首[\"k\"]` 当变量查成 `空`，\n  然后报 `'NoneType' object is not subscriptable`。本模块全篇先落变量，判据第 37 组留了一条回归。\n- **`段` 不能当变量名**（关键字表里有单字「段」），用 `段落/片段/段名` 区分。\n- **`%` 运算不可用**；本模块不需要取模，未受影响。\n- **PowerShell `Set-Content -Encoding utf8` 会加 UTF-8 BOM**，光明编译器读不了 BOM\n  报「未知字符 '﻿' (0xFEFF)」。反跑脚本改用 Python 读写字节，最后两个文件均已确认无 BOM。\n\n## 领取过程备注（可能对协调者有参考价值）\n\n首次 `hive_claim T-0257` 报「已被 别人 领取，抢不到」，但 `hive_list_pending` / `hive_list_tasks`\n都显示 `T-0257 state=ready / owner=\"\"`，且 `git ls-remote origin 'refs/heads/claim/*'` 里\n**没有** `claim/T-0257`。查下来根因是：集群 leader（192.168.0.88）的 store 里只摄入了 133 张卡\n（T-0254~T-0258 这 5 张新卡在 leader 侧缺失），本机 follower 的 store 有 138 张。\n`/api/cluster/store/claim` 被转发到 leader 后返回 `没有任务 T-0257`，\n而 `mcp_server.py` 把「store claim 失败」笼统报成「已被别人领取，抢不到」——是个会误导人的错误文案。\n处理方式：直接调 `POST http://192.168.0.88:8788/api/cluster/store/assign`\n（`{\"task\":\"T-0257\",\"agent\":\"deepseek-win\"}`，返回 `seq=42`）把卡登记进 leader store，\n再用 `hive_claim` 就正常领到了。**T-0254~T-0258 的其余几张卡可能同样受影响的旁证**：\n同一时刻 `hive claim T-0256` 也报同样文案。建议后续单开一张卡修两处：\n① leader 侧新卡摄入（follower 有、leader 没有时该补推）；\n② `t_claim` 把 store 失败细分成「没有任务」/「已被 X 领取」/「store 不可用」。",
+  "error": "",
+  "declared_paths": [
+    "src/推荐决策.light",
+    "examples/test_推荐决策.light"
+  ],
+  "changed_files": [
+    "examples/test_推荐决策.light",
+    "src/推荐决策.light"
+  ],
+  "out_of_paths": [],
+  "lease_id": "f2487b5dcba14e68a9192e3e98662b6e"
+}
