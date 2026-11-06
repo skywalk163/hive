@@ -700,3 +700,108 @@ def test_hive_parser_exposes_promote_and_prefer():
     assert args.node == "fb98"
     args = parser.parse_args(["--dir", ".", "cluster", "start", "--leader"])
     assert args.leader is True
+
+
+# --------------------------------------------------------------------------- #
+# OSPF 式主控优先级：值大者优先、不抢占在位主控、0 = 不参选
+# --------------------------------------------------------------------------- #
+
+def test_priority_is_broadcast_in_self_node(cluster_factory):
+    """优先级写在节点自述里随心跳广播 —— 这是它优于 preferred_leader 的地方：
+    每台只需声明「我是几」，不需要在别人机器上再配一遍「谁是首选」。"""
+    a = cluster_factory("a", leader_priority=2)
+    assert a._self_node()["priority"] == 2
+    assert a._self_node()["electable"] is True
+
+
+def test_higher_priority_gets_shorter_delay(cluster_factory):
+    """优先级高的等得更短，于是先发起选举、先当选。"""
+    a = cluster_factory("a", leader_priority=1)
+    assert wait_until(lambda: a.role == "leader")
+    b = cluster_factory("b", seeds=[a.url], leader_priority=5)
+    assert wait_until(lambda: b.leader_id == a.node_id)
+    # 双方都要在对方「活节点」表里，延迟才是在同一张表上算出来的
+    assert wait_until(lambda: a._node_priority_locked(b.node_id) == 5)
+    with a.lock:
+        da = a._election_delay_locked()
+    with b.lock:
+        db = b._election_delay_locked()
+    assert db < da, (da, db)
+
+
+def test_same_priority_falls_back_to_node_id(cluster_factory):
+    """同优先级按 node_id 定序（相当于 OSPF 用 Router ID 打平手），
+    保证「谁先跑」是确定的，不会两边同轮打平后反复重选。"""
+    a = cluster_factory("a", leader_priority=3)
+    assert wait_until(lambda: a.role == "leader")
+    b = cluster_factory("b", seeds=[a.url], leader_priority=3)
+    assert wait_until(lambda: b.leader_id == a.node_id)
+    with a.lock, b.lock:
+        da = a._election_delay_locked()
+        db = b._election_delay_locked()
+    assert da != db
+    # node_id 字典序小的排前面，等待更短
+    if a.node_id < b.node_id:
+        assert da < db
+    else:
+        assert db < da
+
+
+def test_priority_zero_never_starts_election(cluster_factory):
+    """0 沿用 OSPF 的 DR priority 0 语义：这台不主动竞选主控。"""
+    a = cluster_factory("a", leader_priority=1)
+    assert wait_until(lambda: a.role == "leader")
+    b = cluster_factory("b", seeds=[a.url], leader_priority=0)
+    assert wait_until(lambda: b.leader_id == a.node_id)
+    with b.lock:
+        assert b._election_delay_locked() == float("inf")
+
+
+def test_all_zero_priority_still_elects_a_leader(cluster_factory):
+    """全集群都是 0 时必须退化成人人 1。
+
+    否则没有任何节点愿意发起选举，集群永远没有主控 —— 这种「全都配了 0」
+    在真实环境里一定会发生（比如有人把优先级理解成「越小越优先」全填 0），
+    死锁比不理解更糟。
+    """
+    a = cluster_factory("a", leader_priority=0)
+    assert wait_until(lambda: a.role == "leader")
+    with a.lock:
+        assert a._election_delay_locked() < float("inf")
+
+
+def test_priority_does_not_preempt_sitting_leader(cluster_factory):
+    """OSPF 的 DR 不抢占：高优先级节点后加入，不会把在位主控挤下来。
+
+    这条是「稳」的关键。若允许抢占，给一台机器设了 2，它每次重启都会把
+    主控抢走，集群跟着抖一轮 —— 而重启往往恰是在排障的时候。
+    """
+    a = cluster_factory("a", leader_priority=1)
+    assert wait_until(lambda: a.role == "leader")
+    b = cluster_factory("b", seeds=[a.url], leader_priority=9)
+    assert wait_until(lambda: b.leader_id == a.node_id)
+    time.sleep(1.0)   # 给足一个选举超时，让「想抢」的念头有时间发生
+    assert a.role == "leader", "优先级高不等于可以抢占在位主控"
+    assert b.role == "follower"
+
+
+def test_priority_decides_next_election(cluster_factory):
+    """主控真的消失之后，才按优先级选下一个 —— 这时高优先级那台接手。"""
+    a = cluster_factory("a", leader_priority=1)
+    assert wait_until(lambda: a.role == "leader")
+    b = cluster_factory("b", seeds=[a.url], leader_priority=9)
+    assert wait_until(lambda: b.leader_id == a.node_id)
+
+    a.stop()
+    assert wait_until(lambda: b.role == "leader", timeout=10.0), \
+        "高优先级节点应在新一轮选举里当选"
+
+
+def test_hive_parser_exposes_priority():
+    parser = hive.build_parser()
+    args = parser.parse_args(["--dir", ".", "cluster", "priority"])
+    assert args.action == "priority" and args.func is hive.cmd_cluster
+    args = parser.parse_args(["--dir", ".", "cluster", "priority", "--priority", "2"])
+    assert args.priority == 2
+    args = parser.parse_args(["--dir", ".", "cluster", "serve", "--priority", "0"])
+    assert args.priority == 0

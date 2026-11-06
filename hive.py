@@ -7299,13 +7299,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", nargs="?", default="status",
                    choices=["serve", "start", "stop", "restart", "ensure",
                             "status", "peers", "events", "sync", "join", "leave",
-                            "discover", "watch", "leader", "promote", "prefer"])
+                            "discover", "watch", "leader", "promote", "prefer",
+                            "priority"])
     s.add_argument("--node", default=None,
                    help="leader/promote/prefer 的目标节点（名字或 id，默认本机）")
     s.add_argument("--leader", action="store_true",
                    help="start/restart 时把本机设为首选主控（重启后自动拿回主控权）")
     s.add_argument("--clear", action="store_true",
                    help="prefer --clear：清除本机的首选主控设置")
+    s.add_argument("--priority", type=int, default=None,
+                   help="主控优先级（OSPF 式：值大者优先，默认 1，0 = 不参选）。"
+                        "serve/start 时设定；cluster priority --priority N 改本机")
+    s.add_argument("--no-restart", action="store_true",
+                   help="cluster priority 改完不自动重启本机节点")
     s.add_argument("seed_url", nargs="?", help="join 的目标（HOST:PORT 或 URL）")
     s.add_argument("--port", type=int, default=None, help="HTTP 端口（默认 8788）")
     s.add_argument("--host", default=None, help="HTTP 绑定地址（默认 0.0.0.0）")

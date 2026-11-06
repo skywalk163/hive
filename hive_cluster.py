@@ -343,6 +343,23 @@ class Config:
             kw.get("preferred_leader")
             or os.environ.get("HIVE_CLUSTER_PREFERRED_LEADER")
             or saved.get("preferred_leader") or "").strip()
+        # OSPF 式主控优先级：**值大者优先**当主控，默认 1（等于谁都一样）。
+        # 和 preferred_leader 的分工：preferred 是「人硬指定某台」，priority 是
+        # 「每台自己声明我该排第几」—— 后者写在自述里随心跳广播，全局可见，
+        # 不用像 preferred 那样在每台机器上各配一遍「谁是首选」。
+        #
+        # 0 沿用 OSPF 的语义（DR priority 0 = 不参选）：这台可以当从属、可以被
+        # 投票，但自己永不主动发起选举。留这个口子是因为「只读副本 / 弱机器」
+        # 不该有机会当主控，而 electable=false 又太绝对（连被选举都不行）。
+        try:
+            raw_prio = kw.get("leader_priority")
+            if raw_prio is None:
+                raw_prio = os.environ.get("HIVE_CLUSTER_PRIORITY")
+            if raw_prio is None:
+                raw_prio = saved.get("leader_priority")
+            self.leader_priority = int(1 if raw_prio is None else raw_prio)
+        except (TypeError, ValueError):
+            self.leader_priority = 1
         # 抢主控时是否允许比现任主控落后（见 promoted 相关逻辑）：
         # store 只是缓存、git 才是事实账，所以允许，但要留下审计痕迹。
         self.allow_forced_promote = _env_bool(
@@ -456,6 +473,7 @@ class Config:
             "seeds": list(dict.fromkeys(self.seeds)),
             "lease_grace": self.lease_grace,
             "electable": bool(self.electable),
+            "leader_priority": int(self.leader_priority),
             "preferred_leader": self.preferred_leader,
             "allow_forced_promote": bool(self.allow_forced_promote),
             "sync": bool(self.sync_enabled),
@@ -1477,6 +1495,8 @@ class Cluster:
             "agents": self._local_agents(),
             "capabilities": [],
             "electable": bool(self.config.electable),
+            # 随自述广播出去：别的节点据此排选举顺序，不必各自配置「谁是首选」。
+            "priority": int(self.config.leader_priority),
             "last_store_seq": self.store.commit_seq() if getattr(self, "store", None) else 0,
             "hive_dir": str(self.config.hive_dir),
         }
@@ -2015,24 +2035,61 @@ class Cluster:
                 ids.append(nid)
         return ids
 
+    def _node_priority_locked(self, nid: str) -> int:
+        """某个可参选节点的 OSPF 优先级。
+
+        自己的用配置值而不是节点表 —— 节点表里那条是上次落盘的快照，
+        刚改完优先级还没广播出去时会读到旧值，导致「明明改成 2 了却不生效」。
+        """
+        if nid == self.node_id:
+            return int(self.config.leader_priority)
+        rec = self.nodes.get(nid) or {}
+        try:
+            return int(rec.get("priority") if rec.get("priority") is not None else 1)
+        except (TypeError, ValueError):
+            return 1
+
     def _election_delay_locked(self) -> float:
+        """本机在「当前无主控」时该等多久才发起选举。
+
+        OSPF 的 DR 选举：优先级数值大的先当，同优先级按 Router ID 定序；
+        **不抢占**已经在位的 DR。这里完全照搬，所以：
+          - 只有当前没有主控时才调用（调用点在维护循环里，由 leader 租约决定）；
+          - 排序键是 (-priority, node_id)，名次越靠前等得越短。
+        优先级 0 = 不参选（OSPF 里 priority 0 的接口永远不会成为 DR），
+        所以返回一个「永远等不到」的值；但若全集群都是 0，就退化成人人 1，
+        否则会没有节点愿意发起选举、集群永远没有主控。
+        """
         voters = sorted(self._alive_voter_ids_locked())
         try:
             rank = voters.index(self.node_id)
         except ValueError:
             rank = 0
+        # 同优先级用 node_id 兜底定序，和 OSPF 用 Router ID 打平手一个道理。
+        ordered = sorted(voters, key=lambda n: (-self._node_priority_locked(n), n))
+        if self.node_id in ordered:
+            rank = ordered.index(self.node_id)
+
+        if all(self._node_priority_locked(n) <= 0 for n in voters):
+            mine = 1
+        else:
+            mine = self._node_priority_locked(self.node_id)
+        if mine <= 0:
+            # 不参选：等一个不可能的时长，选举由别人发起。
+            return float("inf")
+
         delay = self.config.election_min + rank * self.config.election_jitter
+
         pref = self._preferred_leader_id_locked()
         if not pref or pref not in voters:
-            # 没配偏好，或首选节点当前不在线 / 不参选：按老规则来。
+            # 没配偏好，或首选节点当前不在线 / 不参选：按优先级规则来。
             # 这里必须退回原逻辑，否则一个永远离线的 preferred 会让整个集群
             # 每次选主都白等一个 window。
             return delay
         if pref == self.node_id:
-            # 首选节点立刻可竞选。原逻辑按名字排序 + jitter 决定谁先跑，
-            # 那个顺序是随机的、和「谁该当主控」无关；有了偏好就以偏好为准。
+            # 人工硬指定：立刻可竞选，压过一切优先级。
             return 0.0
-        # 其它节点让出一整个选举窗口，别跟首选节点同轮打平。
+        # 其它节点让出一整个选举窗口，别跟被指定的那台同轮打平。
         return delay + self.config.election_min
 
     def _preferred_leader_id_locked(self) -> str:
@@ -3472,13 +3529,27 @@ def _config_from_args(args) -> Config:
         claim_backend=getattr(args, "claim_backend", None),
         coordinator_enabled=(True if getattr(args, "coordinator", False)
                              else None),
+        leader_priority=getattr(args, "priority", None),
         hive_dir=getattr(args, "dir", None),
     )
 
 
-def _local_health(config: Config):
+def _health_timeout() -> float:
+    """健康探测的超时。
+
+    原值 0.45s 太紧：节点一旦在忙（store 追平上百张卡、git 同步、GC），
+    一次 health round-trip 很容易超过它，调用方就误判成「集群没起来」。
+    ensure_background 拿到这个误判后会在端口已被占用的情况下再 spawn 一个，
+    新进程抢不到端口、又去抢同一个 sqlite —— 于是「database is locked」
+    + 端口冲突 + 更慢 + 再 spawn，雪崩。
+    连接被拒（真没起）在本地是立即返回的，所以放宽超时不会拖慢「确实没起」的判定。
+    """
+    return _env_float("HIVE_CLUSTER_HEALTH_TIMEOUT", 3.0)
+
+
+def _local_health(config: Config, timeout: float | None = None):
     code, body = http_json(f"http://127.0.0.1:{config.port}/api/cluster/health",
-                           timeout=0.45)
+                           timeout=_health_timeout() if timeout is None else timeout)
     if code == 200 and isinstance(body, dict):
         return body
     return None
@@ -3596,6 +3667,15 @@ def _read_pid(config: Config) -> int:
 def _spawn_background(config: Config, args) -> int:
     """脱离当前会话拉起 `hive.py cluster serve`。"""
     health = _local_health(config)
+    if health is None:
+        # 进程还在、只是这一拍没响应：**绝不能**再拉一个。
+        # 再拉的那个抢不到端口（Address already in use），却会打开同一个 sqlite，
+        # 把正在为公司服务的节点拖进 database is locked，然后循环恶化。
+        pid = _read_pid(config)
+        if _pid_alive(pid):
+            print(f"集群进程在跑（PID {pid}）但暂未响应，不重复拉起。"
+                  f"\n若确实卡死：hive cluster restart", file=sys.stderr)
+            return 0
     if health:
         want_store = config.store_enabled or config.claim_backend == "store"
         store = health.get("store") if isinstance(health.get("store"), dict) else {}
@@ -3672,14 +3752,21 @@ def _spawn_background(config: Config, args) -> int:
             log.close()
         except OSError:
             pass
-    try:
-        config.pid_path.write_text(str(proc.pid), encoding="utf-8")
-    except OSError:
-        pass
-    deadline = _now() + 5.0
+    # PID 由子进程自己在上台时写（见 _load_state 之后的自述），这里**不再代写**。
+    # 代写过的后果链：父进程 spawn 失败（端口已被占）→ 仍把 pid 写成自己 → 立刻退出
+    # → pid 文件指向一个死进程 → 下一轮 ensure 读不到活 PID 又去 spawn → 循环，
+    # 且 `hive cluster stop` 按这个 PID 停不掉真正在服务的那个节点。
+    deadline = _now() + 8.0
     while _now() < deadline:
         health = _local_health(config)
         if health:
+            # 起来了再补写一次 PID：子进程自己写的是权威值，这里兜住
+            # 「子进程还没来得及写、但端口已在服务」的窄窗口。
+            if proc.poll() is None:
+                try:
+                    config.pid_path.write_text(str(proc.pid), encoding="utf-8")
+                except OSError:
+                    pass
             print(f"集群已启动：{config.name} http://127.0.0.1:{config.port} "
                   f"（日志 {config.log_path}）")
             return 0
@@ -3987,6 +4074,81 @@ def _claim_leadership_after_start(config: Config) -> None:
         print(f"拿回主控失败：{reason}", file=sys.stderr)
 
 
+def _cmd_priority(config: Config, value: int | None = None,
+                  restart: bool = True) -> int:
+    """查看/设置本机的主控优先级（OSPF 式，值大者优先，默认 1）。
+
+    写 config.json 后**重启本机节点**让它生效 —— 优先级是启动时读进内存的，
+    不重启的话命令行改完看起来毫无反应，这种「改了没生效」最难查。
+    """
+    if value is None:
+        snap, running = _local_state(config)
+        nodes = (snap or {}).get("nodes") or []
+        tip = "" if config.leader_priority > 0 else "（0 = 不参选主控）"
+        print(f"本机 {config.name} 优先级：{config.leader_priority}{tip}")
+        if not running or not nodes:
+            return 0
+        ranked = sorted(nodes,
+                        key=lambda n: (-(n.get("priority") if n.get("priority")
+                                         is not None else 1),
+                                       str(n.get("name") or "")))
+        print("\n按优先级排序（当前无主控时，最上面那台先发起选举）：")
+        print(f"  {'NAME':<24} {'PRIO':<5} {'STATUS':<8} ROLE")
+        for n in ranked:
+            prio = n.get("priority") if n.get("priority") is not None else 1
+            print(f"  {str(n.get('name') or n.get('id'))[:24]:<24} "
+                  f"{str(prio):<5} {str(n.get('status') or ''):<8} "
+                  f"{n.get('role') or ''}")
+        leader = snap.get("leader") or {}
+        if leader.get("name"):
+            print(f"\n当前主控：{leader.get('name')}"
+                  f"（优先级不抢占在位主控，只在没有主控时才按它选）")
+        return 0
+
+    # 设置：只改本机自己的值。优先级随自述广播，别的节点自己会看到，
+    # 不需要（也不该）在别人机器上代设。
+    try:
+        prio = int(value)
+    except (TypeError, ValueError):
+        print(f"优先级必须是整数：{value!r}", file=sys.stderr)
+        return 2
+    if prio < 0:
+        print("优先级不能为负（0 表示不参选，1 是默认）", file=sys.stderr)
+        return 2
+
+    old = _read_json(config.state_dir / "config.json", {}) or {}
+    old_prio = old.get("leader_priority") if isinstance(old, dict) else None
+    try:
+        old_prio = int(1 if old_prio is None else old_prio)
+    except (TypeError, ValueError):
+        old_prio = 1
+    config.leader_priority = prio
+    config.save()
+    note = "（0 = 不主动参选主控）" if prio == 0 else ""
+    print(f"本机 {config.name} 优先级：{old_prio} -> {prio}{note}")
+
+    health = _local_health(config)
+    if not health:
+        print("  本机节点未运行，下次启动时生效。")
+        return 0
+    if not restart:
+        print("  需要重启本机节点才生效：hive cluster restart")
+        return 0
+    print("  重启本机节点让它生效…")
+    _stop_background(config)
+    if _spawn_background(config, None) == 0:
+        h = _local_health(config)
+        if h:
+            print(f"  已生效：role={h.get('role')} term={h.get('term')} "
+                  f"priority={prio}")
+            print("  想立刻当主控：hive cluster promote")
+            return 0
+        print("  重启后未就绪，请 `hive cluster status` 确认。")
+        return 0
+    print("  重启失败，请手动 `hive cluster restart` 并看日志。", file=sys.stderr)
+    return 1
+
+
 def run_cli(args) -> int:
     action = getattr(args, "action", "status") or "status"
     config = _config_from_args(args)
@@ -4098,6 +4260,10 @@ def run_cli(args) -> int:
         return _cmd_prefer(config, getattr(args, "node", None),
                            bool(getattr(args, "clear", False)))
 
+    if action == "priority":
+        return _cmd_priority(config, getattr(args, "priority", None),
+                             restart=not getattr(args, "no_restart", False))
+
     if action == "discover":
         health = _local_health(config)
         if not health:
@@ -4144,11 +4310,14 @@ def run_cli(args) -> int:
         if getattr(args, "json", False):
             _print_json(nodes)
         else:
-            print(f"{'STATUS':<8} {'NAME':<24} {'ROLE':<9} {'TERM':<5} URL")
+            print(f"{'STATUS':<8} {'NAME':<24} {'ROLE':<9} {'TERM':<5} {'PRIO':<5} URL")
             for n in nodes:
+                # 优先级是「主控归属」的第一顺位依据，放在表格里才能一眼看出
+                # 下次选主该轮到谁，不然只能靠翻配置。
                 print(f"{str(n.get('status', '?')):<8} "
                       f"{str(n.get('name') or n.get('id'))[:24]:<24} "
                       f"{str(n.get('role') or ''):<9} {n.get('term', 0):<5} "
+                      f"{str(n.get('priority') if n.get('priority') is not None else 1):<5} "
                       f"{n.get('url') or ''}")
         return 0
 
@@ -4224,13 +4393,19 @@ def add_parser(sub) -> None:
     p.add_argument("action", nargs="?", default="status",
                    choices=["serve", "start", "stop", "restart", "ensure",
                             "status", "peers", "events", "sync", "join", "leave",
-                            "discover", "watch", "leader", "promote", "prefer"])
+                            "discover", "watch", "leader", "promote", "prefer",
+                            "priority"])
     p.add_argument("--node", default=None,
                    help="leader/promote/prefer 的目标节点（名字或 id，默认本机）")
     p.add_argument("--leader", action="store_true",
                    help="start/restart 时把本机设为首选主控（重启后自动拿回主控权）")
     p.add_argument("--clear", action="store_true",
                    help="prefer --clear：清除本机的首选主控设置")
+    p.add_argument("--priority", type=int, default=None,
+                   help="主控优先级（OSPF 式：值大者优先，默认 1，0 = 不参选）。"
+                        "serve/start 时设定；cluster priority --priority N 改本机")
+    p.add_argument("--no-restart", action="store_true",
+                   help="cluster priority 改完不自动重启本机节点")
     p.add_argument("seed_url", nargs="?", help="join 的目标（HOST:PORT 或 URL）")
     p.add_argument("--port", type=int, default=None,
                    help=f"HTTP 端口（默认 {DEFAULT_PORT}）")

@@ -4,6 +4,22 @@
 
 ### Added
 
+- **主控优先级：OSPF 式 `leader_priority`（值大者优先，默认 1）**。
+  `preferred_leader` 是「本机配置」，想让某台当家得在那台上单独配一条、别的节点
+  还看不见。优先级改成每台自己声明「我排第几」，随节点自述广播，全集群可见。
+  四条语义全部照抄 OSPF 的 DR 选举：
+  - **值大者优先**：排序键 `(-priority, node_id)`，优先级高的选举延迟更短，先发起；
+  - **同值按 node_id 定序**：相当于 OSPF 用 Router ID 打平手，顺序确定、不会同轮
+    打平后反复重选；
+  - **不抢占在位主控**：优先级只在「当前没有主控」时才起作用。允许抢占的话，
+    设了 2 的机器每次重启都抢一次主控 —— 而重启往往正发生在排障时；
+  - **0 = 不参选**（OSPF 里 priority 0 的接口永远不是 DR）：可以当从属、可以被
+    投票，但自己永不主动发起选举，给只读副本/弱机器用。
+  全集群都是 0 时退化成人人 1，否则没人愿意选举、集群永远没主控。
+  `hive cluster priority` 看排序、`--priority N` 改本机（改完自动重启生效），
+  `hive cluster peers` 多一列 PRIO。两个 parser（`hive.py` / `hive_cluster.add_parser`）
+  都已同步 —— 只改后者的那份是不生效的。
+
 - **人工指定主控：`hive cluster promote` / `prefer` / `start --leader`（T-0260）**。
   自动选主只看「谁先发起 + term 谁高」，和「谁该当主控」无关 —— 常年开机那台被
   笔记本抢走主控之后再也回不去，是实际困扰。现在留了三条人工通道：
@@ -159,6 +175,22 @@
   字段；状态快照读不到时自动降级为原渲染，不影响复制。
 
 ### Fixed
+
+- **集群节点被反复「拉起」导致端口冲突 + `database is locked` + 主控反复易主**。
+  三个缺陷串成一条雪崩链，症状是 `cluster status` 时好时坏、term 每分钟涨几,
+  `hive cluster leader` 一会儿说本机、一会儿说别人：
+  1. `_local_health()` 的超时写死 **0.45s**。节点一忙（store 追平上百张卡、
+     git 同步）health 往返就超时，`orchestrate` 每轮 tick 都判定「集群没起来」。
+     改为默认 3.0s，可用 `HIVE_CLUSTER_HEALTH_TIMEOUT` 调（连接被拒在本地是
+     立即返回的，放宽超时不会拖慢「确实没起」的判定）。
+  2. `ensure_background()` 只看 health 就 spawn，不看 PID。health 一时不响应
+     就再拉一个进程 → 抢不到端口（`Address already in use`）却打开同一个
+     sqlite（`database is locked`）→ 把正在服务的节点拖慢 → 下一轮又拉。
+     现在：PID 还活就只提示「进程在跑但未响应，卡死请用 `cluster restart`」。
+  3. `_spawn_background()` 在 Popen 之后**立刻**把 pid 文件写成自己的 pid，
+     而失败的进程随即退出 —— pid 文件从此指向死进程，下一轮 ensure 读不到活
+     PID 又去 spawn，且 `cluster stop` 按它停不掉真正的节点。改为子进程自述时
+     自己写、父进程只在确认健康后兜底补写。
 
 - **`hive unblock` 之后卡派不出去（回归里暴露的既有问题）**：解挂只清了
   `dispatch_miss`，没清 `dispatched_to` / `dispatched_at`；而 `dispatch` 的
