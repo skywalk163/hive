@@ -562,3 +562,141 @@ def test_store_commit_failure_does_not_apply_locally(cluster_factory, monkeypatc
     assert c.store.claim_info("T-0001") is None
     assert c.store.commit_seq() == 0
     assert c.store.last_seq() == 1
+
+
+# --------------------------------------------------------------------------- #
+# 人工切主控：promote / prefer（「谁当主控」由人说了算）
+# --------------------------------------------------------------------------- #
+
+def test_promote_moves_leadership(cluster_factory):
+    """人工把从属节点推上主控：它当选、原主控降级、任期推进。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    b = cluster_factory("b", seeds=[a.url])
+    assert wait_until(lambda: b.leader_id == a.node_id)
+    old_term = a.term
+
+    code, body = b.handle_promote({"force": True})
+    assert code == 200 and body["ok"], body
+    assert b.role == "leader"
+    assert body["previous_leader"] == a.node_id
+    assert wait_until(lambda: a.role == "follower"), "原主控必须降级，不能留下双主"
+    assert wait_until(lambda: a.leader_id == b.node_id)
+    assert b.term > old_term
+    assert any(e["type"] == "leader_elected" for e in b.snapshot()["events"])
+
+
+def test_promote_leader_is_noop(cluster_factory):
+    """已经是主控时 promote 幂等，不该白涨一期任期。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    term = a.term
+    code, body = a.handle_promote({})
+    assert code == 200 and body.get("already") is True
+    assert a.term == term
+
+
+def test_promote_observer_rejected(cluster_factory):
+    """observer（electable=false）不能被推上主控。"""
+    a = cluster_factory("a", electable=False)
+    code, body = a.handle_promote({})
+    assert code == 409 and not body["ok"]
+    assert "observer" in body["error"]
+
+
+def test_preferred_leader_gets_zero_delay(cluster_factory):
+    """首选主控节点的选举延迟为 0：主控一失联它立刻发起选举。"""
+    a = cluster_factory("a", preferred_leader="a")
+    assert wait_until(lambda: a.role == "leader")
+    with a.lock:
+        assert a._election_delay_locked() == 0.0
+        assert a._preferred_leader_id_locked() == a.node_id
+
+
+def test_non_preferred_node_yields_a_window(cluster_factory):
+    """非首选节点要让出一个选举窗口，避免和首选节点同轮打平。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    b = cluster_factory("b", seeds=[a.url], preferred_leader="a")
+    assert wait_until(lambda: b.leader_id == a.node_id)
+    assert wait_until(lambda: b._preferred_leader_id_locked() == a.node_id)
+    with b.lock:
+        delay = b._election_delay_locked()
+    # 默认延迟是 election_min + rank*jitter；非首选至少再加一个 election_min
+    assert delay >= b.config.election_min * 1.9, delay
+
+
+def test_preferred_offline_falls_back(cluster_factory):
+    """首选节点不在线 / 不存在时退回默认延迟，不能拖慢整个集群。"""
+    a = cluster_factory("a", preferred_leader="ghost-node")
+    assert wait_until(lambda: a.role == "leader")
+    with a.lock:
+        # 只剩自己一个 voter，rank=0 → 就是 election_min，没有额外惩罚
+        assert a._election_delay_locked() == a.config.election_min
+
+
+def test_force_vote_overrides_store_behind(cluster_factory):
+    """人工夺权时允许候选人 store 落后（git 才是事实账），且留下审计事件。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    b = cluster_factory("b", seeds=[a.url])
+    assert wait_until(lambda: b.leader_id == a.node_id)
+
+    class _FakeStore:
+        def commit_seq(self):
+            return 99
+
+    cand = b._self_node()
+    cand["last_store_seq"] = 1  # 比 A 的 99 落后
+    a.store = _FakeStore()
+    try:
+        term = a.term + 5
+        code, body = a.handle_vote({"term": term, "candidate": cand})
+        assert body.get("granted") is False
+        assert body.get("reason") == "store_behind"
+
+        code, body = a.handle_vote({"term": term, "candidate": cand, "force": True})
+        assert body.get("granted") is True, body
+        assert any(e["type"] == "leader_forced" for e in a.snapshot()["events"]), \
+            "强制放行必须留审计痕迹"
+    finally:
+        a.store = None
+
+
+def test_force_vote_can_be_disabled(cluster_factory):
+    """HIVE_CLUSTER_ALLOW_FORCE_PROMOTE=0 时，force 也压不过 store 闸门。
+
+    给「宁可没主控也不接受落后节点」这种更严的策略留出口。
+    """
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    b = cluster_factory("b", seeds=[a.url])
+    assert wait_until(lambda: b.leader_id == a.node_id)
+
+    class _FakeStore:
+        def commit_seq(self):
+            return 99
+
+    cand = b._self_node()
+    cand["last_store_seq"] = 1
+    a.store = _FakeStore()
+    a.config.allow_forced_promote = False
+    try:
+        code, body = a.handle_vote({"term": a.term + 5, "candidate": cand,
+                                    "force": True})
+        assert body.get("granted") is False
+        assert body.get("reason") == "store_behind"
+    finally:
+        a.store = None
+
+
+def test_hive_parser_exposes_promote_and_prefer():
+    parser = hive.build_parser()
+    for action in ("leader", "promote", "prefer"):
+        args = parser.parse_args(["--dir", ".", "cluster", action])
+        assert args.action == action
+        assert args.func is hive.cmd_cluster
+    args = parser.parse_args(["--dir", ".", "cluster", "promote", "--node", "fb98"])
+    assert args.node == "fb98"
+    args = parser.parse_args(["--dir", ".", "cluster", "start", "--leader"])
+    assert args.leader is True

@@ -4,6 +4,25 @@
 
 ### Added
 
+- **人工指定主控：`hive cluster promote` / `prefer` / `start --leader`（T-0260）**。
+  自动选主只看「谁先发起 + term 谁高」，和「谁该当主控」无关 —— 常年开机那台被
+  笔记本抢走主控之后再也回不去，是实际困扰。现在留了三条人工通道：
+  - `hive cluster promote [--node X]`：立刻把 X（默认本机）推上主控。先请现任主控
+    `resign` 主动下台（避免双主窗口），再把本机 term 追到集群最高，最后 `term+1`
+    选举。**追 term 这步是关键**：重启节点 term 往往落后一整截，不追的话
+    `term+1` 仍比在位主控小，投票以 `stale_term` 被拒，现象是「敲了没反应」。
+  - `hive cluster prefer`：设本机为首选主控。被偏好的节点选举延迟为 0，其它节点
+    让出一个窗口，所以主控失联时它最先发起并拿回主控权。偏好是本机配置，
+    只在「当前没有主控」时生效。
+  - `hive cluster start --leader`：启动时直接把自己记为首选。
+  - `hive cluster leader`：一行看清本机角色、当前主控、租约剩余、在线数与多数门槛。
+- **夺权可以越过「store 落后不许当选」那道闸**。`handle_vote` 原本拒绝给 store
+  落后的候选投票（防止选出数据落后的主节点），但重启节点的 store 几乎必然落后，
+  人工夺权会被自己人拦住。现在投票请求带 `force: true` 时放行，依据是
+  **store 只是缓存、git 才是事实账**，落后会在当上主控后由 `StoreReconciler`
+  从卡面补回。放行时写 `leader_forced` 事件注明落后条数，事后能分辨这次任期
+  切换是「按规矩选的」还是「人硬点的」。不想放开就设
+  `HIVE_CLUSTER_ALLOW_FORCE_PROMOTE=0`，语义变成「宁可没主控也不接受落后节点」。
 - **`scripts/agent-exec.py`：一处收口所有 AI CLI 差异，让「主控分配 → AI 完成」
   真正闭环（T-0259）**。此前 `agents/*.json` 里 14 个 agent 的 `command` 和 `launch`
   都是空字符串，worker 收到卡之后没有任何能把任务喂进 AI 的入口，只剩「复制到剪贴板」，

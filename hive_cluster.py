@@ -336,6 +336,18 @@ class Config:
                                        bool(saved.get("electable", True)))
         else:
             self.electable = bool(kw.get("electable"))
+        # 首选主控：集群里「本来应该由它当主控」的那台（写名字或 node_id 都行）。
+        # 主控挂掉重新选主时，这个节点最先发起选举，把主控权拿回来。
+        # 空字符串 = 不设偏好，选主行为和以前完全一致（向后兼容）。
+        self.preferred_leader = str(
+            kw.get("preferred_leader")
+            or os.environ.get("HIVE_CLUSTER_PREFERRED_LEADER")
+            or saved.get("preferred_leader") or "").strip()
+        # 抢主控时是否允许比现任主控落后（见 promoted 相关逻辑）：
+        # store 只是缓存、git 才是事实账，所以允许，但要留下审计痕迹。
+        self.allow_forced_promote = _env_bool(
+            "HIVE_CLUSTER_ALLOW_FORCE_PROMOTE",
+            bool(saved.get("allow_forced_promote", True)))
         if kw.get("sync_enabled") is None:
             self.sync_enabled = _env_bool("HIVE_CLUSTER_SYNC",
                                           bool(saved.get("sync", True)))
@@ -444,6 +456,8 @@ class Config:
             "seeds": list(dict.fromkeys(self.seeds)),
             "lease_grace": self.lease_grace,
             "electable": bool(self.electable),
+            "preferred_leader": self.preferred_leader,
+            "allow_forced_promote": bool(self.allow_forced_promote),
             "sync": bool(self.sync_enabled),
             "mcp": bool(self.mcp_enabled),
             "mcp_port": self.mcp_port,
@@ -2007,7 +2021,36 @@ class Cluster:
             rank = voters.index(self.node_id)
         except ValueError:
             rank = 0
-        return self.config.election_min + rank * self.config.election_jitter
+        delay = self.config.election_min + rank * self.config.election_jitter
+        pref = self._preferred_leader_id_locked()
+        if not pref or pref not in voters:
+            # 没配偏好，或首选节点当前不在线 / 不参选：按老规则来。
+            # 这里必须退回原逻辑，否则一个永远离线的 preferred 会让整个集群
+            # 每次选主都白等一个 window。
+            return delay
+        if pref == self.node_id:
+            # 首选节点立刻可竞选。原逻辑按名字排序 + jitter 决定谁先跑，
+            # 那个顺序是随机的、和「谁该当主控」无关；有了偏好就以偏好为准。
+            return 0.0
+        # 其它节点让出一整个选举窗口，别跟首选节点同轮打平。
+        return delay + self.config.election_min
+
+    def _preferred_leader_id_locked(self) -> str:
+        """把配置里的 preferred_leader 解析成节点 id。
+
+        配置里人写的是记得住的名字（fb98 / laiweilideMacBook-Air），
+        而节点表里 id 是随机串，所以每次都要现解析一遍。
+        解析不出来就返回空 → 调用方退回默认选主行为。
+        """
+        want = (self.config.preferred_leader or "").strip()
+        if not want:
+            return ""
+        if want in self.nodes:
+            return want
+        for nid, rec in self.nodes.items():
+            if str(rec.get("name") or "") == want:
+                return nid
+        return ""
 
     # -- 合并远端状态 ------------------------------------------------------- #
     def _merge_snapshot_locked(self, snap: dict, from_leader: bool = False) -> None:
@@ -2146,17 +2189,56 @@ class Cluster:
         return self._leader_record_locked()
 
     # -- 选主 -------------------------------------------------------------- #
-    def _start_election(self) -> None:
+    def _sync_term_from_peers(self) -> None:
+        """把本机任期追到集群里看到的最高值。
+
+        重启过的节点 term 往往落后一整截（在位主控 term=32，本机还停在 15）。
+        这时直接 term+1 仍然比对方小，投票会被 stale_term 拒掉，
+        现象是「敲了 promote，什么也没发生」—— 比报错难查得多。
+        health 端点免 token 且带 term，正好用来做这一趟。
+        """
+        peers = [rec for rec in list(self.nodes.values())
+                 if rec.get("id") != self.node_id and rec.get("url")]
+        if not peers:
+            return
+        best = self.term
+        with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+            futs = [pool.submit(http_json,
+                                str(p["url"]).rstrip("/") + "/api/cluster/health",
+                                "GET", None, 0.8, self.config.token) for p in peers]
+            for fut in as_completed(futs):
+                try:
+                    code, resp = fut.result()
+                except Exception:  # noqa: BLE001  单个节点不通不影响夺权
+                    continue
+                if code == 200 and isinstance(resp, dict):
+                    best = max(best, int(resp.get("term") or 0))
+        if best > self.term:
+            with self.lock:
+                self._adopt_higher_term_locked(best)
+            _log(f"夺权前对齐任期：{best}")
+
+    def _start_election(self, force: bool = False) -> bool:
+        """发起一轮选举。force=True 是人工 promote 通道。
+
+        返回是否真的发起了 —— 已经是主控 / 不可参选 / 被节流都返回 False，
+        调用方可以据此给出准确提示，而不是假装成功。
+        """
+        if force:
+            self._sync_term_from_peers()
         with self.lock:
             if self._stop.is_set() or self._election_inflight:
-                return
+                return False
             if not self.config.electable:
-                return
+                return False
             if self.role == "leader" and self.leader_lease_until > _now():
-                return
+                return False
             # 失败后不要每 0.2s 就 term+1：至少隔一个选举超时再试。
-            if self._last_election and _now() - self._last_election < self.config.election_min:
-                return
+            # 人工 promote 是明确意图，不受这个节流限制 —— 否则用户点了之后
+            # 还要等一个 window 才生效，会以为「没反应」。
+            if (not force and self._last_election
+                    and _now() - self._last_election < self.config.election_min):
+                return False
             self._election_inflight = True
             self.term += 1
             self.voted_for = self.node_id
@@ -2177,6 +2259,9 @@ class Cluster:
             body = {"term": term, "candidate": self._self_node(),
                     "last_event": self.events[-1]["id"] if self.events else "",
                     "last_store_seq": self.store.commit_seq() if self.store else 0}
+            if force:
+                # 让对端知道这是人工夺权，可以跳过「store 落后不许当选」那道闸。
+                body["force"] = True
 
         votes = {self.node_id}
         try:
@@ -2213,6 +2298,7 @@ class Cluster:
             self._heartbeat_once()
         else:
             _log(f"本轮选举未获多数：term={term}（{len(votes)}/{quorum} 票）")
+        return became
 
     def _adopt_higher_term_locked(self, term: int, leader=None) -> None:
         if term <= self.term:
@@ -2601,10 +2687,18 @@ class Cluster:
             return 200, {"ok": True, "granted": False, "term": self.term,
                          "reason": "candidate_not_electable"}
         my_seq = self.store.commit_seq() if self.store else 0
-        if int(cand.get("last_store_seq") or 0) < my_seq:
+        cand_seq = int(cand.get("last_store_seq") or 0)
+        # 人工夺权通道：body 里带 force 才放行（且本机没禁用）。
+        # 这道闸原本是防止选出数据落后的主节点，但 hive 的 store 只是缓存、
+        # git 才是事实账（见 StoreReconciler），落后能在当上主控后从卡面补回来。
+        # 保留开关（HIVE_CLUSTER_ALLOW_FORCE_PROMOTE=0 可关掉）是为了让集群
+        # 管理员能选择「宁可没主控，也不接受落后节点」这种更严的策略。
+        forced = bool(body.get("force")) and self.config.allow_forced_promote
+        behind = cand_seq < my_seq
+        if behind and not forced:
             return 200, {"ok": True, "granted": False, "term": self.term,
                          "reason": "store_behind",
-                         "candidate_seq": int(cand.get("last_store_seq") or 0),
+                         "candidate_seq": cand_seq,
                          "my_seq": my_seq}
         with self.lock:
             if term < self.term:
@@ -2620,6 +2714,15 @@ class Cluster:
             if self.voted_for not in (None, cid):
                 return 200, {"ok": True, "granted": False, "term": self.term,
                              "voted_for": self.voted_for, "leader": self._leader_public_locked()}
+            if behind and forced:
+                # 明知候选人 store 落后也投票，必须留痕：否则事后没人能分辨
+                # 这次任期切换是「按规矩选的」还是「人硬点的」。
+                self._emit_locked(
+                    "leader_forced",
+                    message=(f"人工夺权：{cand.get('name') or cid} 的 store 落后 "
+                             f"{my_seq - cand_seq} 条（{cand_seq}/{my_seq}），仍投赞成票"))
+                _log(f"接受人工夺权候选 {cand.get('name') or cid}："
+                     f"store {cand_seq} < {my_seq}，按 force 放行")
             self.voted_for = cid
             # 投完票先别急着自己也参选：给对方一个把 leader 心跳发过来的窗口。
             self._leader_lost_at = _now()
@@ -2643,6 +2746,45 @@ class Cluster:
                 self._emit_locked("leader_step_down", message="resign")
                 self._persist_locked()
             return 200, {"ok": True, "term": self.term}
+
+    def handle_promote(self, body: dict) -> tuple[int, dict]:
+        """人工把**本机**提升为主控。
+
+        和自动选主的区别，正是「人说了算」需要的那几点：
+          * 不看选举延迟、不看 _last_election 节流 —— 点了就该马上动；
+          * 允许在 store 落后时当选（force），因为 store 只是缓存、git 才是事实账，
+            落后会在当上主控后由 StoreReconciler 从卡面补回来；
+          * 先请现任主控主动下台，把「双主」窗口压到最小 —— 它自己降级，
+            比等它被更高任期压下去干净。
+        """
+        force = bool(body.get("force", True))
+        if not self.config.electable:
+            return 409, {"ok": False, "role": self.role, "node": self.node_id,
+                         "error": "本机 electable=false（observer），不能当主控"}
+
+        with self.lock:
+            if self.role == "leader" and self.leader_lease_until > _now():
+                return 200, {"ok": True, "already": True, "role": "leader",
+                             "term": self.term, "node": self.node_id,
+                             "previous_leader": self.node_id}
+            leader_url = self.leader_url
+            leader_id = self.leader_id or ""
+            me = self.node_id
+
+        resigned = False
+        if leader_url and leader_id and leader_id != me:
+            code, _ = http_json(str(leader_url).rstrip("/") + "/api/cluster/resign",
+                                "POST", {"node_id": leader_id}, 1.5, self.config.token)
+            resigned = code == 200
+
+        became = self._start_election(force=force)
+        with self.lock:
+            return (200 if became else 409), {
+                "ok": became, "role": self.role, "term": self.term, "node": me,
+                "resigned_previous": resigned, "previous_leader": leader_id,
+                "error": "" if became else
+                "选举未获多数（peers 不在线，或有节点投了反对票）",
+            }
 
     def handle_leave(self, body: dict) -> tuple[int, dict]:
         node_id = str(body.get("node_id") or (body.get("node") or {}).get("id") or "")
@@ -3254,6 +3396,8 @@ def build_handler(cluster: Cluster):
                     code, payload = cluster.handle_vote(body)
                 elif path == "/api/cluster/resign":
                     code, payload = cluster.handle_resign(body)
+                elif path == "/api/cluster/promote":
+                    code, payload = cluster.handle_promote(body)
                 elif path == "/api/cluster/leave":
                     code, payload = cluster.handle_leave(body)
                 elif path == "/api/cluster/push":
@@ -3672,10 +3816,191 @@ def _watch(config: Config, since: int = 0) -> int:
         return 0
 
 
+def _find_node(snap: dict, want: str) -> tuple[str, str, str]:
+    """按名字或 id 在节点表里找人，返回 (id, name, url)。
+
+    名字匹配是主流用法（人记得住 fb98，记不住随机 id），
+    但 id 也要支持 —— 脚本里往往直接用 id 更稳。
+    """
+    want = (want or "").strip()
+    if not want:
+        return "", "", ""
+    nodes = (snap or {}).get("nodes") or []
+    for n in nodes:
+        if str(n.get("id") or "") == want or str(n.get("name") or "") == want:
+            return str(n.get("id") or ""), str(n.get("name") or ""), str(n.get("url") or "")
+    return "", "", ""
+
+
+def _cmd_leader(config: Config, node: str | None = None) -> int:
+    health = _local_health(config)
+    if not health:
+        print("集群未运行（先 hive cluster start）", file=sys.stderr)
+        return 1
+    snap, _running = _local_state(config)
+    snap = snap or {}
+    leader = snap.get("leader") or {}
+    me = (health.get("node") or {})
+    peer_count = snap.get("alive")
+    quorum = snap.get("quorum")
+
+    print(f"本机 {me.get('name') or config.name}  角色 {snap.get('role') or health.get('role')}"
+          f"  任期 {snap.get('term')}")
+    if leader:
+        lease = leader.get("lease_until_epoch") or 0
+        left = max(0, int(lease - _now())) if lease else 0
+        print(f"主节点 {leader.get('name') or leader.get('id')}  {leader.get('url') or ''}"
+              f"  租约剩余 {left}s")
+    else:
+        print("主节点 （无）—— 正在选举，或多数派不可用")
+    if peer_count is not None:
+        print(f"在线 {peer_count}  多数门槛 {quorum}")
+    if config.preferred_leader:
+        print(f"首选主控（本机配置） {config.preferred_leader}")
+    else:
+        print("首选主控（本机配置） （未设置；集群按默认规则选主）")
+    if node:
+        nid, name, url = _find_node(snap, node)
+        if nid:
+            print(f"\n指定节点 {name or nid}  {url}")
+            print(f"  {'就是当前主控' if nid == (leader.get('id') or '') else '不是主控'}")
+        else:
+            print(f"\n找不到节点 {node}", file=sys.stderr)
+            return 1
+    return 0
+
+
+def _cmd_promote(config: Config, node: str | None = None) -> int:
+    """让人立刻把某个节点推上主控位置。"""
+    snap, _running = _local_state(config)
+    snap = snap or {}
+    me_health = _local_health(config) or {}
+    me = me_health.get("node") or {}
+
+    target = (node or "").strip()
+    if not target or target in (str(me.get("id") or ""), str(me.get("name") or ""), config.name):
+        url = f"http://127.0.0.1:{config.port}"
+        label = me.get("name") or config.name
+    else:
+        nid, name, node_url = _find_node(snap, target)
+        if not nid:
+            print(f"找不到节点 {target}（先 hive cluster peers 看一眼）", file=sys.stderr)
+            return 1
+        url, label = node_url, (name or nid)
+
+    if not me_health and not target:
+        print("集群未运行（先 hive cluster start）", file=sys.stderr)
+        return 1
+
+    code, body = http_json(url.rstrip("/") + "/api/cluster/promote", "POST",
+                           {"force": True}, timeout=10.0, token=config.token)
+    if not isinstance(body, dict):
+        print(f"提升失败：HTTP {code}", file=sys.stderr)
+        return 1
+    if body.get("ok"):
+        if body.get("already"):
+            print(f"{label} 已经是主控（任期 {body.get('term')}），无需切换")
+        else:
+            prev = body.get("previous_leader") or ""
+            print(f"已切换主控 → {label}（任期 {body.get('term')}）"
+                  + (f"，原主控 {prev} 已下台" if body.get("resigned_previous") else ""))
+        return 0
+    print(f"提升失败：{body.get('error') or f'HTTP {code}'}", file=sys.stderr)
+    if body.get("resigned_previous"):
+        print("（原主控已下台，但现在没人当选 —— 集群暂时没有主控，"
+              "通常是 pex 不在线或多数派不足）", file=sys.stderr)
+    return 1
+
+
+def _cmd_prefer(config: Config, node: str | None = None, clear: bool = False) -> int:
+    """设置/清除「首选主控」。
+
+    偏好存在**本机** config.json 里，作用于本机的选举延迟：被偏好的节点在主控
+    失联后立刻发起选举（delay=0），其它节点让出一个窗口。所以要让某台机器稳定
+    当主控，就在**那台机器**上配（或启动时用 `hive cluster start --leader`）。
+    """
+    if clear:
+        if not config.preferred_leader:
+            print("当前没有设置首选主控")
+            return 0
+        old = config.preferred_leader
+        config.preferred_leader = ""
+        config.save()
+        print(f"已清除首选主控（原 {old}）")
+        return 0
+
+    # 不带参数 = 把自己设为首选。这是最常用的意图：
+    # 「这台就是主控机，重启以后也还是我」。
+    target = (node or "").strip() or config.name
+    config.preferred_leader = target
+    config.save()
+
+    if target == config.name:
+        print(f"已把本机（{config.name}）设为首选主控")
+        print("  主控失联重新选主时，本机会最先发起选举，把主控权拿回来。")
+        print("  想立刻生效而不等下次选举：hive cluster promote")
+        return 0
+
+    # 指定了别人：偏好仍只写在本地，要如实说明它不会把对方推上去。
+    print(f"已记录首选主控：{target}（本机 {config.name} 的配置）", file=sys.stderr)
+    print(f"  这条偏好只影响本机的选举时机，不会把 {target} 推上主控。",
+          file=sys.stderr)
+    print(f"  要让它真的当家：\n"
+          f"    在 {target} 上执行  hive cluster prefer      # 长期\n"
+          f"    或在这里执行        hive cluster promote {target}   # 立刻", file=sys.stderr)
+    return 0
+
+
+def _claim_leadership_after_start(config: Config) -> None:
+    """`start --leader` 的后半段：起来之后如果主控在别人手上，直接拿回来。
+
+    只写 preferred_leader 是不够的 —— 偏好只在「当前没有主控」时生效。
+    集群里已经有主控时，新启动的节点只是注册成 follower，那台笔记本照样当家。
+    用户的预期是「我说了算，启动就该是我」，所以这里补一次夺权。
+    """
+    deadline = _now() + 12.0
+    health = None
+    while _now() < deadline:
+        health = _local_health(config)
+        if health:
+            break
+        time.sleep(0.3)
+    if not health:
+        print("警告：集群 12s 内没起来，--leader 没能落实（看 cluster.log）",
+              file=sys.stderr)
+        return
+
+    me = (health.get("node") or {}).get("id")
+    leader = health.get("leader") or {}
+    if leader.get("id") == me:
+        print(f"本机 {config.name} 已是主控")
+        return
+
+    code, body = http_json(f"http://127.0.0.1:{config.port}/api/cluster/promote",
+                           "POST", {"force": True}, timeout=12.0,
+                           token=config.token)
+    if isinstance(body, dict) and body.get("ok"):
+        print(f"已从 {leader.get('name') or '（无主控）'} 拿回主控"
+              f"（任期 {body.get('term')}）")
+    else:
+        reason = (body or {}).get("error") if isinstance(body, dict) else f"HTTP {code}"
+        print(f"拿回主控失败：{reason}", file=sys.stderr)
+
+
 def run_cli(args) -> int:
     action = getattr(args, "action", "status") or "status"
     config = _config_from_args(args)
     config.state_dir.mkdir(parents=True, exist_ok=True)
+
+    # `--leader` 是「启动时的手动开关」：把本机记为首选主控。
+    # 写进 config.json 而不是只影响这一次进程 —— 机器重启、集群重新选主之后
+    # 它仍然会最先发起选举，把主控权拿回来。这才是「一直是 0.88 当主控」的
+    # 那个「一直」该由谁来保证。
+    if getattr(args, "leader", False) and action in ("serve", "start", "restart", "ensure"):
+        if config.preferred_leader != config.name:
+            config.preferred_leader = config.name
+            config.save()
+        print(f"本机 {config.name} 记为首选主控（preferred_leader）")
 
     if action == "serve":
         cluster = Cluster(config)
@@ -3703,7 +4028,10 @@ def run_cli(args) -> int:
         return 0
 
     if action == "start":
-        return _spawn_background(config, args)
+        rc = _spawn_background(config, args)
+        if rc == 0 and getattr(args, "leader", False):
+            _claim_leadership_after_start(config)
+        return rc
 
     if action == "stop":
         rc = _stop_background(config)
@@ -3713,7 +4041,10 @@ def run_cli(args) -> int:
 
     if action == "restart":
         _stop_background(config)
-        return _spawn_background(config, args)
+        rc = _spawn_background(config, args)
+        if rc == 0 and getattr(args, "leader", False):
+            _claim_leadership_after_start(config)
+        return rc
 
     if action == "ensure":
         if _local_health(config):
@@ -3756,6 +4087,16 @@ def run_cli(args) -> int:
                   {"node_id": node_id}, timeout=1.5, token=config.token)
         print(f"已从集群退出：{node_id}")
         return 0
+
+    if action == "leader":
+        return _cmd_leader(config, getattr(args, "node", None))
+
+    if action == "promote":
+        return _cmd_promote(config, getattr(args, "node", None))
+
+    if action == "prefer":
+        return _cmd_prefer(config, getattr(args, "node", None),
+                           bool(getattr(args, "clear", False)))
 
     if action == "discover":
         health = _local_health(config)
@@ -3883,7 +4224,13 @@ def add_parser(sub) -> None:
     p.add_argument("action", nargs="?", default="status",
                    choices=["serve", "start", "stop", "restart", "ensure",
                             "status", "peers", "events", "sync", "join", "leave",
-                            "discover", "watch"])
+                            "discover", "watch", "leader", "promote", "prefer"])
+    p.add_argument("--node", default=None,
+                   help="leader/promote/prefer 的目标节点（名字或 id，默认本机）")
+    p.add_argument("--leader", action="store_true",
+                   help="start/restart 时把本机设为首选主控（重启后自动拿回主控权）")
+    p.add_argument("--clear", action="store_true",
+                   help="prefer --clear：清除本机的首选主控设置")
     p.add_argument("seed_url", nargs="?", help="join 的目标（HOST:PORT 或 URL）")
     p.add_argument("--port", type=int, default=None,
                    help=f"HTTP 端口（默认 {DEFAULT_PORT}）")

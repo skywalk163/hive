@@ -114,6 +114,10 @@ python3 hive/hive.py --dir hive cluster status    # 谁是主节点 / 谁在线
 python3 hive/hive.py --dir hive cluster peers
 python3 hive/hive.py --dir hive cluster watch     # 事件流
 python3 hive/hive.py --dir hive cluster sync      # 本机代码同步状态
+python3 hive/hive.py --dir hive cluster leader    # 主控是谁、租约还剩多久
+python3 hive/hive.py --dir hive cluster promote   # 人工把本机推上主控（可 --node 指定别台）
+python3 hive/hive.py --dir hive cluster prefer    # 设本机为首选：主控失联时它最先接手
+python3 hive/hive.py --dir hive cluster start --leader   # 启动即宣告「我当主控」
 ```
 
 Windows 同理，只换分隔符：
