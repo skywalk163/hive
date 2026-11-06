@@ -178,6 +178,18 @@
 
 ### Fixed
 
+- **幽灵节点复发：查清「删了又活」的根因并给出固定处置**。`_adopt_leader_locked()`
+  收到「leader 是 X」的快照时会 `_update_node_locked(rec, touch=True)`，只要
+  `leader_id` 还指向 X，每次心跳就给 X 续命 —— 单独 `leave` 删节点表下一拍必复活。
+  正确顺序是**每个节点**先 `resign`（断 leader 指向）→ `leave`（删记录）→
+  `promote` 产生更高 term 的新 leader。已按此清掉指向 104 的
+  `laiweilideMacBook-Air` 僵尸记录，fb98 以 term 58 重新当选，节点表回到 2 个。
+  文档 §7.1 留了可复制的处置命令。
+- **新增 `scripts/win-sync-restart.ps1`**：Windows 节点只开 445/8788、无 SSH/WinRM，
+  集群 HTTP 也没有 exec 接口，所以「同步 hive 代码 + 重启服务」需要一次人工
+  bootstrap。脚本默认只体检，`-Apply` 执行 `git pull --ff-only` + 官方
+  `cluster restart` + 探活，`-EnableRemote` 额外开只放行内网的 OpenSSH Server，
+  之后主控可直接 ssh 运维。**UTF-8 BOM + CRLF**（PS 5.1 含中文注释必需）。
 - **主控优先级复核 OSPF 语义后收紧三处**（用户补了「0-255、默认 1、值大者优先、
   0 放弃资格」的准确定义）：
   1. **取值范围 0-255 原先没校验**：`--priority 300` / 环境变量 / `config.json`
