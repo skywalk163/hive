@@ -4,6 +4,25 @@
 
 ### Added
 
+- **manual agent 也能被主控自动派卡（T-0259）**。此前 `dispatch` 里
+  `if mode == "manual": continue` 一行，让 15 个 `mode: manual` 的机器全部不进候选，
+  `dispatch --apply` 恒输出「没有可分派的任务」，人只能 `hive prompt` 再手工复制到
+  IDE —— 这是「多机协同其实全靠人肉转发」的直接原因。现在 manual 默认仍不派，
+  但 agent 配置里显式写 `dispatchable: true` 就参与候选（语义：这台机器上有常驻
+  worker 会在收件箱里接活）。`agent add --dispatchable` 新增该开关；重新登记时
+  不传该参数视为保持原状，避免脚本里复制粘贴旧命令把它悄悄关掉；`agent list`
+  用 `[可派]` 标出来。
+- **manual 卡不再只有「人写 summary.md」才算完成（T-0259）**。旧逻辑死等
+  `summary.md` 到 `timeout_minutes` 超时，把已经改完的卡判成失败（GUI agent 忘了
+  写 summary 是常态）。现在三种信号任一成立即收工：summary.md 非空、HEAD 变了、
+  工作区有改动。后两条要求改动快照连续两次相同（`HIVE_MANUAL_SETTLE_SECONDS`，
+  默认 20s）才认，避免「改到一半」误判。**不放松任何质量闸门**：越界检查、verify、
+  结果闸门照旧全跑。
+- **`scripts/master.sh` / `scripts/worker.sh` / `scripts/join-agent.{sh,ps1}`**：
+  把「主控派活 / 机器干活」拆成两个可独立启停的常驻进程，各带单实例 PID 保护；
+  接入一台新机器从「按文档敲七八条命令」变成一条 `join-agent`（登记 + 起 worker +
+  注册登录自启）。文档见 `docs/主控与分发.md`。
+
 - **多机副本一致性：把「启动时一次摄入」升级为持续不变式，并让 `doctor` 自己喊出不一致**。
   承接缺卡 claim 误报的复盘，目标始终是让多机多 agent 看到同一份事实：
   - `Cluster._ingest_store_cards()` 对**缺行**改走 `Store.ingest_card` 的 op 日志

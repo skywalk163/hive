@@ -460,6 +460,7 @@ python3 hive/hive.py mcp --agent workbuddy --dir hive
 - **[使用指南](docs/使用指南.md)：从单机到多机、从 Git claim 到 P2 store，人和 AI 都能照着做**
 - **[AGENT 快速上手](docs/AGENT快速上手.md)：第一次接 hive 的 agent 从这里开始（agent 视角，含实测输出和踩坑）**
 - [操作手册](docs/操作手册.md)：每天的命令、总控流程、故障处理
+- **[主控与分发](docs/主控与分发.md)：任务卡怎么跑到某台机器的某个 AI 手上；`master.sh` / `worker.sh` / `join-agent` 三个脚本怎么用**
 - [任务卡模板](docs/任务卡模板.md)：代码卡 / 验收卡 / 诊断卡 / 手动卡
 - [迁移指南](docs/迁移指南.md)：从聊天里手工分发迁到蜂巢
 - [多机并行开发](docs/多机并行开发.md)：多台机器 + 多个 agent 并行的部署、host 路由、防冲突、合流

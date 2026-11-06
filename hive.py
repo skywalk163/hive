@@ -2695,7 +2695,13 @@ class Hive:
                         f"能力缺失（{name} 缺 {', '.join(sorted(lack))}）")
                     continue
                 mode = a.get("mode") or ("manual" if a.get("manual") else "exec")
-                if mode == "manual":
+                # T-0259：manual 默认仍不自动派，但显式写 `dispatchable: true`
+                # 的例外。这类机器上有常驻 worker 会在收件箱里接活（建 worktree、
+                # 写 .hive/task.md、弹 IDE、把 prompt 放进剪贴板），派过去和派给
+                # exec 一样有人接。没有这个开关时，所有 GUI 机器都只能人工 copy
+                # prompt —— 这正是 2026-11-06 之前 15 个 agent 全 manual、
+                # `dispatch --apply` 恒输出「没有可分派的任务」的原因。
+                if mode == "manual" and not a.get("dispatchable"):
                     blocked.append(f"人工优先（{name} 是 manual 模式）")
                     continue
                 if mode == "verify" and (c.get("paths") or []):
@@ -5306,9 +5312,31 @@ class Worker:
                 print(f"\n=== 任务 {tid} 已就绪 ===\n工作目录: {wt}\n任务卡:   {wt/'.hive'/'task.md'}"
                       f"\n完成后写: {summary_file}（或在此按 Ctrl-C 放弃）\n", flush=True)
                 deadline = time.time() + int(card.get("timeout_minutes") or 120) * 60
+                # T-0259：完成信号不再只有「人写 summary.md」一条路。
+                # GUI agent 干完活忘了写 summary 是常态，旧逻辑会一路死等到
+                # timeout 才判超时，把已经改完的卡判成失败（现场踩过）。
+                # 现在三种信号任一成立即收工：
+                #   1) summary.md 非空 —— 最明确，agent 自己写的自述；
+                #   2) HEAD 变了      —— agent 自己 commit 过；
+                #   3) 工作区有改动   —— 只改了文件没提交（worker 会兜底 commit）。
+                # 2/3 只是「可以收工」的判据，**不放松任何质量闸门**：越界检查、
+                # verify、结果闸门照旧全跑，判不过照样 failed。为了让「改到一半」
+                # 不被误判，改动快照必须连续两次相同（间隔 settle 秒）才认。
+                base = (rev_parse(wt, "HEAD") or "") + "\n" + "\n".join(changed_files(wt))
+                settle = float(os.environ.get("HIVE_MANUAL_SETTLE_SECONDS") or 20)
+                last_snap, last_change_at = base, 0.0
                 while time.time() < deadline:
                     if summary_file.exists() and summary_file.stat().st_size > 0:
+                        log(f"{tid} 手动模式：检测到 summary.md，收工")
                         break
+                    snap = ((rev_parse(wt, "HEAD") or "") + "\n"
+                            + "\n".join(changed_files(wt)))
+                    if snap != base:
+                        if snap != last_snap:
+                            last_snap, last_change_at = snap, time.time()
+                        elif time.time() - last_change_at >= settle:
+                            log(f"{tid} 手动模式：改动已稳定 {int(settle)}s，收工")
+                            break
                     time.sleep(5)
                 else:
                     timed_out = True
@@ -5699,7 +5727,8 @@ def cmd_agent(args) -> None:
             print(f"{cfg.get('name'):<16} host={cfg.get('host') or '-':<8} "
                   f"abilities={cfg.get('abilities', [])} "
                   f"caps={cfg.get('capabilities', [])} "
-                  f"{'manual' if cfg.get('manual') else cfg.get('command', '')[:60]}")
+                  f"{'manual' if cfg.get('manual') else cfg.get('command', '')[:60]}"
+                  f"{'  [可派]' if cfg.get('dispatchable') else ''}")
         return
     if not args.name:
         raise HiveError("agent add 需要 --name")
@@ -5710,6 +5739,17 @@ def cmd_agent(args) -> None:
         k, v = item.split("=", 1)
         repos[k] = v
     mode = args.mode or ("manual" if args.manual else "exec")
+    # T-0259：重新登记时没传 --dispatchable 视为「保持原状」。
+    # 否则一次手滑（或脚本里复制粘贴旧命令）就把某台机器的自动分派悄悄关掉，
+    # 而现象只是「这台机器再也不接卡了」，很难查到是登记时被冲掉的。
+    p_old = h.dir / "agents" / f"{args.name}.json"
+    dispatchable = bool(getattr(args, "dispatchable", False))
+    if not dispatchable and p_old.exists():
+        try:
+            dispatchable = bool(
+                json.loads(p_old.read_text(encoding="utf-8")).get("dispatchable"))
+        except (OSError, ValueError):
+            pass
     cfg = {
         "name": args.name,
         "host": (args.host or current_host()).strip().lower(),
@@ -5724,6 +5764,8 @@ def cmd_agent(args) -> None:
         "max_concurrency": args.max_concurrency or 1,
         "created": iso(),
     }
+    if dispatchable:
+        cfg["dispatchable"] = True
     p = h.dir / "agents" / f"{args.name}.json"
     p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     h.commit_and_push(f"agent: register {args.name}",
@@ -6855,6 +6897,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", action="append", metavar="NAME=PATH")
     s.add_argument("--worktrees", help="worktree 根目录")
     s.add_argument("--launch", help="manual 模式下打开 GUI 的命令，支持 {worktree}/{task}/{prompt}")
+    s.add_argument("--dispatchable", action="store_true",
+                   help="manual agent 也接受自动分派（那台机器上有常驻 worker 会接活）；"
+                        "不加则 dispatch 一律跳过它")
     s.add_argument("--max-concurrency", type=int, default=1)
     s.add_argument("--host",
                    help="agent 所在机器名（多机协作用来路由；默认取当前 hostname）")
