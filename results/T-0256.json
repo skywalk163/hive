@@ -1,0 +1,40 @@
+{
+  "task": "T-0256",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0256",
+  "base": "main",
+  "head": "c6ab8eff65d5852a4ec8a1c02acbfbc0f9fb9208",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-05T23:48:03+08:00",
+  "finished_at": "2026-11-05T23:48:03+08:00",
+  "duration_s": 0.2,
+  "verify": [
+    {
+      "cmd": "python 运行.py examples/test_变更请求.light",
+      "code": 0,
+      "tail": [
+        "--- 测试 变更请求 通过 ---"
+      ]
+    },
+    {
+      "cmd": "test -f src/变更请求.light",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0256 交付摘要：lightharness 移植 0.2.2-rc.1 B4：变更请求注册表与会话绑定\n\n## 新增文件与行数\n\n- `src/变更请求.light`：310 行\n- `examples/test_变更请求.light`：204 行（31 条断言）\n\n## 判据输出原文\n\n```\n--- 测试 变更请求 通过 ---\n```\n\n退出码 rc=0。\n\n## 反跑记录\n\n### A. 值反：变更请求键 去掉小写归一\n- 改动：`返回 小写(键文)` → `返回 键文`\n- 结果：rc=1（`键小写` 断言失败，混合大小写未归一）\n- 恢复后复跑绿。\n\n### B. 抛反：下次轮询延迟 merged 分支\n- 改动：`返回 空`（停轮）→ `返回 间隔[\"空闲间隔\"]`（继续轮询）\n- 结果：rc=1，`断言失败: merged停轮 实际=120000 期望=null`\n- 恢复后复跑绿。\n\n## 段落名冲突扫描\n\n跨 `src/*.light` 全量扫描 `^段落\\s+(名字)` 集合交：**零冲突**。\n\n本模块段落：变更请求_报错、变更请求键、下次轮询延迟、变更请求_幂、URL身份、同变更请求URL、变更请求_是数字、变更请求_清理词尾、变更请求_是URL词、找变更请求URL、找自身URL、变更请求_扫JSONURL、变更请求_找标记、绑定追加、记录推送、评审归一。\n\n## 移植内容（对标上游）\n\n| 上游文件 | 本模块对应 |\n|---|---|\n| `forge/src/keys.ts` | `变更请求键`（forge:host/owner/name#number 全小写） |\n| `forge/src/schedule.ts` | `下次轮询延迟`（失败指数退避/封顶、merged停轮、closed空闲、pending活跃） |\n| `forge/src/types.ts` | 以字典表示（repository/ref/snapshot/failure/intervals） |\n| `forge-session/src/commands.ts` URL 函数 | `URL身份`/`同变更请求URL`/`找变更请求URL`/`找自身URL` |\n| `forge-session/src/projection.ts` 绑定逻辑 | `绑定追加`/`记录推送` |\n| `forge-github` review 归一（纯逻辑面） | `评审归一`（APPROVED/CHANGES_REQUESTED/REVIEW_REQUIRED → canonical） |\n\n## 没做/做不到的部分（诚实列）\n\n1. **gh CLI 命令解析（references.ts / shell-quote）**：属宿主面，按任务卡不移植。\n2. **Session 事件投影（projection.ts 的 applyCall/applyResult）**：依赖宿主 SessionEvent 模型，本卡只移植纯绑定逻辑（bind/recordPushes）。\n3. **reference-lookup.ts 的 shell 执行回查**：纯宿主行为，不移植。\n4. **ForgeService 类（注册表/轮询循环/timer）**：依赖 Cordis Context、AbortController、Promise 等宿主运行时，不移植。\n5. **ForgeProvider 接口（fetch/findByHead/markReady/merge 等）**：全是宿主网络调用，不移植。\n6. **URL 提取用手写扫描替代正则**：光明无正则捕获组返回，用分词+逐字符扫描实现，覆盖核心 `/pull/数字` URL 模式。",
+  "error": "",
+  "declared_paths": [
+    "src/变更请求.light",
+    "examples/test_变更请求.light"
+  ],
+  "changed_files": [
+    "examples/test_变更请求.light",
+    "src/变更请求.light"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
