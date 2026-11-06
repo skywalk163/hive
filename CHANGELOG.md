@@ -4,6 +4,22 @@
 
 ### Added
 
+- **Windows agent「定时领取」：`scripts/win-scheduled-work.ps1`**。hive 本来就是拉取式
+  worker（`hive.py` 文件头第 11 行：只要能 git fetch/push 就不需要被 SSH 进来），
+  常驻 worker 只是其中一种实现。新脚本用计划任务每 N 分钟（15/30/60/120，
+  默认 30）叫醒一次，每轮 `git pull --ff-only` 同步 hive 工具仓 +
+  `hive work --once --no-cluster` 领一轮卡即退出：
+  - 纯 git 通道，不拉起 8788 集群服务，不受选主/端口/冷启动自检影响；
+  - 顺带把「远端机器代码旧」解决掉，不需要主控反向登录、不需要 OpenSSH；
+  - 命名 Mutex 防重入，上一轮没跑完就跳过本次触发（卡留在 inbox，下轮再捡）；
+  - 不带 `-Apply` 只体检，会指出 agent 未登记 / 未标 `dispatchable` / manual 无
+    `command` 这三类「定时也领不到卡」的前提问题；`-RunNow` 可先跑一轮验证。
+  - 文档见 `docs/主控与分发.md` §4.5，含「解决什么 / 不解决什么」对照表。
+- **`--no-cluster` 现在全程生效**：原先只管住 `cmd_work` 启动那一次，
+  `Worker.loop()` 每轮仍无条件 `cluster_ensure()`，定时领取照样会把集群拉起来。
+  现把开关透传进 Worker，loop 每轮一并尊重。
+
+
 - **主控优先级：OSPF 式 `leader_priority`（值大者优先，默认 1）**。
   `preferred_leader` 是「本机配置」，想让某台当家得在那台上单独配一条、别的节点
   还看不见。优先级改成每台自己声明「我排第几」，随节点自述广播，全集群可见。
@@ -119,64 +135,32 @@
     `dashboard/plans.json`（已进 `.gitignore`）；测试见
     `tests/test_dashboard_plans.py` 与 `tests/test_dashboard_plans_ui.py`。
 
-### Changed
-
-- 看板统计条多了常驻的「计划 N」入口（进行中数量），点它切到计划 Tab。
-
-- **任务状态「搁置」（`shelved`）：不能忘，但大部分时候可以忽略**。有些卡当前确实
-  做不了：打回 `ready` 只白占一个名额、还会干扰 agent 领取；一直挂在异常里也不对（情况
-  已知，租约/结果/进度这些现场完全可以释放）；直接删更不行，删了就真忘了。
-  - `hive shelve <tid> --reason "…"`：卡面写 `shelved` + `shelved_at` /
-    `shelved_from` / `shelve_reason` 和现场备注；**释放** `claim/` / `res/` /
-    `status/` 远端分支、`results/<tid>.json` 归档、`inbox/*/<tid>.md` 分派信号、
-    本机与集群租约，并推进 fence 让旧 worker 复活写进来的结果一律作废。
-  - 三个出口：`hive unshelve <tid>` 放回 `ready`；
-    `hive unshelve <tid> --spawn-new --title "…"` 以搁置卡为模板另立一张
-    `ready` 新卡（继承 repo/base/priority/verify/depends_on，原卡保持搁置）；
-    `hive close <tid>` 废弃。卡面备注里也写着这三条命令。
-  - 不挂账：不进任何看板列、不进「共 N 个任务」活跃统计、`doctor` 不报、
-    不归档（冷热分离只收 `done`/`closed`）。`dispatch` / `hive take` /
-    MCP `hive_claim` / `hive land --all` 一律跳过；`retry` / `unassign` /
-    `block` 会拒绝搁置卡，唯一出口是 `unshelve`。`hive_whoami.todo` 单列
-    `shelved` 清单，免得封着封着就忘了。
-  - **排版用按钮，不加第 7 列**：六列已经够挤，搁置卡也不该跟活跃卡平级。
-    顶栏统计条常驻一枚低调的「搁置 N」，看板上方是一条默认收起的横条，点开才
-    展开卡片列表（原因 / 搁置时间 / 原状态 + 放回、另立、废弃三个按钮）；
-    搜索命中搁置卡时，折叠态会显示「有匹配」提示。详情抽屉也补了搁置信息块。
-  - 活跃列（待领取 / 进行中 / 待合并 / 异常）卡片加「搁置」按钮；
-    `/api/task` 白名单加 `shelve` / `unshelve` / `respawn`，均限 controller 角色，
-    `respawn` 校验标题并把新卡号回给前端。
-  - 派发指令加 `mode=shelved`：搁置卡的「复制」拿到的是写明**不要领取**的搁置说明，
-    而不是一句「请领取任务」把 agent 又勾回来（JSON 输出也不带 `claim_tool`）。
-  - `hive top`（TUI）加第五组「搁置」，计数常驻但排在最后，不抢前四组注意力。
-- **看板「留言」：跨机给 agent 递话的聊天框**。机器 A 对某张卡的理解/疑问、
-  对机器 B 上另一个 agent 的指点，以前只能贴到某个窗口再口口相传；现在看板右下角
-  点「留言」就能发。频道三种：`hall`（大厅）、`task:T-0231`（某张卡的讨论线程）、
-  `agent:名字`（私信）。任务卡和详情抽屉里都有「讨论 n」入口，点了直接进那张卡的线程。
-  - 存储走集群而不是 git：worker 的 worktree / MCP 的独占 clone 每轮都
-    `reset --hard origin/main`，写进仓里的留言会被冲掉；`git push` 也撑不起秒级。
-  - 每个节点 `~/.hive/cluster/chat.jsonl` 追加一份（一行一条 JSON），内存保留最近
-    2000 条；follower 每 2 秒向主节点增量拉取，主节点不可达时本地留存（看板照样能看能发）。
-  - 接口：`GET/POST /api/cluster/chat`（集群）、`GET/POST /api/chat`（看板，带写鉴权，
-    集群不在时降级到 `~/.hive/chat/chat.jsonl`）。
-- **`hive chat post / list / wait`**（`--task` / `--agent` / `--scope`、`--kind
-  note|question|answer`、`--unread --mark-read`、`--json`）。`wait` 是长轮询，
-  agent 干到一半想知道有没有人留话，用它比反复 list 省事；未读水位记在
-  `~/.hive/chat-seen.json`，每台机器各记各的。
-- **MCP 工具 `hive_chat_post` / `hive_chat_read`**：agent 可以直接把疑问、跨任务的
-  经验发出来，也能读到「大厅 + 私信 + 我名下各卡」的留言；`hive_claim` 会把这张卡的
-  留言回在 `chat` 字段里，并落一份到 worktree 的 `.hive/chat.md`。
-- `hive prompt` 渲染派发指令时，自动把该卡的留言附在末尾（最多 10 条）。
-- **看板「复制派发指令」状态感知**：同一个按钮按卡的运行时状态渲染不同文本
-  （判定口径与看板分列对齐）。待合并卡复制出的是给主控的**合并指令**
-  （`mode=merge`：结果分支 `res/<tid>`、head、执行 agent、`hive land <tid> --apply`、
-  冲突处理），不再是叫人领取的旧文案，按钮文案也跟着改成「复制合并指令」；
-  异常卡（failed / blocked / 租约过期）在派发指令末尾附**溯源块**（`mode=abnormal`：
-  此前领取 agent、领取/异常时间、异常状态与摘要），重派时新 agent 知道前情；
-  其余状态 `mode=claim` 与旧行为逐字一致。`/api/dispatch-prompt` 响应新增 `mode`
-  字段；状态快照读不到时自动降级为原渲染，不影响复制。
-
 ### Fixed
+
+- **`cluster restart` 在 Windows 上误报「集群未能就绪」**。自检窗口写死 8s，
+  Microsoft Store 版 Python 冷启动 + 打开上百张卡的 store + 起 MCP/发现线程
+  很容易超过它，父进程返回 1，**但子进程没被杀、随后照样就绪**（实测 104
+  health 200、uptime 273s）。日志尾部的 `ConnectionResetError: [WinError 10054]`
+  只是探活/旧连接被重置的噪音，被当成崩溃原因贴出来，误导性极强。三处修复：
+  1. 窗口改为 `HIVE_CLUSTER_STARTUP_TIMEOUT`，Windows 默认 30s / 其它 15s；
+  2. 窗口用尽但进程仍活着 → 返回 0 并提示「启动较慢，稍后 status 确认」，
+     只有进程真退了才判失败（避免调用方据此反复 restart 去 kill 刚要起来的进程）；
+  3. `Handler.handle()` 就地吞掉 `ConnectionResetError` / `BrokenPipeError` /
+     `ConnectionAbortedError`，不再把 traceback 刷进日志。
+- **`win-sync-restart.ps1` 在探活之前就 throw**：`cluster restart` 一旦返回非 0
+  立刻中止，第 3 步探活根本没机会跑。改为非零只记警告，以 30 秒实际 health
+  探活定成败；探活成功时补一行说明「自检超时但服务已就绪」。
+- **幽灵节点会随节点重启从 `state.json` 复活**。上一轮只清了运行时内存 + 落盘，
+  但磁盘里若残留「同一 URL、两个 node_id」，重启 `_load_state()` 会原样读回，
+  心跳再把它续活（2026-11-06 重启 104 后复发即此链）。新增两道防护：
+  `_dedupe_node_urls_locked()` 在加载时按 URL 去重（本机自己优先，其余按
+  incarnation 取最新，被删身份若是 leader 则清 leader 指向）；
+  `_update_node_locked()` 拒绝同 URL 的旧身份写入/续命，只有确实更新的实例
+  才允许替换并清掉旧记录。已按 resign → leave → promote 再清一次，fb98 以
+  term 63 重新当选，两边 peers=2。
+- 测试：新增 8 项覆盖启动窗口/存活即成功/进程退出才失败/连接重置静默/
+  URL 去重/幽灵拒入/`--no-cluster` 透传/PS 脚本 BOM+CRLF 编码。
+
 
 - **幽灵节点复发：查清「删了又活」的根因并给出固定处置**。`_adopt_leader_locked()`
   收到「leader 是 X」的快照时会 `_update_node_locked(rec, touch=True)`，只要
@@ -259,6 +243,63 @@
 - **`test -f 'v4|v7'` 被垫片自己改坏**：旧顺序是「先转单引号、再交 `hive_compat.rewrite`」，
   产出 `run 'test -f "v4|v7"'`，cmd 剥掉内层双引号后 `|` 暴露成管道。
   改为垫片认得的写法先认领（`rewrite` 自带外层双引号保护），转引号只作用于其余命令。
+
+### Changed
+
+- 看板统计条多了常驻的「计划 N」入口（进行中数量），点它切到计划 Tab。
+
+- **任务状态「搁置」（`shelved`）：不能忘，但大部分时候可以忽略**。有些卡当前确实
+  做不了：打回 `ready` 只白占一个名额、还会干扰 agent 领取；一直挂在异常里也不对（情况
+  已知，租约/结果/进度这些现场完全可以释放）；直接删更不行，删了就真忘了。
+  - `hive shelve <tid> --reason "…"`：卡面写 `shelved` + `shelved_at` /
+    `shelved_from` / `shelve_reason` 和现场备注；**释放** `claim/` / `res/` /
+    `status/` 远端分支、`results/<tid>.json` 归档、`inbox/*/<tid>.md` 分派信号、
+    本机与集群租约，并推进 fence 让旧 worker 复活写进来的结果一律作废。
+  - 三个出口：`hive unshelve <tid>` 放回 `ready`；
+    `hive unshelve <tid> --spawn-new --title "…"` 以搁置卡为模板另立一张
+    `ready` 新卡（继承 repo/base/priority/verify/depends_on，原卡保持搁置）；
+    `hive close <tid>` 废弃。卡面备注里也写着这三条命令。
+  - 不挂账：不进任何看板列、不进「共 N 个任务」活跃统计、`doctor` 不报、
+    不归档（冷热分离只收 `done`/`closed`）。`dispatch` / `hive take` /
+    MCP `hive_claim` / `hive land --all` 一律跳过；`retry` / `unassign` /
+    `block` 会拒绝搁置卡，唯一出口是 `unshelve`。`hive_whoami.todo` 单列
+    `shelved` 清单，免得封着封着就忘了。
+  - **排版用按钮，不加第 7 列**：六列已经够挤，搁置卡也不该跟活跃卡平级。
+    顶栏统计条常驻一枚低调的「搁置 N」，看板上方是一条默认收起的横条，点开才
+    展开卡片列表（原因 / 搁置时间 / 原状态 + 放回、另立、废弃三个按钮）；
+    搜索命中搁置卡时，折叠态会显示「有匹配」提示。详情抽屉也补了搁置信息块。
+  - 活跃列（待领取 / 进行中 / 待合并 / 异常）卡片加「搁置」按钮；
+    `/api/task` 白名单加 `shelve` / `unshelve` / `respawn`，均限 controller 角色，
+    `respawn` 校验标题并把新卡号回给前端。
+  - 派发指令加 `mode=shelved`：搁置卡的「复制」拿到的是写明**不要领取**的搁置说明，
+    而不是一句「请领取任务」把 agent 又勾回来（JSON 输出也不带 `claim_tool`）。
+  - `hive top`（TUI）加第五组「搁置」，计数常驻但排在最后，不抢前四组注意力。
+- **看板「留言」：跨机给 agent 递话的聊天框**。机器 A 对某张卡的理解/疑问、
+  对机器 B 上另一个 agent 的指点，以前只能贴到某个窗口再口口相传；现在看板右下角
+  点「留言」就能发。频道三种：`hall`（大厅）、`task:T-0231`（某张卡的讨论线程）、
+  `agent:名字`（私信）。任务卡和详情抽屉里都有「讨论 n」入口，点了直接进那张卡的线程。
+  - 存储走集群而不是 git：worker 的 worktree / MCP 的独占 clone 每轮都
+    `reset --hard origin/main`，写进仓里的留言会被冲掉；`git push` 也撑不起秒级。
+  - 每个节点 `~/.hive/cluster/chat.jsonl` 追加一份（一行一条 JSON），内存保留最近
+    2000 条；follower 每 2 秒向主节点增量拉取，主节点不可达时本地留存（看板照样能看能发）。
+  - 接口：`GET/POST /api/cluster/chat`（集群）、`GET/POST /api/chat`（看板，带写鉴权，
+    集群不在时降级到 `~/.hive/chat/chat.jsonl`）。
+- **`hive chat post / list / wait`**（`--task` / `--agent` / `--scope`、`--kind
+  note|question|answer`、`--unread --mark-read`、`--json`）。`wait` 是长轮询，
+  agent 干到一半想知道有没有人留话，用它比反复 list 省事；未读水位记在
+  `~/.hive/chat-seen.json`，每台机器各记各的。
+- **MCP 工具 `hive_chat_post` / `hive_chat_read`**：agent 可以直接把疑问、跨任务的
+  经验发出来，也能读到「大厅 + 私信 + 我名下各卡」的留言；`hive_claim` 会把这张卡的
+  留言回在 `chat` 字段里，并落一份到 worktree 的 `.hive/chat.md`。
+- `hive prompt` 渲染派发指令时，自动把该卡的留言附在末尾（最多 10 条）。
+- **看板「复制派发指令」状态感知**：同一个按钮按卡的运行时状态渲染不同文本
+  （判定口径与看板分列对齐）。待合并卡复制出的是给主控的**合并指令**
+  （`mode=merge`：结果分支 `res/<tid>`、head、执行 agent、`hive land <tid> --apply`、
+  冲突处理），不再是叫人领取的旧文案，按钮文案也跟着改成「复制合并指令」；
+  异常卡（failed / blocked / 租约过期）在派发指令末尾附**溯源块**（`mode=abnormal`：
+  此前领取 agent、领取/异常时间、异常状态与摘要），重派时新 agent 知道前情；
+  其余状态 `mode=claim` 与旧行为逐字一致。`/api/dispatch-prompt` 响应新增 `mode`
+  字段；状态快照读不到时自动降级为原渲染，不影响复制。
 
 ## 0.15.2 — 2026-11-01
 

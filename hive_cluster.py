@@ -1387,6 +1387,11 @@ class Cluster:
             for nid, rec in nodes.items():
                 if isinstance(rec, dict):
                     self.nodes[str(nid)] = self._normalize_node(rec)
+        # 一个 IP:port 只能有一个身份。磁盘里若残留「同一 URL、两个 node_id」
+        # 的旧记录（机器改过名、或历史 leader 快照被写回），保留 incarnation
+        # 最新的那个，其余删掉 —— 否则重启后两个身份各算一票，两边都能凑到
+        # 多数、各自宣布当选，就是反复复发的「幽灵节点」。
+        self._dedupe_node_urls_locked()
 
         events = raw.get("events")
         if isinstance(events, list):
@@ -1563,6 +1568,42 @@ class Cluster:
             return "suspect"
         return "dead"
 
+    def _dedupe_node_urls_locked(self) -> None:
+        """磁盘加载后清理「同一 URL、多个 node_id」的重复身份。
+
+        一台机器一个端口只能跑一个节点进程。两个不同 id 却共用同一个
+        http://host:port，必然是一台机器改过名 / 旧实例记录没删干净。留着它
+        的后果很具体：两个身份各算一票，两边都能凑到多数、各自宣布当选；
+        而 ``_adopt_leader_locked`` 每次收到「leader 是 X」的快照都会给 X
+        ``touch=True`` 续命，所以单发 leave 删掉，下一拍又活。
+
+        保留规则：本机自己那条绝对不动；其余按 incarnation 取最新，同值取
+        node_id 字典序大的（确定性）。被删掉的身份若正是当前 leader，一并把
+        leader 指向清掉，让重启后重新选举。
+        """
+        by_url: dict[str, list[str]] = {}
+        for nid, rec in self.nodes.items():
+            url = str(rec.get("url") or "").rstrip("/")
+            if url:
+                by_url.setdefault(url, []).append(nid)
+        for url, nids in by_url.items():
+            if len(nids) < 2:
+                continue
+            keep = max(nids, key=lambda n: (
+                n == self.node_id,
+                int(self.nodes[n].get("incarnation") or 0),
+                n,
+            ))
+            for nid in nids:
+                if nid == keep:
+                    continue
+                self.nodes.pop(nid, None)
+                if self.leader_id == nid:
+                    self.leader_id = None
+                    self.leader_url = None
+                    self.leader_lease_until = 0.0
+                _log(f"集群状态加载：丢弃与 {url} 重复的旧身份 {nid}")
+
     def _update_node_locked(self, rec: dict, touch: bool = True,
                             joined: bool = False) -> bool:
         """合入一个节点记录。低化身号直接丢弃；返回是否写入。"""
@@ -1572,6 +1613,27 @@ class Cluster:
         if nid == self.node_id:
             return False
         incoming = self._normalize_node(rec)
+        # 同一个 IP:port 不可能同时属于两个活节点。心跳/快照若把一个 URL 相同、
+        # id 不同的旧身份送回来，多半是历史幽灵（配合 _adopt_leader_locked 的
+        # touch=True 会一直续命）。对方是本机、或对方化身号不比新来的旧时，
+        # 一律拒绝写入；只有确实更新的实例才允许替换，并顺手清掉旧身份。
+        url = str(incoming.get("url") or "").rstrip("/")
+        if url:
+            for other_id, other in list(self.nodes.items()):
+                if other_id == nid:
+                    continue
+                if str(other.get("url") or "").rstrip("/") != url:
+                    continue
+                newer = (int(incoming.get("incarnation") or 0)
+                         > int(other.get("incarnation") or 0))
+                if newer and other_id != self.node_id:
+                    self.nodes.pop(other_id, None)
+                    if self.leader_id == other_id:
+                        self.leader_id = None
+                        self.leader_url = None
+                        self.leader_lease_until = 0.0
+                    continue
+                return False
         known = self.nodes.get(nid)
         if known is not None:
             if incoming["incarnation"] < int(known.get("incarnation") or 0):
@@ -3329,6 +3391,17 @@ def build_handler(cluster: Cluster):
             if code >= 400:
                 sys.stderr.write("[hive-cluster] %s\n" % (fmt % args))
 
+        def handle(self):
+            # 客户端（探活、被 stop 掉的旧连接、浏览器刷新）提前断开时，
+            # readline/recv_into 会抛 ConnectionResetError(WinError 10054)。
+            # BaseHTTPRequestHandler 默认让 socketserver 把整段 traceback 打进
+            # stderr —— 服务完全没事，但日志尾部会堆满这种噪音，一旦别处报
+            # 「启动未就绪」就会被误读成崩溃原因。这里就地吞掉连接重置。
+            try:
+                super().handle()
+            except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+                self.close_connection = True
+
         def _send(self, code, payload):
             self._last_code = code
             body = _json_bytes(payload)
@@ -3607,6 +3680,17 @@ def _health_timeout() -> float:
     return _env_float("HIVE_CLUSTER_HEALTH_TIMEOUT", 3.0)
 
 
+def _startup_timeout() -> float:
+    """`_spawn_background` 等待新进程 health 就绪的窗口（秒）。
+
+    Windows 上默认给 30s：Microsoft Store 版 Python 冷启动 + 打开 store
+    （上百张卡）+ 起 MCP / UDP 发现线程，实测会超过原先写死的 8s。
+    `HIVE_CLUSTER_STARTUP_TIMEOUT` 可覆盖。
+    """
+    return _env_float("HIVE_CLUSTER_STARTUP_TIMEOUT",
+                      30.0 if os.name == "nt" else 15.0)
+
+
 def _local_health(config: Config, timeout: float | None = None):
     code, body = http_json(f"http://127.0.0.1:{config.port}/api/cluster/health",
                            timeout=_health_timeout() if timeout is None else timeout)
@@ -3816,7 +3900,13 @@ def _spawn_background(config: Config, args) -> int:
     # 代写过的后果链：父进程 spawn 失败（端口已被占）→ 仍把 pid 写成自己 → 立刻退出
     # → pid 文件指向一个死进程 → 下一轮 ensure 读不到活 PID 又去 spawn → 循环，
     # 且 `hive cluster stop` 按这个 PID 停不掉真正在服务的那个节点。
-    deadline = _now() + 8.0
+    #
+    # 自检窗口必须比「进程真正就绪」长。原先写死 8s，在 Windows 上会误判：
+    # Microsoft Store 版 Python 冷启动 + 打开 store（上百张卡）+ 起 MCP/发现线程，
+    # 很容易超过 8s，此时父进程返回 1，但子进程没被杀、随后照样启动完成 ——
+    # 用户看到「未能就绪」，实际服务好好的。更糟的是调用方据此再 restart 一次，
+    # 就会去 kill 一个刚要起来的进程。
+    deadline = _now() + _startup_timeout()
     while _now() < deadline:
         health = _local_health(config)
         if health:
@@ -3833,12 +3923,21 @@ def _spawn_background(config: Config, args) -> int:
         if proc.poll() is not None:
             break
         time.sleep(0.15)
+
+    # 窗口用尽但子进程还活着 = 只是启动慢，**不是失败**。返回 0 让调用方继续
+    # 探活，绝不报错（也绝不重复 spawn）。只有进程真的退了才判定启动失败。
+    if proc.poll() is None:
+        print(f"集群进程已拉起（pid={proc.pid}），但 {_startup_timeout():.0f}s 内"
+              f"尚未响应 health —— 常见于 Windows 冷启动，进程仍在初始化。\n"
+              f"请用 `hive cluster status` 稍后确认；日志 {config.log_path}",
+              file=sys.stderr)
+        return 0
     tail = ""
     try:
         tail = _tail_text(config.log_path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         pass
-    print(f"集群未能就绪（pid={proc.pid}）。日志：{config.log_path}\n{tail}",
+    print(f"集群启动失败：进程已退出（pid={proc.pid}）。日志：{config.log_path}\n{tail}",
           file=sys.stderr)
     return 1
 

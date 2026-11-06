@@ -4646,7 +4646,7 @@ class Hive:
 class Worker:
     def __init__(self, hive_dir: str, agent_name: str, keep_worktree=False,
                  hive_state: str | None = None, max_concurrency: int | None = None,
-                 open_pr: bool = False):
+                 open_pr: bool = False, no_cluster: bool = False):
         self.h = Hive(hive_dir)
         self.dir = self.h.dir
         self.name = agent_name
@@ -4658,6 +4658,11 @@ class Worker:
         self.h.sync_main()
         self.cfg = self.h.agent(agent_name)
         self.keep = keep_worktree
+        # 定时/一次性领取（work --once --no-cluster）不该顺手把本机集群服务拉起来：
+        # 那种模式下我们只要 git 拉取，集群是可选的，拉起反而会在 Windows 冷启动
+        # 时制造「未就绪」误报和端口抢占。cmd_work 启动时已经尊重 --no-cluster，
+        # 这里让 loop 每轮的 cluster_ensure 也一并尊重它。
+        self.no_cluster = no_cluster
         self.state = Path(hive_state or os.environ.get("HIVE_STATE")
                           or DEFAULT_STATE / "agents" / agent_name).expanduser()
         (self.state / "done").mkdir(parents=True, exist_ok=True)
@@ -5612,7 +5617,9 @@ class Worker:
         while True:
             try:
                 # 常驻 worker 同时盯一下本机集群：进程挂了就重新拉起。
-                cluster_ensure(self.dir)
+                # --no-cluster（定时/纯 git 领取）时整场都不碰集群服务。
+                if not self.no_cluster:
+                    cluster_ensure(self.dir)
                 # 同 __init__：轮询也不能裸 reset，否则常驻 worker 每隔 interval 秒
                 # 就把主工作区里未提交的改动抹一次。落后+脏时 sync_main 抛 HiveError，
                 # 下面本来就 catch 住并继续下一轮，不会崩。
@@ -6490,7 +6497,8 @@ def cmd_work(args) -> None:
     if not getattr(args, "no_cluster", False):
         cluster_ensure(args.dir)
     w = Worker(args.dir, args.agent, keep_worktree=args.keep, hive_state=args.state_dir,
-               max_concurrency=args.max_concurrency, open_pr=getattr(args, "pr", False))
+               max_concurrency=args.max_concurrency, open_pr=getattr(args, "pr", False),
+               no_cluster=getattr(args, "no_cluster", False))
     w.loop(once=args.once, interval=args.interval)
 
 

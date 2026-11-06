@@ -112,13 +112,19 @@ $after = (git -C $repo rev-parse --short HEAD)
 Write-Host "  $before -> $after"
 
 # --- 2) 重启节点（用官方 restart：读 config.json、detached 拉起、自检健康）----
+# restart 的退出码**不是**服务是否活着的判据：它内部有一段自检窗口，
+# Windows 冷启动超过窗口时会返回 1，但子进程没被杀、随后照样就绪。
+# 所以非零只记警告，交给第 3 步实际探活定成败。
 Write-Host "`n=== 2) 重启集群服务 ===" -ForegroundColor Cyan
 & $py $hivePy '--dir' $coord 'cluster' 'restart'
-if ($LASTEXITCODE -ne 0) { throw "cluster restart 返回 $LASTEXITCODE，看 $env:USERPROFILE\.hive\cluster\ 下的日志" }
+$restartRc = $LASTEXITCODE
+if ($restartRc -ne 0) {
+    Write-Warning "cluster restart 返回 $restartRc（可能只是自检窗口超时），继续探活确认"
+}
 
-Write-Host "`n=== 3) 探活 ===" -ForegroundColor Cyan
+Write-Host "`n=== 3) 探活（以实际 health 为准）===" -ForegroundColor Cyan
 $ok = $false
-for ($i = 0; $i -lt 20; $i++) {
+for ($i = 0; $i -lt 30; $i++) {
     try {
         $h = Invoke-RestMethod 'http://127.0.0.1:8788/api/cluster/health' -TimeoutSec 3
         if ($h.ok) {
@@ -129,7 +135,12 @@ for ($i = 0; $i -lt 20; $i++) {
     } catch { }
     Start-Sleep -Seconds 1
 }
-if (-not $ok) { Write-Warning "20 秒内没探活成功，请看日志：hive cluster status" }
+if (-not $ok) {
+    throw "30 秒内探活失败，集群服务确实没起来。看 $env:USERPROFILE\.hive\cluster\cluster.log"
+}
+if ($restartRc -ne 0) {
+    Write-Host "  （restart 自检超时，但服务实际已就绪，无需处理）" -ForegroundColor Yellow
+}
 
 # --- 4) 可选：开远程通道 -----------------------------------------------------
 if ($EnableRemote) {

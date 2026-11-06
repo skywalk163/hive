@@ -104,3 +104,39 @@ def test_readme_links_new_docs():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     for name in ("租约与fencing", "PR自动化", "看板写操作与鉴权", "windows-baseline"):
         assert name in readme, f"README 没有指向 {name}"
+
+
+def test_no_cluster_reaches_worker_loop(monkeypatch, tmp_path):
+    """--no-cluster 必须全程生效：loop 每轮也不能再去拉起集群服务。"""
+    import hive
+    seen = {}
+
+    class FakeWorker:
+        def __init__(self, *a, **kw):
+            seen["no_cluster"] = kw.get("no_cluster")
+        def loop(self, once=False, interval=30):
+            seen["loop"] = (once, interval)
+
+    monkeypatch.setattr(hive, "Worker", FakeWorker)
+    monkeypatch.setattr(hive, "cluster_ensure",
+                        lambda *_a, **_k: (_ for _ in ()).throw(
+                            AssertionError("--no-cluster 下不该拉起集群")))
+    args = hive.build_parser().parse_args(
+        ["work", "--agent", "a", "--once", "--no-cluster"])
+    hive.cmd_work(args)
+    assert seen["no_cluster"] is True
+    assert seen["loop"][0] is True
+
+
+def test_windows_scheduled_work_script_encoding():
+    """含中文注释的 PS 5.1 脚本必须 UTF-8 BOM + CRLF，否则按 ANSI 解码会语法错。"""
+    from pathlib import Path
+    p = Path(__file__).resolve().parents[1] / "scripts" / "win-scheduled-work.ps1"
+    raw = p.read_bytes()
+    assert raw[:3] == b"\xef\xbb\xbf", "缺 UTF-8 BOM"
+    assert b"\r\n" in raw, "不是 CRLF"
+    assert raw.replace(b"\r\n", b"").count(b"\n") == 0, "混入了裸 LF"
+    text = raw.decode("utf-8-sig")
+    for token in ("git", "pull", "--ff-only", "work", "--once", "--no-cluster",
+                  "schtasks", "Minutes", "Mutex", "-RunNow"):
+        assert token in text, f"脚本缺少 {token}"

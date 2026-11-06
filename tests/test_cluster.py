@@ -898,3 +898,124 @@ def test_zero_jitter_still_orders_by_priority(cluster_factory):
     with b.lock:
         db = b._election_delay_locked()
     assert db < da, (da, db)
+
+
+# --------------------------------------------------------------------------- #
+# 重启 / 启动自检 / 幽灵节点防护（2026-11-06 Windows 节点重启误报复盘）
+# --------------------------------------------------------------------------- #
+
+def test_startup_timeout_is_longer_on_windows(monkeypatch):
+    """Windows 冷启动 > 8s 曾让 restart 误报失败；窗口要更长且可由 env 覆盖。"""
+    monkeypatch.delenv("HIVE_CLUSTER_STARTUP_TIMEOUT", raising=False)
+    monkeypatch.setattr(hc.os, "name", "nt")
+    assert hc._startup_timeout() == 30.0
+    monkeypatch.setattr(hc.os, "name", "posix")
+    assert hc._startup_timeout() == 15.0
+    monkeypatch.setenv("HIVE_CLUSTER_STARTUP_TIMEOUT", "45")
+    assert hc._startup_timeout() == 45.0
+
+
+def test_spawn_alive_but_slow_is_not_a_failure(monkeypatch, tmp_path):
+    """自检窗口用尽但子进程仍活着 = 启动慢，不是失败，返回 0 且不再 spawn。"""
+    cfg = hc.Config(state_dir=tmp_path / "st", name="slow",
+                    host="127.0.0.1", port=0, advertise="127.0.0.1",
+                    discover=False, hive_dir=tmp_path / "repo")
+
+    class FakeProc:
+        pid = 4242
+        def poll(self):
+            return None          # 一直活着
+
+    monkeypatch.setattr(hc, "_local_health", lambda *a, **k: None)
+    monkeypatch.setattr(hc, "_startup_timeout", lambda: 0.05)
+    monkeypatch.setattr(hc.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(hc.subprocess, "Popen", lambda *a, **k: FakeProc())
+    monkeypatch.setattr(hc, "_tail_text", lambda *a, **k: "ConnectionResetError noise")
+    rc = hc._spawn_background(cfg, argparse.Namespace())
+    assert rc == 0, "进程还活着却被判成启动失败，会导致调用方反复 restart"
+
+
+def test_spawn_dead_process_is_a_failure(monkeypatch, tmp_path):
+    """进程真的退了才返回非 0。"""
+    cfg = hc.Config(state_dir=tmp_path / "st2", name="dead",
+                    host="127.0.0.1", port=0, advertise="127.0.0.1",
+                    discover=False, hive_dir=tmp_path / "repo2")
+
+    class FakeProc:
+        pid = 4343
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(hc, "_local_health", lambda *a, **k: None)
+    monkeypatch.setattr(hc.subprocess, "Popen", lambda *a, **k: FakeProc())
+    monkeypatch.setattr(hc, "_tail_text", lambda *a, **k: "real traceback")
+    assert hc._spawn_background(cfg, argparse.Namespace()) == 1
+
+
+def test_http_handler_swallows_connection_reset(monkeypatch):
+    """探活/旧连接断开抛 10054 时不能把 traceback 刷进日志（会被误读成崩溃）。"""
+    Handler = hc.build_handler(object())
+
+    def boom(self):
+        raise ConnectionResetError(10054, "forcibly closed")
+
+    monkeypatch.setattr(hc.BaseHTTPRequestHandler, "handle", boom)
+    d = Handler.__new__(Handler)
+    d.close_connection = False
+    Handler.handle(d)          # 不该抛
+    assert d.close_connection is True
+
+
+def test_load_state_dedupes_same_url_ghost(cluster_factory):
+    """磁盘里同一 URL 的两个身份，加载后只留一个，且不再指向被删的 leader。"""
+    a = cluster_factory("dedupe")
+    ghost = "ghost-old-id"
+    real = a.node_id
+    state_path = a.config.state_path
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps({
+        "term": 62,
+        "nodes": {
+            real: {"id": real, "url": "http://10.0.0.9:8788",
+                   "incarnation": 200, "name": "real"},
+            ghost: {"id": ghost, "url": "http://10.0.0.9:8788",
+                    "incarnation": 100, "name": "ghost"},
+        },
+        "leader_id": ghost,
+        "leader_url": "http://10.0.0.9:8788",
+        "leader_lease_until_epoch": 0.0,
+    }), encoding="utf-8")
+
+    cfg = hc.Config(state_dir=a.config.state_dir, name=a.config.name,
+                    host="127.0.0.1", port=0, advertise="127.0.0.1",
+                    discover=False, hive_dir=a.config.hive_dir)
+    c2 = hc.Cluster(cfg)
+    with c2.lock:
+        # __init__ 之后 _put_self_node() 会用本机真实 URL 覆盖 self 记录，
+        # 所以这里只验「幽灵被删 + leader 不再指向它」。
+        assert ghost not in c2.nodes
+        assert c2.leader_id != ghost
+        # 再直接验一次去重本身：同 URL 只留一个身份。
+        c2.nodes[real] = {"id": real, "url": "http://10.0.0.9:8788",
+                          "incarnation": 200, "name": "real"}
+        c2.nodes[ghost] = {"id": ghost, "url": "http://10.0.0.9:8788",
+                           "incarnation": 100, "name": "ghost"}
+        c2.leader_id = ghost
+        c2._dedupe_node_urls_locked()
+        urls = [str(r.get("url") or "").rstrip("/") for r in c2.nodes.values()]
+        assert urls.count("http://10.0.0.9:8788") == 1, urls
+        assert ghost not in c2.nodes
+        assert c2.leader_id != ghost
+
+
+def test_update_node_rejects_same_url_ghost(cluster_factory):
+    """心跳把同 URL 的旧身份送回来时拒绝续命，避免 _adopt_leader touch 复活。"""
+    a = cluster_factory("ghostguard")
+    mine = {"id": "real-node", "url": "http://10.0.0.9:8788",
+            "incarnation": 200, "name": "real"}
+    ghost = {"id": "ghost-node", "url": "http://10.0.0.9:8788",
+             "incarnation": 100, "name": "ghost"}
+    with a.lock:
+        assert a._update_node_locked(mine) is True
+        assert a._update_node_locked(ghost) is False
+        assert "ghost-node" not in a.nodes
