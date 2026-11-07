@@ -1,0 +1,39 @@
+{
+  "task": "T-0265",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0265",
+  "base": "main",
+  "head": "511b0bfd364db2f6b0c3e1129367075dbbad380c",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-07T22:31:52+08:00",
+  "finished_at": "2026-11-07T22:32:56+08:00",
+  "duration_s": 64.1,
+  "verify": [
+    {
+      "cmd": "python scripts/check_version_consistency.py",
+      "code": 0,
+      "tail": [
+        "版本号来源校验：",
+        "  src/version.py       = 0.4.1",
+        "  pyproject.toml       = 0.4.1",
+        "",
+        "✅ 一致：所有来源版本号相同（0.4.1）。"
+      ]
+    }
+  ],
+  "summary": "# T-0265 交付说明\n\n把版本号一致性校验从 light 专用下沉为四仓共用，同时保持默认模式逐字向后兼容。\n\n## 改动\n- `scripts/check_version_consistency.py`：新增 `--repo <路径>` 跨仓模式。按存在性自动探测\n  `pyproject.toml` / `src/version.py` / `hive.py VERSION` / `CHANGELOG.md 首条` / `cli --version` / 最近 tag；\n  比较时统一去掉前导 `v`；按各仓单一真源给出「谁 != 谁」与「该改成什么」，跨仓不一致 rc=1，目录不存在 rc=2。\n  默认模式（无 `--repo`）完全走旧逻辑：只查 `src/version.py` + `pyproject.toml`（`--git` 再查 tag），\n  输出文案与退出码不变。\n- `docs/版本号口径.md`（新增 82 行）：四仓单一真源表、探测点、跨仓用法与退出码、铁规、\n  hive 修复建议（`pyproject.toml` 0.1.0 → 0.15.2，已拆 T-0272，本卡不改 hive）、向后兼容说明。\n\n## 验收实测（worktree 内）\n1. `python scripts/check_version_consistency.py` → rc=0，输出 `src/version.py = 0.4.1`、`pyproject.toml = 0.4.1`、`✅ 一致`。\n2. `python scripts/check_version_consistency.py --repo /Users/skywalk/dswork/hive` → rc=1，\n   输出 `✗ pyproject.toml(0.1.0) != hive.py VERSION(0.15.2)` 与建议「pyproject.toml 改为 0.15.2（以 hive.py VERSION 为准，运行时真源）」。\n3. `python scripts/check_version_consistency.py --repo .` → rc=0，5 个探测点均为 0.4.1。\n4. `test -f docs/版本号口径.md && wc -l` → 存在，82 行。\n\n补充取证：`--repo lightmem`（仅 tag v0.1.0）rc=0；`--repo lightharness`（CHANGELOG 0.5.0-rc1 与 tag 一致）rc=0；\n本机无 `~/dswork/lightplugin`，`--repo` 返回 rc=2「目录不存在」（未伪造结果）。\n\n## 向后兼容证据\n用 `git show HEAD:scripts/check_version_consistency.py` 取旧版，在 /tmp 以同样输入并排比对：\n默认 / `--git` / `--strict` 三种输出 `diff -u` 均 IDENTICAL，rc 均为 0；\n另造「version.py 0.4.1 vs pyproject 9.9.9」不一致场景：非 strict 两版均 rc=0 且提示相同，\nstrict 两版均 rc=1 且文案相同，`--git` 无 tag 时两版均显示 `(未找到)`。\n\n## 风险 / 遗留\n- `hive` 的不一致仍真实存在，本卡只报告；修复走 T-0272。\n- 本机缺 lightplugin 仓，该仓未实测；其口径只有「最近 tag」一条，逻辑与 lightmem 相同。\n- 未改 hive/lightmem/lightharness/lightplugin 任何文件；未写 token/密钥/IP。\n\n## 过程说明\n首轮曾在本地先 commit 再 submit，触发结果闸门的「零改动」判定（verify 实际 rc=0），判为 failed；\n已 `hive retry T-0265 --fresh` 清掉旧结果后重新领取，把两个文件以未提交状态交付，本条结果由 hive 的\nsubmit 统一提交（task 分支 head 会带上全部改动）。MCP 的 `hive_submit` 在本机常驻进程上报\n`'float' object has no attribute 'isoformat'`（该进程未重启、属旧代码），改用等价的 `hive submit` CLI 入口完成。",
+  "error": "",
+  "declared_paths": [
+    "scripts/check_version_consistency.py",
+    "docs/版本号口径.md"
+  ],
+  "changed_files": [
+    "scripts/check_version_consistency.py",
+    "docs/版本号口径.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "9006c1cfb261416f86070d561fd86c08"
+}
