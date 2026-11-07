@@ -48,7 +48,8 @@ assignees: ''
 - hive 版本： [运行 `python3 hive/hive.py --version` 的输出，例如 0.15.2]
 - Git 版本： [运行 `git --version` 的输出]
 - 部署形态： [单机 / 多机（几台）；有没有跑 `hive cluster start`；claim 后端是 Git 还是 `--store`]
-- agent 模式： [exec / verify / manual；`hive work` 还是 MCP 自助领卡]
+- agent 模式： [exec / verify / manual / accept；常驻 worker / MCP 自助 / 定时 accept]
+- 接单窗口： [accept 模式填 `accept_window_minutes`；常驻 orchestrate/hived 改代码后是否重启]
 
 ## 附加上下文
 

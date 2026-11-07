@@ -36,6 +36,10 @@ token 在运行 hived 的机器上由人执行 `hive agent enroll --name <你的
 
 然后按顺序调：`hive_whoami` → `hive_next` → `hive_claim` → 干活 → 写 `.hive/summary.md` → `hive_submit` → `hive_result`。
 
+> 若你的 agent 是 **`accept`（派单—接单）模式**：第 2 步 `hive_next` 只推荐派给你的卡，
+> 第 3 步改调 `hive_accept`。它先校验派单对象，不会领走别人的单；CLI 等价命令是
+> `hive accept T-xxxx --agent <你的agent名>`。
+
 三条最容易踩的：
 
 1. **`--dir` 必须写在 `mcp` 后面**，写在前面会被静默忽略（见 §5.1）。

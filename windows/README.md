@@ -171,13 +171,21 @@ powershell -ExecutionPolicy Bypass -File C:\hive\windows\bootstrap.ps1 `
    路线才需要，**走 MCP 的话不用装**；
 7. 尝试把 `C:\src`、`C:\hive-wt` 加进 Defender 排除项（需要管理员）。
 
-## 2. 三种模式
+## 2. 四种模式
 
 | 模式 | 启动参数 | 用途 |
 |---|---|---|
 | `verify` | `-Mode verify` | 只跑验收，不调用 agent；**Windows 默认** |
 | `manual` | `-Mode manual -Command ...` 或 `-Launch` | Trae / CodeArts / dumate 改完，人补 summary |
 | `exec` | `-Mode exec -Command "claude -p"` | 有 CLI agent 时全自动 |
+| `accept` | `-Mode accept` | 派单—接单：定时任务唤起 AI 自己接单（推荐，见下） |
+
+**`accept`（派单—接单）最适合 Windows 定时接单**：本机不需要常驻 worker、不需要 AI CLI，
+只要一个每小时唤起 AI 的计划任务；主控 `assign`/`dispatch` 把单派过来，AI 自己
+`hive accept T-xxxx --agent <name>` 接单 → 干活 → `hive submit`。接单窗口默认 180 分钟，
+不会被 watchdog 的 10 分钟快速通道抢走。完整 prompt 见
+`docs/子agent定时领取-prompt.md`，机制见 `docs/主控与分发.md` §4.6。
+注意：**别用 `take` 接单**——它不校验派单对象，会领走派给别的机器的卡。
 
 `verify` 模式不需要任何 agent CLI。Windows 专属 bug 的三卡闭环：
 

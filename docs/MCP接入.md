@@ -29,6 +29,7 @@ CLI 的问题是人要敲。agent 能调 MCP 之后，闭环里就少一个人�
 |---|---|---|
 | 我有什么活 | 人跑 `hive status` 念给 agent 听 | agent 自己 `hive_next` |
 | 领卡抢锁 | 人跑 `hive take --agent x` | agent 自己 `hive_claim` |
+| 接单（accept） | 人跑 `hive accept --agent x` | agent 自己 `hive_accept`（只接派给自己的单） |
 | 交活 | 人跑 `hive submit` | agent 自己 `hive_submit` |
 | 卡住了 | 卡到租约过期，等人 `gc` | agent 自己 `hive_abort` 把卡还回去 |
 
@@ -292,6 +293,9 @@ python3 -m pytest tests/test_mcp.py -q
 
 ### 11.2 本机实测值
 
+> 下表是 **v0.9.12 当时的实测记录**；2026-11-07 新增 `hive_accept` 后，worker 工具数
+> 已从 15 → **16**（controller 视角 22 → 23），其余实测值不变。
+
 | 项 | 实测值 |
 |---|---|
 | `serverInfo` | `{"name": "hive", "version": "0.9.12"}` |
@@ -307,7 +311,7 @@ python3 -m pytest tests/test_mcp.py -q
 
 ### 11.3 工具何时出现
 
-配置写进 `mcp.json` 后**不保证当场生效**：实测本会话内热加载没把 15 个工具注册进来，
+配置写进 `mcp.json` 后**不保证当场生效**：实测本会话内热加载没把当时那 15 个工具注册进来，
 重启客户端后才有（日志出现 `mcp/ready count=<原数+14>`）。
 
 判断成功的标准，按从便宜到贵的顺序：

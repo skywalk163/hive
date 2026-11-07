@@ -20,8 +20,15 @@
     下一轮定时任务照样能接。
   - `agent add --mode accept --accept-window-minutes N`；`agent add` 与看板保存配置
     都会继承已有的 `accept_window_minutes`，不会被重新登记冲掉。
+  - 部署生效边界：`orchestrate`/`hived` 是常驻进程，改完 hive.py 必须重启；
+    13:13 提交后旧 orchestrate（11-06 启动）13:29 又按 10 分钟窗口回收了 8 张卡。
   - 文档：`docs/主控与分发.md` §2 / §4.6、`README.md` 模式表、
     `docs/子agent定时领取-prompt.md`（`take` → `accept`）、`docs/MCP接入.md`。
+  - 文档口径全量对齐（2026-11-07 下午）：操作手册补 watchdog 三条窗口与部署生效边界、
+    使用指南/AGENT快速上手/windows README/架构与排障全景/多机并行开发/issue 模板补 accept；
+    所有「三种模式」→「四种模式」、工具计数 15→16 / 22→23；删掉定时 prompt 里
+    「旧版可回退 take」的许可（`take` 不校验派单对象，现场抢过别人的单），
+    以及零引用的重复分卷 `docs/MCP接入_section11.md`（工具数还停在旧版 14）。
 - **Windows agent「定时领取」：`scripts/win-scheduled-work.ps1`**。hive 本来就是拉取式
   worker（`hive.py` 文件头第 11 行：只要能 git fetch/push 就不需要被 SSH 进来），
   常驻 worker 只是其中一种实现。新脚本用计划任务每 N 分钟（15/30/60/120，

@@ -52,7 +52,8 @@ inbox 里的 done 旧卡直接跳过，但不要删除任何 inbox 文件（清�
   {{PYTHON}} hive.py --dir . accept T-xxxx --agent {{AGENT}}
 accept 会先校验这张单确实派给我，再抢租约、写 accepted_at、建独立 worktree，
 并在输出里给出工作目录和 task.md 路径。
-- 旧版 hive 没有 accept 命令时才回退 take（take 不校验派单对象，务必自己先核对 owner）。
+- **不要回退 take**：`take` 不校验派单对象，会领走派给别人的单（2026-11-07 现场
+  T-0261 被另一台 agent 用 take 领走）。没有 accept 命令就先升级 hive，别用 take 凑合。
 - 报「派给了 XX，不是你」→ 跳过这张，不要改卡、不要重试。
 - 不要用 claim：它只抢锁不写 owner，后面 submit 会报「没有 owner」。
 - 不要运行 hive work / worker：那是另一套领取机制，和本定时任务并行会重复领卡；
@@ -94,7 +95,8 @@ cd 进 take 输出的 worktree，完整读 .hive/task.md，严格按卡面执行
    只领「已经派给我的」，不要自己挑「适合的任务」、不要领别人的卡、不要删 inbox 文件。
    没有 → 输出「本轮无任务」立即结束，不要改任何文件、不要空提交。
 2. {{PYTHON}} hive.py --dir . accept T-xxxx --agent {{AGENT}}（只接派给我的单；
-   旧版无 accept 才用 take；不要用 claim，不要跑 hive work）。报被别人领走就跳过、不重试。
+   绝不回退 take——它不校验派单对象会抢别人的单；不要用 claim，不要跑 hive work）。
+   报被别人领走就跳过、不重试。
 3. cd 到它给的 worktree，完整读 .hive/task.md 干活：只改允许路径、按 verify 自测、
    不 git commit/push、必写 .hive/summary.md（成功失败都写）。
 4. {{PYTHON}} hive.py --dir . submit T-xxxx，看输出确认 done/failed，别自己改卡面。
@@ -144,11 +146,10 @@ python3 hive.py --dir . assign T-xxxx --agent trae-win      # 卡进 inbox/trae-
 ```
 
 或在建卡时直接指定 agent。子 agent 下一轮（最坏 1 小时）就会领走。
-注意 `dispatch` 自动派卡要求该 agent 标了 `dispatchable`；**手动 `assign` 不受这个限制**。
-
 **派单—接单（`accept`）模式**（推荐）：把定时接单的机器登记成 `--mode accept`，
 `dispatch --apply` 就能直接派给它（不需要 `dispatchable`），接单窗口默认 180 分钟，
-卡不会在定时任务醒来前被 watchdog 回收。详见 `docs/主控与分发.md` §4.6。
+卡不会在定时任务醒来前被 watchdog 回收；手动 `assign` 则不受 `dispatchable` 限制。
+详见 `docs/主控与分发.md` §4.6。
 
 ⚠️ **双写坑**：本机 `claim_backend=store` 时 `assign` **只写 store**，
 不写 Git 卡面 / `inbox/`；而定时任务读的是 Git 卡面，会看不到派单。两条都要跑：

@@ -184,7 +184,8 @@ python3 hive\hive.py --dir hive agent add --name win10 --mode verify `
 
 > `exec` 的约定：**任务提示词从 stdin 传入**，进程的 cwd 就是任务 worktree。
 > `dsh --profile headless -` 正好满足；Claude Code 用 `claude -p`；Codex 用 `codex exec -`。
-> 国产 GUI agent 大多没有 CLI，用 `verify` 或 `manual`（见 §6、§7）。
+> 国产 GUI agent 大多没有 CLI：只验收用 `verify`，人点 IDE 用 `manual`，
+> **只有定时任务、想让 AI 自己来接单就用 `accept`**（见 §2 模式表、`docs/主控与分发.md` §4.6）。
 
 ## 3. 建卡与分派（总控做的事）
 
@@ -273,6 +274,7 @@ python3 hive/hive.py --dir hive pr T-0101 --dry-run
 
 # 不跑 worker 的人工链路（GUI agent 场景，与该 agent 的 worker 二选一）
 python3 hive/hive.py --dir hive take   T-0101 --agent workbuddy
+python3 hive/hive.py --dir hive accept T-0101 --agent workbuddy   # accept 模式接单（校验派单对象）
 python3 hive/hive.py --dir hive submit T-0101
 python3 hive/hive.py --dir hive submit T-0101 --pr   # 提交后顺手开 PR
 ```
@@ -354,7 +356,8 @@ chroot 里的小浣熊 / WorkBuddy 的完整接法（共享 `/home`、manual wor
 - 小浣熊这种深链登录、沙箱受限的 Electron 客户端；
 - 暂时不想给 agent 配 API key 的机器。
 
-**小浣熊接 MCP 的现成配置**（已在 `~/.box-agent/config/mcp.json` 验证可用，15 个工具）：
+**小浣熊接 MCP 的现成配置**（已在 `~/.box-agent/config/mcp.json` 验证可用，当时 15 个工具；
+新增 `hive_accept` 后 worker 工具为 16 个）：
 
 ```json
 {"command": "python3",
@@ -417,7 +420,7 @@ PORT=8787 INTERVAL=20 ./hive/scripts/serve-dashboard.sh
 
 五列看板（待领取 / 进行中 / 待合并 / 异常 / 已关闭），租约过期实时变红，
 支持仓库/owner/搜索筛选、详情抽屉、深浅色。零依赖静态页，`serve.py` 只用标准库。
-看板**只读**，写操作走 CLI（`take` / `submit` / `close` / `retry`）。
+看板**只读**，写操作走 CLI（`assign` / `accept` / `take` / `submit` / `close` / `retry`）。
 说明见 [dashboard/README.md](dashboard/README.md)，实跑验收见
 [dashboard/VERIFICATION.md](dashboard/VERIFICATION.md)。
 
