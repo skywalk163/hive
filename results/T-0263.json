@@ -1,0 +1,33 @@
+{
+  "task": "T-0263",
+  "agent": "trae-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0263",
+  "base": "main",
+  "head": "2c980a7dc2c49b3d96c6f6eaa79d256f92fb95e9",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T00:25:39+08:00",
+  "finished_at": "2026-11-08T00:25:39+08:00",
+  "duration_s": 0.7,
+  "verify": [
+    {
+      "cmd": "python -c \"import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml')); print('yaml ok')\"",
+      "code": 0,
+      "tail": [
+        "yaml ok"
+      ]
+    }
+  ],
+  "summary": "# T-0263 完成总结\n\n## 做了什么\n改造 lightharness 的 GitHub Actions CI（`.github/workflows/ci.yml`），消除「克隆失败仍绿」的假绿路径，并用能力探针替代硬编码 commit 校验。\n\n## 改了哪些文件\n- `.github/workflows/ci.yml`（唯一改动，卡面允许范围内）\n\n## 具体改动\n1. job 开头新增「前置：确认测试对 light 编译器的依赖是硬依赖」步骤，日志写明缺 sibling 必须红、不得 skip。\n2. 「检出 light-merge 编译器」→「检出 light 编译器（语言本体）」：`|| echo warning` 改为 `if ! git clone ...; then echo \"::error title=light 编译器检出失败::...\"; exit 1; fi`，失败显式红；未配置 `LIGHT_MERGE_REPO` 时 `::notice` + 默认地址作为 fallback（不会因此失败）。\n3. 删除 `EXPECT=5610f44a2b7d6970a9a185bccba578e13b9a7657` 与回退重克隆整段，新增「校验 light 编译器可用（能力探针，替代硬编码 commit）」：`python -m cli.light_unified --version` + 落地 `/tmp/_lh_hello.light` 并 `run`。\n未改 `timeout-minutes: 30`、`PYTHON_VERSION: \"3.13\"`，未引入 `continue-on-error`，未改测试代码，未写 token/密钥/IP。\n\n## 验证结果\n- `python -c \"import yaml; yaml.safe_load(open('.github/workflows/ci.yml')); print('yaml ok')\"` → yaml ok\n- 残留检查（`测试将跳过` / `continue-on-error` / `EXPECT=5610f44a`）→ 无输出\n- 本机能力探针实测（light-merge 仓，venv python）：\n  - `python -m cli.light_unified --version` → `光明 v0.4.1`\n  - hello 程序 `打印(\"hello\")` → 输出 `hello`，exit 0\n- 故意失败模拟（git bash，REPO 指向不存在的地址）：`if ! git clone ...; then echo \"::error::...\"; exit 1; fi` → 退出码 1（诚实红）\n\n## 遗留风险 / 需业主操作\n- `vars.LIGHT_MERGE_REPO` 无法在本机设置：需业主在 GitHub 仓库 Settings → Variables 配置；未配置时走硬编码默认地址 `https://gitcode.com/skywalk163/light.git`，不会导致失败。\n- 本机模拟时 Windows Git Bash 下 echo 有 `Bad file descriptor` 噪声（PowerShell 管道所致），失败分支退出码 1 已验证；GitHub ubuntu runner 不受影响。\n- 能力探针依赖 light 仓 requirements（`python -m cli.light_unified` 若需额外依赖，走 lightharness 同环境 python；本机实测通过）。",
+  "error": "",
+  "declared_paths": [
+    ".github/workflows/ci.yml"
+  ],
+  "changed_files": [
+    ".github/workflows/ci.yml"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
