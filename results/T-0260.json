@@ -1,0 +1,52 @@
+{
+  "task": "T-0260",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0260",
+  "base": "main",
+  "head": "d939a68727f627def22f02cad82cf770dc9d839a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-07T21:59:21+08:00",
+  "finished_at": "2026-11-07T22:06:54+08:00",
+  "duration_s": 453.9,
+  "verify": [
+    {
+      "cmd": "python hive.py doctor",
+      "code": 0,
+      "tail": [
+        "[WARN] 任务 T-0256 只有弱验收（grep/test -f 之类），成果没被真正执行验证",
+        "[WARN] 任务 T-0257 只有弱验收（grep/test -f 之类），成果没被真正执行验证",
+        "[WARN] 任务 T-0258 只有弱验收（grep/test -f 之类），成果没被真正执行验证",
+        "[WARN] T-0262: 有结果却还停在 assigned（land_lag，该去 land 了）",
+        "[ OK ] 161 张任务，15 个 agent，1 个进行中租约，6 个待合并结果"
+      ]
+    },
+    {
+      "cmd": "python hive.py agent list",
+      "code": 0,
+      "tail": [
+        "raccoon          host=fb98     abilities=[] caps=['gui', 'chroot', 'linux'] manual",
+        "trae-mac         host=laiweilidemacbook-air.local abilities=['code', 'docs', 'verify'] caps=['macos', 'gui'] manual",
+        "trae-win         host=win10    abilities=['code', 'docs', 'verify'] caps=['gui', 'windows', 'linux']   [接单]",
+        "workbuddy        host=fb98     abilities=['docs', 'review', 'gui', 'verify'] caps=['gui', 'chroot', 'linux'] manual",
+        "workbuddyai-win  host=win10    abilities=['code', 'docs', 'verify'] caps=['windows', 'gui', 'linux']   [接单]"
+      ]
+    }
+  ],
+  "summary": "# T-0260 登记 lighthive/lightplugin 两仓 + 给 fb88-dsh 开 dispatchable\n\n## 做了什么\n\n### 1) 给两台 agent 登记 lighthive / lightplugin 仓库\n\n- **agents/workbuddy.json**：repos 新增两条\n  - `lighthive`: `/home/skywalk/dswork/lighthive`\n  - `lightplugin`: `/home/skywalk/dswork/lightplugin`\n- **agents/fb88-dsh.json**：repos 同样新增这两条（路径与 workbuddy 一致，两台都在 fb98）\n\n两台都在 fb98（FreeBSD 15.1 linuxulator），路径用 Linux 形态，与现有 hive/lightharness/light/lightmem 一致。\nWindows 机器没有这两个仓的克隆，按红线要求没有给任何 Windows agent 加。\n\n### 2) 给 fb88-dsh 开 dispatchable: true\n\n- **agents/fb88-dsh.json** 新增 `\"dispatchable\": true`\n- 选它的理由：\n  - 它有 `command: /home/skywalk/dswork/hive/scripts/dsh-exec`，是真正接 stdin prompt、出 stdout 答案的 exec worker 后端；\n  - inbox/fb88-dsh 下已有 T-0110~T-0254 等大量已派发卡片，说明常驻 worker 在收件箱接活；\n  - abilities 含 code/ci/docs/verify/python/pytest，是最像执行机的一台。\n- workbuddy 不开：它的 `command` 为空，abilities 只有 docs/review/gui/verify，没有 code/pytest，不是执行机。\n- 其余 13 台一律不动 dispatchable，避免「派了但没人领」。\n\n### 3) 文档补「新仓接入三件事」\n\n- **docs/AGENT快速上手.md** 在 §4.5 后新增 §4.6「新仓接入三件事」：\n  1. 在目标 agent 的 repos 里加路径（否则 draft_lint 报「永远派不出去」）；\n  2. 该机器要先 git clone 一份（worktree 建在克隆之上）；\n  3. manual 机器要显式 `dispatchable: true` 才会被 `dispatch --apply` 选中。\n  并提醒：改 mode（manual→exec）是行为变更，不在接新仓范围内。\n\n## 验证\n\n- `python hive.py doctor` → exit 0，末尾 `[ OK ] 161 张任务，15 个 agent，1 个进行中租约，6 个待合并结果`。\n  大量 `[WARN] 本机看不到 ...` 是因为在 Windows 上跑、看不到 fb98 的 Linux 路径，属于预期假警告，不是产物问题。\n- `python hive.py agent list` → exit 0，fb88-dsh 行尾出现 `[可派]`，其余 manual 机器无此标记，符合预期。\n- JSON 合法性：`json.load` 两个文件均通过；workbuddy repos 含 lighthive/lightplugin；fb88-dsh repos 含这两个且 dispatchable=True。\n- `git status --porcelain` 仅三个锁定文件被改：\n  - agents/fb88-dsh.json\n  - agents/workbuddy.json\n  - docs/AGENT快速上手.md\n\n## 没做 / 风险\n\n- 没动 hive.py（T-0261 正在改它）。\n- 没改任何 agent 的 mode（全部仍为 manual）。\n- 没给其余 13 台加 dispatchable。\n- 没写任何 token / 密钥 / IP。\n- doctor 在 Windows 上跑，Linux 路径探测全 WARN；若需在 FreeBSD 上复核，ssh workbuddy@192.168.0.88 跑 `cd ~/dswork/hive && python3 hive.py doctor` 即可。",
+  "error": "",
+  "declared_paths": [
+    "agents/workbuddy.json",
+    "agents/fb88-dsh.json",
+    "docs/AGENT快速上手.md"
+  ],
+  "changed_files": [
+    "agents/fb88-dsh.json",
+    "agents/workbuddy.json",
+    "docs/AGENT快速上手.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "d368405295324f7b821bcc9a5e6b1d34"
+}
