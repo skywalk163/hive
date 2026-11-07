@@ -1,0 +1,34 @@
+{
+  "task": "T-0264",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0264",
+  "base": "main",
+  "head": "662ebd7650b5c842ebde41197968fc7c722bdb63",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-07T22:01:20+08:00",
+  "finished_at": "2026-11-07T22:20:19+08:00",
+  "duration_s": 1139.9,
+  "verify": [
+    {
+      "cmd": "test -f docs/远端分叉核验_20261106.md",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0264 工作说明：lightmem 两远端分叉核验\n\n## 结论（给业主的一句话）\n\n**分叉是真的，但 GitHub 侧没有任何独有代码**：67 个独有提交里 64 个与 gitea 侧补丁等价，\n另 3 个的代码内容在 gitea tip 上逐字节一致（`git cherry` + tip 树差双向验证）。\n真正的差异只有 3 处，其中 2 处是安全问题：\n\n1. **P0**：GitHub main **缺 fail-closed 启动护栏**（`30ff8e4`，141 行 / 4 文件）——\n   README:54 却教新用户从 GitHub clone；\n2. **P0**：GitHub 公开镜像里**还有 49 个 `.dumate/` 内部交付文档，其中 28 个正文含内网地址**，\n   gitea 侧早已清出版本库（`.gitignore: .dumate/`）；\n3. P2：GitHub 侧根 `go.mod` 仍带 `replace ... => ./kernel`，构建口径与主仓不同。\n\n## 做了什么\n\n- 只读核验（`ls-remote` / `rev-list --left-right --count` / `merge-base` / `cherry` /\n  `diff --name-status` / `grep` / `cat-file`），**没有 fetch / push / force / rebase / merge，\n  也没有改 remote 配置**。\n- 产出 `docs/远端分叉核验_20261106.md`（743 行）：硬数据表、两侧清单、树级对照、\n  安全对比、tag 对照、脚本差异、5 个方案对比 + 推荐、5 条待决策点、可直接应用的补丁、\n  复核命令清单。\n- 附带的两个补丁（README 警告、`push_all_remotes.sh` 红线注释）在**隔离副本**里\n  `git apply --check` 实测通过，但**没有应用到本仓**（见下「没做什么」）。\n\n## 推荐方案\n\n**方案丁：以 gitea 为准，`git merge -s ours github/main` 后普通 push（非 force）** ——\n不改写历史、GitHub 侧 67 个 SHA 仍可达、护栏随树上线，10 分钟完成。\n**方案甲（cherry-pick 67 个）已证明是空转**（64 个等价 + 3 个内容已在），**不推荐**。\n另建议**单独一张卡**处理 §5.4 的历史泄露（改 private / 重建仓 / 重写历史三选一）——\nforce-push 只能让 main 上消失，历史里仍可查。\n\n## 没做什么（以及为什么）\n\n1. **没改 `README.md` / `scripts/push_all_remotes.sh`**：卡片正文要求改，但卡面 `paths`\n   锁只有 `docs/远端分叉核验_20261106.md`，派单契约也写的是这一条。越界改动会被记\n   `out_of_paths`，所以按契约只改了文档，把两处改动做成**可直接 `git apply` 的补丁**\n   写进报告 §11，并在 §10.4 列为待决策点。**建议**：批次验收后开一张只改这两处的小卡（10 分钟）。\n2. **没有执行任何合流/推送动作**：卡片明令「真正推哪个方向，等业主点头」。\n3. **没有 fetch 镜像**：`ls-remote` 已能拿到真实 HEAD，且与本地 remote-tracking ref 一致；\n   fetch 会改 refs，属可避免的写操作。\n\n## 验证\n\n- 卡片验收命令 `test -f docs/远端分叉核验_20261106.md`：产物存在（743 行，46KB）。\n- 报告内的数字全部可复核：§12 给了 Windows 等价写法（本机 POSIX 判据会 255 假失败）；\n  命令与实测输出一致（84/67、分叉点 `5014a4f7`、树差 D=50 A=10 M=7、kernel +141）。\n- `git status --short --branch`：只有本报告一个未跟踪文件，`origin/main` 仍是 `edc3106`。\n\n## 需要业主决策的点\n\n1. GitHub 镜像定位：对外门面（走丁）还是纯备份（乙也可）？\n2. 49 份含内网拓扑的文档已在公开历史里：改 private / 重建仓 / 重写历史？\n3. gitcode 落后 13 个提交：要不要顺手拉齐（另一张卡）？\n4. README 警告是否立刻加（本卡因 paths 锁未改，补丁在报告 §11）？\n5. 方案丁要不要先在本地预演 `merge -s ours` 看 `git log --graph` 再决定推不推？\n\n## 状态建议\n\n按卡片要求，建议置 `needs_review`（等业主选方案），不要直接 `done`。",
+  "error": "",
+  "declared_paths": [
+    "docs/远端分叉核验_20261106.md"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "docs/远端分叉核验_20261106.md"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md"
+  ],
+  "lease_id": "c9db5bfdf8bc47cb8877a5e8a6b51a13"
+}
