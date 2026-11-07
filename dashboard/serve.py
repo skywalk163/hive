@@ -55,7 +55,7 @@ except ImportError:  # pragma: no cover - 单独拷走 dashboard 时的兜底
 HIVE_CONFIG_PATH = HIVE_ROOT / "hive-config.json"
 
 AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-AGENT_MODES = ("exec", "verify", "manual")
+AGENT_MODES = ("exec", "verify", "manual", "accept")
 
 
 def _as_str_list(v):
@@ -798,12 +798,16 @@ def build_handler(status_path, write_auth="off"):
                     for k, v in raw.items():
                         if k:
                             repos[str(k)] = str(v)
-                # 已存在的 agent 保留 created 时间戳
+                # 已存在的 agent 保留 created 时间戳与 accept 接单窗口
                 created = ""
+                accept_window = a.get("accept_window_minutes")
                 existing = agents_dir / ("%s.json" % name)
                 if existing.exists():
                     try:
-                        created = json.loads(existing.read_text(encoding="utf-8")).get("created", "")
+                        old = json.loads(existing.read_text(encoding="utf-8"))
+                        created = old.get("created", "")
+                        if accept_window in (None, ""):
+                            accept_window = old.get("accept_window_minutes")
                     except ValueError:
                         created = ""
                 cfg = {
@@ -820,6 +824,12 @@ def build_handler(status_path, write_auth="off"):
                     "max_concurrency": mc,
                     "created": created or _iso_now(),
                 }
+                if mode == "accept":
+                    try:
+                        cfg["accept_window_minutes"] = (
+                            int(accept_window) if accept_window not in (None, "") else 180)
+                    except (TypeError, ValueError):
+                        cfg["accept_window_minutes"] = 180
                 existing.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
                 seen.add(name)
             # 删除不在提交集合里的 agent（保留 .gitkeep）

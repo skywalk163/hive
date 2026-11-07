@@ -110,6 +110,15 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "hive_accept",
+        "description": "接单（派单—接单模式）：领走派给我自己的卡。先校验派单对象（不领别人的单、不领无主单），再抢 claim 租约、备好 worktree，并在卡面写 accepted_at 留痕。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string", "description": "任务号，如 T-0260"}},
+            "required": ["task_id"],
+        },
+    },
+    {
         "name": "hive_submit",
         "description": "提交成果：把 worktree 里的改动 commit 并推到 task/<任务号> 分支，跑卡片上的 verify 命令，把结果写进 res/<任务号> 分支。提交前把工作说明写进 <worktree>/.hive/summary.md（也可以在这里用 note 传）。",
         "inputSchema": {
@@ -626,23 +635,50 @@ class HiveMcp:
     def t_next(self, _a: dict) -> dict:
         h = self.hive_view()
         cfg = h.agent(self.agent)
+        accept_mode = (cfg.get("mode") or
+                       ("manual" if cfg.get("manual") else "exec")) == "accept"
         for tid, c in sorted(h.cards().items(),
                              key=lambda kv: (PRIORITY_ORDER.get(kv[1].get("priority"), 9), kv[0])):
-            if c.get("state") != "ready" or c.get("owner"):
-                continue
+            if accept_mode:
+                # 派单—接单：只接派给我的单，不抢无主单，也不碰别人的单。
+                # 派单被 watchdog 退回 ready 后仍保留 dispatched_to，照样能接。
+                target = str(c.get("dispatched_to") or c.get("owner") or "").strip()
+                if target != self.agent:
+                    continue
+                if c.get("state") not in ("ready", "assigned"):
+                    continue
+                if c.get("owner") and c.get("owner") != self.agent:
+                    continue
+            else:
+                if c.get("state") != "ready" or c.get("owner"):
+                    continue
             if c.get("state") in HANDOFF_STATES:
                 continue  # blocked / conflict / needs_review / shelved 不是「能领」
             if h.result_info(tid) or h.claim_info(tid):
                 continue
             good, why = self._can_do(cfg, c, h)
             if good:
+                nxt = ("hive_accept" if accept_mode else "hive_claim")
                 return ok(f"建议接 {tid}：{c.get('title')}",
                           task_id=tid, title=c.get("title"), repo=c.get("repo"),
                           priority=c.get("priority"), paths=c.get("paths") or [],
                           verify=c.get("verify") or [],
-                          hint=f"下一步调用 hive_claim(task_id=\"{tid}\")")
-        return err("现在没有我能接的卡（都已被领走、依赖未就绪，或我的能力/仓库不匹配）",
-                   hint="用 hive_list_tasks 看看全貌，或 hive_stats 看整体进度")
+                          hint=f"下一步调用 {nxt}(task_id=\"{tid}\")")
+        msg = ("现在没有派给我的待接单卡" if accept_mode else
+               "现在没有我能接的卡（都已被领走、依赖未就绪，或我的能力/仓库不匹配）")
+        return err(msg, hint="用 hive_list_tasks 看看全貌，或 hive_stats 看整体进度")
+
+    def t_accept(self, a: dict) -> dict:
+        """接单：只领派给我自己的卡（accept 模式）。"""
+        tid = a["task_id"]
+        h = self.hive()
+        try:
+            h.cmd_accept(tid, self.agent)
+        except HiveError as exc:
+            return err(str(exc),
+                       hint="用 hive_list_tasks 确认派单对象，或 hive_next 挑一张派给我的卡")
+        return ok(f"{tid} 接单成功（{self.agent}）", task_id=tid,
+                  hint="在 worktree 里干活并写 .hive/summary.md，完成后 hive_submit")
 
     def t_claim(self, a: dict) -> dict:
         tid = a["task_id"]
@@ -1116,6 +1152,7 @@ class HiveMcp:
         "hive_next": t_next,
         "hive_list_pending": t_list_pending,
         "hive_claim": t_claim,
+        "hive_accept": t_accept,
         "hive_submit": t_submit,
         "hive_block": t_block,
         "hive_unblock": t_unblock,
@@ -1170,6 +1207,8 @@ class McpServer:
             "典型流程：hive_whoami 看自己 → hive_next 挑卡 → hive_claim 领取 → "
             "在返回的 worktree 里干活并写 .hive/summary.md → hive_submit 提交 → "
             "hive_result 看验收结果。干不下去就 hive_abort 把卡还回去，别干耗到租约过期。"
+            "派单—接单（accept）模式的 agent 改用 hive_accept 接单：只领派给自己的卡，"
+            "不抢无主单或别人的单。"
             "另外：领卡后用 hive_chat_read 看一眼这张卡有没有人留言（可能是人的指点）；"
             "对任务有疑问、或要提醒别的 agent 某个坑，用 hive_chat_post 留言——"
             "它走集群，别的机器和看板 1~2 秒内就能看到，比闷头猜强。"

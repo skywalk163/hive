@@ -31,7 +31,7 @@
 
 param(
     [string]$Agent = '',
-    [ValidateSet('auto', 'manual', 'exec', 'verify')][string]$Mode = 'auto',
+    [ValidateSet('auto', 'manual', 'exec', 'verify', 'accept')][string]$Mode = 'auto',
     [string]$Command = '',
     [string]$Launch = '',
     [string[]]$Repo = @(),

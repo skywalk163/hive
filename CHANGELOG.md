@@ -4,6 +4,24 @@
 
 ### Added
 
+- **第四种 agent 模式 `accept`（派单—接单）**。给「主控发布任务 → agent 通过定时任务
+  自己去 hive 接单」一个正式语义，不再借用 `manual`。
+  - 起因（2026-11-07 现场）：07:38 派给三台 Windows agent 的 9 张卡，07:48 全部被
+    watchdog 按 `dispatch_unclaimed` 回收（`HIVE_DISPATCH_UNCLAIMED_MINUTES=10`），
+    而定时任务每小时才醒一轮；回收后 60 分钟推送 TTL 压着不重派，累计 2 次
+    `dispatch_miss` 还会转 `blocked`。**与 `manual` 模式无关，改 mode 修不了**。
+  - `mode: accept` 天然参与 `dispatch --apply`，不需要 `command` / `launch` /
+    `dispatchable` / 常驻 worker；新增 `hive accept <tid> --agent X` 命令与 MCP
+    `hive_accept` 工具，接单前校验派单对象（不抢无主单或别人的单），并在卡面写
+    `accepted_at` 留痕；`hive_next` 对 accept agent 只推荐派给它的单。
+  - watchdog 按派单对象逐卡取窗口：agent 配置 `accept_window_minutes`（默认 180，
+    可用 `HIVE_ACCEPT_WINDOW_MINUTES` 覆盖），窗口内不回收；超时只退回 `ready`、
+    保留 `dispatched_to` 与 inbox 便条，**不累加 `dispatch_miss`、不转 `blocked`**，
+    下一轮定时任务照样能接。
+  - `agent add --mode accept --accept-window-minutes N`；`agent add` 与看板保存配置
+    都会继承已有的 `accept_window_minutes`，不会被重新登记冲掉。
+  - 文档：`docs/主控与分发.md` §2 / §4.6、`README.md` 模式表、
+    `docs/子agent定时领取-prompt.md`（`take` → `accept`）、`docs/MCP接入.md`。
 - **Windows agent「定时领取」：`scripts/win-scheduled-work.ps1`**。hive 本来就是拉取式
   worker（`hive.py` 文件头第 11 行：只要能 git fetch/push 就不需要被 SSH 进来），
   常驻 worker 只是其中一种实现。新脚本用计划任务每 N 分钟（15/30/60/120，

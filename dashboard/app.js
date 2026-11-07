@@ -1821,7 +1821,7 @@
   }
 
   function optsMode(cur) {
-    return ['exec', 'verify', 'manual'].map(function (m) {
+    return ['exec', 'verify', 'manual', 'accept'].map(function (m) {
       return '<option value="' + m + '"' + (m === cur ? ' selected' : '') + '>' + m + '</option>';
     }).join('');
   }

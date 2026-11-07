@@ -5,6 +5,7 @@
 #   scripts/join-agent.sh fb88-dsh
 #   scripts/join-agent.sh my-node --mode exec --command "/usr/local/bin/codebuddy -p -"
 #   scripts/join-agent.sh my-mac --mode manual --launch "open -a Trae {worktree}"
+#   scripts/join-agent.sh my-nas --mode accept   # 派单—接单：只要定时任务，不要常驻 worker
 #   scripts/join-agent.sh fb88-dsh --status
 #   scripts/join-agent.sh fb88-dsh --uninstall
 #

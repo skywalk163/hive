@@ -1,7 +1,7 @@
 # MCP 接入：让任意 agent 自己来查任务、领任务、交任务
 
-`hive mcp` 起一个 **MCP stdio server**，把 hive 的任务总线暴露成 **15 个工具**
-（`--role controller` 是 22 个）。
+`hive mcp` 起一个 **MCP stdio server**，把 hive 的任务总线暴露成 **16 个工具**
+（`--role controller` 是 23 个；新增的 `hive_accept` 用于「派单—接单」模式）。
 支持 MCP 的 agent（Claude Desktop / Cursor / Claude Code / Codex CLI / 小浣熊 / 自己写的 harness）
 接上之后就能自助：**查阅自己的任务 → 申请领取 → 在 worktree 里干活 → 提交验收 → 干不下去就还回去**。
 
@@ -102,6 +102,7 @@ python3 hive.py mcp --agent raccoon --dir /path/to/hive    # ← 正确
 | `hive_next` | 推荐一张**现在就能干**的卡（跳过能力不匹配/依赖未就绪/已被领走） | 只推荐，不领取 |
 | `hive_list_pending` | 列出我能领的卡：按匹配分数排序并附理由（能力/仓库/依赖/在飞冲突） | 不给 `agent` 时返回全部 ready 且无人持有的卡（按任务号）；给了就打分排序。只读，不 claim |
 | `hive_claim` | 申请并领取：指派给我 + 推 claim 租约分支抢锁 + 备好 worktree 和提示词 | 返回工作目录 |
+| `hive_accept` | 接单（`accept` 模式）：只领派给我自己的单，校验派单对象后抢租约、备 worktree、写 `accepted_at` | `hive_next` 对 accept agent 只推荐派给它的单 |
 | `hive_submit` | 提交：commit + push `task/<id>` + 跑 verify + 写结果到 `res/<id>` | 先用 summary.md 或 `note` 说明干了什么 |
 | `hive_abort` | 终止/放弃：释放我的租约，默认把卡退回 ready 让别人能领 | 已出结果的卡不许终止 |
 | `hive_block` | 条件没到先冻卡：保留租约与进度，到期不被回收，解冻后继续 | 卡在等外部条件（真机 / 密钥 / 别人）时用 |

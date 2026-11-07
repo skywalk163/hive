@@ -169,13 +169,18 @@ python3 hive\hive.py --dir hive agent add --name win10 --mode verify `
 > `--repo` / `--worktrees` 写**绝对路径**：worker 可能被计划任务从别的 cwd 拉起，
 > 相对路径会解析到错误位置。
 
-三种模式：
+四种模式：
 
 | 模式 | 配置 | 行为 |
 |---|---|---|
 | `exec` | `--command "..."` | 调 agent，prompt 从 stdin 进，cwd 是 worktree |
 | `verify` | `--mode verify` | 不调 agent，只跑任务卡的 `verify`，不产出代码分支 |
 | `manual` | `--manual` | 备好 worktree，等人/GUI agent 干完写 `.hive/summary.md` |
+| `accept` | `--mode accept --accept-window-minutes 180` | **派单—接单**：主控把单派到这台机器（`assign`/`dispatch`），机器上的 AI 被定时任务唤起后自己 `hive accept` 接单；不需要常驻 worker、`command`、`launch` 或 `dispatchable` |
+
+> `accept` 的接单窗口必须大于定时任务的唤醒周期（每小时一轮时建议 ≥180 分钟）。
+> 窗口内 watchdog 不回收、不记 `dispatch_miss`；超时只退回待接单，不转 blocked。
+> 详见 [主控与分发](docs/主控与分发.md) §4.6。
 
 > `exec` 的约定：**任务提示词从 stdin 传入**，进程的 cwd 就是任务 worktree。
 > `dsh --profile headless -` 正好满足；Claude Code 用 `claude -p`；Codex 用 `codex exec -`。
@@ -418,7 +423,7 @@ PORT=8787 INTERVAL=20 ./hive/scripts/serve-dashboard.sh
 
 ## 11. MCP：让 agent 自己来领活
 
-`hive mcp` 起一个 MCP stdio server，把任务总线暴露成 15 个工具。接上之后 agent
+`hive mcp` 起一个 MCP stdio server，把任务总线暴露成 16 个工具。接上之后 agent
 不用等人喂卡，自助闭环：**查任务 → 领卡 → 干活 → 提交 → 干不下去还回去**。
 
 ```sh
@@ -449,6 +454,7 @@ python3 hive/hive.py mcp --agent workbuddy --dir hive
 | `hive_whoami` / `hive_list_tasks` / `hive_get_task` | 我是谁、有哪些卡、某张卡的全文 |
 | `hive_next` | 推荐一张现在就能干的卡（跳过能力不匹配/依赖未就绪/已被领走） |
 | `hive_claim` | 领取：指派给我 + 抢 claim 租约 + 备好 worktree 和提示词 |
+| `hive_accept` | 接单（`accept` 模式）：只领派给我自己的单，校验派单对象后抢租约、备 worktree、写 `accepted_at` |
 | `hive_submit` | 提交：commit + push `task/<id>` + 跑 verify + 写结果 |
 | `hive_abort` / `hive_extend_lease` / `hive_progress` | 放弃还卡 / 续租 / 中途记进度 |
 | `hive_block` / `hive_unblock` | 条件没到先冻卡 / 解冻 |

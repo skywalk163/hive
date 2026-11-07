@@ -23,7 +23,7 @@ MCP = ROOT / "mcp_server.py"
 EXPECTED_TOOLS = {
     "hive_whoami", "hive_list_tasks", "hive_get_task", "hive_next",
     "hive_list_pending",
-    "hive_claim", "hive_submit", "hive_block", "hive_unblock",
+    "hive_claim", "hive_accept", "hive_submit", "hive_block", "hive_unblock",
     "hive_abort", "hive_extend_lease",
     "hive_progress", "hive_result", "hive_stats", "hive_doctor",
     "hive_chat_post", "hive_chat_read",
@@ -144,7 +144,7 @@ def test_mcp_handshake_and_tool_list(world, mcp):
         assert t["inputSchema"]["type"] == "object"
         assert "properties" in t["inputSchema"]
     # 需要参数的工具必须标 required，否则客户端不知道要传什么
-    for name in ("hive_get_task", "hive_claim", "hive_submit", "hive_abort",
+    for name in ("hive_get_task", "hive_claim", "hive_accept", "hive_submit", "hive_abort",
                  "hive_extend_lease", "hive_result"):
         t = next(t for t in tools if t["name"] == name)
         assert "task_id" in t["inputSchema"]["required"], name

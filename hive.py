@@ -92,6 +92,17 @@ DEFAULT_MAX_RETRIES = 3
 # 与 max_retries 分开记：retries 是「跑过但失败」，dispatch_miss 是「压根没人接」。
 DISPATCH_MISS_BLOCK_AT = 2
 
+# 第四种 agent 模式：派单—接单（accept）。
+# 主控把卡派到 agent 名下，机器上的 AI 由定时任务唤起后自己 `hive accept` 接单；
+# 不需要常驻 worker，也不需要 command / launch / dispatchable。
+# 2026-11-07 现场：15 台全 manual、派出去的 9 张卡在 10 分钟内被 watchdog 回收，
+# 而 Windows 定时任务每小时才醒一轮 —— 卡在 agent 醒来之前就被收走了。
+AGENT_MODES = ("exec", "verify", "manual", "accept")
+# accept 单的接单窗口（分钟）：要覆盖定时任务的唤醒周期（默认每小时一轮），
+# 默认 180 给足三轮余量。窗口内 watchdog 不回收、不累计 dispatch_miss。
+DEFAULT_ACCEPT_WINDOW_MINUTES = 180
+ACCEPT_WINDOW_ENV = "HIVE_ACCEPT_WINDOW_MINUTES"
+
 # 网络类 git 操作（fetch / push / clone / ls-remote）的默认超时（秒）。
 # subprocess.run 不传 timeout 就是无限等：2026-10-25 Gitea 约 12 小时不可达，
 # `hive land --apply` 就静默卡死在 fetch 上，只能靠杀进程才发现。
@@ -145,6 +156,8 @@ TASK_FIELDS = [
     # T-0188 追加到列表末尾（不动已有顺序）：避免所有旧卡被大面积重写。
     # 推送（dispatch-mark）与真正分派（assign）是两个动作，所以这是可选的派生字段。
     "dispatched_to", "dispatched_at",
+    # accept 模式：AI 定时任务「接单」的时间（派单—接单的审计点）
+    "accepted_at",
     # T-0206 追加：租约 fencing 序号。每次回收/重派 +1，结果里带上写入时的 fence，
     # land/close 用它识别「旧 worker 复活后写进来的过期结果」。
     "fence",
@@ -1912,6 +1925,42 @@ class Hive:
                              self._card_paths(tid, agent))
         log(f"{tid} 已分派给 {agent}")
 
+    def cmd_accept(self, tid: str, agent: str) -> None:
+        """接单：accept 模式下 AI 定时任务领走「派给我」的单。
+
+        与 `cmd_take` 的区别：take 谁都能领（只要没人抢锁），accept 先校验派单
+        对象，防止定时任务领走别人的卡；且无论 claim 后端是 git 还是 store，
+        都在 Git 卡面写 `accepted_at` 留审计点（take 在 store 后端不写卡面）。
+        """
+        self.fetch()
+        p = self.dir / "tasks" / f"{tid}.md"
+        if not p.exists():
+            raise HiveError(f"没有任务 {tid}")
+        # 读纯卡面，绕开 store overlay 对 state/owner 的覆盖
+        data, _body = parse_card(p)
+        target = str(data.get("dispatched_to") or data.get("owner") or "").strip()
+        if not target:
+            raise HiveError(
+                f"{tid} 还没派单给任何 agent（主控先 assign / dispatch）")
+        if target != agent:
+            raise HiveError(
+                f"{tid} 派给了 {target}，不是 {agent}；不能接别人的单")
+        if data.get("state") in ("done", "closed", "shelved", "blocked",
+                                "conflict", "needs_review"):
+            raise HiveError(f"{tid} 状态 {data['state']}，不能接单")
+        if self.result_info(tid):
+            raise HiveError(f"{tid} 已经有结果或已关闭")
+
+        self.cmd_take(tid, agent)   # 抢 claim 租约 + 备好 worktree
+
+        # 接单留痕：cmd_take 在 store 后端不写 Git 卡面，这里补上事实账。
+        data2, body2 = parse_card(p)
+        data2["accepted_at"] = iso()
+        write_card(p, data2, body2)
+        self.commit_and_push(f"accept {tid} -> {agent}",
+                             self._card_paths(tid, agent))
+        log(f"{tid} 接单成功（{agent}），worktree 见上面的 take 输出")
+
     def cmd_close(self, tid: str, note: str = "", done: bool | None = None) -> None:
         """关闭任务：**有结果才算完成，没结果只算作废**。
 
@@ -2514,19 +2563,46 @@ class Hive:
         except ValueError:
             return 60
 
-    def _dispatch_unclaimed_minutes(self) -> int:
+    def _dispatch_unclaimed_minutes(self, card: dict | None = None) -> int:
         """「派发出去多久没人领」的快速回收阈值（分钟），默认 10。
 
         和 `orphan_grace`（45 分钟，管「领了但死了」）是两件事：
-        这里回收的是 **从没被 claim 过** 的卡，10 分钟足够 agent 反应了。
-        可读 `HIVE_DISPATCH_UNCLAIMED_MINUTES`；写成方法是为了测试能钉住，
-        不在模块层读一次（与 `_dispatch_ttl_minutes` 同款）。
+        这里回收的是 **从没被 claim 过** 的卡，10 分钟足够常驻 worker 反应。
+
+        **accept 模式例外（2026-11-07）**：这类 agent 靠定时任务（默认每小时一轮）
+        来接单，10 分钟窗口会在它醒来之前把单收走。所以按派单对象查 agent 配置的
+        `accept_window_minutes`（缺省 180），并至少不小于全局 base。
+        可读 `HIVE_DISPATCH_UNCLAIMED_MINUTES` / `HIVE_ACCEPT_WINDOW_MINUTES`。
+        写成方法是为了测试能钉住，不在模块层读一次。
         """
         raw = (os.environ.get("HIVE_DISPATCH_UNCLAIMED_MINUTES") or "").strip()
         try:
-            return max(0, int(raw)) if raw else 10
+            base = max(0, int(raw)) if raw else 10
         except ValueError:
-            return 10
+            base = 10
+        if card is None:
+            return base
+        if not self._is_accept_offer(card):
+            return base
+        target = str(card.get("dispatched_to") or card.get("owner") or "").strip()
+        cfg = (self.agents() or {}).get(target) or {}
+        win = cfg.get("accept_window_minutes")
+        if win in (None, ""):
+            win = (os.environ.get(ACCEPT_WINDOW_ENV) or
+                   DEFAULT_ACCEPT_WINDOW_MINUTES)
+        try:
+            return max(base, int(win))
+        except (TypeError, ValueError):
+            return max(base, DEFAULT_ACCEPT_WINDOW_MINUTES)
+
+    def _is_accept_offer(self, card: dict) -> bool:
+        """这张卡是不是「派给 accept 模式 agent、等它定时来接」的单。"""
+        target = str(card.get("dispatched_to") or card.get("owner") or "").strip()
+        if not target:
+            return False
+        cfg = (self.agents() or {}).get(target) or {}
+        mode = cfg.get("mode") or ("manual" if cfg.get("manual") else "exec")
+        return mode == "accept"
 
     def _store_state_conflict(self, card: dict) -> str | None:
         """store 模式下派发前校验：store 的 state 与 Git 卡面不一致就返回跳过原因。
@@ -3043,10 +3119,12 @@ class Hive:
             warns.append("还没有登记 agent")
         for name, a in agents.items():
             mode = a.get("mode") or ("manual" if a.get("manual") else "exec")
-            if mode not in ("exec", "verify", "manual"):
+            if mode not in AGENT_MODES:
                 errors.append(f"agent {name}: mode={mode!r} 非法")
             if mode == "exec" and not a.get("command"):
                 errors.append(f"agent {name}: exec 模式没有 command")
+            # accept 不需要 command：接单方是定时任务唤起的 AI，不是常驻 worker。
+            # 没写 accept_window_minutes 就走默认值，不算错。
             if not a.get("repos"):
                 warns.append(f"agent {name}: 没有配置 repos")
             for repo, path in (a.get("repos") or {}).items():
@@ -4274,7 +4352,8 @@ class Hive:
         self.commit_and_push(f"watchdog reclaim {tid}: {reason}", self._card_paths(tid))
         log(f"{tid} 已退回 ready（{reason}）")
 
-    def _reclaim_dispatch_miss(self, tid: str, minutes: int = 0) -> None:
+    def _reclaim_dispatch_miss(self, tid: str, minutes: int = 0,
+                               accept_mode: bool = False) -> None:
         """回收「派发出去但一直没人领」的卡（T-0220）。
 
         和 `_reenqueue_ready` 刻意分开：那条路是「领过但死了/掉线」，
@@ -4284,11 +4363,35 @@ class Hive:
           * 清掉 `inbox/<agent>/<tid>.md` 残留（否则 agent 还会看到旧信号）；
           * 未到阈值 → 退回 ready（`dispatched_to` 保留，TTL 继续压着不重派）；
             到阈值 → 转 blocked 并在卡体写明「连续 N 次派发无人领取，转人工」。
+
+        **accept_mode=True 的例外（2026-11-07）**：定时任务每小时才醒一轮，
+        「暂时没人接」不是派发失败。此时不累计 dispatch_miss（否则两次就转
+        blocked 锁死）、不撕 inbox 便条、保留 `dispatched_to`，只把卡退回
+        ready 等下一轮接单，并在卡体留痕。`hive accept` 允许接这种
+        `state=ready` 但派单对象仍是自己的单。
         """
         card = self.card(tid)
         old_owner = card.get("owner") or ""
         at = self._assigned_at(card)          # 必须在清 owner 之前算（要读 inbox）
         stamp = iso()
+        if accept_mode:
+            wait_min = minutes
+            if at is not None:
+                try:
+                    wait_min = max(0, int((now() - at).total_seconds() // 60))
+                except (TypeError, ValueError):
+                    wait_min = minutes
+            card["owner"] = None
+            card["state"] = "ready"
+            note = (f"\n\n---\n\n**接单窗口超时（{stamp}）**：派给 "
+                    f"{old_owner or '（无主）'} 后 {wait_min} 分钟未接单；"
+                    f"派单关系保留，卡退回 ready 等下一轮定时任务接单，"
+                    f"不计 dispatch_miss、不转 blocked。\n")
+            self.save_card(card, card["_body"] + note)
+            self.commit_and_push(f"watchdog accept-timeout {tid}",
+                                 self._card_paths(tid, old_owner))
+            log(f"{tid} accept 单 {wait_min} 分钟未接单，退回 ready 等下一轮")
+            return
         wait_min = minutes
         if at is not None:
             try:
@@ -4344,7 +4447,8 @@ class Hive:
         nowdt = now()
         grace = timedelta(minutes=minutes)
         ograce = timedelta(minutes=orphan_grace)
-        unclaimed = timedelta(minutes=self._dispatch_unclaimed_minutes())
+        # 每张卡单独算窗口：accept 单用接单窗口（默认 180 分钟），
+        # 其它单仍走 10 分钟快速通道（见 _dispatch_unclaimed_minutes）。
         candidates: list[dict] = []
         for tid, c in cards.items():
             if c.get("state") not in IN_FLIGHT_STATES:
@@ -4356,14 +4460,25 @@ class Hive:
             if claim is None:
                 if c.get("state") == "running":
                     candidates.append({"id": tid, "reason": "orphan_running", "action": "reclaim"})
-                else:  # assigned 但还没 claim：可能刚分派，按两个阈值判断
+                else:  # assigned 但还没 claim：按派单模式分别定时
                     at = self._assigned_at(c)
-                    if at is not None and at < nowdt - unclaimed:
-                        # 快速通道：派了 10 分钟还没人领，记一次 dispatch_miss
-                        candidates.append({"id": tid, "reason": "dispatch_unclaimed",
-                                          "action": "reclaim_miss"})
-                    elif at is not None and at < nowdt - ograce:
-                        # 兜底：把阈值调大时仍沿用原 orphan 语义（不记 miss）
+                    window = self._dispatch_unclaimed_minutes(c)
+                    accept_mode = self._is_accept_offer(c)
+                    if at is not None and at < nowdt - timedelta(minutes=window):
+                        # 常驻 worker 派单 10 分钟没人领记 dispatch_miss；
+                        # accept 单是定时任务来接，窗口按 agent 配置放宽，
+                        # 超时也只退回待接单，不记 miss、不转 blocked。
+                        candidates.append({
+                            "id": tid,
+                            "reason": ("accept_unclaimed" if accept_mode
+                                       else "dispatch_unclaimed"),
+                            "action": "reclaim_miss",
+                            "accept_mode": accept_mode})
+                    elif (at is not None and at < nowdt - ograce
+                          and not accept_mode):
+                        # 兜底：把阈值调大时仍沿用原 orphan 语义（不记 miss）。
+                        # accept 单必须跳过这条：否则 180 分钟窗口会被 45 分钟的
+                        # orphan 兜底从后门绕过去（2026-11-07 实测踩到）。
                         candidates.append({"id": tid, "reason": "orphan_assigned",
                                           "action": "reclaim"})
                 continue
@@ -4415,7 +4530,8 @@ class Hive:
             verb = "已转 blocked" if c["action"] == "block" else "已回收"
             log(f"[watchdog] {verb} {c['id']}：{c['reason']}")
         for c in to_miss:
-            self._reclaim_dispatch_miss(c["id"])
+            self._reclaim_dispatch_miss(c["id"],
+                                        accept_mode=bool(c.get("accept_mode")))
             log(f"[watchdog] 已回收 {c['id']}：{c['reason']}")
         log(f"[watchdog] 完成，回收 {len(to_reclaim) + len(to_miss)} 张、"
             f"转 blocked {len(to_block)} 张")
@@ -5735,6 +5851,7 @@ def cmd_agent(args) -> None:
                   f"abilities={cfg.get('abilities', [])} "
                   f"caps={cfg.get('capabilities', [])} "
                   f"{'manual' if cfg.get('manual') else cfg.get('command', '')[:60]}"
+                  f"{'  [接单]' if cfg.get('mode') == 'accept' else ''}"
                   f"{'  [可派]' if cfg.get('dispatchable') else ''}")
         return
     if not args.name:
@@ -5771,6 +5888,22 @@ def cmd_agent(args) -> None:
         "max_concurrency": args.max_concurrency or 1,
         "created": iso(),
     }
+    # accept 模式的接单窗口是长期配置，`agent add` 会重建整份 json，
+    # 不显式继承就会被一次重新登记冲掉（与 dispatchable 同款坑）。
+    accept_window = getattr(args, "accept_window_minutes", None)
+    if accept_window is None and p_old.exists():
+        try:
+            accept_window = json.loads(p_old.read_text(encoding="utf-8")).get(
+                "accept_window_minutes")
+        except (OSError, ValueError):
+            accept_window = None
+    if mode == "accept":
+        try:
+            cfg["accept_window_minutes"] = (
+                int(accept_window) if accept_window not in (None, "")
+                else DEFAULT_ACCEPT_WINDOW_MINUTES)
+        except (TypeError, ValueError):
+            cfg["accept_window_minutes"] = DEFAULT_ACCEPT_WINDOW_MINUTES
     if dispatchable:
         cfg["dispatchable"] = True
     p = h.dir / "agents" / f"{args.name}.json"
@@ -5987,6 +6120,10 @@ def cmd_assign(args) -> None:
 
 def cmd_take(args) -> None:
     Hive(args.dir).cmd_take(args.task, args.agent)
+
+
+def cmd_accept(args) -> None:
+    Hive(args.dir).cmd_accept(args.task, args.agent)
 
 
 def cmd_submit(args) -> None:
@@ -6897,8 +7034,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="MCP token 的角色（enroll 时用；默认 worker）")
     s.add_argument("--command", help="执行命令（prompt 从 stdin 传入）")
     s.add_argument("--manual", action="store_true", help="GUI 半自动模式（等价 --mode manual）")
-    s.add_argument("--mode", choices=["exec", "verify", "manual"],
-                   help="exec=调用 agent；verify=只跑验收；manual=等人")
+    s.add_argument("--mode", choices=list(AGENT_MODES),
+                   help="exec=调用 agent；verify=只跑验收；manual=等人；"
+                        "accept=派单—接单（定时任务唤起 AI 自己来接）")
+    s.add_argument("--accept-window-minutes", type=int, default=None,
+                   help="accept 模式的接单窗口（分钟，缺省 180）；"
+                        "必须大于定时任务唤醒周期")
     s.add_argument("--abilities", nargs="*",
                    help="能力注册表，如 code ci docs verify")
     s.add_argument("--capabilities", nargs="*")
@@ -6945,6 +7086,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.add_argument("--agent", required=True)
     s.set_defaults(func=cmd_take)
+
+    s = sub.add_parser("accept", help="接单：领走派给自己的卡（派单—接单模式）")
+    s.add_argument("task")
+    s.add_argument("--agent", required=True)
+    s.set_defaults(func=cmd_accept)
 
     s = sub.add_parser("submit", help="手工提交：commit/push/verify/result")
     s.add_argument("task")

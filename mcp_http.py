@@ -25,7 +25,7 @@ from mcp_server import HiveMcp, McpServer, ensure_clone
 
 HTTP_PROTOCOL_VERSION = "2025-03-26"
 WRITE_TOOLS = {
-    "hive_claim", "hive_submit", "hive_block", "hive_unblock", "hive_abort",
+    "hive_claim", "hive_accept", "hive_submit", "hive_block", "hive_unblock", "hive_abort",
     "hive_extend_lease", "hive_progress", "hive_land", "hive_close",
     "hive_retry", "hive_assign", "hive_dispatch", "hive_gc", "hive_watchdog",
 }
