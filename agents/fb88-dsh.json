@@ -4,6 +4,7 @@
     "command":  "/home/skywalk/dswork/hive/scripts/dsh-exec",
     "mode":  "manual",
     "manual":  true,
+    "dispatchable":  true,
     "abilities":  [
                       "code",
                       "ci",
@@ -21,7 +22,9 @@
     "repos":  {
                   "hive":  "/home/skywalk/dswork/hive",
                   "lightharness":  "/home/skywalk/dswork/lightharness",
-                  "light":  "/home/skywalk/dswork/light"
+                  "light":  "/home/skywalk/dswork/light",
+                  "lighthive":  "/home/skywalk/dswork/lighthive",
+                  "lightplugin":  "/home/skywalk/dswork/lightplugin"
               },
     "launch":  "",
     "worktrees":  "/home/skywalk/.hive/wt",

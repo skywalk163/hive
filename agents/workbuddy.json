@@ -19,7 +19,9 @@
     "hive": "/home/skywalk/dswork/hive",
     "lightharness": "/home/skywalk/dswork/lightharness",
     "lightmem": "/home/skywalk/dswork/lightmem",
-    "light": "/home/skywalk/dswork/light"
+    "light": "/home/skywalk/dswork/light",
+    "lighthive": "/home/skywalk/dswork/lighthive",
+    "lightplugin": "/home/skywalk/dswork/lightplugin"
   },
   "launch": "",
   "worktrees": "/home/skywalk/.hive/wt/workbuddy",
