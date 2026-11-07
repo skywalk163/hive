@@ -236,6 +236,24 @@ git -C <代码仓> worktree remove --force <worktree路径>
 git -C <代码仓> worktree prune
 ```
 
+### 4.6 新仓接入三件事
+
+新开一个仓库（比如 `lighthive` / `lightplugin`）要让 hive 能把卡派出去，必须同时做三件事，
+缺任何一件卡都会永远卡在 `ready`：
+
+1. **在目标 agent 的 `repos` 里加路径**。`draft_lint` 会检查 `repo` 是否至少被一台 agent
+   登记；没登记的仓，落卡直接报「repo xxx 没有任何 agent 登记 —— 这张卡永远派不出去」。
+   路径必须是该 agent 所在机器上的真实绝对路径（Linux 是 `/home/skywalk/dswork/...`，
+   Windows 是 `G:\...`）。**某台机器没 clone 这个仓就不要给它加**——加了 dispatch 会把卡派过去，
+   那边 `git worktree add` 直接失败。
+2. **该机器要先 `git clone` 一份**。worktree 是建在克隆之上的，没克隆就没有 worktree 根。
+3. **`manual` 机器要显式 `dispatchable: true` 才会被 `dispatch --apply` 选中**。
+   源码里 `mode == "manual" and not a.get("dispatchable")` 的 agent 会被跳过，
+   表现为「没有可分派的任务」。只给确实有常驻 worker 在收件箱接活的那台加——
+   乱开会让卡被派到没有 worker 的机器上，「派了但永远没人领」比派不出去更难查。
+
+注意：改 agent 的 `mode`（`manual` → `exec`）是行为变更，不在「接新仓」范围内，别顺手改。
+
 ## 5. 两个必须知道的坑（本次实测踩到）
 
 ### 5.1 `--dir` 写在 `mcp` 前面会被静默忽略
