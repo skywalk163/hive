@@ -1,0 +1,44 @@
+{
+  "task": "T-0282",
+  "agent": "codearts-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0282",
+  "base": "main",
+  "head": "84b4315b98c2657de9790b3fa8aa494aa241af42",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T19:01:34+08:00",
+  "finished_at": "2026-11-08T20:59:21+08:00",
+  "duration_s": 7067.2,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/unit/test_R220_缺陷账状态一致性.py -q -o addopts=",
+      "code": 0,
+      "tail": [
+        ".........................                                                [100%]",
+        "25 passed in 236.01s (0:03:56)"
+      ]
+    },
+    {
+      "cmd": "python -m pytest tests/unit/test_R220_移植语言坑.py -q -o addopts=",
+      "code": 0,
+      "tail": [
+        ".....................                                                    [100%]",
+        "21 passed in 150.60s (0:02:30)"
+      ]
+    }
+  ],
+  "summary": "# T-0282 交付摘要 · light 语言缺陷账终态刷新\n\n- 仓库：light\n- 分支：`task/T-0282`（基于 `main` `988af23c5`）\n- 取证环境：Windows 11 / Python 3.13，`python -m cli.light run <探针>`，本仓 `stdlib/`（不用下游快照）\n- 改动文件（仅 paths 内两个）：\n  - `docs/功能对标/语言缺陷账.md`（+71 行，历史条目原样保留，逐条追加复测状态）\n  - `tests/unit/test_R220_缺陷账状态一致性.py`（新增）\n\n## 一、七条状态变更对照（旧 → 新 → 证据）\n\n| 编号 | 2026-10-30 | 2026-11-07 复测 | 证据（rc / 输出） |\n|---|---|---|---|\n| L-256 | 🔴 未修 | 🟡 **部分修复** | 形参语言分布 70/92/3 → **0/166/0**（AST 实扫 191 个顶层 def）；`编码=`/`路径=`/`分隔符=`/`缩进=`/`默认值=`/`权限=`/`键=`/`反向=` 全通；遗留 `范围(起始=0, 结束=3)` rc=1 `range() takes no keyword arguments` |\n| L-257 | 🔴 未修 | ✅ 已修复 | `归约(..., 求和, 0)` 与 2 参形态 rc=0，stdout `6` |\n| L-258 | 🔴 未修 | ✅ 已修复 | `映射` → `[2, 4]`、`筛选` → `[2, 3]`，无 `<map object>` |\n| L-259 | 🔴 未修 | ✅ 已修复 | ISO 与空格格式均返回 `struct_time`；非法文本 rc=1 `值错误：解析时间失败：…候选格式…`；`试解析时间` → `空` |\n| L-260 | 🔴 未修 | ✅ 已修复 | `设 表[0:2] 为 [9, 9]` → `[9, 9, 3, 4]` |\n| L-261 | 🔴 未修 | ✅ 已修复（清单侧） | `get_builtin_names()` 中两伪名均 `False`；`集合([1,2,2,3])` → `{1, 2, 3}`；运行期 NameError 属预期 |\n| L-262 | 🔴 未修 | ✅ 已修复 | 转译腿 `[\"甲\", \"乙\"]`、原生腿 `[\"甲\", \"乙\"]`，两腿一致 |\n\n## 二、验收输出\n\n```text\npython -m pytest tests/unit/test_R220_缺陷账状态一致性.py -q -o addopts=\n25 passed in 181.16s\n\npython -m pytest tests/unit/test_R220_移植语言坑.py -q -o addopts=\n21 passed in 258.02s\n```\n\n## 三、与 T-0274 的回灌交接\n\n`lighthive/docs/光明语言问题记录.md`（LH-34~LH-41）**本卡未改**（跨仓边界）。\n建议 T-0274 按本次实测结案：LH-35/36/37/38/41 已修；LH-34 降级为部分修复 + `范围` 遗留；\nLH-40 按「清单侧已修、运行期报错属预期」。详见账本 §二十七·四。\n\n## 四、没做 / 做不到\n\n1. **未改编译器**：`范围` 的 Python 内建关键字翻译不在本卡 paths，记为遗留；\n   建议后续在 `docs/AI编程指南.md` 写明「`范围` 用位置参数」。\n2. **未改 `src/linter/builtins.py`**：`字典设置默认值` 目前只是从有效清单缺席，\n   `_CURATED_REMOVED` 没有它的剔除理由；建议后续补一条，避免下轮再问。\n3. **未改 `lighthive` 仓**：见第三节，交 T-0274。\n4. 原生腿判据依赖本机 LLVM 工具链；测试在编译不可用时 `pytest.skip`（本机实测真编译通过，不是回退转译）。",
+  "error": "",
+  "declared_paths": [
+    "docs/功能对标/语言缺陷账.md",
+    "tests/unit/test_R220_缺陷账状态一致性.py"
+  ],
+  "changed_files": [
+    "docs/功能对标/语言缺陷账.md",
+    "tests/unit/test_R220_缺陷账状态一致性.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "8eec675397b24f1391f0c80ce5cdc228"
+}
