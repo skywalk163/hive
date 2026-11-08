@@ -1,0 +1,34 @@
+{
+  "task": "T-0287",
+  "agent": "raccoon-ic6",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0287",
+  "base": "main",
+  "head": "618ef5f87f1cdc8c59fdac95149404da2d77d560",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T18:53:37+08:00",
+  "finished_at": "2026-11-08T19:02:54+08:00",
+  "duration_s": 557.6,
+  "verify": [
+    {
+      "cmd": "python -c \"import hive_compat,sys,subprocess,os; w=hive_compat.rewrite('true'); assert ('\\\"'+sys.executable+'\\\"') in w, 'executable not quoted'; r=subprocess.run(w,cwd=os.getcwd(),shell=True,capture_output=True,text=True); assert r.returncode==0, r.stderr[:200]; print('OK')\"",
+      "code": 0,
+      "tail": [
+        "OK"
+      ]
+    }
+  ],
+  "summary": "T-0287 修复完成：hive_compat.py::rewrite() 给 sys.executable 加引号（与 _self_path() 一致），用户名带空格的 Windows 机器上 test -f/true 等垫片 verify 不再假红。实测：本机 exe=C:\\Users\\PCbeta Tester\\...python.exe，test -f rc=0、false rc=1、!test -f 缺失 rc=0、test 1 -eq 1 rc=0；pytest tests/test_verify_command_quotes.py + test_compat.py + test_no_window.py 全绿。",
+  "error": "",
+  "declared_paths": [
+    "hive_compat.py"
+  ],
+  "changed_files": [
+    "hive_compat.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "779f94ff0afd4da7b030f2976ffb034a",
+  "fence": 2
+}
