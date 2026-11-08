@@ -1,0 +1,48 @@
+{
+  "task": "T-0272",
+  "agent": "trae-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0272",
+  "base": "main",
+  "head": "c0e94aee72aba08a0c854e5804a361af00729c11",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T14:31:18+08:00",
+  "finished_at": "2026-11-08T14:32:57+08:00",
+  "duration_s": 99.6,
+  "verify": [
+    {
+      "cmd": "python -c \"import tomllib;v=tomllib.load(open('pyproject.toml','rb'))['project']['version'];L=[l for l in open('hive.py',encoding='utf-8') if l.startswith('VERSION =')];s=L[0].split('=',1)[1].strip().strip(chr(34));print(v,s);assert v==s\"",
+      "code": 0,
+      "tail": [
+        "0.15.2 0.15.2"
+      ]
+    },
+    {
+      "cmd": "python -m pytest tests/test_version_consistency.py -q",
+      "code": 0,
+      "tail": [
+        "..                                                                       [100%]",
+        "2 passed in 0.70s"
+      ]
+    }
+  ],
+  "summary": "# T-0272 summary（trae-win）\n\n做了什么：按卡面修两套版本号为单一真源，并补齐两个治理文件。首次提交因 Windows 下 verify 引号被吃掉判红，\n第二次提交因「交付已在 task 分支、工作区零改动」被零改动闸门判 failed（verify 两条均为 code=0）；\n按仓库约定走 `hive retry --fresh` 从 main 重建 worktree 后重新落盘交付物并提交。\n改动的文件（均在卡面 paths 内）：`pyproject.toml`（version 0.1.0 → 0.15.2，并加「真源是 hive.py VERSION」注释）；\n新增 `tests/test_version_consistency.py`（2 个用例：一致性与 semver 格式）；新增 `CONTRIBUTING.md`、`SECURITY.md`。\n\n版本一致性前后：改前 pyproject=0.1.0 vs hive.py=0.15.2；本轮验收命令输出 `0.15.2 0.15.2`，一致。\n验证结果：\n- `python -m pytest tests/test_version_consistency.py -q` → 2 passed（0.21s）\n- 治理文件齐：CONTRIBUTING.md / SECURITY.md 均存在；打包元数据为 0.15.2\n- 全量 pytest 未完整跑完：上一轮在 Windows 上跑到 15% 处约 232 个用例全绿后，卡在\n  `test_prune_deletes_only_merged0` 的子进程 `hive.py work --agent fb --once`（10 分钟不退出），\n  属 T-0261 记录的 stdin/子进程挂住环境问题，与本卡改动无关；本卡 verify 两条均绿。\n\nmcp_auth.py 核实结论：鉴权**默认开启** —— `mcp_http.py` 对所有请求校验\n`Authorization: Bearer` / `X-Hive-Mcp-Token`，无有效 token 一律 401；token 存本机\n`~/.hive/cluster/mcp_tokens.json`（SHA-256、0600，不入库）；MCP 默认绑 `127.0.0.1:8790`；\n看板默认 `0.0.0.0:8787`（内网假设）。SECURITY.md 已按此写。\n遗留风险：PyPI 上 `hive-cli` 同名包未核实（卡面声明不在范围）；Windows 全量测试偶发挂住，建议用 `tests/run_pytest.sh` 或 Linux 环境。",
+  "error": "",
+  "declared_paths": [
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "pyproject.toml",
+    "tests/test_version_consistency.py"
+  ],
+  "changed_files": [
+    "pyproject.toml",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "tests/test_version_consistency.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "de033a5a41084b2f8d822c5de4340110",
+  "fence": 7
+}
