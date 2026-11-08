@@ -1,0 +1,46 @@
+{
+  "task": "T-0281",
+  "agent": "trae-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0281",
+  "base": "main",
+  "head": "2c6a2b19ed914238be8818e15ef5017acd8e25ae",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T04:01:40+08:00",
+  "finished_at": "2026-11-08T04:14:25+08:00",
+  "duration_s": 765.4,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/unit/test_R220_移植语言坑.py -q -o addopts=",
+      "code": 0,
+      "tail": [
+        ".....................                                                    [100%]",
+        "21 passed in 90.68s (0:01:30)"
+      ]
+    },
+    {
+      "cmd": "python -m pytest tests/unit/test_LH05_用户参数.py -q -o addopts=",
+      "code": 0,
+      "tail": [
+        "........                                                                 [100%]",
+        "8 passed in 29.89s"
+      ]
+    }
+  ],
+  "summary": "# T-0281 执行摘要（trae-win / 2026-11-08）\n\n## 做了什么\n新增 `tests/unit/test_R220_移植语言坑.py`，把 T-0258 的 7 条「语言坑」固化为 21 个 subprocess 真跑\n`python -m cli.light run`（默认 src 后端 + 本仓 stdlib）用例，并补「今天已绿」能力回归。\n未改编译器 / stdlib / linter / 既有测试，仅新增这一个文件。\n\n## 逐条三态实测结论\n1. `导出 a b c` 行末句号：无/有句号均 rc=0 且三名可导入 → **已修，原结论过期**。\n2. 字符串 `\\uXXXX`：单个反斜杠已输出「你」，写 `\\\\u4f60` 才是字面 → **已修，原结论过期**。\n3. `段落() 返回 x`：仍不支持，但报可读「名称错误」；`接收 甲：返回 …` 可用 → **设计约束**。\n4. `设 f(x) 为 v`：仍非法，parser 明确提示「期望'为'或'等于'」 → **设计约束**。\n5. `设 等待 为 1`：仍解析失败 → **仍红**；建议改名（如 等待时长）；对照 `跳过` 可作变量名。\n6. `写 转字符串(甲 + 1)`：rc=0 输出 `2`（不换行） → **已修，原结论过期**。\n7. `尝试/捕获`（含 `试/捕` 别名）：rc=0 输出「捕到了」 → **已修，基本形态已绿**。\n\n## 验证\n- `python -m pytest tests/unit/test_R220_移植语言坑.py -q -o addopts=` → 21 passed（92s）。\n- `python -m pytest tests/unit/test_LH05_用户参数.py -q -o addopts=` → 8 passed（31s）。\n\n## 风险 / 未做\n- 实测发现 `导出` 未做白名单门禁：未导出的模块级名字也能被 `从 模块 导入` 拿到（负控 rc=0）。\n  更像缺陷，未写成断言以免固化错误语义，留给缺陷账处理。\n- 坑 5 为语言实现问题，本卡只做判据不修编译器；修复后需把该用例改判为「已修」。",
+  "error": "",
+  "declared_paths": [
+    "tests/unit/test_R220_移植语言坑.py"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "tests/unit/test_R220_移植语言坑.py"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md"
+  ],
+  "lease_id": "6029f250097942d39f2db74d83ff3c7e",
+  "fence": 1
+}
