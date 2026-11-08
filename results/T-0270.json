@@ -1,0 +1,51 @@
+{
+  "task": "T-0270",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0270",
+  "base": "main",
+  "head": "33e023e328ad1042249bbbe045d8cf9bc99e73a8",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T19:27:24+08:00",
+  "finished_at": "2026-11-08T19:27:33+08:00",
+  "duration_s": 9.6,
+  "verify": [
+    {
+      "cmd": "test -f LICENSE",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "test -f smoke.sh",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "bash smoke.sh",
+      "code": 0,
+      "tail": [
+        "SMOKE OK"
+      ]
+    }
+  ],
+  "summary": "# T-0270 交付说明\n\n补 lighthive 治理三件套：LICENSE（MIT）、smoke.sh、GitHub Actions CI；另补 .gitignore 临时物规则与 README 顶部「一句话」。\n\n## 改动文件（均在 paths 内）\n- 新增 `LICENSE`：逐字复制 `light/LICENSE`（版权行 `Copyright (c) 2024-2026 Dumate`，未编年份）。\n- 新增 `smoke.sh`（30 行）：自动定位光明编译器（LIGHT_MERGE → `../light` → `~/dswork/light`），依次跑 `运行.py --help`、最小 .light 程序打印、`tests/单测.light`。\n- 新增 `.github/workflows/ci.yml`：ubuntu-latest + Python 3.12，克隆 light 到 `../light`，跑 smoke.sh 与单测；不跑 `tests/跑全部.sh`。\n- 改 `.gitignore`：追加 `/tmp_*/`、`*.light.tmp`。\n- 改 `README.md`：顶部补 3 行「一句话」说明（替换原单行粗体介绍）。\n\n## 验证\n- `test -f LICENSE`、`test -f smoke.sh`：通过。\n- `bash smoke.sh`（6.5s）实际输出：\n```\nSMOKE OK\n```\n- `python3 -c \"yaml.safe_load(ci.yml)\"`：`yaml ok`\n- `diff LICENSE ../light/LICENSE`：无差异 → **LICENSE 与 light 逐字一致**\n- `bash tests/跑全部.sh`：退出码 **1**。同机在未改动的 main（`/tmp/lh-base-T0270`，5006f23）跑同样 rc=1，失败集完全一致：3/8 端到端 `e2e FAILED: 6`（测试把仓库路径写死为 Linux 的 `/home/skywalk/dswork/hive`）；5/8~8/8 因本机 bash 3.2 把「）PORT」误当变量名报 `PORT�: unbound variable`。属既有环境问题，非本卡回归。\n\n## 遗留风险\n- 本机 smoke 依赖 `~/dswork/light` 兜底；CI 用 `../light`。两者都缺时会明确报「找不到光明编译器」。\n- 本机完整回归不可作判据（既有失败），CI 仅跑 smoke + 单测。",
+  "error": "",
+  "declared_paths": [
+    "LICENSE",
+    ".github/workflows/ci.yml",
+    "smoke.sh",
+    "README.md",
+    ".gitignore"
+  ],
+  "changed_files": [
+    ".gitignore",
+    "README.md",
+    ".github/workflows/ci.yml",
+    "LICENSE",
+    "smoke.sh"
+  ],
+  "out_of_paths": [],
+  "lease_id": "7372ad1c103d4234b3d9812bf319378f"
+}
