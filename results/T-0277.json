@@ -1,0 +1,49 @@
+{
+  "task": "T-0277",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0277",
+  "base": "main",
+  "head": "48b723b26a60990817871962cd5f48a876ef1b32",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T00:07:15+08:00",
+  "finished_at": "2026-11-08T00:46:03+08:00",
+  "duration_s": 2328.9,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/unit/test_R220_归约与段落体.py -q -o addopts=",
+      "code": 0,
+      "tail": [
+        "................                                                         [100%]",
+        "16 passed in 121.48s (0:02:01)"
+      ]
+    },
+    {
+      "cmd": "python -m pytest tests/unit/test_LH05_用户参数.py -q -o addopts=",
+      "code": 0,
+      "tail": [
+        "........                                                                 [100%]",
+        "8 passed in 43.41s"
+      ]
+    }
+  ],
+  "summary": "# T-0277 · 归约传段落报类型错误 + 单行段落体后顶层语句静默空跑\n\n**结论：两条缺陷都在本卡 paths 内修复；两条 verify 全绿（16 passed + 8 passed）。额外回归 44 + 665 例里唯一 1 红，经「临时还原 HEAD 字节」A/B 实证为基线既有（sibling lightharness 副本 drift），非本卡引入。**\n\n## 一、根因（先定位再改）\n\n- **探针 A**：生成产物是 `functools.reduce(求和(), [1, 2, 3], 0)` —— 换序本身是对的（函数位、数据位、初值末位都合 `reduce(function, iterable, initializer)` 口径），错在函数位把「函数引用」发射成了「立即调用」。AST 对比：`映射([1,2,3], 加倍)` 的「加倍」是 `Identifier`（发射 `加倍`，本来就绿）；「求和」是 keywords.py VERB_ARITY 登记过的动词名，parser 把零参裸引用做成 `ParagraphCall(name='求和', args=[], 带括号=False)`，codegen 照常发成 `求和()`，于是缺两个必填参数。注意「求和」同时是内置名，用户又定义了同名段落，代码里靠 `_user_defined_functions` 区分。\n- **探针 B**：生成产物是 `def 加倍(x): return (x*2); print(\"END\")` —— 顶层语句被吞进段落体、排在 `return` 之后不可达，故 rc=0 零输出。L-013 的「冒号后无 NEWLINE 即单行体」修复（本文件 :3384 / :3429）当年只落到 if / while / for，`_parse_paragraph_v2` 冒号后无条件跳过 NEWLINE 并以 `allow_single_line=False` 调 `_parse_body`；单行体没有 DEDENT 边界，后续语句全被吞。\n- **裁定**：单行段落体是**合法语法**（与其它块结构同口径），不是编译期错误；修法是让它在行尾闭合、后续顶层语句照常执行，并把这个裁定固化进测试（test_B6/B7 为多行体对照）。\n\n## 二、改动（仅卡面 3 个 paths 内文件，62 insertions / 4 deletions）\n\n- `src/code_generator.py`（+50/-2）：`ParagraphCall` 实参生成处，只对 `map` / `filter` / `functools.reduce` 换序后的**第 0 位函数位**，若实参是「零参且源码无括号」的 ParagraphCall，改走 `_gen_paragraph_ref()` 发射可调用对象名（不追加括号）；新增 `_is_bare_paragraph_ref()` / `_gen_paragraph_ref()`，名字解析与既有分支同源（块作用域 mangle、类内 self、遮蔽、内置映射、用户段落名）。带括号的真调用 `求和()` 不算引用，其它调用口径一字未动。\n- `src/parser_stmt.py`（+12/-2）：`_parse_paragraph_v2` 冒号后记 `has_newline`，`_parse_body(allow_single_line=not has_newline, stop_on_paragraph=False)`。多行缩进体（has_newline=True）行为逐字不变。\n- `tests/unit/test_R220_归约与段落体.py`（新增）：16 例**全部** `subprocess.run([sys.executable, '-m', 'cli.light', 'run', …])` 真起 CLI 进程，断言 rc 与 stdout 精确值（先 `\\r\\n`→`\\n` 归一化）；A 组 3 例、B 组 7 例（含块内/连续定义/多行体对照）、卡面「已绿能力」6 条各 1 例。不 import 编译器函数、不改环境变量判绿。\n\n## 三、两条探针修复前 / 后（A/B 实证：临时把两源码还原成 HEAD 字节跑一遍，finally 写回原字节）\n\n探针 A（`段落 求和(a,b): 返回 a+b` + `归约([1,2,3], 求和, 0)`）：\n- 修复前 **rc=1**，stdout 原文 `BEGIN\\n`；stderr 首行 `错误: 类型错误` / `类型错误：求和() missing 2 required positional arguments: 'a' and 'b'（t0277_A:4）`。\n- 修复后 **rc=0**，stdout 原文 `BEGIN\\n6\\nEND\\n`，stderr 空。\n\n探针 B（`段落 加倍(x): 返回 x * 2` + `打印 \"END\"`）：\n- 修复前 **rc=0**，stdout 原文 **(空)**，stderr 空 —— 静默空跑。\n- 修复后 **rc=0**，stdout 原文 `END\\n`，stderr 空。\n\n## 四、验证结果\n\n- verify ① `python -m pytest tests/unit/test_R220_归约与段落体.py -q -o addopts=` → **16 passed / 109.58s**。\n- verify ② `python -m pytest tests/unit/test_LH05_用户参数.py -q -o addopts=` → **8 passed / 43.56s**。\n- **模拟 submit 的 verify 环境**（`shell=True` + cwd=worktree + PATH 前置 `C:\\Python314`）：① 16 passed / 106.56s、② 8 passed / 40.89s，`ALL_RC=0`。上轮 T-0262 的 `managed 3.13 无 pytest` 假红是 PATH 解析问题，本轮只在运行期前置解释器路径解决，**未改 hive 仓任何文件**。\n- 相关回归 5 文件（LH35 归约与高阶内置 / parser / R166 异步段落 / R158 地板证据窗口 / 文档内置名存在性）：**44 passed / 79.32s**。\n- 扩展回归 15 文件（codegen×8 / lambda / dead_code / LH34 / l0 / lpd_009 / a2_1 / LH41）：**665 passed、19 subtests passed、1 failed / 432.21s**。\n- 唯一红 `test_LH34_中文关键字参数.py::test_LH形参名与真源逐字相同` → `KeyError: '原子写入'`。**未改动 HEAD 单跑同一条：同样 1 failed、同签名**（`BASE_HEAD_RC=1`）；根因是 sibling `lightharness/stdlib/builtins.py` 副本缺 `原子写入`（测试用例自身用 `LH[名]` 下标而非 `LH.get`，把 drift 报成 KeyError）。两处输入文件 `stdlib/builtins.py` 与 LH 副本本卡**一字未改**，故定性为基线既有红，不在本卡 paths，未修。\n- `git diff --check` 干净；两个源文件仍是全 CRLF（7838 / 6740 行），补丁按字节替换，无整文件行尾漂移。\n\n## 五、三副本同步结论（卡面第三节）\n\n本卡只改编译器源码的**解析 / 发射逻辑**，**未改** `builtin_map` 发射表、生成产物序言的 import（`import functools` 一行未动）、`stdlib/builtins.py` 及任何 stdlib 副本 ⇒ `bootstrap/release/stdlib/`、`lightharness/stdlib/`、`lighthive/stdlib/` 三份 stdlib 副本**无需同步**。本 worktree 内 `bootstrap/release/stdlib/` 存在；`lightharness/stdlib/` 与 `lighthive/stdlib/` **目录不存在**，sibling LH 副本实际位于 worktree 外的 `C:/Users/skywalk/.hive/wt/workbuddyai-win/lightharness/stdlib/builtins.py`（已陈旧，即上面基线红的来源）。按卡面「不能同步的在结果里点名」在此点名：这两份副本在本 worktree 无法逐文件核对，且同步它们越出本卡 paths，未动。\n\n## 六、没做 / 做不到 / 遗留风险（诚实列，不把未验证写成通过）\n\n- **未跑 `tests/unit` 全量 200 个文件**（本机全量耗时长）；回归只覆盖与本改动强相关的 20 个文件，未覆盖面风险如实保留。\n- 「先用后定义」且撞内置动词名的段落实参：`_user_defined_functions` 是单遍生成边走边登记，该形态会落到内置映射（例如 `sum`），仍是合法可调用对象但语义可能不是用户段落。本卡未扩展这个边界，测试也未覆盖。\n- 单行段落体位于嵌套块内时，行尾 NEWLINE 交由外层 `_parse_body` 处理（与 L-013 同口径）；已用 test_B4 覆盖 `如果` 块内形态，更深嵌套未穷举。\n- 未执行 `git commit` / `git push` / `git checkout`；未改 `.hive/task.md`、`state.json`、卡面 state 与 result 文件。\n- 本 worktree 基线 `12fac8c08` 是旧基线，`.hive/summary.md` 仍是 **tracked**，故 submit 可能记一条 `out_of_paths=['.hive/summary.md']` 警告（非严格模式仅警告，不是判据）；按指令「无论成功失败都要写 summary」，未为规避警告而省略或删除该文件。",
+  "error": "",
+  "declared_paths": [
+    "src/code_generator.py",
+    "src/parser_stmt.py",
+    "tests/unit/test_R220_归约与段落体.py"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "src/code_generator.py",
+    "src/parser_stmt.py",
+    "tests/unit/test_R220_归约与段落体.py"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md"
+  ],
+  "lease_id": "61cff6f652284a60979f0670d9e81824"
+}
