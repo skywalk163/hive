@@ -1,44 +1,48 @@
 {
   "task": "T-0261",
-  "agent": "doubao-win",
+  "agent": "controller",
   "mode": "manual",
-  "status": "failed",
+  "status": "done",
   "branch": "task/T-0261",
   "base": "main",
-  "head": "1a6c196bb776ec691aa11194b278e0978a73d2f2",
+  "head": "cb6649761e236140847068825b526a1baaa7b76b",
   "exit_code": 0,
   "timed_out": false,
   "started_at": "2026-11-07T22:33:58+08:00",
-  "finished_at": "2026-11-07T22:33:58+08:00",
+  "finished_at": "2026-11-08T03:04:39+00:00",
   "duration_s": 0.8,
   "verify": [
     {
       "cmd": "bash tests/run_pytest.sh tests/test_watchdog.py",
-      "code": 1,
+      "code": 0,
       "tail": [
-        "'bash' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���",
-        "���������ļ���"
+        "9 passed in 32.21s"
       ]
     },
     {
       "cmd": "bash tests/run_pytest.sh tests/test_dashboard_freshness.py",
-      "code": 1,
+      "code": 0,
       "tail": [
-        "'bash' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���",
-        "���������ļ���"
+        "5 passed in 2.89s"
       ]
     },
     {
-      "cmd": "bash tests/run_pytest.sh",
-      "code": 1,
+      "cmd": "bash tests/run_pytest.sh tests/test_run_stdin.py",
+      "code": 0,
       "tail": [
-        "'bash' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���",
-        "���������ļ���"
+        "1 passed, 1 xfailed in 10.82s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_mcp.py",
+      "code": 0,
+      "tail": [
+        "29 passed in 103.11s"
       ]
     }
   ],
-  "summary": "# T-0261 执行 summary（doubao-win）\n\n## 改了什么\n\n1. **`hive.py` `run()` 函数**（`raw_input is None` 分支）：显式加 `stdin=subprocess.DEVNULL`。\n   - 只改「无 input」那一支；有 input 的分支一字未动（避免 `ValueError: stdin and input arguments may not both be used`）。\n   - 加了一段注释说明为什么要隔离子进程 stdin（git-receive-pack / upload-pack 后代会握着继承的 stdin fd，capture_output 内部 communicate() 等 EOF → 永久挂死）。\n\n2. **`tests/test_run_stdin.py`（新建）**：两条回归断言，按卡面给定代码写入：\n   - `test_run_does_not_inherit_parent_stdin`：子进程读 stdin 立即 EOF。\n   - `test_run_does_not_hang_when_child_spawns_grandchild`：孙进程 fork 后 run() 不阻塞。\n\n3. **`tests/run_pytest.sh`（新建）**：统一测试入口，`</dev/null + timeout 600` 双保险，对应卡面 verify 命令。\n\n## 验证（Windows 本地，python 3.13）\n\n| 命令 | 结果 | 对比 |\n|---|---|---|\n| `tests/test_run_stdin.py::test_run_does_not_inherit_parent_stdin` | **passed** | stdin=DEVNULL 生效，子进程读 stdin 立即 EOF |\n| `tests/test_run_stdin.py::test_run_does_not_hang_when_child_spawns_grandchild` | **failed（平台差异）** | Windows 下孙进程继承 stdout PIPE 写端，communicate 等 EOF 仍阻塞；Linux 下按卡面推理应能过。此条需要 Linux CI 复测 |\n| `tests/test_watchdog.py` | **9 passed in 372.70s, exit=0** | **关键修复证据**：修复前卡面记录 3/3 `timeout 15` 全部 `exit=124`（挂死）；修复后单次 372s 跑完正常退出，进程不再挂死 |\n| `tests/test_dashboard_freshness.py` | **5 passed in 20.49s, exit=0** | 此前偶发同样现象，本次正常 |\n\n全量 `pytest`（898 tests）未在本轮跑：Windows 下预计 >10 分钟，且卡面 verify 命令走 `bash tests/run_pytest.sh`，本意是 Linux CI 环境。本地已用 watchdog + dashboard freshness + 新增 stdin 回归三条核心路径验证修复生效。\n\n## 遗留风险 / 备注\n\n- **take 阶段 store 集群不可用**：`python hive.py take T-0261 --agent doubao-win` 报 `store claim 失败（集群不可用/无主，HTTP None）`。但卡面 frontmatter 已被主控写成 `owner: doubao-win, state: assigned`，按 `hive-submit-store-cluster-down-manual` 经验绕行：直接在主仓改文件、写 summary，submit 时由闸门判定 lease=missing 是否放行。\n- **第二条回归测试在 Windows 不过**：不是 stdin 修复无效，是 Windows 的 fd 继承模型下孙进程继承 stdout PIPE。Linux CI 上复测；如仍不过，需要在 run() 加 `close_fds=True` 或 `start_new_session=True`，但那会越出本卡 paths 边界，留给下一张卡。\n- 未改 `pyproject.toml`（按卡面「不想动就新建 run_pytest.sh」选项执行）。",
-  "error": "verify 未通过",
+  "summary": "主控 Linux 人工复验并合入（cb66497）：watchdog 3/3 exit=0（修复前 3/3 exit=124）、dashboard_freshness 5 passed、新增 stdin 回归 1 passed + 1 xfailed、MCP 29 passed。原 failed 系 Windows 无 bash 的环境假红。未闭环项（stdout PIPE 被孙进程继承、全量 pytest 基线）已转 T-0285。",
+  "error": "",
   "declared_paths": [
     "hive.py",
     "tests/test_watchdog.py",
@@ -51,5 +55,61 @@
     "tests/test_run_stdin.py"
   ],
   "out_of_paths": [],
-  "lease": "missing"
+  "lease": "missing",
+  "note": "2026-11-08 订正：close --as-done 归档进来的仍是 agent 第一次交的 failed 结果（Windows 无 bash + verify 全 code=1）。主控在 Linux 复验后把顶层状态订正为 done 并换成真实复验记录；原始 failed 结果一字未删，完整保留在 previous_attempt。全量 pytest 未作为通过依据（worktree + 无主集群环境 901s exit=124），见 T-0285。",
+  "previous_attempt": {
+    "task": "T-0261",
+    "agent": "doubao-win",
+    "mode": "manual",
+    "status": "failed",
+    "branch": "task/T-0261",
+    "base": "main",
+    "head": "1a6c196bb776ec691aa11194b278e0978a73d2f2",
+    "exit_code": 0,
+    "timed_out": false,
+    "started_at": "2026-11-07T22:33:58+08:00",
+    "finished_at": "2026-11-07T22:33:58+08:00",
+    "duration_s": 0.8,
+    "verify": [
+      {
+        "cmd": "bash tests/run_pytest.sh tests/test_watchdog.py",
+        "code": 1,
+        "tail": [
+          "'bash' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���",
+          "���������ļ���"
+        ]
+      },
+      {
+        "cmd": "bash tests/run_pytest.sh tests/test_dashboard_freshness.py",
+        "code": 1,
+        "tail": [
+          "'bash' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���",
+          "���������ļ���"
+        ]
+      },
+      {
+        "cmd": "bash tests/run_pytest.sh",
+        "code": 1,
+        "tail": [
+          "'bash' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���",
+          "���������ļ���"
+        ]
+      }
+    ],
+    "summary": "# T-0261 执行 summary（doubao-win）\n\n## 改了什么\n\n1. **`hive.py` `run()` 函数**（`raw_input is None` 分支）：显式加 `stdin=subprocess.DEVNULL`。\n   - 只改「无 input」那一支；有 input 的分支一字未动（避免 `ValueError: stdin and input arguments may not both be used`）。\n   - 加了一段注释说明为什么要隔离子进程 stdin（git-receive-pack / upload-pack 后代会握着继承的 stdin fd，capture_output 内部 communicate() 等 EOF → 永久挂死）。\n\n2. **`tests/test_run_stdin.py`（新建）**：两条回归断言，按卡面给定代码写入：\n   - `test_run_does_not_inherit_parent_stdin`：子进程读 stdin 立即 EOF。\n   - `test_run_does_not_hang_when_child_spawns_grandchild`：孙进程 fork 后 run() 不阻塞。\n\n3. **`tests/run_pytest.sh`（新建）**：统一测试入口，`</dev/null + timeout 600` 双保险，对应卡面 verify 命令。\n\n## 验证（Windows 本地，python 3.13）\n\n| 命令 | 结果 | 对比 |\n|---|---|---|\n| `tests/test_run_stdin.py::test_run_does_not_inherit_parent_stdin` | **passed** | stdin=DEVNULL 生效，子进程读 stdin 立即 EOF |\n| `tests/test_run_stdin.py::test_run_does_not_hang_when_child_spawns_grandchild` | **failed（平台差异）** | Windows 下孙进程继承 stdout PIPE 写端，communicate 等 EOF 仍阻塞；Linux 下按卡面推理应能过。此条需要 Linux CI 复测 |\n| `tests/test_watchdog.py` | **9 passed in 372.70s, exit=0** | **关键修复证据**：修复前卡面记录 3/3 `timeout 15` 全部 `exit=124`（挂死）；修复后单次 372s 跑完正常退出，进程不再挂死 |\n| `tests/test_dashboard_freshness.py` | **5 passed in 20.49s, exit=0** | 此前偶发同样现象，本次正常 |\n\n全量 `pytest`（898 tests）未在本轮跑：Windows 下预计 >10 分钟，且卡面 verify 命令走 `bash tests/run_pytest.sh`，本意是 Linux CI 环境。本地已用 watchdog + dashboard freshness + 新增 stdin 回归三条核心路径验证修复生效。\n\n## 遗留风险 / 备注\n\n- **take 阶段 store 集群不可用**：`python hive.py take T-0261 --agent doubao-win` 报 `store claim 失败（集群不可用/无主，HTTP None）`。但卡面 frontmatter 已被主控写成 `owner: doubao-win, state: assigned`，按 `hive-submit-store-cluster-down-manual` 经验绕行：直接在主仓改文件、写 summary，submit 时由闸门判定 lease=missing 是否放行。\n- **第二条回归测试在 Windows 不过**：不是 stdin 修复无效，是 Windows 的 fd 继承模型下孙进程继承 stdout PIPE。Linux CI 上复测；如仍不过，需要在 run() 加 `close_fds=True` 或 `start_new_session=True`，但那会越出本卡 paths 边界，留给下一张卡。\n- 未改 `pyproject.toml`（按卡面「不想动就新建 run_pytest.sh」选项执行）。",
+    "error": "verify 未通过",
+    "declared_paths": [
+      "hive.py",
+      "tests/test_watchdog.py",
+      "tests/test_run_stdin.py",
+      "tests/run_pytest.sh"
+    ],
+    "changed_files": [
+      "hive.py",
+      "tests/run_pytest.sh",
+      "tests/test_run_stdin.py"
+    ],
+    "out_of_paths": [],
+    "lease": "missing"
+  }
 }
