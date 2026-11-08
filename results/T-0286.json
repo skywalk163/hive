@@ -1,0 +1,43 @@
+{
+  "task": "T-0286",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0286",
+  "base": "main",
+  "head": "ffd2a125815c1e665a1bb74b920541671b836187",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T14:39:22+08:00",
+  "finished_at": "2026-11-08T14:45:08+08:00",
+  "duration_s": 346.9,
+  "verify": [
+    {
+      "cmd": "python -c \"import subprocess,sys; r=subprocess.run([sys.executable,'-m','pytest','-q','tests/test_changed_files_committed.py','tests/test_result_head_guard.py','tests/test_submit_summary.py','-o','addopts='],stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=600); print(r.stdout[-3000:]); print(r.stderr[-1000:]); sys.exit(r.returncode)\"",
+      "code": 0,
+      "tail": [
+        "........................                                                 [100%]",
+        "24 passed in 70.35s (0:01:10)"
+      ]
+    },
+    {
+      "cmd": "python -c \"import hive; print('import-ok')\"",
+      "code": 0,
+      "tail": [
+        "import-ok"
+      ]
+    }
+  ],
+  "summary": "# T-0286 完成小结：修 submit 零改动误判\n\n## 结论\n\n`submit` / worker 产结果时不再只数「相对 HEAD 的未提交改动」，改为**交付口径并集**：\n\n- `git diff --name-only <base>...HEAD`（agent 自己 commit 过的）\n- `git status --porcelain -uall`（还没提交的）\n\n两者并集去重后用于 `changed_files`、`out_of_paths` 与零改动闸门。stage 仍然只加未提交改动。\n\n## 根因\n\n- `changed_files(wt)` 是「相对 HEAD 的未提交改动」；\n- worker 手动模式又把「HEAD 变了 —— agent 自己 commit 过」当作完成信号；\n- 两处语义打架：agent 一 commit，worktree 就干净，`changed_files=[]`，`result_gate` 判 failed。\n- 连带：`out_of_paths` 只看未提交改动，agent 自己提交的越界文件会漏检。\n\n## 改了哪几处\n\n| 位置 | 改动 |\n|---|---|\n| `hive.py` `base_diff_files(wt, base)` | 新增：`base` → `origin/base` 依次回落，三点差列已提交改动；取不到 base 返回 `[]` |\n| `hive.py` `delivery_files(wt, base)` | 新增：`base...HEAD` 与工作区改动并集，去重保序 |\n| `hive.py` `cmd_submit` | `changed` 改用 `delivery_files`；`stage_paths` 仍只传 `changed_files(wt)` |\n| `hive.py` worker 产结果路径 | 同上；`verify_only` 保持旧口径（不产代码分支） |\n| `tests/test_changed_files_committed.py` | 新增 5 例回归 |\n\n## base 回落策略\n\n1. 卡面 `base`（默认 `main`）；\n2. `origin/<base>`（worktree detached / 本地无 main 时）；\n3. 两者都取不到 → `base_diff_files` 返回空，自动退回旧口径（只看未提交），不误判、不放大。\n\n三点差 `base...HEAD` 由 git 自取 merge-base，不额外依赖本地 `main` 指向。\n\n## 越界检查\n\n一并覆盖「已提交文件」：`out_of_paths` 现在吃 `delivery_files` 的并集，agent 自己提交的 paths 外文件会进 `out_of_paths`。`strict_paths` 行为不变（默认只告警，不阻断）。\n\n## verify 实测\n\n卡面 verify 1（新回归 + 既有两个测试文件）：\n\n```\n........................                                                 [100%]\n24 passed in 73.15s (0:01:13)\nVERIFY1_RC=0\n```\n\n- 新文件 5 passed（单独跑：`5 passed in 42.14s`）\n- 既有 `tests/test_result_head_guard.py`、`tests/test_submit_summary.py` 全绿\n\n卡面 verify 2：\n\n```\nimport-ok\nVERIFY2_RC=0\n```\n\n## 回归用例（5 条）\n\n1. agent 自己 commit → `changed_files` 含该文件、`status=done`（修前 failed）；\n2. 一个文件都没改 → 仍 `failed`、错误含「零改动」，`changed_files=[]`；\n3. 已提交 + 未提交混合 → 并集正确、无重复；\n4. `allow_empty_diff: true` 验收卡零改动仍 `done`；\n5. 已提交的 paths 外文件 → 记进 `out_of_paths`。\n\n## 保护未动\n\n- `result_gate` 零改动保护保留；\n- head 未推送 / 与远端不一致仍判 failed；\n- `allow_empty_diff: true`、`paths` 为空的验收卡仍自动放行。\n\n## 备注\n\n- 本卡只改 `hive.py` 与新增测试文件，未改其它任务卡与 agents 配置。\n- 交付保持未提交，由 `hive_submit` 统一 commit/push。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_changed_files_committed.py"
+  ],
+  "changed_files": [
+    "hive.py",
+    "tests/test_changed_files_committed.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "be7fd18113fc42b9a539a7ff47f2746e"
+}
