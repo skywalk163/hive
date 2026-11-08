@@ -1547,6 +1547,44 @@ def changed_files(wt: Path) -> list[str]:
     return out
 
 
+def base_diff_files(wt: Path, base: str | None) -> list[str]:
+    """相对 base 已提交的改动清单（三点差，自动取 merge-base）。
+
+    worktree 常是 detached HEAD，本地未必有 `main` 分支；按 base →
+    origin/base 依次回落。两个都取不到时返回 []，调用方退回旧口径
+    （只看未提交改动），宁可保守也不误判。
+    """
+    if not base:
+        return []
+    ref = None
+    for cand in (base, f"origin/{base}"):
+        if rev_parse(wt, cand):
+            ref = cand
+            break
+    if not ref:
+        return []
+    p = git(["-c", "core.quotePath=false", "diff", "--name-only",
+             f"{ref}...HEAD"], wt, check=False)
+    return [l.strip() for l in p.stdout.splitlines() if l.strip()]
+
+
+def delivery_files(wt: Path, base: str | None) -> list[str]:
+    """交付口径：已提交（相对 base）+ 未提交改动的并集，去重保序。
+
+    `changed_files()` 只看相对 HEAD 的未提交改动；agent 自己 commit 过后
+    worktree 是干净的，它返回空，结果闸门会误判「零改动」failed（T-0286）。
+    产结果与越界检查用本函数；stage 仍按未提交改动走，二者不混。
+    base 取不到时 base_diff_files 返回空，自动退回旧口径。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for f in [*base_diff_files(wt, base), *changed_files(wt)]:
+        if f and f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+
 def delivery_paths(declared, files) -> list[str]:
     """提交时要 stage 的路径：从改动里剔除 `.hive/` 运行时文件，除非卡面显式点名。
 
@@ -3567,15 +3605,19 @@ class Hive:
             raise HiveError(f"worktree 不存在: {wt}")
 
         head = rev_parse(wt, "HEAD")
+        base = card.get("base") or "main"
         try:
-            changed = changed_files(wt)
+            # 交付口径：已提交（相对 base）+ 未提交的并集。agent 自己 commit 过
+            # 时 changed_files() 为空，但它仍然是有效交付（T-0286）。
+            changed = delivery_files(wt, base)
             oop = out_of_paths(card.get("paths"), changed)
             if oop:
                 log(f"{tid} 越界改动 {len(oop)} 个文件：{', '.join(oop[:8])}")
                 if strict_paths(cfg):
                     raise HiveError(
                         "越界改动（严格模式），拒绝提交：" + ", ".join(oop[:8]))
-            stage_paths(wt, delivery_paths(card.get("paths"), changed),
+            # stage 只加未提交的改动；已提交的无需再 add（也可能已被删除）。
+            stage_paths(wt, delivery_paths(card.get("paths"), changed_files(wt)),
                         card.get("paths"))
             if git(["diff", "--cached", "--quiet"], wt, check=False).returncode != 0:
                 git([*IDENT, "commit", "-m",
@@ -5474,7 +5516,10 @@ class Worker:
                                                   int(card.get("timeout_minutes") or 60) * 60, tid)
 
         # 越界检查：自举时代码仓和协调仓库是同一个，agent 能顺手改掉自己的任务卡
-        changed: list[str] = changed_files(wt)
+        # 交付口径 = 已提交（相对 base）+ 未提交的并集，防止「agent 自己 commit
+        # 过后 changed_files 为空」既漏越界又误判零改动（T-0286）。
+        changed: list[str] = (changed_files(wt) if verify_only
+                              else delivery_files(wt, card.get("base") or "main"))
         oop: list[str] = []
         if not verify_only:
             oop = out_of_paths(card.get("paths"), changed)
@@ -5493,7 +5538,8 @@ class Worker:
             head = rev_parse(wt, "HEAD")
         else:
             try:
-                stage_paths(wt, delivery_paths(card.get("paths"), changed),
+                # stage 只加未提交的改动；已提交的已在 HEAD 里。
+                stage_paths(wt, delivery_paths(card.get("paths"), changed_files(wt)),
                             card.get("paths"))
                 if git(["diff", "--cached", "--quiet"], wt, check=False).returncode != 0:
                     git([*IDENT, "commit", "-m", f"hive({tid}): {card.get('title', '')}"], wt)
