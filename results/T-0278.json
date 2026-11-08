@@ -1,0 +1,51 @@
+{
+  "task": "T-0278",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0278",
+  "base": "main",
+  "head": "eb9f20ccf94582c24cb988e3ac0c3317ee7de18f",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T09:43:21+08:00",
+  "finished_at": "2026-11-08T10:53:02+08:00",
+  "duration_s": 4181.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/unit/test_文档内置名存在性.py -q -o addopts=",
+      "code": 0,
+      "tail": [
+        ".............                                                            [100%]",
+        "13 passed in 9.12s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest tests/unit/test_R220_linter清单对拍.py -q -o addopts=",
+      "code": 0,
+      "tail": [
+        ".........                                                                [100%]",
+        "9 passed in 72.78s (0:01:12)"
+      ]
+    }
+  ],
+  "summary": "# T-0278 · linter 内置名清单 ↔ 运行期真身（真 CLI 逐名对拍）\n\n**结论：装上 R220 门禁后，清单 333 名在真 CLI 下 332/332 可写探针全部运行期可达，\n「新建」关键字式单列可达 ⇒ 假绿差异 0 项。卡面 §一 的两张探针证据已过期：\n`集合创建` 早已不在清单里，`字典设置默认值` 从未登记也从未实现。\n本卡不增删任何登记名，改的是「门禁 + 留痕」，不是「把臆造名修成能跑」。**\n\n## 一、两张探针：修复前 / 修复后（均为真起 `python -m cli.light run`）\n\n### 探针 A `集合创建`\n- **修复前**（卡面 §一，HEAD `8567a6588`）：`rc=1`，`错误: 名称错误 / name '集合创建' is not defined`。\n- **本轮现场复测（worktree HEAD）**：\n  ```\n  rc=1\n  stdout: (空)\n  stderr: 错误: 名称错误\n            name '集合创建' is not defined\n           1 设 s 为 集合创建([1,2,2,3])\n             │                     ^\n            2 打印 转字符串(s)\n  ```\n- **修复后**：仍 `rc=1`、同样输出 —— **这是对的**，它是裁定过的臆造名，不该能跑。\n  变化在于：`get_builtin_names()` 里 `集合创建` **0 处**（T-0213 已剔进 `_CURATED_REMOVED`），\n  linter 不再为它盖章；R220 用例把它钉成「永远不许进清单」。\n  真写法 `设 s 为 集合([1,2,2,3]) / 打印 转字符串(s)` → **`rc=0`，stdout `{1, 2, 3}`**。\n\n### 探针 B `字典设置默认值`\n- **修复前**（卡面 §一 / 本轮复测一致）：\n  ```\n  rc=1\n  stdout: (空)\n  stderr: 错误: 名称错误\n            name '字典设置默认值' is not defined\n           1 设 d 为 {\"a\":1}\n           2 字典设置默认值(d, \"b\", 5)\n             │                  ^\n           3 打印 转字符串(d)\n  ```\n- **修复后**：**仍 `rc=1`、同样输出**（未补实现，理由见「做不到」）。\n  修复的实质是**一致性**：R220 的 `test_R220_卡面两张探针的一致性定性` 规定\n  「rc=1 ⇒ 不许登记；将来自若补到 rc=0 ⇒ 必须同步登记进清单」，\n  门禁不挡合法改进，只挡「清单与实现脱节」。\n\n## 二、linter 清单对拍的逐名结果（真 CLI，非进程内 exec 比对文本）\n\n| 项 | 数 |\n|---|---|\n| `get_builtin_names()` 登记数 | **333** |\n| 写成 `<名字>(__哨兵__)` 的探针数 | **332**（`新建` 为关键字式单列） |\n| 运行期可解析（报 `name '__哨兵__' is not defined`） | **332 / 332** |\n| 差异名单（清单有 / 运行期无） | **空（0 项）** |\n| 关键字式 `新建` | 用 `设 __p 为 新建 哨兵盒(__哨兵__)` 真 CLI `rc=0` 且报哨兵未定义 ⇒ 可达 |\n\n探针形式：`试: / 设 __p 为 <名字>(__哨兵__) / 捕 错误 为 e: / 打印 \"R220|<i>|\", 转字符串(e)`。\n哨兵是故意不定义的实参 —— Python 先解析 callable 再求值实参，所以**函数体永不执行**\n（`退出程序` 不会 sys.exit、`输入` 不会等 stdin），却真的走完「解析名字」这一步。\n调用必须放在 `设 ... 为` 右侧：把 `假(...)`/`枚举(...)` 放语句开头会撞 15 个语法错误（实测）。\n\n**反向脱节（本轮新发现）**：`stdlib/builtins.py::__all__` 有 **11** 个名字只在 `__all__`、\n不在 `builtin_map`：`众数 / 分割扩展名 / 分割路径 / 圆周率 / 平均数 / 弧度转角度 /\n样本方差 / 样本标准差 / 累积和 / 自然常数 / 角度转弧度`。真 CLI 逐个裸调用**全部**\n`name '<名字>' is not defined`；它们与 linter 清单交集 **0** —— 清单没盖章是对的，\n**不能**照着 `__all__` 补登，否则凭空造出新假绿。已加反向哨兵用例钉住。\n\n## 三、三态处置（逐条）\n\n- **态① 有真身、只是清单漏/多登记 → 修清单**：**多登记 0 项**（332/332 可达）。\n  漏登记方向只找到上述 11 个 `__all__` 独家名字，但实测「不可达」，补登=造假绿，\n  因此**不改清单**，改为在 `src/linter/builtins.py` docstring 留痕 + R220 反向哨兵钉住。\n- **态② 清单有、运行期没有且确属该有的能力 → 补实现**：**0 项**。\n  `字典设置默认值` 不在清单里，不属于本态；补实现做不到（见下）。\n- **态③ 臆造名 → 清登记 + docs 之外留痕**：T-0213 已清 `14` 个（`_EXCLUDED_NAMES`），\n  本轮真 CLI 复核全部仍不在清单：`集合创建 / 计数 / 集 / 真值 / 转布尔 / 连接` 报自身未定义；\n  `FFI调试` / `XML生成` 连源码都写不出来（解析错误）。`repr` 是 **Python 内置名泄漏**\n  （真 CLI 可达但不是光明内置名），由 LH40 闸 A 拦，R220 有用例实证这个盲区。\n  留痕落在 `src/linter/builtins.py` docstring 与 R220 docstring/用例，**未碰 `docs/`**。\n\n## 四、改了什么（严格在 `paths` 内 + 新增那一个测试文件）\n\n1. `src/linter/builtins.py`：**+26 行 docstring**，记现场复核、三态结论、11 个反向脱节名、\n   判别力边界。**零逻辑改动**，任何集合/函数都没动（LH40 对 `_EXCLUDED_NAMES` 有硬断言）。\n2. `tests/unit/test_文档内置名存在性.py`：在 `test_every_doc_name_registered_and_reachable`\n   同一个用例里补 linter 清单侧断言 —— 清单非空+关键名、文档 §三 名（除 `DOC_IMPORT_NAMES`\n   里需导入的 `转布尔`）都在清单、5 个已裁定伪名不许回流、`_EXCLUDED_NAMES` 无残留。\n   **合进已有用例，保持原有 13 例形态不变**。\n3. `tests/unit/test_R220_linter清单对拍.py`：**新增 9 例**，`subprocess` 真起\n   `python -m cli.light run` 逐名探测；含覆盖完整性（标记集合 == 探测名单，防零标记假绿）、\n   阳性对照、伪名反跑、Python 泄漏盲区实证、关键字式精确登记、`__all__` 反向哨兵、\n   两张卡面探针一致性。Windows 带 `CREATE_NO_WINDOW`（T-0206 死锁修法，全量 CI `-n 4` 时必要）。\n\n## 五、新增测试输出\n\n```\nverify 1  python -m pytest tests/unit/test_文档内置名存在性.py -q -o addopts=\n          ............. [100%]  13 passed in 10.26s\nverify 2  python -m pytest tests/unit/test_R220_linter清单对拍.py -q -o addopts=\n          .........     [100%]   9 passed in 62.65s\nCI 默认参数（pyproject: --timeout=60 -n 4 --dist=loadscope）\n          9 passed in 67.89s，最慢单例 14.84s < 60s（per-test 超时安全），无死锁\nA/B 有牙实证：临时把 `集合创建` 注入清单 →\n          B: 1 failed in 8.85s，精确点名「集合创建：name '集合创建' is not defined」\n          恢复原字节（字节一致 True）→ A: 1 passed in 9.18s\n```\n\n## 六、没做 / 做不到（如实）\n\n1. **没补 `字典设置默认值` 实现 —— 本卡做不到，不是跳过**。实测依据：上述 11 个\n   `__all__` 独家名字「stdlib 里有定义、也导出了」，真 CLI 裸调用照样 NameError ⇒\n   光在 `stdlib/builtins.py` 里定义/导出**不会**让调用点可达。调用点靠\n   `src/code_generator.py::builtin_map` 接线，而该文件是 **T-0277 独占、卡面明令禁改**；\n   卡面指定的 `_t5b_runtime.py` 通道也**不在 `paths` 内**。硬做只会造出第 12 个\n   「导出但调不到」的名字。建议另开卡（先接线 `builtin_map`，再谈补实现）。\n2. **没改 `stdlib/builtins.py`**：因此未新增顶层 `def`（地板自举率门禁不受影响），\n   也没有内置名登记变更。副本核查：本工作区可见\n   `lightharness/stdlib/builtins.py`（79032B）、\n   `light-merge/bootstrap/release/stdlib/builtins.py`（63687B），`lighthive` 侧副本未定位到；\n   **本轮无 stdlib 改动 ⇒ 三份副本没有需要同步的内容**。\n3. **没改 `docs/`**（T-0282 独占）：`docs/AI编程指南.md` /\n   `docs/功能对标/语言缺陷账.md` 里旧 L-261 / `集合创建()` 描述仍在，\n   已在 `src/linter/builtins.py` docstring 里留痕订正，不越界改文档。\n4. **没增删清单登记名**：现场差异 0 项；`_EXCLUDED_NAMES` 一个没动。\n5. **没碰** `src/code_generator.py` / `src/parser_stmt.py`（T-0277）、\n   `tests/unit/test_R158_地板证据窗口漂移.py`（T-0280）。\n6. **判据是单侧的**：R220 只钉「清单 → 运行期可达」；反方向由 LH40 闸 A 负责，\n   `test_R220_可达闸对Python内置名泄漏无牙` 实证了 `repr`/`len` 的盲区，别当双向判据。\n7. **耗时**：每条真 CLI 启动约 7s，R220 9 例合计约 63s；`-o addopts=` 下无超时，\n   全量 CI 的 `--timeout=60` 是 per-test，最慢单例 14.84s，安全。",
+  "error": "",
+  "declared_paths": [
+    "src/linter/builtins.py",
+    "stdlib/builtins.py",
+    "tests/unit/test_文档内置名存在性.py"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "src/linter/builtins.py",
+    "tests/unit/test_R220_linter清单对拍.py",
+    "tests/unit/test_文档内置名存在性.py"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md",
+    "tests/unit/test_R220_linter清单对拍.py"
+  ],
+  "lease_id": "6de00d2dfa004602b5481e98fe182bf6",
+  "fence": 1
+}
