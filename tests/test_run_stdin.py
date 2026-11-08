@@ -7,8 +7,6 @@ import subprocess
 import sys
 import time
 
-import pytest
-
 import hive
 
 
@@ -20,18 +18,13 @@ def test_run_does_not_inherit_parent_stdin():
     assert "eof-ok" in (p.stdout or "")
 
 
-@pytest.mark.xfail(
-    reason="T-0261 只隔离了 stdin；stdout PIPE 写端仍被孙进程继承，"
-           "2026-11-08 Linux 实测同样超时。待 T-0285 根治 fd 继承后改回严格断言",
-    strict=False,
-)
 def test_run_does_not_hang_when_child_spawns_grandchild():
     """子进程再 fork 一个继续持有 stdout 的后代时，run() 不该永久阻塞。
 
     2026-11-08 主控 Linux 复验：`stdin=DEVNULL` 解决了 watchdog 的挂死（3/3 exit=0），
     但本例挂在 `capture_output=True` 的 stdout 管道上 —— 孙进程 sleep 30 握着写端，
     `communicate()` 等 EOF，10s 超时抛 HiveError。Windows / Linux 表现一致，
-    **不是平台差异**。这条先 xfail 留证，别删；根治与恢复严格断言见 T-0285。
+    **不是平台差异**。T-0285 把 stdout/stderr 改走临时文件后恢复严格断言。
     """
     # 孙进程 sleep 后写日志；父进程立刻退出。若不隔离 fd，communicate 会等到孙进程结束。
     code = (
