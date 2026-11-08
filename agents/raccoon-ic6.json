@@ -14,7 +14,11 @@
     "gui"
   ],
   "repos": {
-    "hive": "C:/dswork/hive"
+    "hive": "C:/dswork/hive",
+    "light": "C:/dswork/light",
+    "lighthive": "C:/dswork/lighthive",
+    "lightmem": "C:/dswork/lightmem",
+    "lightharness": "C:/dswork/lightharness"
   },
   "launch": "",
   "worktrees": "C:/dswork/hive-wt",
