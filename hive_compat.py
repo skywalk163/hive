@@ -105,7 +105,10 @@ def rewrite(cmd: str) -> str:
     """把单条 POSIX 惯用法改写成 `python hive_compat.py run "<cmd>"`。"""
     text = str(cmd or "")
     quote = "'" if "'" not in text else '"'
-    return f'{sys.executable} "{_self_path()}" run {quote}{text}{quote}'
+    # sys.executable 必须与脚本路径一样带引号：用户名带空格的 Windows 机器上
+    # （`C:\Users\PCbeta Tester\...\python.exe`），cmd.exe 会在空格处截断，
+    # 把 `C:\Users\PCbeta` 当可执行程序去找，verify 于是无条件假红（T-0287）。
+    return f'"{sys.executable}" "{_self_path()}" run {quote}{text}{quote}'
 
 
 def _self_path() -> str:
