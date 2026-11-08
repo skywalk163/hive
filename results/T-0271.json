@@ -1,0 +1,39 @@
+{
+  "task": "T-0271",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0271",
+  "base": "main",
+  "head": "1980f828c8def13eac69533dd8dc5637961fdef7",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T12:58:48+08:00",
+  "finished_at": "2026-11-08T13:03:47+08:00",
+  "duration_s": 299.1,
+  "verify": [
+    {
+      "cmd": "test -f CONTRIBUTING.md",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "test -f SECURITY.md",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0271 交付摘要\n\n- **做了什么**：新增 `CONTRIBUTING.md`（构建 / 跑测试 / 提 PR / 红线 四节）与 `SECURITY.md`（报告漏洞 / 支持范围 / 已知设计边界 / 凭据）。素材逐条取自仓内实证：`.github/workflows/ci.yml` 1–13 行、根 `go.mod`、README「运行测试 / 能力边界 / 贡献 / 三远端推送」、`scripts/smoke.sh` 头部、`scripts/push_all_remotes.sh` 红线⑧、`roadmap.md` 红线 1/2、`kernel/auth.go`（红线④透传、IsLoopbackAddr）、`.gitignore` 凭据段、`docs/远端分叉核验_20261106.md`（T-0264）。\n- **改了哪些文件**：仅 `CONTRIBUTING.md`、`SECURITY.md`（卡面 paths 内）；`git status --porcelain` 只有这两个 `??`，未提交、未越界、未动 `kernel/` 与其它文件。\n- **验证结果**：卡面 verify 两条 `test -f CONTRIBUTING.md` / `test -f SECURITY.md` 均 PASS；`grep kernel` 有命中；两文件扫描内网地址段无匹配（统一写 `<门禁机>`）；UTF-8 无 BOM、LF 行尾、99 / 36 行。\n- **卡在哪（附加验收）**：`cd kernel && go build ./...` 本机真实输出是 `go: command not found`、rc=127 —— 本机没有 Go 工具链；且 `roadmap.md` 红线 2「本机仅编辑 + SSH/传输，实跑在 `<门禁机>`」也禁止本机实跑。卡面「交付」要求的真实 go build 输出**无法提供，未伪造**；文中命令口径依据 CI 配置、README「运行测试」与脚本注释，请在门禁机复跑一次。\n- **边界停下**：卡面任务说明第 3 节要求「顺手」改 `README.md` 加本地开发小节，但「允许修改」只列两个新文件，按本轮硬边界未越界，建议主控扩 paths 或另开卡；另发现 README 第 37 行引用的 `docs/核心与外围边界_v1.0.md` 实测不存在（既有坏链），不在本卡范围，未改。\n- **邮箱 / 时限**：未编造。SECURITY.md 以 Gitea private issue 为首选通道，写明维护者安全邮箱尚未公开（TODO 待业主补），不承诺自动响应时限。\n- **遗留风险**：① go 构建 / 单测 / smoke 未在门禁机实测；② 三远端分叉与「启动护栏只在 gitea 侧」按红线未处理（属 T-0264）；③ README 本地开发小节待补。",
+  "error": "",
+  "declared_paths": [
+    "CONTRIBUTING.md",
+    "SECURITY.md"
+  ],
+  "changed_files": [
+    "CONTRIBUTING.md",
+    "SECURITY.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "36a762cafada49c8a9c41209cc451389",
+  "fence": 1
+}
