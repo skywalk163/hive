@@ -5,6 +5,10 @@ __pycache__/
 .env
 .env.*
 .hive/
+# 运行时快照（频繁覆盖、体积大、含内网拓扑，一律不入库）——T-0267
+status.json
+dashboard/live-status.json
+dashboard/*.bak.*
 dashboard/status.json
 dashboard/status.json.tmp*
 dashboard/status.err

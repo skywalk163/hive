@@ -5,6 +5,8 @@
 > 中文编程语言，与本项目无关——只是早期拿它的代码仓当过登记示例。
 >
 > **第一次用？直接看 [使用指南](docs/使用指南.md)**：人照着命令跑，AI 照着工具序列用。
+>
+> 文中 `<...>` 为占位符。本仓为公开仓库，请勿在文档中提交真实内网地址与主机名。
 
 一个 Python 脚本（`hive.py`）+ 一个 git 仓库，把「总控 AI 拆任务」和「多台机器上的 agent 干活」连起来。
 MCP server 与 LLM 总控已拆成独立模块（`mcp_server.py` / `llm_controller.py`）。
@@ -71,8 +73,6 @@ git push -u origin main
 ```sh
 # FreeBSD / Linux / macOS（公网）
 git clone https://github.com/skywalk163/hive.git hive
-# 内网可达时更快（作者自建 Gitea，外部访问不到）：
-# git clone http://192.168.1.5:3000/skywalk/hive.git hive
 python3 hive/hive.py --dir hive init
 ```
 
@@ -127,7 +127,7 @@ python3 hive\hive.py --dir hive cluster start
 python3 hive\hive.py --dir hive cluster status
 ```
 
-- 默认 HTTP `8788`、UDP 发现 `8789`；跨网段用 `--seed 192.168.1.5:8788`。
+- 默认 HTTP `8788`、UDP 发现 `8789`；跨网段用 `--seed <seed-ip>:8788`。
 - 端口规划（看板 8787 / 集群 8788 / 发现 8789 / 冒烟 8799）集中在
   [`docs/端口与服务规划.md`](docs/端口与服务规划.md)，代码默认值只在
   [`hive_ports.py`](hive_ports.py) 定义一次；`hive ports` 查看，`hive ports --check` 体检。
@@ -408,7 +408,7 @@ PORT=8787 INTERVAL=20 ./hive/scripts/serve-dashboard.sh
 # 浏览器打开 http://127.0.0.1:8787
 ```
 
-远程看：`ssh -L 8787:127.0.0.1:8787 skywalk@192.168.0.88`，浏览器开 `http://127.0.0.1:8787`
+远程看：`ssh -L 8787:127.0.0.1:8787 <user>@<gate-host>`，浏览器开 `http://127.0.0.1:8787`
 （这条 `ssh` 在 Windows PowerShell 里用法相同）。Windows 上不跑看板服务，隧道到 FreeBSD 看即可。
 
 端口只有一个来源：`HIVE_DASHBOARD_PORT`（默认 **8787**），`PORT` 是历史兼容的覆盖项。
