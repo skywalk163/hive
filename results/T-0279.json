@@ -1,0 +1,41 @@
+{
+  "task": "T-0279",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0279",
+  "base": "main",
+  "head": "ffe46a0ed721ce05031d8478d304d783c2f636eb",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T17:22:50+08:00",
+  "finished_at": "2026-11-08T17:28:15+08:00",
+  "duration_s": 325.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/unit/test_T6B_时间系统内建_原生腿.py -q -o addopts=",
+      "code": 0,
+      "tail": [
+        ".....                                                                    [100%]",
+        "5 passed in 21.03s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest tests/unit/test_LH05_用户参数.py -q -o addopts=",
+      "code": 0,
+      "tail": [
+        "........                                                                 [100%]",
+        "8 passed in 36.40s"
+      ]
+    }
+  ],
+  "summary": "# T-0279 summary（deepseek-win，复核 + 收尾）\n\n## 一、这张卡为什么\"异常\"\n\n原结果 `status=failed`，`error = 零改动：结果没有任何 changed_files，判 failed`。\n\n**不是缺陷复发，是重复卡撞上零改动闸门**：卡面 `paths` 非空（`src/llvm/runtime_typed.c`、\n`tests/unit/test_T6B_时间系统内建_原生腿.py`），但这两处的修复早在\n`T-0215`（commit `b0517c2f2`）与 `T-0249`（commit `356563f95`）就已合入 main；\n本轮接手时 main 上已无可改之处 → `guard_result_head()` 按设计判 failed。两条 verify\n本身全绿（见第四节），上一轮 agent 已如实写下\"零改动、建议主控 close\"，没有谎报。\n\n## 二、main 现状核对（light main = `ffe46a0ed`）\n\n| 卡面要求 | main 上的实际形态 | 引入 commit |\n|---|---|---|\n| `dv_get_args` 跳过 argv[0]，对齐 `sys.argv[1:]` | `src/llvm/runtime_typed.c:4590` `for (int i = 1; i < _dv_argc; i++)`，注释直接点名 L-262 | `b0517c2f2`（T-0215） |\n| Windows 下 argv 编码正确（不靠 ACP） | `_dv_init_args_win()` 走 `GetCommandLineW + CommandLineToArgvW`（4533-4557） | `356563f95`（T-0249） |\n| T6B:207 断言从 `>= 1` 改掉 | 已改成 `assertEqual(int(got[\"N\"]), 0)`，并注明\"比 `>= 0` 更强\" | 同上 |\n| 两腿对拍用例 | `tests/unit/test_LH41_原生腿参数口径.py` 已存在（逐元素相等/空实参/中文/形如选项/变异有牙） | T-0215/T-0249 |\n\n`git branch --contains b0517c2f2` → `main`；`356563f95` → `main`。本卡 task 分支\n`task/T-0279` 的 head 与 main 完全一致（`ffe46a0ed`），即零改动分支。\n\n## 三、两条腿探针实测（本次现场真跑，含修复前 A/B）\n\n本机 clang/MSVC 可用，原生腿**真编译真跑**。A/B 的\"修复前\"是把 `runtime_typed.c`\n的 `i = 1` 临时改回 `i = 0` 重编译跑出来的，跑完 `git checkout` 还原，工作区已确认干净。\n\n探针（无 `--`、不带任何用户实参）：\n\n| 腿 / 形态 | `参数列表()` 原文 | 长度 |\n|---|---|---|\n| src（转译腿） | `[\"C:\\\\Users\\\\...\\\\cli\\\\light.py\", \"run\", \"C:\\\\Users\\\\...\\\\probe_args.light\"]` | 3（存量行为，未传 `--` 时返回宿主 argv） |\n| native，**i=0（修复前形态）** | `[C:\\Users\\skywalk\\AppData\\Local\\Temp\\light_native_etb6d9p1\\probe_args.exe]` | **1 ← L-262 病灶** |\n| native，**i=1（当前 main）** | `[]` | **0 ✅** |\n\n带用户实参（`-- 甲 乙`）：\n\n| 腿 / 形态 | `参数列表()` | `用户参数()` |\n|---|---|---|\n| src | `[\"甲\", \"乙\"]` | `[\"甲\", \"乙\"]` |\n| native，i=0（修复前） | `[C:\\...\\probe_args.exe, 甲, 乙]`（多 1） | `[甲, 乙]` |\n| native，i=1（当前 main） | `[甲, 乙]` | `[甲, 乙]` |\n\n结论：个数口径与 `sys.argv[1:]` 一致，卡面目标已在 main 达成。\n\n> 顺带发现（不在本卡范围，未改）：`转字符串(列表)` 的字符串元素形态两腿不同 ——\n> src 腿输出 `[\"甲\", \"乙\"]`（带引号），native 腿输出 `[甲, 乙]`（不带引号）。\n> 这是另一个**可见的跨腿口径差**，与 argv 个数无关；建议另开卡（可以传\n> `tests/unit/test_LH41_原生腿参数口径.py` 同款两腿对拍思路）。\n\n## 四、verify（worktree 内真跑，exit 0）\n\n- `python -m pytest tests/unit/test_T6B_时间系统内建_原生腿.py -q -o addopts=` → **5 passed / 23.29s**\n- `python -m pytest tests/unit/test_LH05_用户参数.py -q -o addopts=` → **8 passed / 34.84s**\n\n## 五、改动\n\n- **代码改动：无**（本卡目标已由 T-0215/T-0249 落在 main；再做一遍只会重复或越界）。\n- **卡面改动**：新增 `allow_empty_diff: true`（依据 `docs/判据与平台.md` §三之二：\n  「有 paths 但确实不产出文件改动的卡」显式声明放行）。不加这行，任何\"复核/收尾\"\n  跑法都会被零改动闸门判 failed，形成\"重跑→再 failed\"的死循环。\n\n## 六、没做 / 做不到\n\n- 没有改 `src/llvm/runtime_typed.c`、没有改 T6B 测试：无必要，且会与 T-0215 重复。\n- 没有跑 `tests/unit` 全量（本卡只要求两条 verify，已真跑）。\n- \"修复前\"是**本地变异复现**，不是历史产物快照：历史产物已不可得，但变异点就是\n  L-262 记的那一行（`i` 从 0 起），足以证明闸门有牙。\n- `转字符串(列表)` 两腿引号差异只记录、未修（不在 paths 内）。",
+  "error": "",
+  "declared_paths": [
+    "src/llvm/runtime_typed.c",
+    "tests/unit/test_T6B_时间系统内建_原生腿.py"
+  ],
+  "changed_files": [],
+  "out_of_paths": [],
+  "lease_id": "a9ea2f14d77a4372a81411952fbf8dda"
+}
