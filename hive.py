@@ -376,10 +376,18 @@ def run(cmd, cwd=None, check=True, input=None, timeout=None, shell=False, env=No
     raw_input = input.encode("utf-8") if isinstance(input, str) else input
     # 全仓命令出口：Windows 上加 CREATE_NO_WINDOW（T-0206），git/tasklist/pytest
     # 这些 console 程序就不会各自新建可见控制台。非 Windows 上恒为空 dict。
+    #
+    # stdin 必须显式给成 DEVNULL（T-0261）：不传时子进程继承父进程 stdin，
+    # git 派生的 receive-pack / upload-pack 后代会一直握着这个 fd；capture_output
+    # 内部走 communicate()，等管道 EOF 才能返回，写端被活着的后代握着 → 永久挂死
+    # （2026-11-06 实测 tests/test_watchdog.py 3/3 exit=124，测试全绿但进程不退）。
+    # 只在「没有 input」这一支加；有 input 时 subprocess.run 自己会把 stdin 设成
+    # PIPE，再显式传 stdin 会 ValueError（stdin and input arguments may not both be used）。
     try:
         if raw_input is None:
             p = subprocess.run(
                 cmd, cwd=str(cwd) if cwd else None, text=True, input=None,
+                stdin=subprocess.DEVNULL,
                 capture_output=True, timeout=timeout, shell=shell, env=env,
                 encoding="utf-8", errors="replace", **no_window_kwargs(),
             )
