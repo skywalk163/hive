@@ -1,0 +1,54 @@
+{
+  "task": "T-0285",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0285",
+  "base": "main",
+  "head": "e9b795c38a351eb3d63a7fe1a1e1fc54ba190ce8",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T14:45:50+08:00",
+  "finished_at": "2026-11-08T16:18:28+08:00",
+  "duration_s": 5558.8,
+  "verify": [
+    {
+      "cmd": "bash tests/run_pytest.sh tests/test_run_stdin.py",
+      "code": 0,
+      "tail": [
+        "..                                                                       [100%]",
+        "2 passed in 0.53s"
+      ]
+    },
+    {
+      "cmd": "bash tests/run_pytest.sh tests/test_watchdog.py",
+      "code": 0,
+      "tail": [
+        ".........                                                                [100%]",
+        "9 passed in 55.13s"
+      ]
+    },
+    {
+      "cmd": "bash tests/run_pytest.sh tests/test_mcp.py",
+      "code": 0,
+      "tail": [
+        ".............................                                            [100%]",
+        "29 passed in 198.88s (0:03:18)"
+      ]
+    }
+  ],
+  "summary": "# T-0285 完成小结：run() 后代持有 stdout PIPE 的挂死\n\n## 结论\n\n`hive.run()` 仍按 `capture_output=True` 调用，但 hive.py 内部的 `subprocess`\n出口换成 `_CaptureToFileProxy`：捕获路径把 stdout/stderr 落到临时文件，不再用\nPIPE，`communicate()` 不需要等后代关闭写端。严格回归已恢复，三条 verify 全绿。\n\n## 根因\n\n- `capture_output=True` 建 PIPE；子进程 fork 出的孙进程继承写端；\n- `communicate()` 要等所有写端关闭（EOF）才返回；\n- 孙进程长寿（如 `sleep 30`）时 `run()` 一直阻塞，直到 timeout 抛 HiveError；\n- Windows/Linux 同因，不是平台差异（T-0261 只修了 stdin）。\n\n## 修法\n\n在 `hive.py` 新增模块级 `_CaptureToFileProxy`，`subprocess` 名字指向它：\n\n- `capture_output=True` 且未显式传 stdout/stderr 时：开两个 `TemporaryFile`，\n  以 `stdout=fout, stderr=ferr` 调真正的 `subprocess.run`，返回后用调用方的\n  `encoding`/`errors`（默认 utf-8/replace）解码，构造 `CompletedProcess`；\n- 其它调用（无 capture，或自带 stdout/stderr）原样透传，不改变语义；\n- `timeout` 仍交给 `subprocess.run`，`TimeoutExpired` 照旧由 `run()` 转成\n  带 `timed_out` 标记的 HiveError；\n- `check=True` 时按 `CompletedProcess` 语义抛 `CalledProcessError`；\n- `subprocess` 的其它属性/方法（`PIPE`、`DEVNULL`、`TimeoutExpired`、\n  `CREATE_NO_WINDOW` 等）经 `__getattr__` 透传，对既有护栏透明。\n\n### 为什么用兼容层而不是在 run() 里直接传文件\n\n`tests/test_no_window.py::test_run_keeps_encoding_redlines` 明确断言\n`capture_output is True`（该文件不在本卡 paths）。直接把 `stdout/stderr` 换成\n文件会破坏这条既有护栏。兼容层保留了对外调用契约，同时把 PIPE 换成文件，\n三条红线（T-0143 编码、T-0206 无窗口、T-0145 超时）全部原样通过。\n\n### input 分支\n\n- 有 `input` 时仍走二进制 stdin（`text=False`），避免 Windows 把 `\\n` 改成\n  `\\r\\n`；\n- 输出同样由兼容层落文件后按 UTF-8 解码，`test_chinese_content_reaches_git_as_utf8`\n  与 `R137` 结果写入路径均通过；\n- 没有给 `input` 的分支继续显式 `stdin=DEVNULL`（保留 T-0261）。\n\n## 改动文件（仅 paths 内 3 个）\n\n| 文件 | 改动 |\n|---|---|\n| `hive.py` | 新增 `_CaptureToFileProxy` 并绑定 `subprocess`；`run()` 恢复 `capture_output=True` 调用 |\n| `tests/test_run_stdin.py` | 删除第二条的 `xfail`，恢复严格断言（`< 5s`） |\n| `tests/run_pytest.sh` | `PYTHON` 可覆盖/自动探测 `python`/`python3`；`timeout`/`gtimeout` 自动探测，`HIVE_TEST_TIMEOUT` 可覆盖 |\n\n`git status` 仅这 3 个文件；未动其它任务卡、agents 配置、`hive_compat.py`。\n\n## verify 实测\n\n1. `bash tests/run_pytest.sh tests/test_run_stdin.py`\n\n```\n2 passed in 0.51s\nV1_RC=0\n```\n（0 xfailed；含 `< 5s` 耗时断言）\n\n2. `bash tests/run_pytest.sh tests/test_watchdog.py`\n\n```\n9 passed in 57.60s\nV2_RC=0\n```\n\n3. `bash tests/run_pytest.sh tests/test_mcp.py`\n\n```\n29 passed in 201.49s (0:03:21)\nV3_RC=0\n```\n\n4. 全量基线（`HIVE_TEST_TIMEOUT=2400 bash tests/run_pytest.sh`）\n\n```\n2 failed, 914 passed, 6 skipped in 1844.35s (0:30:44)\nFULL2_RC=1\n```\n\n## 全量基线 F/E 归因（均为 main 既有，不是本卡引入）\n\n| 失败用例 | 原因 | main 基线复验 |\n|---|---|---|\n| `test_git_timeout.py::test_network_git_calls_all_go_through_git_net` | `remote_head()` 第 513 行直接 `run([\"git\",\"ls-remote\",...])`，未走 `git_net()`（既有代码） | main 同样失败（`ls-remote` @468） |\n| `test_repo_scope.py::test_agent_repos_within_allowed_set` | `agents/fb88-dsh.json` 登记了白名单外的 `lighthive`、`lightplugin`（数据/配置问题） | main 同样失败 |\n\n- 本卡修改的 run()/run_pytest.sh 未新增任何 F；编码、无窗口、超时、MCP stdio 护栏全绿。\n- 与卡面记录的 Linux 基线（900s 到 93%、3F+16E）相比，本机主仓 + 集群有主环境是\n  30 分 44 秒跑完、2F/0E，F 已逐条归因。\n\n## 兼容性\n\n- Windows：`CREATE_NO_WINDOW` 与逃生阀原样透传（`test_no_window` 24 passed）；\n  临时文件为二进制句柄，子孙继续写不影响本次返回。\n- Linux/macOS：`timeout`/`gtimeout` 自动探测；无 timeout 时不加硬超时但\n  stdin 仍为 DEVNULL，测试不再挂死。\n- 性能：捕获路径多两次临时文件读写，无额外进程；对 git 调用密度影响可忽略。\n\n## 遗留\n\n- `remote_head()` 未走 `git_net()`、`fb88-dsh.json` 仓库白名单两项属既有基线，\n  不在本卡 paths，未改动，建议另开卡收口。\n- 交付保持未提交，由 `hive_submit` 统一 commit/push。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_run_stdin.py",
+    "tests/run_pytest.sh"
+  ],
+  "changed_files": [
+    "hive.py",
+    "tests/run_pytest.sh",
+    "tests/test_run_stdin.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "6a182d70ec85493c9e9c2f3febb66c97"
+}
