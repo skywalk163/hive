@@ -1,0 +1,40 @@
+{
+  "task": "T-0273",
+  "agent": "trae-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0273",
+  "base": "main",
+  "head": "d9280ae361a4447c06c8b8a4611a5828263b1af3",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T16:02:08+08:00",
+  "finished_at": "2026-11-08T16:25:48+08:00",
+  "duration_s": 1420.2,
+  "verify": [
+    {
+      "cmd": "python -c \"import tomllib;d=tomllib.load(open('pyproject.toml','rb'));print(d['project']['name'],d['project']['version'])\"",
+      "code": 0,
+      "tail": [
+        "lightharness 0.5.0rc1"
+      ]
+    }
+  ],
+  "summary": "# T-0273 执行摘要（trae-win / Windows）\n\n## 结论：部分完成（can_install True / import False）\n\n`pip install -e .` 成功，`import lightharness` 失败。按卡面「红线 + paths」范围，无法在不新增\n`lightharness/__init__.py`（或改 `运行.py`）的前提下造出可导入的 `lightharness` 模块，\n因此不伪造成功，建议转 `needs_review` 由主控裁量后续卡。\n\n## 做了什么\n\n新增 4 个文件（均在本卡 `paths` 内；未改 `运行.py` / `CHANGELOG.md` / `tests/` / CI）：\n\n| 文件 | 要点 |\n|---|---|\n| `pyproject.toml` | `name=lightharness`，`version=0.5.0rc1`（CHANGELOG 首条 `v0.5.0-rc1` 转 PEP 440：去 `v`、去连字符）；setuptools 后端；`packages = []` 显式关闭自动发现（本仓是 `.light` 源码 + `运行.py` 的脚本布局，没有 Python 包目录，自动发现会把 `src/`、`stdlib/`、`docs/` 误判成顶层包而报错）；无 `[project.scripts]`（`运行.py` 没有 `main()`，选卡面方案「乙」） |\n| `SUPPORT.md` | 支持范围表 + 「lightharness 移植问题 vs light 语言本体问题」分流判据（最小 `.light` 片段能否在 light 仓复现）+ 提问前自查 + 渠道清单 |\n| `.github/ISSUE_TEMPLATE/bug_report.md` | 含环境（lightharness 版本 / light 版本 / OS / Python / lightplugin）、最小复现、期望 vs 实际，以及核心的「归因」三选一（移植问题 / light 本体缺陷带 LH 编号 / 不确定） |\n| `.github/ISSUE_TEMPLATE/feature_request.md` | 问题 / 建议方案 / 替代方案 / 适用场景 / 归属判断（本仓实现 vs 需 light 支持）/ 附加上下文 |\n\n## 验证结果（真实输出）\n\n1) pyproject 解析 + 版本（卡面 verify 命令）：\n```\n$ python -c \"import tomllib;d=tomllib.load(open('pyproject.toml','rb'));print(d['project']['name'],d['project']['version'])\"\nlightharness 0.5.0rc1\n```\n\n2) `pip install -e .`（临时 venv，`--no-build-isolation`，Python 3.14.7 / pip 26.2.1 / setuptools 84.0.0）：\n```\nPreparing editable metadata (pyproject.toml): finished with status 'done'\nBuilding editable for lightharness (pyproject.toml): finished with status 'done'\nCreated wheel for lightharness: filename=lightharness-0.5.0rc1-0.editable-py3-none-any.whl\nSuccessfully built lightharness\nSuccessfully installed lightharness-0.5.0rc1\n```\n→ 安装这一段通过。\n\n3) `import lightharness`：\n```\n$ python -c \"import lightharness; print('import ok')\"\nModuleNotFoundError: No module named 'lightharness'\n```\n→ **卡在这里**（见下节原因）。仅装了元数据，没有可导入的顶层模块/包。\n\n4) 既有测试与冒烟：\n```\n$ bash smoke.sh   (LIGHT_MERGE=light-merge, LIGHTPLUGIN=lightplugin)\nsmoke: ✓ 全部通过（依赖齐 + 冒烟退出码 0）\n  ok   examples/冒烟.light 退出码 0，输出含「自包含 stdlib 冒烟测试通过」\n\n$ python -m pytest tests/ -q --collect-only\n2140 tests collected in 1.54s   （0 收集错误）\n```\n全量 `python -m pytest tests/ -q` 在本机跑了约 20 分钟仍未结束：4 个 xdist worker CPU 近空转\n（10 秒采样各只涨 0.0~0.1s），疑似卡在长尾 example 的 60s 超时等待（pytest.ini 已记录的\nWindows `-n` 挂死/长尾坑），已主动终止。本次只新增文档/元数据，未动任何 Python 代码与\npytest 配置，收集阶段 2140 条全通过；全量结果**未拿到**，如实记录。\n\n5) 治理文件齐：\n```\nSUPPORT.md  .github/ISSUE_TEMPLATE/{bug_report.md,feature_request.md,config.yml}\n```\n\n## 卡在哪 / 为什么 import 做不到\n\n本仓 Python 侧只有 `运行.py`（脚本型，无 `main()`）和两个 `_push_github_*.py` 辅助脚本，\n`src/` 下全是 `.light` 源码（仅一个 `_动态加载.py`），**没有名字叫 `lightharness` 的模块或包目录**。\n`setuptools` 无法把别的文件名映射成 `lightharness` 顶层模块；要让 `import lightharness` 通过，\n必须新增 `lightharness/__init__.py`（薄壳）或把 `运行.py` 改名/加 `main()`，两者都越出本卡\n`paths` 与「不改 运行.py」红线，故按卡面要求停手并如实报告。\n\n## 建议后续（不在本卡执行）\n\n1. 新开一张卡：新增 `lightharness/__init__.py`（只放 `__version__` 或薄 `main()` 转发），\n   同时把 `pyproject.toml` 改成 `packages = [\"lightharness\"]` + `[project.scripts] lightharness = \"lightharness:main\"`；\n2. 或维持「脚本仓」定位，把验收判据改为 `pip install -e .` 成功即可，删掉 `import lightharness` 一条。\n\n## 遗留风险\n\n- 本卡改动不影响 `light` CI 的 `FileNotFoundError`（那是 sibling 路径读取问题），\n  只解决「lightharness 有打包元数据、治理文件齐全」这一层。\n- `pyproject.toml` 的 `license = { file = \"LICENSE\" }` 在 setuptools 84 下仍是兼容写法\n  （PEP 639 推荐 `license = \"MIT\"` + `license-files`），本次实测安装无报错，后续可顺手迁移。\n- 工作区仅有上述 4 个新增文件，无 `*.egg-info`、无测试残留物。",
+  "error": "",
+  "declared_paths": [
+    "pyproject.toml",
+    "SUPPORT.md",
+    ".github/ISSUE_TEMPLATE/bug_report.md",
+    ".github/ISSUE_TEMPLATE/feature_request.md"
+  ],
+  "changed_files": [
+    ".github/ISSUE_TEMPLATE/bug_report.md",
+    ".github/ISSUE_TEMPLATE/feature_request.md",
+    "SUPPORT.md",
+    "pyproject.toml"
+  ],
+  "out_of_paths": [],
+  "lease_id": "ae3d3cf6af614b9ab47267b686bab883",
+  "fence": 1
+}
