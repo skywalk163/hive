@@ -17,7 +17,8 @@
   "repos": {
     "hive": "G:/dswork/duan-light-merge/hive",
     "lightharness": "G:/dswork/duan-light-merge/lightharness",
-    "light": "G:/dswork/duan-light-merge/light-merge"
+    "light": "G:/dswork/duan-light-merge/light-merge",
+    "lightmem": "G:/dswork/duan-light-merge/lightmem"
   },
   "launch": "",
   "worktrees": "C:/Users/skywalk/.hive/wt/doubao-win",
