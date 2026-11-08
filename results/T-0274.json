@@ -1,0 +1,33 @@
+{
+  "task": "T-0274",
+  "agent": "raccoon-ic6",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0274",
+  "base": "main",
+  "head": "5710d45d217afea52ebecfec2441d880fa9652c4",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T18:09:54+08:00",
+  "finished_at": "2026-11-08T18:09:54+08:00",
+  "duration_s": 0.3,
+  "verify": [
+    {
+      "cmd": "test -f docs/LH回灌流程.md",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0274 交付总结\n\n## 结论：6 条 P0 对账完成（探针轮次 lhprobe_T0274）\n\n**取证环境**：light HEAD `2916d98a`，`--backend src`（本机 ANTLR 后端缺 `antlr4` 依赖），探针在 `/tmp/lhprobe_T0274/`。\n\n| LH 编号 | light 编号 | 状态 |\n|---|---|---|\n| LH-05 | L-5 | ✅ 已修（第四轮，沿用文档结论，未重跑） |\n| LH-08 | L-8 | ✅ 已修（T-0197，探针已验） |\n| LH-10 | L-10 | ✅ 已修（探针已验，异常正常传播） |\n| LH-17 | L-17 | ✅ 已修（探针已验，后台常驻不卡死） |\n| LH-30 | L-30 | ⚠️ 半修（语义未变，告警函数有定义但 src 后端未触发） |\n| LH-32 | L-32 | ❌ 未修（直接复现英文关键字 TypeError） |\n| LH-37 | 待登记 | ❌ 未修（能力缺口，light 侧无 `解析时间` 函数） |\n\n一句话汇总：**6 条 P0 里 4 条（LH-05/08/10/17）已修、1 条（LH-30）半修、2 条（LH-32/37）未修**——其中 LH-32 是本卡最该追的静默错误，LH-37 经实测应重新定性为「能力缺口」而非「静默返回空」。\n\n---\n\n## 必贴的真实探针输出\n\n### 1) LH-32 未修（❌ 最重要发现——静默错误，直接复现）\n\n```\n===== L-32 .light遮蔽.py(英文关键字) =====\n[运行错误] 原子写入() got an unexpected keyword argument 'encoding'\n---exit=1---\n```\n\n探针 `/tmp/lhprobe_T0274/L32_遮蔽.light`：\n\n```\n导入 文件系统\n文件系统.原子写入(\".../out.txt\", \"hi\", encoding=\"utf-8\")\n输出(\"按英文关键字调用成功\")\n```\n\n`导入 文件系统` 拿到的是 `.light` 转发段落（中文形参），英文关键字 `encoding` 被拒。文档第四轮的\"已绕开\"只是按路径加载 `.py` 的临时手段，**机制未改**。\n\n### 2) LH-10 已修（✅ 对比验证——异常不再静默吞）\n\n```\n===== L-10 尝试…最终(无捕获) =====\n进入 尝试\n最终 执行了\n[运行错误] boom\nrun_exit=1\n```\n\n探针 `/tmp/lhprobe_T0274/L10_尝试最终.light`：\n\n```\n尝试:\n    输出(\"进入 尝试\")\n    抛出(\"boom\")\n最终:\n    输出(\"最终 执行了\")\n输出(\"尝试之后仍在跑（看到这行=异常被吞）\")\n```\n\n\"尝试之后仍在跑\"**没有打印**，`boom` 正常作为运行错误抛出并 exit=1 —— 静默吞异常行为已不存在。\n\n### 3) LH-17 已修（✅ 后台常驻进程不卡死）\n\n```\n===== L-17 后台执行(常驻进程不卡死?) =====\n后台已启动，没卡死\n命令结果(返回码=-1, 成功=False)\n---exit=0---\n```\n\n探针 `/tmp/lhprobe_T0274/L17_后台执行.light`：`外部命令.后台执行(\"ping -n 30 127.0.0.1\")` 立即返回（默认写 DEVNULL），`等待进程(p, 2)` 2 秒超时后正常退出，未卡死。\n\n### 4) LH-37 重新定性（❌ 能力缺口，非\"静默返回空\"）\n\n```\n===== LH-37 解析时间(ISO) =====\n[运行错误] name '解析时间' is not defined\n---exit=1---\n```\n\nlight HEAD `stdlib/builtins.py` **无独立 `解析时间` 函数**（1138 行附近是 `格式化时间` 的内部解析逻辑）。原记录说\"静默返回空\"，实测是函数根本不存在——需在 light 侧开「能力缺口」卡，不是修「静默」。\n\n### 5) LH-30 半修（⚠️）\n\n```\n===== L-30 属性覆盖方法 =====\n5\n[运行错误] 'int' object is not callable\n---exit=1---\n```\n\n`设 a.状态 为 5` 成功（属性顶掉方法），`a.状态()` 报 `'int' object is not callable`。`_warn_method_attr_collision` 在 `src/code_generator.py:5246` **有定义**，但 src 后端编译探针**未触发告警**——告警存在但未被本探针命中。\n\n---\n\n## 交付物\n\n- **新增**：`docs/LH回灌流程.md`（158 行：取证硬规矩 + LH→L 编号映射表 + 回灌触发条件 + 本卡对账表 + 可复制动作 + 维护流程）\n- **改动**：`docs/光明语言问题记录.md`\n  - 汇总表 L-1~L-22：**补加状态列**（P0 六条填实测结论，其余标「未核验」）\n  - L-23~LH-41 表：更新 LH-30/LH-32/LH-37 三条状态结论\n  - `git diff --stat`：26 insertions(+), 26 deletions(-)——**只加/更新状态列，未重排现有内容**\n\n## 红线遵守\n\n- 未改 `src/*.light`、未改 `stdlib/`、未改 `light` 仓任何文件\n- 探针只放 `/tmp/lhprobe_T0274/`，未提交进仓库\n- 未编造「已修」：LH-37 因实测与原描述不符，如实改判为能力缺口\n- 未写 token / 密钥 / IP\n\n## 遗留 / 建议\n\n1. LH-32（❌ 未修）建议下一张卡直接追：要么让 `.light` 转发段落兼容英文关键字，要么统一中文形参。\n2. LH-37 需在 light 侧**新开能力缺口卡**（`python hive.py task new --repo light --title \"解析时间：ISO 文本→时间对象\"`）。\n3. LH-34~36/38~41（P1/P2）尚未登记到 light，按 `docs/LH回灌流程.md` §2 触发条件依次开卡。\n4. 本机 ANTLR 后端缺 `antlr4` 依赖，本轮全部用 src 后端取证；若需覆盖 ANTLR 腿，先 `%pip install antlr4-python3-runtime`。",
+  "error": "",
+  "declared_paths": [
+    "docs/光明语言问题记录.md",
+    "docs/LH回灌流程.md"
+  ],
+  "changed_files": [
+    "docs/LH回灌流程.md",
+    "docs/光明语言问题记录.md"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
