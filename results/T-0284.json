@@ -1,0 +1,52 @@
+{
+  "task": "T-0284",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0284",
+  "base": "main",
+  "head": "92cc43897f0a7bda07d74ae8569cfc0ac1436de7",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T11:48:58+08:00",
+  "finished_at": "2026-11-08T11:57:55+08:00",
+  "duration_s": 537.8,
+  "verify": [
+    {
+      "cmd": "python -c \"import json,pathlib; d=json.load(open('registry/registry.json',encoding='utf-8')); assert isinstance(d.get('packages'),list) and d['packages']; print('registry-json-ok')\"",
+      "code": 0,
+      "tail": [
+        "registry-json-ok"
+      ]
+    },
+    {
+      "cmd": "python -c \"import pathlib; t=pathlib.Path('src/lightpkg.py').read_text(encoding='utf-8'); assert 'light-lang/registry' not in t and 'github.com/skywalk163/light/raw/main' not in t; print('old-dead-urls-gone')\"",
+      "code": 0,
+      "tail": [
+        "old-dead-urls-gone"
+      ]
+    },
+    {
+      "cmd": "python -c \"import pathlib; t=pathlib.Path('tests/unit/test_R137_install_publish.py').read_text(encoding='utf-8'); assert 'light-lang/registry' not in t and 'github.com/skywalk163/light/raw/main' not in t; print('test11-synced')\"",
+      "code": 0,
+      "tail": [
+        "test11-synced"
+      ]
+    }
+  ],
+  "summary": "# T-0284 交付说明\n\n让 `light install` 的默认 registry 源从「两条死链」换成真实可取到 JSON 的地址，并新建官方包表。\n\n## 现象（承接 T-0262 实测，不重复踩）\n- 旧国内源 `gitcode.com/light-lang/registry/raw/main/registry.json`：项目不存在；同域**任意不存在路径也返回 `200 + text/html` SPA 页**（实测 `/__no_such__.json` → `200 text/html 6156` 字节），`200` 无判别力。\n- 旧国外源 `github.com/skywalk163/light/raw/...`：URL 本身写错，raw 域名应为 `raw.githubusercontent.com`，原地址 404。\n- 仓里没有 `registry/`，`_load_registry()` 只能静默降级到内置 20 包表。\n\n## 改动\n- **新增 `registry/registry.json`**（355 行）：从 `src/package_installer.py::BUILTIN_REGISTRY` 导出 20 条包表，`\"packages\"` 为**列表**（每项自带 `name`），另带 `updated: 2026-11-08`。\n- **`src/lightpkg.py`**：`REGISTRY_REGION_URLS` 改为\n  - `domestic` = `https://fastly.jsdelivr.net/gh/skywalk163/light@main/registry/registry.json`\n  - `foreign`  = `https://raw.githubusercontent.com/skywalk163/light/main/registry/registry.json`\n  `DEFAULT_REGISTRY_REGION` 与优先级语义不变；注释里删掉了旧死链字面量。\n- **`tests/unit/test_R137_install_publish.py`**：`test_11` 两条旧 URL 断言改为新地址（不删断言、不放宽）；`test_12` 的域名期望同步为 `jsdelivr.net` / `raw.githubusercontent.com`；两处过时注释同步。\n- **`docs/包管理器使用指南.md`**：默认源表、区域用法、`HTTP 200 ≠ 可达` 判别力边界、land 后复跑命令。\n\n## 选定地址的实测证据（2026-11-08，本机）\n| 目的 | URL | 结果 |\n|---|---|---|\n| 正向 | `fastly.jsdelivr.net/gh/skywalk163/light@main/pyproject.toml`（registry.json 尚未 land，用已存在文件代替） | `200 application/toml 7831`，前 80 字节 `[build-system] requires = [...]` |\n| 负向 | `fastly.jsdelivr.net/gh/skywalk163/light@main/registry/__no_such__.json` | `404 text/plain 80`，`Couldn't find the requested file ...` |\n| 负向对照 | 旧 `gitcode.com/light-lang/registry/raw/main/__no_such__.json` | `200 text/html 6156`，`<!DOCTYPE html> ...`（假绿证据） |\n| 国外源 | `raw.githubusercontent.com/skywalk163/light/main/pyproject.toml` 直连 | 本机网络不可直连（curl `000`）；经 ghproxy 间接验证：`200 text/plain 7831`，不存在路径 `404 text/plain 14` |\n\n> 本机（国内网络）以 jsDelivr 国内源完成正向/负向判别力实测；国外 raw 源用代理间接证明路径有效。\n> `registry/registry.json` 目前只在 task 分支，`main` 上的 URL 必然 404，**land 后由主控复跑最终判据**。\n\n## 验收\n卡面 3 条 verify（worktree 内，全离线）：\n```\nregistry-json-ok      rc=0\nold-dead-urls-gone    rc=0\ntest11-synced         rc=0\n```\n回归：`tests/unit/test_R137_install_publish.py` 全量 **17 passed (58.99s)**；改完 registry.json 结构后再跑区域相关 6 条 **6 passed (9.35s)**。\n\n## 已知问题（必须写清，未在本卡偷改）\n- 卡面要求 `\"packages\": [...]`（列表），但 `package_installer._load_registry()` 的远端合并仍是字典口径\n  `registry['packages'].update(remote['packages'])`（第 1025 行）。列表会被现有 `except Exception: pass`\n  静默吞掉，**远端表暂时不会覆盖内置表**。\n- `src/package_installer.py` 不在本卡 paths 内，按红线未改。建议另开一张卡：把远端/缓存合并适配\n  列表并去掉静默吞异常（这也正是「HTTP 200 ≠ 成功」的根因）。\n- `.gitignore:85` 有 `registry/`（本意是本地注册表数据），与卡面要求的入库路径冲突；\n  `.gitignore` 不在本卡 paths，未改，改用 `git add -f registry/registry.json` 强加入索引（未提交），\n  由 submit 统一提交。建议后续把规则改成 `registry/` + `!registry/registry.json`。\n- 未把 registry.json 只留 task 分支；land 动作由主控执行（本卡允许 land）。未写 token/密钥/IP。",
+  "error": "",
+  "declared_paths": [
+    "registry/registry.json",
+    "src/lightpkg.py",
+    "tests/unit/test_R137_install_publish.py",
+    "docs/包管理器使用指南.md"
+  ],
+  "changed_files": [
+    "docs/包管理器使用指南.md",
+    "src/lightpkg.py",
+    "tests/unit/test_R137_install_publish.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "25f07533d63240f782f11d7c68651b50"
+}
