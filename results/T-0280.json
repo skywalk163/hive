@@ -1,0 +1,46 @@
+{
+  "task": "T-0280",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0280",
+  "base": "main",
+  "head": "8fa0257d12a02bada3daaef61da905dbb3fe83b0",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-08T02:56:18+08:00",
+  "finished_at": "2026-11-08T03:13:03+08:00",
+  "duration_s": 1005.8,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/unit/test_R158_地板证据窗口漂移.py -q -o addopts=",
+      "code": 0,
+      "tail": [
+        "..............                                                           [100%]",
+        "14 passed in 2.17s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest tests/unit/test_LH05_用户参数.py -q -o addopts=",
+      "code": 0,
+      "tail": [
+        "........                                                                 [100%]",
+        "8 passed in 43.45s"
+      ]
+    }
+  ],
+  "summary": "# T-0280 交付说明 · workbuddyai-win\n\n## 一、先留证：未改动 HEAD 的复跑（0 红）\nworktree HEAD `12fac8c08`、`git status --porcelain` 为空时，先按卡面两条 verify 原样复跑：\n- `python -m pytest tests/unit/test_R158_地板证据窗口漂移.py -q -o addopts=` → **10 passed in 2.26s**\n- `python -m pytest tests/unit/test_LH05_用户参数.py -q -o addopts=` → **8 passed in 43.50s**\n\n**关键发现（与卡面前提不符，不虚报）**：卡面说「写死 68/96、main 上 4 条红、行号 61 漂到 73」，但当前仓库里这些红已不存在：\n- `test_R158` 早已改为「从 `floor_bootstrap_baseline.json` 动态取分子/分母 + `FB.定位定义行` 按声明名现算定义行」，文件历史 `c46e3e7bc` 即 T-0214 的同类修复；\n- `git diff HEAD gitcode/main -- tests/unit/test_R158_...py` 为空（真 main `8567a6588` 与 worktree 旧基线 `12fac8c08` 上该文件逐字相同），baseline 已是 `69/102`；\n- 实测：`stdlib/builtins.py` 顶层 `def` = **191**（ast 独立解析），`denominator` = 191 − 89（`native_required`）= **102**，`light_count` = **69**，`rate` = 69/102；`段落 是字母` 现算定义行 = **73**（R157 时为 61，现按名字现算，不写死）。\n=> 因此**没有、也不需要做「刷新数字让 4 条红归零」**；本卡做的是补齐卡面目标 2/3 明文要求、但当前文件仍缺的**可执行守卫**，不宣称修好了不存在的红。\n\n## 二、改了哪些文件（仅卡面 paths 内 1 个，128 insertions / 0 deletions，只增不改）\n`tests/unit/test_R158_地板证据窗口漂移.py`：\n- 顶部 docstring 补「T-0280 补强」小节，写明分母/行号来源、刷新办法、与 T-0278 约定；`import ast`（独立解析用）；\n- 新增 `Test分母来源与同步守卫` 4 条断言：\n  1. `test_分母来源是builtins顶层函数数`：独立 ast 数 == 门禁 `读地板函数名` 数 == 清单条目数 == 基线 `total` == 门禁统计 `total`；并钉 `基线.denominator == 基线.total − 基线.native_required_count`。任一处被手改即红。\n  2. `test_自举率按分子除以分母计算`：钉 `统计.denominator == total − native_required_count`、`统计.rate == light_count/denominator`、`基线.rate == light_count/denominator`（钉口径，不写死数字）。\n  3. `test_分母变化必须同步更新_反向哨兵`：临时副本给 `builtins.py` 加一个顶层 `def` → 独立 ast 与门禁 ast 均 +1、基线 `total` 仍匹配原值 → 断言二者不等，且清单没同步时门禁必须报「漏登记/防腐烂」。副本只在 `TemporaryDirectory`，**绝不改写仓库清单/builtins/`.light`**。\n  4. `test_定义行按声明名现算而非写死`：锚点 == 按名字现算值；不同声明名定位到不同行；反跑把 `段落 是字母(` 改名后按旧名必须定位失败（精确匹配），插 3 行后现算值必须 +3（写死快照做不到）。\n- **未** skip、**未**改弱/删除任何既有 assert、**未**改被测源码、**未**碰 `stdlib/builtins.py`、`src/`、`docs/`、其它测试文件。\n\n## 三、验证结果（改后）\n- `test_R158_地板证据窗口漂移.py -q -o addopts=` → **14 passed in 2.82s**（原 10 + 新增 4，无新增红）\n- `test_LH05_用户参数.py -q -o addopts=` → **8 passed in 42.28s**\n- 解释器 `C:/Python314/python.exe`（3.14，带 pytest）；两条均带 `-o addopts=` 覆盖 pyproject。\n\n## 四、环境异常（非本卡代码问题）\n首次 `take` 报「store claim 失败（集群不可用/无主，HTTP None）」：本机 `claim_backend=store`，但 8788 集群服务未监听（health 探活 000、端口无占用）。按定时任务边界**没有动 8788 服务/登记/配置**，改用 hive 自带运行期开关 `HIVE_CLAIM_BACKEND=git`（走 `claim/<tid>` ref 锁，零文件改动；源码注释亦注明本机历史即 git 后端）完成领取；submit 沿用同一后端。store 里 T-0280 当时 `assigned / owner=workbuddyai-win / 无租约`、Git 侧无他人持有，卡面 01:18 明确「等下一轮定时任务接单」，领取无争用。\n\n## 五、没做 / 做不到 / 遗留风险\n- 卡面目标 1 的 `git worktree add /tmp/base-T0280 HEAD --detach` 未照做：Windows 无 `/tmp`；改用「未改动 HEAD、status 干净」直接复跑留证，等价且无副作用。\n- 与 **T-0278** 对齐：其约定「补内置实现走 `_t5b_runtime.py`、不加顶层 `def`」⇒ 分母不应在并行期变化。实测顶层 `def` 仍 191、分母仍 102，两卡**结论不冲突**，未互相迁就改数字；新增来源守卫会在 T-0278 万一加了顶层 def 时转红并点名。\n- worktree 基线 `12fac8c08`（11-03）落后真 main `8567a6588`（11-08），但本卡唯一改动文件在两边逐字相同；`.hive/summary.md` 在该旧基线仍 tracked ⇒ submit 可能出现 1 条 `out_of_paths` 警告（非严格模式仅警告，非判据）。\n- manual submit 的 verify 走 `shell=True` 孙进程，必须让 `python` 解析到 3.14，否则会重演 T-0262 的「No module named pytest」假红；本轮已在运行期前置 `PATH=/c/Python314`。\n- 未做 land / dispatch / assign / 手推三远端（遵守定时任务边界）。",
+  "error": "",
+  "declared_paths": [
+    "tests/unit/test_R158_地板证据窗口漂移.py"
+  ],
+  "changed_files": [
+    ".hive/summary.md",
+    "tests/unit/test_R158_地板证据窗口漂移.py"
+  ],
+  "out_of_paths": [
+    ".hive/summary.md"
+  ],
+  "lease_id": "c0505757c86c41648d9d598c7e6b379f",
+  "fence": 1
+}
