@@ -41,6 +41,7 @@ import shutil
 import signal
 import statistics
 import subprocess
+import subprocess as _subprocess
 import sys
 import tempfile
 import threading
@@ -357,6 +358,49 @@ class LeaseFenced(HiveError):
     """
 
 
+class _CaptureToFileProxy:
+    """hive.py 内的 subprocess 兼容层：capture_output 改走临时文件。
+
+    管道写端会被子进程 fork 出的后代继承，communicate() 等所有写端关闭（EOF）
+    才返回；后代长寿时 run() 永久阻塞（T-0285，Windows/Linux 一致）。临时文件
+    没有 EOF 等待：直接子进程退出即可读，后代继续写只影响之后的内容，不妨碍
+    本次返回。与 cmd_dashboard 的处理同一口径。
+
+    对外契约不变：hive.run() 仍按 capture_output=True + encoding/errors 调用，
+    subprocess 的其它属性/方法原样透传，既有护栏（T-0143 编码、T-0206 无窗口、
+    T-0145 超时）无需改动。
+    """
+
+    def __getattr__(self, name):
+        return getattr(_subprocess, name)
+
+    def run(self, *popenargs, input=None, capture_output=False,
+            timeout=None, check=False, **kwargs):
+        if not capture_output or kwargs.get("stdout") is not None \
+                or kwargs.get("stderr") is not None:
+            return _subprocess.run(*popenargs, input=input, timeout=timeout,
+                                   check=check, **kwargs)
+        encoding = kwargs.get("encoding") or "utf-8"
+        errors = kwargs.get("errors") or "replace"
+        with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
+            p = _subprocess.run(*popenargs, input=input, timeout=timeout,
+                                stdout=fout, stderr=ferr, check=False, **kwargs)
+            fout.seek(0)
+            ferr.seek(0)
+            out = (fout.read() or b"").decode(encoding, errors)
+            err = (ferr.read() or b"").decode(encoding, errors)
+        cp = _subprocess.CompletedProcess(getattr(p, "args", popenargs),
+                                          p.returncode, out, err)
+        if check and cp.returncode != 0:
+            raise _subprocess.CalledProcessError(
+                cp.returncode, cp.args, output=out, stderr=err)
+        return cp
+
+
+# hive.py 内部所有 subprocess 调用都经这一层；捕获路径不再用 PIPE。
+subprocess = _CaptureToFileProxy()
+
+
 def run(cmd, cwd=None, check=True, input=None, timeout=None, shell=False, env=None):
     # 钉死 utf-8，别让编码跟着 locale 跑（T-0143）。
     #
@@ -381,26 +425,27 @@ def run(cmd, cwd=None, check=True, input=None, timeout=None, shell=False, env=No
     # git 派生的 receive-pack / upload-pack 后代会一直握着这个 fd；capture_output
     # 内部走 communicate()，等管道 EOF 才能返回，写端被活着的后代握着 → 永久挂死
     # （2026-11-06 实测 tests/test_watchdog.py 3/3 exit=124，测试全绿但进程不退）。
-    # 只在「没有 input」这一支加；有 input 时 subprocess.run 自己会把 stdin 设成
-    # PIPE，再显式传 stdin 会 ValueError（stdin and input arguments may not both be used）。
+    #
+    # stdout/stderr 也不再由本函数直接持有 PIPE：后代继承写端会让 communicate()
+    # 等不到 EOF（T-0285）。调用契约保持不变（仍是 capture_output=True），由
+    # 模块级 _CaptureToFileProxy 把输出落到临时文件，见类文档。
     try:
         if raw_input is None:
             p = subprocess.run(
-                cmd, cwd=str(cwd) if cwd else None, text=True, input=None,
-                stdin=subprocess.DEVNULL,
-                capture_output=True, timeout=timeout, shell=shell, env=env,
-                encoding="utf-8", errors="replace", **no_window_kwargs(),
+                cmd, cwd=str(cwd) if cwd else None, text=True,
+                encoding="utf-8", errors="replace",
+                stdin=subprocess.DEVNULL, capture_output=True,
+                timeout=timeout, shell=shell, env=env,
+                **no_window_kwargs(),
             )
         else:
+            # 有 input 时 subprocess 自己把 stdin 设成 PIPE，不能再显式传 stdin
+            # （stdin and input arguments may not both be used）。
             p = subprocess.run(
                 cmd, cwd=str(cwd) if cwd else None, text=False, input=raw_input,
                 capture_output=True, timeout=timeout, shell=shell, env=env,
                 **no_window_kwargs(),
             )
-            p = subprocess.CompletedProcess(
-                p.args, p.returncode,
-                (p.stdout or b"").decode("utf-8", "replace"),
-                (p.stderr or b"").decode("utf-8", "replace"))
     except subprocess.TimeoutExpired:
         # timeout=None 永远不会走到这里；一旦设了超时，就必须把「挂住」变成
         # 一条人能看懂、能行动的 HiveError，而不是无限等或裸 TimeoutExpired。
