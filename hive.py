@@ -2277,10 +2277,12 @@ class Hive:
                 f"分支在别的远端时用 --remote 指定）")
             return plan
         if task_head == base_head:
-            # task 分支与 base 一致：代码已在 main。但卡面可能仍在飞（上次 land
-            # push 到了远端但 close 没走完，典型场景是 push 超时本地没收到回执）。
-            # 这种情况必须补 close，不能只说"无需合并"就 return，否则看板永远
-            # 卡在"待合并"列，要人手工改卡面（T-0211 踩过）。
+            # task 分支与 base 一致：代码已在 main。两种来源都要补 close：
+            #   1) 零改动复核卡（目标状态早已在 main，submit 靠 allow_empty_diff 放行）；
+            #   2) 上次 land push 到了远端但 close 没走完（典型：push 超时没收到回执）。
+            # 不能只说"无需合并"就 return，否则看板永远卡在"待合并"列，要人手工
+            # 改卡面（T-0211 踩过）。提示语必须把两种来源都点出来 —— 只写"上次 push
+            # 超时"会让复核卡的收尾记录误导排查方向（T-0279 现场就是这样）。
             if card.get("state") in IN_FLIGHT_STATES:
                 plan["head"] = task_head
                 plan["merged"] = True
@@ -2289,7 +2291,8 @@ class Hive:
                     plan["closed"] = True
                     plan["status"] = "landed"
                     plan["problems"].append(
-                        f"代码已在 {target}，卡面补 close（上次 push 可能超时未收回执）")
+                        f"代码已在 {target}，卡面补 close（分支与 {target} 一致："
+                        f"零改动复核卡，或上次 push 超时未收回执）")
                 except HiveError as e:
                     plan["status"] = "merged-not-closed"
                     plan["problems"].append(
