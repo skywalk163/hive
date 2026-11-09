@@ -1,0 +1,21 @@
+{
+  "cluster_id": "hive",
+  "name": "填写本机节点名",
+  "port": 8788,
+  "host": "0.0.0.0",
+  "advertise": "",
+  "discover": true,
+  "discovery_port": 8789,
+  "seeds": [],
+  "electable": true,
+  "leader_priority": 1,
+  "preferred_leader": "",
+  "lease_grace": 120.0,
+  "sync": true,
+  "mcp": false,
+  "mcp_port": 8790,
+  "mcp_bind": "127.0.0.1",
+  "store_enabled": true,
+  "claim_backend": "store",
+  "coordinator": false
+}

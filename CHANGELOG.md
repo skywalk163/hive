@@ -326,6 +326,44 @@
   其余状态 `mode=claim` 与旧行为逐字一致。`/api/dispatch-prompt` 响应新增 `mode`
   字段；状态快照读不到时自动降级为原渲染，不影响复制。
 
+### Fixed
+
+- **幽灵 leader 死循环（follower 互相喂租约，2026-11-09）**。节点表是干净的，
+  但每台 follower 都把 `leader_id` 指向同一台其实也是 follower 的机器（现场
+  `192.168.0.103`），租约被心跳不断续命，term 从 2110 涨到 2150，日志刷满
+  `leader_seen` 与「本轮选举未获多数」，集群长期无主。根因是
+  `_follower_heartbeat()` 把发往 `leader_url` 的回复无条件当成「主控本人心跳」
+  （`from_leader=True` + `refresh_lease=True`），跟随者互探的每一次转述都把
+  租约重签成 `now+lease` —— 旧主死了租约也永不过期，于是没人发起选举。
+  - 租约签发权收归主控本人：只有 `handle_heartbeat()` 收到 `body.leader is True`
+    才 `refresh_lease=True`；心跳回复新增 `is_leader` / `node_id` 供请求方核验，
+    老版本用顶层 `role` 兜底（`_reply_is_from_leader()`）。
+  - `_merge_snapshot_locked()` 只在 `from_leader=True` 时采纳 leader 记录：跟随者
+    快照里的 leader 只是「听说」的视图，不再写进 `leader_id`，幽灵无法在 follower
+    之间扩散。`_adopt_higher_term_locked()` 同理只同步 term，不借机改主控指向。
+  - 转述只沿用远端给出的绝对到期时间，不参与 `now+lease` 续期，也不再 `touch`
+    幽灵节点记录；`_peer_heartbeat` / 更高任期传闻 / vote 回复一律不签发租约。
+  - `_merge_snapshot_locked(..., sender_id=...)` 要求主控记录由本人签发：
+    `leader.id` 必须等于消息发送方 id，挡住「自己 role=leader 却把 leader_id
+    指向幽灵」的不一致快照经 register / 双主路径回流。
+  - `handle_heartbeat(..., peer_ip=...)` 核对心跳来源 IP 与自述 `url` 一致
+    （域名不校验）。最终取证：幽灵是 `192.168.0.110` 那台机器沿用旧
+    `node.json` 里的 Mac 身份、声明已下线的 `192.168.0.103` 发 `leader: True`
+    心跳。身份不符的请求**只读不写**：不合并节点、不推进 term、不采纳主控、
+    不签租约 —— 否则它注入的高 term 会一遍遍打断本机选举。
+    `_adopt_leader_locked` 变更时留「来源」审计日志，便于下次排障。
+  - 维护循环两道兜底：主控地址连续拨不通超过 2 个租约窗口、或超过
+    `max(3×leader_lease, 2s)` 没收到主控本人心跳，即使租约被撑得很长也清掉
+    leader 重新选举。`_load_state()` 重启一律丢弃磁盘里的 `leader_id` /
+    `leader_url` / 租约 —— 不再需要「所有节点同时停服 + 手工改 state.json」。
+  - 部署含义：**升级一台就能破环**，不必两台同时停；旧版本节点之间仍会互相喂，
+    但影响不到升级过的新主。仍建议全集群同步代码后重启一次。
+  - 回归测试 6 条，见 `tests/test_cluster.py` 的「幽灵 leader 死循环」区块。
+- **配置文件模板**：新增 `config.example.json`，明确 `leader_priority` 写在**每台
+  机器本地**的 `~/.hive/cluster/config.json`（默认 1，想优先当家只在那台写 2）。
+  不放进 git 仓库共享 —— 协调仓是各节点同步的，共享一份会让所有机器读到同一个
+  优先级，「某台 2、其余 1」的差异化就不存在了。文档见 `docs/集群服务.md` §4.3.2。
+
 ## 0.15.2 — 2026-11-01
 
 > 这一版回应的是「看板打不开了」：**地址没写错，是两个进程 + 一道防火墙各自失守**，
