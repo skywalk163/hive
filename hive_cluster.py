@@ -1600,6 +1600,13 @@ class Cluster:
         return out
 
     def _self_node(self) -> dict:
+        """本机自述记录：心跳 body 与节点表自身条目的模板。
+
+        `last_seen` 必须带上。leader 收不到自己的心跳，`_update_node_locked
+        (touch=True)` 永远轮不到本机，若这里也不带，`state.json` 里本机记录
+        就永远停在启动时刻，看板/体检读盘会把活着的主节点判成失联（T-0297）。
+        """
+        now_epoch = _now()
         return {
             "id": self.node_id,
             "name": self.config.name,
@@ -1621,6 +1628,9 @@ class Cluster:
             "priority": int(self.config.leader_priority),
             "last_store_seq": self.store.commit_seq() if getattr(self, "store", None) else 0,
             "hive_dir": str(self.config.hive_dir),
+            # 本机此刻必然活着：这是「自身记录」而不是从别处收来的观测。
+            "last_seen": _iso(now_epoch),
+            "last_seen_epoch": now_epoch,
         }
 
     def _put_self_node(self) -> None:
@@ -1628,11 +1638,35 @@ class Cluster:
             self._put_self_node_locked()
 
     def _put_self_node_locked(self) -> None:
-        rec = self._self_node()
-        rec["last_seen"] = _iso()
-        rec["last_seen_epoch"] = _now()
-        self.nodes[self.node_id] = rec
+        # `_self_node()` 已带 last_seen/last_seen_epoch（now），不要再覆盖成
+        # 第二份时间戳 —— 单一时钟源，磁盘与 API 才不会分叉。
+        self.nodes[self.node_id] = self._self_node()
         self._mark_dirty_locked()
+
+    def _touch_self_last_seen_locked(self, now_epoch: float | None = None) -> None:
+        """刷新节点表里本机记录的 `last_seen`（维护循环每 tick 调用）。
+
+        为什么必须落盘刷新：`_update_node_locked(..., touch=True)` 只在对端给
+        本机发心跳/快照时执行，leader 收不到自己的心跳，于是本机记录的时间戳
+        停在启动时刻；`/api/cluster/state` 靠 `_public_node_locked` 对 self 回填
+        `now` 看起来正常，但 `state.json` 上那个旧值会被看板/体检当成「主节点
+        长期失联」（T-0287/T-0288 报出的 leader_record_stale）。
+
+        只动时间戳，**不**改 `_node_status_locked()` 的判定，也**不**推进
+        generation：长轮询等的是真实状态变化，不是「本机还活着」这件事
+        （同 `_loop_heartbeat` 里 leader 租约的取舍）。维护循环 5Hz，写盘由
+        `_persist()` 的 1s 节流兜住，不会把磁盘打满。
+        """
+        now_epoch = _now() if now_epoch is None else now_epoch
+        rec = self.nodes.get(self.node_id)
+        if rec is None:
+            self._put_self_node_locked()
+            return
+        rec["last_seen"] = _iso(now_epoch)
+        rec["last_seen_epoch"] = now_epoch
+        # 直接置脏（而非 _mark_dirty_locked）：只让下一次 _persist 落盘，
+        # 不推进 generation、不唤醒长轮询。
+        self._dirty = True
 
     def _refresh_advertise(self, guess: str | None = None) -> bool:
         """校准对外地址；返回是否真的发生了切换。
@@ -2909,6 +2943,9 @@ class Cluster:
         refresh_advertise = False
         with self.lock:
             now_epoch = _now()
+            # 本机记录也走「活着的节点每秒刷新 last_seen」这一条路径：否则
+            # state.json 里 leader 的 last_seen 永远停在启动时刻（T-0297）。
+            self._touch_self_last_seen_locked(now_epoch)
             for nid, rec in list(self.nodes.items()):
                 status = self._node_status_locked(rec, now_epoch)
                 old = rec.get("_status")
