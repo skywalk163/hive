@@ -2,7 +2,7 @@
   "task": "T-0289",
   "agent": "trae-win",
   "mode": "manual",
-  "status": "failed",
+  "status": "done",
   "branch": "task/T-0289",
   "base": "main",
   "head": "4c7b15a35050500ed491bfd3248112ad7005f8bb",
@@ -35,12 +35,65 @@
     }
   ],
   "summary": "# T-0289 执行记录：零文件改动，三条 verify 跨平台真绿\n\n## 结论\n\n**零文件改动即达标**。T-0268 的搬迁工作在 land 时已经做完，坏掉的只是验收口径；\n本卡把口径改成「大写 `_R*.md` + 小写 `_r*.md` 之和 ≥ 145」后，三条 verify 同时在\nFreeBSD 15.1 与本机 Windows 上得出**相同定值且全 rc=0**。\n\n- 工作区 `git status --short`：**空**（无新增、无修改、无删除）\n- 未移动、未删除任何 `_R*.md` / `_r*.md`；未改归档文件内容；未动 `docs/归档/` 既有子目录\n\n## 三条 verify 实测\n\n| # | 命令 | 本机结果 | 88（FreeBSD 15.1）结果 |\n|---|---|---|---|\n| 1 | 归档计数（大写 `_R*` + 小写 `_r*`） | `archived-upper 130 archived-lower 15 total 145`，rc=0 | 同左，rc=0 |\n| 2 | 根目录 `_R*`/`_r*` 残留 | `root-leftover 0 []`，rc=0 | 同左，rc=0 |\n| 3 | ROADMAP 行长/行数 | `roadmap max-line 111 lines 59`，rc=0 | 同左，rc=0 |\n\n说明：计数用 Python 字符串 `startswith`（大小写敏感，与文件系统无关），\n不再用 `glob`——Windows 上 `glob('_R*.md')` 大小写不敏感，会把 15 个\n`_r*_task_*.md` 混进大写匹配，正是 T-0268「Windows 145 假绿 / POSIX 130 假红」的根因。\n\n## 运行环境\n\n- 本机 worktree（`trae-win`）：light HEAD `4c7b15a35`（T-0268 land `33dbc22cf` 之后），`python3` 3.13\n- 验收机（FreeBSD 15.1，`workbuddy`）：`/home/skywalk/dswork/light` HEAD `33dbc22cf`，\n  `python3` 3.12.13；三条 verify 均 rc=0（`git log` 的 safe.directory 提示属环境，已用\n  `GIT_CONFIG_COUNT...` 绕过，不影响 verify）\n\n## 未做 / 不做的事\n\n- 没有为了产生 diff 而移动任何归档文件（本卡契约明确禁止删改归档内容）\n- 未改 T-0268 等其它卡与 verify、未改 `agents/` 配置、未写 token/密钥/IP\n- 未改 README / CHANGELOG / CONTRIBUTING",
-  "error": "零改动：结果没有任何 changed_files，判 failed；若为纯调查/台账类卡请在任务卡声明 allow_empty_diff: true",
   "declared_paths": [
     "docs/归档/轮次报告/",
     "ROADMAP.md"
   ],
   "changed_files": [],
   "out_of_paths": [],
-  "lease_id": "64370f22efd24d5da4082cc7b097f7ef"
+  "lease_id": "64370f22efd24d5da4082cc7b097f7ef",
+  "previous_attempt": {
+    "task": "T-0289",
+    "agent": "trae-win",
+    "mode": "manual",
+    "status": "failed",
+    "branch": "task/T-0289",
+    "base": "main",
+    "head": "4c7b15a35050500ed491bfd3248112ad7005f8bb",
+    "exit_code": 0,
+    "timed_out": false,
+    "started_at": "2026-11-09T08:45:54+08:00",
+    "finished_at": "2026-11-09T08:53:58+08:00",
+    "duration_s": 484.5,
+    "verify": [
+      {
+        "cmd": "python3 -c \"import pathlib; d=pathlib.Path('docs/归档/轮次报告'); up=[p for p in d.iterdir() if p.is_file() and p.name.startswith('_R') and p.suffix=='.md']; low=[p for p in d.iterdir() if p.is_file() and p.name.startswith('_r') and p.suffix=='.md']; print('archived-upper',len(up),'archived-lower',len(low),'total',len(up)+len(low)); assert len(up)+len(low)>=145\"",
+        "code": 0,
+        "tail": [
+          "archived-upper 130 archived-lower 15 total 145"
+        ]
+      },
+      {
+        "cmd": "python3 -c \"import pathlib; b=pathlib.Path('.'); bad=[p.name for p in b.iterdir() if p.is_file() and p.suffix=='.md' and (p.name.startswith('_R') or p.name.startswith('_r'))]; print('root-leftover',len(bad),bad[:5]); assert not bad\"",
+        "code": 0,
+        "tail": [
+          "root-leftover 0 []"
+        ]
+      },
+      {
+        "cmd": "python3 -c \"import pathlib; t=pathlib.Path('ROADMAP.md').read_text(encoding='utf-8'); m=max(len(x) for x in t.splitlines()); n=len(t.splitlines()); print('roadmap max-line',m,'lines',n); assert m<300 and n<120\"",
+        "code": 0,
+        "tail": [
+          "roadmap max-line 111 lines 59"
+        ]
+      }
+    ],
+    "summary": "# T-0289 执行记录：零文件改动，三条 verify 跨平台真绿\n\n## 结论\n\n**零文件改动即达标**。T-0268 的搬迁工作在 land 时已经做完，坏掉的只是验收口径；\n本卡把口径改成「大写 `_R*.md` + 小写 `_r*.md` 之和 ≥ 145」后，三条 verify 同时在\nFreeBSD 15.1 与本机 Windows 上得出**相同定值且全 rc=0**。\n\n- 工作区 `git status --short`：**空**（无新增、无修改、无删除）\n- 未移动、未删除任何 `_R*.md` / `_r*.md`；未改归档文件内容；未动 `docs/归档/` 既有子目录\n\n## 三条 verify 实测\n\n| # | 命令 | 本机结果 | 88（FreeBSD 15.1）结果 |\n|---|---|---|---|\n| 1 | 归档计数（大写 `_R*` + 小写 `_r*`） | `archived-upper 130 archived-lower 15 total 145`，rc=0 | 同左，rc=0 |\n| 2 | 根目录 `_R*`/`_r*` 残留 | `root-leftover 0 []`，rc=0 | 同左，rc=0 |\n| 3 | ROADMAP 行长/行数 | `roadmap max-line 111 lines 59`，rc=0 | 同左，rc=0 |\n\n说明：计数用 Python 字符串 `startswith`（大小写敏感，与文件系统无关），\n不再用 `glob`——Windows 上 `glob('_R*.md')` 大小写不敏感，会把 15 个\n`_r*_task_*.md` 混进大写匹配，正是 T-0268「Windows 145 假绿 / POSIX 130 假红」的根因。\n\n## 运行环境\n\n- 本机 worktree（`trae-win`）：light HEAD `4c7b15a35`（T-0268 land `33dbc22cf` 之后），`python3` 3.13\n- 验收机（FreeBSD 15.1，`workbuddy`）：`/home/skywalk/dswork/light` HEAD `33dbc22cf`，\n  `python3` 3.12.13；三条 verify 均 rc=0（`git log` 的 safe.directory 提示属环境，已用\n  `GIT_CONFIG_COUNT...` 绕过，不影响 verify）\n\n## 未做 / 不做的事\n\n- 没有为了产生 diff 而移动任何归档文件（本卡契约明确禁止删改归档内容）\n- 未改 T-0268 等其它卡与 verify、未改 `agents/` 配置、未写 token/密钥/IP\n- 未改 README / CHANGELOG / CONTRIBUTING",
+    "error": "零改动：结果没有任何 changed_files，判 failed；若为纯调查/台账类卡请在任务卡声明 allow_empty_diff: true",
+    "declared_paths": [
+      "docs/归档/轮次报告/",
+      "ROADMAP.md"
+    ],
+    "changed_files": [],
+    "out_of_paths": [],
+    "lease_id": "64370f22efd24d5da4082cc7b097f7ef"
+  },
+  "human_verdict": {
+    "by": "owner",
+    "at": "2026-11-09T09:12:00+08:00",
+    "decision": "done",
+    "reason": "3/3 verify 全 code=0、exit_code=0、changed_files=[] 属本卡契约内的零改动达标；failed 系卡面未声明 allow_empty_diff: true 触发 submit 闸门误判，非执行失败。",
+    "original_error": "零改动：结果没有任何 changed_files，判 failed；若为纯调查/台账类卡请在任务卡声明 allow_empty_diff: true",
+    "note": "原始 failed 结果完整保留在 previous_attempt，未改 verify / 未改判据 / 未补造 diff。"
+  }
 }
