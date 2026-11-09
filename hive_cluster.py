@@ -98,6 +98,10 @@ CHAT_MAX_TEXT = 8000
 # leader 多久从 Git 卡面补一次新卡到 store（秒）。启动时那一次摄入不够：
 # 卡是随时新增的，副本必须能持续收敛，不能靠一次性快照。
 STORE_RECONCILE_S = 60.0
+# 落后节点当选后，最多花多久从同伴追平 store 再开放写（秒）。追平期间
+# claim/submit 一律 503 E_RECONCILING，宁可短暂拒绝，也不让「落后主控」
+# 拿旧 commit_seq 起一段新 oplog（T-0295 与当选后 reconcile 配套）。
+STORE_RECONCILE_WIN_S = 20.0
 CHAT_SCOPE_RE = re.compile(r"^(hall|task:T-\d{3,6}|agent:[A-Za-z0-9._-]{1,64})$")
 MAX_BODY = 2 * 1024 * 1024
 DEFAULT_STATE = Path.home() / ".hive" / "cluster"
@@ -387,6 +391,19 @@ class Config:
         self.allow_forced_promote = _env_bool(
             "HIVE_CLUSTER_ALLOW_FORCE_PROMOTE",
             bool(saved.get("allow_forced_promote", True)))
+        # 投票闸门的「严格模式」：store 落后的候选人一律拒票。
+        # 默认**关闭** —— store 是可重建缓存、git 才是事实账（见 StoreReconciler），
+        # 拿缓存序号当选举资格，在分区时必然全员互拒票：各节点 commit_seq 本来
+        # 就不一致，于是只能等同伴被 dead_timeout 判死、quorum 退化成 1 才选出
+        # 「孤身主控」，把无主窗口拉长还放大风暴（T-0295）。默认改成「投赞成票
+        # + 留痕 vote_store_lag + 当选后先 reconcile 再服务写」；确实要「宁可没有
+        # 主控也不接受落后节点」的运维，用本开关把老行为打开。
+        if kw.get("strict_store_freshness") is None:
+            self.strict_store_freshness = _env_bool(
+                "HIVE_CLUSTER_STRICT_STORE_FRESHNESS",
+                bool(saved.get("strict_store_freshness", False)))
+        else:
+            self.strict_store_freshness = bool(kw.get("strict_store_freshness"))
         if kw.get("sync_enabled") is None:
             self.sync_enabled = _env_bool("HIVE_CLUSTER_SYNC",
                                           bool(saved.get("sync", True)))
@@ -498,6 +515,7 @@ class Config:
             "leader_priority": int(self.leader_priority),
             "preferred_leader": self.preferred_leader,
             "allow_forced_promote": bool(self.allow_forced_promote),
+            "strict_store_freshness": bool(self.strict_store_freshness),
             "sync": bool(self.sync_enabled),
             "mcp": bool(self.mcp_enabled),
             "mcp_port": self.mcp_port,
@@ -1095,6 +1113,12 @@ class Cluster:
         self._expired_reported: set[str] = set()
         self._last_store_sync = 0.0
         self._last_store_reconcile = 0.0
+        # 落后当选 → 先对齐 store 再服务写。_store_lag_target 是投票时从同伴
+        # 听说的最高 commit_seq；_store_serving_ready=False 期间所有 store 写
+        # 一律 503 E_RECONCILING（读不受影响）。
+        self._store_serving_ready = True
+        self._store_lag_target = 0
+        self._store_reconcile_thread: threading.Thread | None = None
 
         self.port = config.port
         self.advertise_host = config.advertise or (
@@ -2331,6 +2355,71 @@ class Cluster:
             message=f"{self.config.name} 成为主节点，term={self.term}"
                     + ("" if old_role == "candidate" else f"（原 {old_role}）"))
         self._mark_dirty_locked()
+        # 落后当选：先对齐 store 再服务写请求（与投票闸门配套，缺一半就是
+        # 拿旧 commit_seq 起新 oplog 的分叉风险，见 T-0295）。
+        self._arm_store_reconcile_locked()
+
+    def _arm_store_reconcile_locked(self) -> bool:
+        """落后当选时把「写请求」关到 store 追平为止；返回是否进入对齐态。
+
+        调用方持有 self.lock。没有 store、或本机不比投票人落后时立刻放行
+        （纯 git 模式完全不受影响）。
+        """
+        self._store_serving_ready = True
+        if self.store is None:
+            return False
+        want = int(self._store_lag_target or 0)
+        have = int(self.store.commit_seq() or 0)
+        if want <= have:
+            return False
+        targets = [str(rec.get("url")) for nid, rec in self.nodes.items()
+                   if nid != self.node_id and rec.get("url")]
+        self._store_serving_ready = False
+        self._emit_locked(
+            "store_reconcile_started",
+            message=f"当选后先对齐 store：{have} -> {want}",
+            data={"have": have, "want": want, "peers": len(targets)})
+        thread = threading.Thread(
+            target=self._reconcile_store_after_win,
+            args=(targets, want), name="hive-store-reconcile", daemon=True)
+        self._store_reconcile_thread = thread
+        thread.start()
+        return True
+
+    def _reconcile_store_after_win(self, targets: list[str], want: int) -> None:
+        """当选后从同伴拉 snapshot/op，追到 want 再开放写。
+
+        追不平也**不能**永久关着写闸 —— 那等于把「无主」换成「有主但瘫痪」，
+        比 T-0295 想修的毛病更糟。所以给一个有界的窗口，超时后放行并留下
+        store_reconcile_failed 事件，让运维/看板能看见这次降级。
+        """
+        deadline = _now() + STORE_RECONCILE_WIN_S
+        try:
+            while not self._stop.is_set() and _now() < deadline:
+                for base in list(targets):
+                    if self.store is None:
+                        break
+                    try:
+                        self._store_catch_up(base)
+                    except Exception as exc:  # noqa: BLE001
+                        _log(f"store: 从 {base} 对齐失败（继续试）: {exc!r}")
+                    if int(self.store.commit_seq() or 0) >= want:
+                        break
+                if self.store is not None and int(self.store.commit_seq() or 0) >= want:
+                    break
+                if self._stop.wait(0.5):
+                    break
+        finally:
+            with self.lock:
+                self._store_serving_ready = True
+                have = int(self.store.commit_seq() or 0) if self.store else 0
+                ok = have >= want
+                self._emit_locked(
+                    "store_reconciled" if ok else "store_reconcile_failed",
+                    message=(f"store 已对齐到 {have}（目标 {want}）" if ok else
+                             f"store 未追平（{have}/{want}），已放行写请求但数据落后"),
+                    data={"have": have, "want": want, "ok": ok})
+                self._persist_locked()
 
     def _leader_public_locked(self) -> dict | None:
         return self._leader_record_locked()
@@ -2416,6 +2505,8 @@ class Cluster:
                 body["force"] = True
 
         votes = {self.node_id}
+        # 投票人回给我们的 store 位点：当选后要先追到这里再服务写（T-0295）。
+        store_ahead = 0
         try:
             if peers:
                 with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
@@ -2434,12 +2525,22 @@ class Cluster:
                             continue
                         if code == 200 and resp.get("granted"):
                             votes.add(str(futs[fut].get("id")))
+                            try:
+                                store_ahead = max(store_ahead,
+                                                  int(resp.get("store_seq") or 0))
+                            except (TypeError, ValueError):
+                                pass
         finally:
             with self.lock:
                 self._election_inflight = False
         with self.lock:
             if (self.role == "candidate" and self.term == term
                     and len(votes) >= quorum):
+                # 落后当选也要赢，但赢下来先对齐 store 再服务写：不让新主控拿
+                # 旧 commit_seq 起一段新 oplog（那才是「孤身称主」的真危险）。
+                self._store_lag_target = max(
+                    store_ahead,
+                    self.store.commit_seq() if self.store else 0)
                 self._become_leader_locked()
                 self._persist_locked()
                 became = True
@@ -2856,11 +2957,25 @@ class Cluster:
         # 管理员能选择「宁可没主控，也不接受落后节点」这种更严的策略。
         forced = bool(body.get("force")) and self.config.allow_forced_promote
         behind = cand_seq < my_seq
-        if behind and not forced:
+        if behind and not forced and self.config.strict_store_freshness:
+            # 严格模式（默认关闭，见 Config.strict_store_freshness）：管理员显式
+            # 选择「宁可没有主控，也不接受 store 落后的主」。命中必须留下可追的
+            # 原因 —— 否则日志里只剩「未获多数」，没人分得清是网络不通还是闸门
+            # 拒票（T-0295）。
+            with self.lock:
+                self._emit_locked(
+                    "vote_store_behind",
+                    node_id=cid,
+                    message=(f"严格模式拒票：{cand.get('name') or cid} 的 store 落后 "
+                             f"{my_seq - cand_seq} 条（{cand_seq}/{my_seq}）"),
+                    data={"candidate": cid, "candidate_seq": cand_seq,
+                          "my_seq": my_seq, "lag": my_seq - cand_seq,
+                          "strict": True})
+                self._persist_locked()
             return 200, {"ok": True, "granted": False, "term": self.term,
                          "reason": "store_behind",
-                         "candidate_seq": cand_seq,
-                         "my_seq": my_seq}
+                         "candidate_seq": cand_seq, "my_seq": my_seq,
+                         "strict": True}
         with self.lock:
             if term < self.term:
                 return 200, {"ok": True, "granted": False, "term": self.term,
@@ -2884,6 +2999,22 @@ class Cluster:
                              f"{my_seq - cand_seq} 条（{cand_seq}/{my_seq}），仍投赞成票"))
                 _log(f"接受人工夺权候选 {cand.get('name') or cid}："
                      f"store {cand_seq} < {my_seq}，按 force 放行")
+            elif behind:
+                # 默认行为：store 只是缓存，落后不该被提升为「选举资格」。
+                # 分区时各节点 commit_seq 必然不一致，硬拒票会让全员互相否决，
+                # 只能等 dead_timeout 把同伴判死、quorum 退化成 1 才「孤身称主」
+                # （T-0295）。这里放行，但把落后量记成事件，并把本机 commit_seq
+                # 回给候选人 —— 它当选后要先把 store 追到这个位点再服务写。
+                self._emit_locked(
+                    "vote_store_lag",
+                    node_id=cid,
+                    message=(f"投赞成票：{cand.get('name') or cid} 的 store 落后 "
+                             f"{my_seq - cand_seq} 条（{cand_seq}/{my_seq}），"
+                             f"当选后需先 reconcile 到 {my_seq}"),
+                    data={"candidate": cid, "candidate_seq": cand_seq,
+                          "my_seq": my_seq, "lag": my_seq - cand_seq})
+                _log(f"接受落后候选 {cand.get('name') or cid}："
+                     f"store {cand_seq} < {my_seq}，留痕 vote_store_lag")
             self.voted_for = cid
             # 投完票先别急着自己也参选：给对方一个把 leader 心跳发过来的窗口。
             self._leader_lost_at = _now()
@@ -2891,7 +3022,8 @@ class Cluster:
             self._mark_dirty_locked()
             self._persist_locked()
             return 200, {"ok": True, "granted": True, "term": self.term,
-                         "leader": self._leader_public_locked()}
+                         "leader": self._leader_public_locked(),
+                         "store_seq": my_seq}
 
     def handle_resign(self, body: dict) -> tuple[int, dict]:
         node_id = str(body.get("node_id") or (body.get("node") or {}).get("id") or "")
@@ -3199,6 +3331,20 @@ class Cluster:
             return 409, {"ok": False, "error": "没有主节点", "term": self.term}
         if self.store is None:
             return 503, {"ok": False, "error": "store 未启用"}
+        if not getattr(self, "_store_serving_ready", True):
+            # 落后当选后的对齐窗口：读照常，写一律拒绝。返回结构化 code，
+            # 让 hive.py 的 _classify_store_error 能识别成「暂时不可用」并让
+            # worker 退避重试，而不是把卡当成「被别人抢走」（T-0295）。
+            try:
+                have = int(self.store.commit_seq() or 0)
+            except Exception:  # noqa: BLE001  测试桩没有 commit_seq 也不能炸
+                have = 0
+            return 503, {"ok": False, "code": "E_RECONCILING",
+                         "error": "主控正在对齐 store，暂不服务写请求",
+                         "term": self.term,
+                         "store_commit_seq": have,
+                         "store_lag_target": int(getattr(
+                             self, "_store_lag_target", 0) or 0)}
         try:
             out = self._store_op_for(action, body)
         except ClusterError as exc:
