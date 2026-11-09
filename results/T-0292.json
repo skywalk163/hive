@@ -1,0 +1,51 @@
+{
+  "task": "T-0292",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0292",
+  "base": "main",
+  "head": "fc5b22365f0dabb0837bb4ba5aced4ce139fbf11",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-09T20:34:58+08:00",
+  "finished_at": "2026-11-09T22:33:06+08:00",
+  "duration_s": 7088.9,
+  "verify": [
+    {
+      "cmd": "python hive_compat.py run \"bash tests/run_pytest.sh tests/test_run_stdin.py\"",
+      "code": 0,
+      "tail": [
+        "..                                                                       [100%]",
+        "2 passed in 1.47s"
+      ]
+    },
+    {
+      "cmd": "python hive_compat.py run \"python3 -V\"",
+      "code": 0,
+      "tail": [
+        "Python 3.14.7"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_compat.py",
+      "code": 0,
+      "tail": [
+        "........................................................                 [100%]",
+        "56 passed in 80.50s (0:01:20)"
+      ]
+    }
+  ],
+  "summary": "# T-0292 交付说明：hive_compat 支持 bash/python3 命令（Windows 探测 Git Bash）\n\n## 改动（仅卡面允许的两条路径）\n\n**hive_compat.py**\n- 新增 `interpreter_command(cmd)`：识别 `bash <script> [args]` / `python3 <args>`\n  整条命令前缀（`should_wrap` 接入，幂等不套娃）。\n- 新增 `resolve_bash()`：`HIVE_BASH` 覆盖（指错当场报错，不偷偷退回）→\n  `shutil.which(\"bash\")` → Git for Windows 常见安装位置。\n  本机实测：PATH 里没有 bash，经候选表命中 `C:\\Program Files\\Git\\bin\\bash.exe`。\n- 新增 `resolve_python3()`：映射到 `sys.executable`。\n- 新增 `run_interpreter()` / `_run_argv()`：POSIX shlex 拆 argv 后\n  `subprocess.run([exe, *args])` 直接 exec，不经 cmd.exe 二次拼接引号；\n  stdin 隔离（DEVNULL）、stdout/stderr 捕获后转发、仍走 `no_window_kwargs()`（T-0206 不回退）。\n- 新增 `bash_path_arg()`：bash 参数里整元素为盘符绝对路径时 `C:\\a\\b` → `C:/a/b`\n  （Git Bash 是 MSYS 程序，反斜杠路径原样传会变成 `C:ab`，实测踩到）。\n- 找不到解释器：可诊断提示 + rc=127，**绝不映射成 0**；未知写法仍 rc=2 原样回退。\n- 未改 `hive.py` 的 verify 调度主流程；未放宽任何判据；未引第三方依赖。\n\n**tests/test_compat.py**：34 → 56 条（+22）。覆盖：前缀识别/幂等、env 覆盖与指错、\n候选表回退、退出码透传（7）、脚本不存在非零、找不到 bash 非零+提示、\nargv 空格/引号拆分、`no_window_kwargs` 被调用、bash 真跑脚本（含带空格路径）、\nPOSIX 上 `should_wrap` 恒 False、既有惯用法回归锁。\n\n## 验证实测\n\n| 命令 | Windows（win10 / Python 3.14.7 / Git Bash） | FreeBSD 15.1（192.168.0.88 / Python 3.12.13） |\n|---|---|---|\n| `python hive_compat.py run \"bash tests/run_pytest.sh tests/test_run_stdin.py\"` | **rc=0**（2 passed） | **rc=0**（2 passed；中途一次 1 failed 为 T-0261 stdin 测试在 SSH 无 tty 下的 flake，复核 2 passed 复现绿） |\n| `python hive_compat.py run \"python3 -V\"` | **rc=0**（Python 3.14.7） | **rc=0**（Python 3.12.13） |\n| `python -m pytest -q tests/test_compat.py` | **rc=0**（56 passed） | **rc=0**（55 passed, 1 skipped——Windows 专用 e2e） |\n\nPOSIX 回归（/tmp/t0292_check 临时副本，未动 0.88 的检出）：`should_wrap('bash …'/'python3 …'/'true')`\n= `False False False`，直接入口三条命令全绿。测试全部平台无关（含 X_OK 执行位 chmod 修正）。\n\n## 领卡障碍记录（非本卡产物，供排查）\n\n领取时 store 报「集群不可用」：本机 follower 一直 502 转发失败。根因是 .88 的\nfollower 记录了失联主控（幽灵 leader），转发永远打向不存在的 .103:8788。\n按 docs/集群服务.md §7.1 处理：resign + leave 清掉幽灵记录后 promote 本机接管，\n写路径恢复；随后用 git ls-files 导出 + 覆盖两个改动文件的方式在 0.88 建临时副本完成 POSIX 回归。\n\n## 未动（红线核对）\n\n- `hive.py` verify 调度主流程：未改（diff 仅 hive_compat.py / tests/test_compat.py）\n- 未把任何命令无条件映射成 true；未知写法仍回退原命令\n- 任务卡 verify 文本、agents/ 配置：未动\n- T-0291 的 `tests/check_full_baseline.py`、`tests/baseline_allowlist.txt`：未动\n- T-0261 的 `tests/test_run_stdin.py`、`tests/run_pytest.sh`：未动（仅作为被测样例）\n- 无 token / 密钥 / IP 写入任何交付物",
+  "error": "",
+  "declared_paths": [
+    "hive_compat.py",
+    "tests/test_compat.py"
+  ],
+  "changed_files": [
+    "hive_compat.py",
+    "tests/test_compat.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "5605c176a55b4e9c953a3c7dc6dc876a"
+}
