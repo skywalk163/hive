@@ -1,0 +1,31 @@
+{
+  "task": "T-0275",
+  "agent": "trae-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0275",
+  "base": "main",
+  "head": "604149be61d7580852152b5f0fb8d59500a2ea0c",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-09T03:25:30+08:00",
+  "finished_at": "2026-11-09T04:23:31+08:00",
+  "duration_s": 3481.3,
+  "verify": [
+    {
+      "cmd": "test -f docs/六仓整改验收_20261106.md",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "## T-0275 六仓交叉验收：逐条复跑 verify + 对照表\n\n做了什么\n- 只读复跑 T-0260 ~ T-0276 共 16 张卡的卡面 verify，全部在 88（FreeBSD 15.1）上按卡面路径执行；该机无 `python` 软链，卡面里的 `python` 一律用 `python3`（3.12），参数与语义未改。\n- 产出对照表 `docs/六仓整改验收_20261106.md`：逐卡列 verify 命令、实测、耗时、判定，红的/假绿的单独成节，另附横向观察与复现命令。\n- 未修任何东西、未改任何判据、未动前 14 张卡的文件、未 push 它们的分支。\n\n结论（12 绿 / 4 红 / 0 未验）\n- 真绿：T-0260 0263 0264 0265 0266 0267 0269 0270 0271 0272 0273 0274。\n- 假绿或红：\n  - T-0268：`glob('_R*.md')` 在 POSIX 实测 130 < 140（`assert` 失败）；Windows 大小写不敏感把 16 个 `_r*_task_*.md` 也算进去得 145 才绿。卡面 verify 自创建未改动。\n  - T-0276：`bash smoke.sh` 在 FreeBSD `rc=1`（5 项 FAIL），因 `运行.py:26-27` 硬编码 `G:\\dswork\\duan-light-merge\\*`。\n  - T-0261：watchdog 3/3 exit=0、freshness exit=0，但第 3 条全量 `31F/878P/16E/rc=1`（939s）；以属主身份复跑仍 `3F/906P/16E`（有 1 条 `test_repo_scope` 是 agent 白名单真问题，其余为存量/环境）。另观察到 4 次\"打印 passed 后不退出\"的间歇挂死（exit=124），与 T-0285 记录的 stdout PIPE 问题一致。\n  - T-0262：单元测试 17 passed，但真判据（默认源 URL 200）实测 404；卡已 shelve 转 T-0284，shelve 判断正确。\n\n遗留与风险\n- `tests/test_repo_scope.py::test_agent_repos_within_allowed_set` 红：`agents/dumate-win.json` 登记了白名单外的 `lightplugin`，需与 T-0260 的登记整改同步。\n- 各机 HEAD 未对齐（light：88 是 33dbc22cf、Windows 是 4c7b15a35；lightharness：Windows 602c27b / 88 ce8a2ac），计数类判据必须先对齐 HEAD，否则会得出不同答案。\n- 16 errors 是环境（该机 `git init` 默认分支为 `master`），`test_git_timeout` 是存量缺陷（`hive.py:470` ls-remote 未走 git_net），两者都不属本轮 16 张卡的改动引入。\n- 主仓工作区仍有 T-0283 那轮的 `M scripts/verify_104_readiness.py`（主控未定去向），本轮全程未触碰、未回滚、未提交。",
+  "error": "",
+  "declared_paths": [
+    "docs/六仓整改验收_20261106.md"
+  ],
+  "changed_files": [
+    "docs/六仓整改验收_20261106.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "7436b6a209d14ad2ab37e9339de1ecc0"
+}
