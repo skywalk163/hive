@@ -1283,3 +1283,32 @@ def test_leader_priority_is_read_from_config_json(tmp_path, monkeypatch):
     assert fresh().leader_priority == 2
     monkeypatch.setenv("HIVE_CLUSTER_PRIORITY", "7")
     assert fresh().leader_priority == 7, "环境变量优先于 config.json"
+
+
+# --------------------------------------------------------------------------- #
+# 配置来源：只有 state_dir/config.json 生效，仓库里那份仅告警
+# --------------------------------------------------------------------------- #
+
+def test_config_source_reports_shadow_config(tmp_path):
+    """--dir 下存在 config.json 时，status 必须点明它不会被读取。"""
+    state = tmp_path / "state"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "config.json").write_text("{}", encoding="utf-8")
+    cfg = hc.Config(state_dir=state, name="n", hive_dir=repo)
+
+    assert hc.effective_config_path(cfg) == state / "config.json"
+    assert hc.ignored_config_path(cfg) == repo / "config.json"
+    lines = hc.config_source_lines(cfg)
+    assert str(state / "config.json") in lines[0]
+    assert "不会被读取" in lines[1]
+    assert str(repo / "config.json") in lines[1]
+
+
+def test_config_source_without_shadow(tmp_path):
+    """没有影子文件，或影子就是生效文件本身时，不该出现告警。"""
+    cfg = hc.Config(state_dir=tmp_path, name="n", hive_dir=tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    assert hc.ignored_config_path(cfg) is None
+    assert len(hc.config_source_lines(cfg)) == 1
+
