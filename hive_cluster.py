@@ -594,6 +594,41 @@ class Config:
         _write_json(self.state_dir / "config.json", saved)
 
 
+def effective_config_path(config: Config) -> Path:
+    """进程真正读取的配置文件：永远是 ``state_dir/config.json``。"""
+    return Path(config.state_dir) / "config.json"
+
+
+def ignored_config_path(config: Config) -> Path | None:
+    """``hive_dir`` 下那份「看起来像配置、其实没人读」的 config.json。
+
+    state_dir 默认是 ``~/.hive/cluster``，而 ``--dir`` 常指向一个也叫 hive 的
+    仓库根。用户把 config.json 放在仓库里改半天、进程读的却是另一份，
+    是最容易让人认定「改了没生效」的坑。返回影子路径用于显式提示；
+    None 表示不存在这种文件，或它恰好就是生效的那一份。
+    """
+    shadow = Path(config.hive_dir) / "config.json"
+    try:
+        if shadow.resolve() == effective_config_path(config).resolve():
+            return None
+    except OSError:
+        return None
+    return shadow if shadow.is_file() else None
+
+
+def config_source_lines(config: Config) -> list[str]:
+    """给人看的配置来源：生效路径 + 关键字段 + 影子文件告警。"""
+    lines = [
+        f"配置 {effective_config_path(config)}  name={config.name}"
+        f"  priority={config.leader_priority}"
+        f"  preferred={config.preferred_leader or '-'}",
+    ]
+    shadow = ignored_config_path(config)
+    if shadow:
+        lines.append(f"注意 {shadow} 存在但不会被读取（实际只认上面的 state_dir 配置）")
+    return lines
+
+
 class Identity:
     """节点身份：node_id 稳定，incarnation 每次启动严格递增。"""
 
@@ -4793,6 +4828,13 @@ def run_cli(args) -> int:
             config.save()
         print(f"本机 {config.name} 记为首选主控（preferred_leader）")
 
+    # 配置来源说清楚：只有 state_dir/config.json 参与运行时。serve/start/restart
+    # 是「人以为改了配置」的高发场景，启动时就把仓库里那份影子文件点出来，
+    # 否则用户会在 --dir 目录的 config.json 上改半天，然后认为改动没生效。
+    if action in ("serve", "start", "restart"):
+        for line in config_source_lines(config)[1:]:
+            print(f"[hive-cluster] {line}", file=sys.stderr)
+
     if action == "serve":
         cluster = Cluster(config)
         try:
@@ -4913,10 +4955,15 @@ def run_cli(args) -> int:
     if action == "status":
         if getattr(args, "json", False):
             health = _local_health(config) or {}
+            shadow = ignored_config_path(config)
             _print_json({"running": running, "state": snap,
+                         "config_file": str(effective_config_path(config)),
+                         "ignored_config_file": str(shadow) if shadow else "",
                          "mcp": health.get("mcp") or {}})
         else:
             print(_status_line(snap, running, _stopped_marker(config).exists()))
+            for line in config_source_lines(config):
+                print(line)
             health = _local_health(config) or {}
             mcp = health.get("mcp") or {}
             if mcp:
