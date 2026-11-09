@@ -348,6 +348,18 @@ class StoreCallError(HiveError):
         return f"{tid} 领取失败：{self}"
 
 
+class ResultWriteError(StoreCallError):
+    """结果写进 leader store 失败（可重试），保留原始错误分类与 code/http。
+
+    T-0296：旧 `store_result()` 把 `HiveError` 吞成 `None`，`cmd_submit` 又不看
+    返回值，于是「集群换届 / 无主 → store 409」时 submit 照样打印
+    `T-xxxx done by ...` —— 卡在 Git 上看着是完成了，store 里却没有结果行，
+    租约一过期就被重新派发。T-0250 / T-0252 都踩过这个假成功。
+
+    这个异常就是「不许装作成功」的信号：调用方必须显式处理，不许静默吞掉。
+    """
+
+
 class LeaseFenced(HiveError):
     """租约已被回收 / 被别的 agent 接管：本次结果写入被 fencing 拒绝。
 
@@ -655,6 +667,41 @@ def claim_backoff_delay(attempt: int, cfg: dict | None = None,
 
 def _claim_sleep(seconds: float) -> None:
     """独立一层是为了测试能替换掉真实等待；KeyboardInterrupt 会原样向上冒。"""
+    time.sleep(seconds)
+
+
+# --------------------------------------------------------------------------- #
+# 结果写入 leader store 的退避重试（T-0296）
+#
+# `submit` 是 agent 交付的**唯一收口**。结果写不进 store 却不报错，会造出
+# 「Git 上看着 done / store 里没有结果行」的长期不一致：看板看不到、`close/land`
+# 不执行、租约一过期同一张卡又被派一遍（T-0250 / T-0252 踩过）。
+# 所以结果写入不做 best-effort：固定次数 + 递增间隔重试，最终失败必须让调用方
+# 看见（抛 ResultWriteError / 返回非 0），绝不静默。
+#   HIVE_RESULT_WRITE_RETRIES  最多重试几次（默认 3；总尝试次数 = 1 + 这个数）
+#   HIVE_RESULT_WRITE_BASE     第一次退避的基数（秒，默认 2 → 2s/4s/8s）
+# --------------------------------------------------------------------------- #
+RESULT_WRITE_RETRIES = 3
+RESULT_WRITE_BASE_S = 2.0
+RESULT_WRITE_RETRIES_ENV = "HIVE_RESULT_WRITE_RETRIES"
+RESULT_WRITE_BASE_ENV = "HIVE_RESULT_WRITE_BASE"
+
+
+def result_write_backoff_config() -> dict:
+    """本次结果写入的退避参数快照（环境变量可覆盖，模块常量供测试替换）。"""
+    base = _env_number(RESULT_WRITE_BASE_ENV, RESULT_WRITE_BASE_S, float)
+    retries = _env_number(RESULT_WRITE_RETRIES_ENV, RESULT_WRITE_RETRIES, int)
+    return {"base": base, "retries": int(retries)}
+
+
+def result_write_delays(cfg: dict | None = None) -> list[float]:
+    """每次重试前该睡多久：base * 2**i（默认 2, 4, 8）。"""
+    cfg = cfg or result_write_backoff_config()
+    return [round(cfg["base"] * (2 ** i), 3) for i in range(int(cfg["retries"]))]
+
+
+def _result_write_sleep(seconds: float) -> None:
+    """独立一层：测试替换掉真实等待；KeyboardInterrupt 原样向上冒。"""
     time.sleep(seconds)
 
 
@@ -988,15 +1035,53 @@ def store_ingest_card(tid: str, card: dict) -> dict:
 
 
 def store_result(tid: str, agent: str, lease_id: str,
-                 result: dict) -> dict | None:
-    try:
-        return store_call("result", {
-            "task": tid, "agent": agent, "lease_id": lease_id,
-            "status": str(result.get("status") or "done"),
-            "payload": result,
-        })
-    except HiveError:
-        return None
+                 result: dict, retries: int | None = None,
+                 sleeps: list[float] | None = None) -> dict:
+    """把结果写进 leader store；**失败必抛 ResultWriteError，绝不返回 None**。
+
+    T-0296：旧实现 `except HiveError: return None` 把「集群换届 / 无主 / 409」
+    全部吞掉，调用方 `cmd_submit` 又不检查返回值，于是照样打印
+    `T-xxxx done by ...` 并返回 0 —— 结果静默丢失。
+
+    失败按 2s / 4s / 8s（可由 HIVE_RESULT_WRITE_BASE 改基数）重试
+    `HIVE_RESULT_WRITE_RETRIES` 次（默认 3，总尝试 4 次），每次失败 emit 日志；
+    仍然失败就抛出保留原始错误分类的 ResultWriteError，让调用方返回非 0。
+    成功路径返回值与旧实现一致（store 的原始响应 dict）。
+
+    `retries` / `sleeps` 仅供测试注入（覆盖环境变量与真实等待）。
+    """
+    cfg = result_write_backoff_config()
+    attempts = (cfg["retries"] if retries is None else max(0, int(retries))) + 1
+    delays = result_write_delays({"base": cfg["base"],
+                                  "retries": attempts - 1})
+    last: Exception | None = None
+    kind, code, http = "other", "", None
+    for attempt in range(1, attempts + 1):
+        try:
+            return store_call("result", {
+                "task": tid, "agent": agent, "lease_id": lease_id,
+                "status": str(result.get("status") or "done"),
+                "payload": result,
+            })
+        except HiveError as exc:
+            # 所有 HiveError 都算「这次没写进去」：StoreCallError 带分类，
+            # 其它（超时、连接失败包装）也一样得重试，绝不放过。
+            last = exc
+            kind = str(getattr(exc, "kind", "") or "other")
+            code = str(getattr(exc, "code", "") or "")
+            http = getattr(exc, "http", None)
+            if attempt >= attempts:
+                break
+            delay = delays[attempt - 1]
+            log(f"{tid} 结果写入 leader store 失败（{kind}｜{exc}），"
+                f"{delay:g}s 后重试（{attempt}/{attempts - 1}）")
+            if sleeps is not None:
+                sleeps.append(delay)
+            _result_write_sleep(delay)
+    assert last is not None        # attempts >= 1 且只有异常才会走到这里
+    raise ResultWriteError(f"{tid} 结果写入 leader store 失败"
+                           f"（已尝试 {attempts} 次）：{last}",
+                           kind=kind, code=code, http=http) from last
 
 
 def store_close(tid: str, done: bool = True, note: str = "") -> dict | None:
@@ -3614,8 +3699,12 @@ class Hive:
               flush=True)
 
     def cmd_submit(self, tid: str, keep: bool = False, note: str = "",
-                   pr: bool = False) -> None:
-        """人工提交：commit + push + verify + 写结果，不依赖 worker 在跑。"""
+                   pr: bool = False) -> int:
+        """人工提交：commit + push + verify + 写结果，不依赖 worker 在跑。
+
+        返回 0 = 结果已同时落 Git 与 store（store 后端）/ 落 Git（git 后端）；
+        返回 1 = 结果写进 leader store 失败（T-0296），Git 侧产物保留。
+        """
         self.fetch()
         card = self.card(tid)
         if self.result_info(tid):
@@ -3745,8 +3834,52 @@ class Hive:
         if claim:
             save_local_lease(tid, {**claim, "submitted_at": iso(),
                                    "result_status": result["status"]})
+        # 结果落 store：**成功之前不许说成功**（T-0296）。
+        # store_result 自带 2s/4s/8s 重试，失败抛 ResultWriteError；这里显式接住，
+        # 保留 worktree 与 res/<tid>（Git 侧结果不丢），写清状态，返回非 0。
+        store_write_error = ""
         if claim_backend() == "store":
-            store_result(tid, owner, str(claim.get("lease_id") or ""), result)
+            try:
+                store_result(tid, owner, str(claim.get("lease_id") or ""), result)
+            except ResultWriteError as exc:
+                store_write_error = str(exc)
+                result["store_write_error"] = store_write_error
+                log(f"{tid} 结果已写入 Git（res/{tid}），但写入 leader store 失败："
+                    f"{exc}")
+                # 把「store 未写」也补进 res/<tid>：看板 / close / land 读的就是这个
+                # 文件，只写在日志和 summary 里等于没人看得见。推送失败只 log ——
+                # store 挂掉往往伴随网络不通，别让收尾动作再抛一次。
+                try:
+                    commit_file_to_ref(
+                        self.dir, f"results/{tid}.json",
+                        json.dumps(result, ensure_ascii=False, indent=2),
+                        f"res/{tid}", "origin/main",
+                        f"result {tid}: store write failed (marker)", force=True,
+                    )
+                except HiveError as e:
+                    log(f"{tid} 补写 res/{tid} 标记失败（忽略）: {e}")
+                try:
+                    marker = (
+                        f"\n\n## 结果未落 store（T-0296）\n\n"
+                        f"- Git 侧已完成：res/{tid} 分支、task/{tid}（head {head}）\n"
+                        f"- store 侧**未写入**：{store_write_error}\n"
+                        f"- 影响：看板看不到结果、close/land 不执行，租约过期后这张卡"
+                        f"可能被重新派发；git 结果不会丢。\n"
+                        f"- 下一步：集群恢复后重跑 `hive submit {tid}`（或让总控 retry）"
+                        f"把结果补进 store。\n")
+                    with open(summary_file, "a", encoding="utf-8") as fh:
+                        fh.write(marker)
+                except OSError as e:   # 写不了备注也不能再抛出，报错信息已经打出来了
+                    log(f"{tid} 写 summary.md 失败（忽略）: {e}")
+                print(f"{tid} 提交失败：结果已写入 Git（res/{tid}），"
+                      f"但未写入 leader store。\n"
+                      f"原因: {store_write_error}\n"
+                      f"worktree 已保留: {wt}\n"
+                      f"集群恢复后重跑 `hive submit {tid}` 补写结果。",
+                      file=sys.stderr, flush=True)
+                # 不删 worktree、不释放租约：未落库还被释放 = 卡被重新派发、
+                # 结果彻底没人认领（T-0250 / T-0252 的现场）。
+                return 1
 
         if not keep:
             git(["worktree", "remove", "--force", str(wt)], repo, check=False)
@@ -3759,6 +3892,7 @@ class Hive:
         print(f"{tid} {result['status']} by {owner}（{result['duration_s']}s）"
               f"\nbranch: task/{tid}  head: {head}\n"
               f"verify: " + ", ".join(f"{v['code']}" for v in verify), flush=True)
+        return 0
 
     def open_pr_for(self, tid: str, card: dict, result: dict,
                     repo: Path | str | None = None,
@@ -5665,9 +5799,20 @@ class Worker:
             result["pr"] = self.h.open_pr_for(tid, card, result, repo)
             log(f"{tid} PR: " + (result["pr"].get("url")
                                  or result["pr"].get("error") or "已处理"))
-        self._write_result(tid, result)
-        self.set_status(tid, state=result["status"], progress=100, step="完成",
-                        message=(result.get("error") or result["status"]))
+        # T-0296：store 写入失败不许静默 —— _write_result 把失败文本收在这里，
+        # 下面让它出现在 result / 状态推送 / 日志三处。
+        store_errors: list[str] = []
+        self._write_result(tid, result, store_errors)
+        if store_errors:
+            # T-0296：Git 侧结果已落、store 侧没落。不许把它当成「干净完成」：
+            # 结果里留可见标记（看板/digest 能看到），状态里也写明，日志再说一遍。
+            result["store_write_error"] = store_errors[-1]
+            self.set_status(tid, state=result["status"], progress=100,
+                            step="完成（store 未写入）",
+                            message=f"结果已写 Git，未写 leader store：{store_errors[-1]}")
+        else:
+            self.set_status(tid, state=result["status"], progress=100, step="完成",
+                            message=(result.get("error") or result["status"]))
 
         if not self.keep:
             git(["worktree", "remove", "--force", str(wt)], repo, check=False)
@@ -5771,12 +5916,18 @@ class Worker:
         log(f"{tid} 已转 blocked: {reason}")
         return result
 
-    def _write_result(self, tid: str, result: dict) -> None:
+    def _write_result(self, tid: str, result: dict,
+                      store_error: list | None = None) -> None:
         """写结果到 res/<tid>：先做租约 fencing，再 force-with-lease 推送。
 
         fencing 是纯 Git 模型缺的那道确定性防线：租约被回收/接管后，旧 worker
         即使进程还活着、手里还有 worktree，也不许把结果盖到新持有者头上。
         校验用**远端当前 claim** 与本地留底的 lease_id 对账，不匹配抛 LeaseFenced。
+
+        T-0296：store 后端下结果还得写进 leader store，这一步失败**不许吞**。
+        这里不改变 `_write_result` 的契约（LeaseFenced 仍然向上抛，调用方的
+        失败/挂起路径不受影响），但把 store 写入的异常文本收进调用方给的
+        `store_error` 列表，由 `run_task` 决定怎么让它变得可见。
         """
         lease = self._assert_lease(tid)
         for key in ("lease_id", "fence"):
@@ -5795,7 +5946,16 @@ class Worker:
             result["lease"] = "missing"
         if claim_backend() == "store":
             claim = self.h.claim_info(tid) or {}
-            store_result(tid, self.name, str(claim.get("lease_id") or ""), result)
+            try:
+                store_result(tid, self.name, str(claim.get("lease_id") or ""),
+                             result)
+            except ResultWriteError as exc:
+                # Git 侧已经落好（res/<tid> 在），只是 store 没写进去。
+                # 交给调用方决定如何标记：绝不在这里静默吞掉。
+                log(f"{tid} 结果已写入 res/{tid}，但写入 leader store 失败：{exc}")
+                result["store_write_error"] = str(exc)
+                if store_error is not None:
+                    store_error.append(str(exc))
 
     def _assert_lease(self, tid: str) -> dict:
         """确认「现在这个 claim 还是我的、且是我这一版租约」。
@@ -6228,9 +6388,10 @@ def cmd_accept(args) -> None:
     Hive(args.dir).cmd_accept(args.task, args.agent)
 
 
-def cmd_submit(args) -> None:
-    Hive(args.dir).cmd_submit(args.task, args.keep, args.note or "",
-                              pr=getattr(args, "pr", False))
+def cmd_submit(args) -> int:
+    """CLI 入口：把 cmd_submit 的返回码透出去（T-0296：结果没落 store 要非 0）。"""
+    return Hive(args.dir).cmd_submit(args.task, args.keep, args.note or "",
+                                     pr=getattr(args, "pr", False)) or 0
 
 
 def cmd_pr(args) -> int:
