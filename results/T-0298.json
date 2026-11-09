@@ -1,0 +1,41 @@
+{
+  "task": "T-0298",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0298",
+  "base": "main",
+  "head": "df91055b98a1a577582ad729720e64dc314a8d2d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T00:15:26+08:00",
+  "finished_at": "2026-11-10T00:19:23+08:00",
+  "duration_s": 237.1,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_cluster.py -k \"config_source or priority\"",
+      "code": 0,
+      "tail": [
+        "...............                                                          [100%]",
+        "15 passed, 54 deselected in 10.31s",
+        "[hive-cluster] \"POST /api/cluster/register HTTP/1.1\" 409 -"
+      ]
+    }
+  ],
+  "summary": "## T-0298 交付摘要\n\n**做了什么**：让「配置到底从哪读」这件事在启动和 status 里都直说，不再靠猜。\n\n- `hive_cluster.py`：新增 `effective_config_path()`、`ignored_config_path()`、\n  `config_source_lines()`。进程永远只读 `state_dir/config.json`；若 `--dir` 指向的\n  仓库根还有一份 `config.json`（本次现场就是 `~/dswork/hive/config.json`），\n  启动 `serve/start/restart` 时向 stderr 打一条「存在但不会被读取」，并给出\n  真正生效的路径与 `name/priority/preferred`。\n- `cluster status`（文本）末尾固定打印生效配置路径与三个关键字段，有影子文件\n  时追加告警；`--json` 增加 `config_file`、`ignored_config_file`。\n- `docs/集群服务.md`：明确「仓库根目录的 config.json 不生效」，并说明去哪里核对。\n- `tests/test_cluster.py`：新增 2 个用例覆盖影子文件识别与「同路径不误报」。\n\n**验证**：`python -m pytest -q tests/test_cluster.py -k \"config_source or priority\"`\n→ 15 passed；另用真实 state-dir 跑 `cluster status` 冒烟，输出符合预期。\n\n**风险/遗留**：全量 `tests/test_cluster.py` 仍有 3 个失败\n（`test_store_election_restriction`、`test_force_vote_overrides_store_behind`、\n`test_force_vote_can_be_disabled`），在未改动的 main 上同样失败：T-0295 把\n`strict_store_freshness` 默认改为 False 后，这三个旧用例没同步加\n`strict_store_freshness=True`，属既有测试债，不是本卡引入。",
+  "error": "",
+  "declared_paths": [
+    "hive_cluster.py",
+    "hive.py",
+    "docs/集群服务.md",
+    "tests/test_cluster.py"
+  ],
+  "changed_files": [
+    "docs/集群服务.md",
+    "hive_cluster.py",
+    "tests/test_cluster.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "aef2eca622d446ecacd1d156bab22a67",
+  "fence": 1
+}
