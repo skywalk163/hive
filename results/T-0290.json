@@ -1,0 +1,55 @@
+{
+  "task": "T-0290",
+  "agent": "fb88-dsh",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0290",
+  "base": "main",
+  "head": "169f9075837246e56eddc11a1ae7bf7a826c821d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-09T15:57:38+08:00",
+  "finished_at": "2026-11-09T16:01:43+08:00",
+  "duration_s": 245.5,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import pathlib; t=pathlib.Path('运行.py').read_text(encoding='utf-8'); assert 'G:' not in t, '运行.py 仍含 Windows 盘符绝对路径'; assert 'LIGHT_MERGE' in t and 'LIGHTHARNESS' in t, '环境变量覆盖被删'; print('no-win-abs-path')\"",
+      "code": 0,
+      "tail": [
+        "no-win-abs-path"
+      ]
+    },
+    {
+      "cmd": "python3 运行.py",
+      "code": 0,
+      "tail": [
+        "                    ../light、../light-merge，取第一个存在的。",
+        "    LIGHTHARNESS    宿主项目。默认兄弟目录 ../lightharness。",
+        "    两者都可用同名环境变量显式覆盖（优先级最高）。",
+        "    HARNESS_ROOT    工具可见的项目根（安全沙箱根），默认宿主项目路径。",
+        "    目录找不到时会打印全部候选路径并提示用环境变量指路，不静默退出。"
+      ]
+    },
+    {
+      "cmd": "bash smoke.sh",
+      "code": 0,
+      "tail": [
+        "_lpd003_declared.light               OK",
+        "冒烟A_基础.light                 OK",
+        "冒烟B_跨域导入.light           OK",
+        "冒烟C_状态共享.light           OK",
+        "SMOKE OK (5/5; 缺陷探针按预期失败，不计入)"
+      ]
+    }
+  ],
+  "summary": "# T-0290 执行记录：判据本身没问题，上次 failed 是提交机缺 bash\n\n## 结论\n\n`运行.py` 的修复（去掉 Windows 盘符绝对路径、改为按自身位置推导兄弟仓）**在上一次\n尝试时已经完成并提交**（`169f907`，`+49 / -12`）。上一次判 failed 的原因是**执行环境**，\n不是产物：\n\n- verify 1 `python3 -c \"... 'G:' not in 运行.py ...\"` → **rc=0**\n- verify 2 `python3 运行.py` → **rc=0**\n- verify 3 `bash smoke.sh` → 上次 **rc=1**，报错 `'bash' 不是内部或外部命令`：\n  Windows 提交机的 PATH 里没有 bash（Git Bash 在 `C:\\Program Files\\Git\\bin`，未入 PATH）。\n\n## 本次处理（不改代码、不改判据）\n\n1. 在 88（FreeBSD 15.1）上 `retry T-0290` 清掉旧 failed 结果与租约，以 `fb88-dsh` 重新领取；\n2. worktree `/home/skywalk/.hive/wt/T-0290` 复位到 `task/T-0290`（HEAD `169f907`，工作区干净，\n   `git diff --stat main...HEAD` = `运行.py | 49 ++++++++++++++---------`）；\n3. 目录默认值解析所需兄弟仓在 worktree 父目录建**符号链接**（纯环境，不入仓、可逆）：\n   - `/home/skywalk/.hive/wt/light -> /home/skywalk/dswork/light`\n   - `/home/skywalk/.hive/wt/lightharness -> /home/skywalk/dswork/lightharness`\n4. 三条 verify 在 88 上、**不设置 `LIGHT_MERGE` / `LIGHTHARNESS` 环境变量**（验的就是默认推导）真跑。\n\n## 三条 verify 实测（88 / FreeBSD 15.1，python3 3.12，skywalk 身份）\n\n```\n== verify1 ==\nno-win-abs-path\nrc1=0\n\n== verify2 ==\nlightplugin 运行器（打印用法后退出，未触发路径检查失败）\nrc2=0\n\n== verify3 ==\n_lp001_verify.light                  OK\n_lpd003_declared.light               OK\n冒烟A_基础.light                 OK\n冒烟B_跨域导入.light           OK\n冒烟C_状态共享.light           OK\nSMOKE OK (5/5; 缺陷探针按预期失败，不计入)\nrc3=0\n```\n\n## 附带发现（不在本卡 paths 内，未修）\n\n`smoke.sh:37` 把日志硬编码写到共享的 `/tmp/_lp_smoke.log`。该文件曾被另一个账号创建，\n导致本次首次运行时 `Permission denied`、5 条用例全 FAIL（假红）。清理该文件后即 5/5 通过。\n多用户机器上这是可复现的互相踩踏点，建议后续单开卡改成 `mktemp`，本卡不动。\n\n## 未做 / 不做\n\n- 没有为了造 diff 去改 `运行.py`（修复已存在，零新增改动）\n- 未改 T-0276 等其它卡与 verify、未改 `agents/` 配置、未写 token/密钥/IP\n- 未改 smoke 白名单与用例内容",
+  "error": "",
+  "declared_paths": [
+    "运行.py"
+  ],
+  "changed_files": [
+    "运行.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "d1a538b4bf4f4f45b11752ab9b20c205"
+}
