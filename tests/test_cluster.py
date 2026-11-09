@@ -1019,3 +1019,267 @@ def test_update_node_rejects_same_url_ghost(cluster_factory):
         assert a._update_node_locked(mine) is True
         assert a._update_node_locked(ghost) is False
         assert "ghost-node" not in a.nodes
+
+
+# --------------------------------------------------------------------------- #
+# 幽灵 leader 死循环（2026-11-09）：follower 互相喂 .103 的租约，谁都不选举
+# --------------------------------------------------------------------------- #
+
+def _offline_cluster(tmp_path, name="offline", **kw):
+    """只要内存状态、不启 HTTP/后台循环，方便确定性地摆弄租约。"""
+    cfg = hc.Config(
+        state_dir=tmp_path / name, name=name,
+        host="127.0.0.1", port=0, advertise="127.0.0.1",
+        discover=False, hive_dir=tmp_path / "repo",
+        election_min=kw.pop("election_min", 999.0),
+        leader_lease=kw.pop("leader_lease", 5.0),
+        **kw)
+    return hc.Cluster(cfg)
+
+
+def _ghost_record():
+    return {"id": "ghost-103", "name": "laiweilideMacBook-Air",
+            "url": "http://192.168.0.103:8788", "incarnation": 1794110903088,
+            "priority": 1, "electable": True}
+
+
+def test_restart_drops_stale_leader_even_with_live_lease(tmp_path):
+    """磁盘里租约**还没过期**的幽灵主控，重启后也不能被读回内存。
+
+    旧代码只在「租约过期」或「leader 是自己」时才清，于是手工改盘后一重启
+    幽灵立刻复活 —— 操作手册里反复复发的正是这一条。
+    """
+    d = tmp_path / "stale"
+    d.mkdir()
+    (d / "state.json").write_text(json.dumps({
+        "term": 2150,
+        "leader_id": "ghost-103",
+        "leader_url": "http://192.168.0.103:8788",
+        "leader_lease_until_epoch": time.time() + 300,
+        "nodes": {},
+    }), encoding="utf-8")
+    c = _offline_cluster(tmp_path, name="stale")
+    assert c.leader_id is None
+    assert c.leader_url is None
+    assert c.leader_lease_until == 0.0
+
+
+def test_follower_relay_cannot_reissue_ghost_lease(tmp_path):
+    """转述只能传递同一个绝对到期时间，不能每跳重新签发 now+lease。"""
+    c = _offline_cluster(tmp_path, name="relay")
+    with c.lock:
+        c.term = 100
+        assert c._adopt_leader_locked(_ghost_record(), 100,
+                                      refresh_lease=True) is True
+        signed = c.leader_lease_until
+        heartbeat_at = c._last_leader_heartbeat_at
+        assert signed > time.time()
+        assert heartbeat_at > 0
+        time.sleep(0.05)
+        for _ in range(6):
+            relayed = dict(_ghost_record(),
+                           lease_until_epoch=c.leader_lease_until)
+            assert c._adopt_leader_locked(relayed, 100,
+                                          refresh_lease=False) is True
+            assert c.leader_lease_until <= signed, \
+                "跟随者转述把幽灵租约往后推了"
+            assert c._last_leader_heartbeat_at == heartbeat_at, \
+                "转述被误当成主控本人心跳"
+
+
+def test_ghost_leader_cleared_without_direct_heartbeat(tmp_path):
+    """即使有人不断把租约撑长，没有主控本人心跳也必须判定为幽灵并清掉。"""
+    c = _offline_cluster(tmp_path, name="ghostclear")
+    with c.lock:
+        c.term = 100
+        c._adopt_leader_locked(_ghost_record(), 100, refresh_lease=True)
+        assert c.leader_id == "ghost-103"
+        c._last_leader_heartbeat_at = time.time() - 100
+        c.leader_lease_until = time.time() + 100   # 互相喂出来的长租约
+    c._maintenance_once()
+    with c.lock:
+        assert c.leader_id is None
+        assert c.leader_lease_until == 0.0
+
+
+def test_handle_heartbeat_signs_lease_only_for_real_leader(tmp_path):
+    """只有 body.leader is True 的主控心跳能签租约；follower 互探不能。"""
+    c = _offline_cluster(tmp_path, name="hb")
+    peer = {"id": "peer-1", "name": "peer", "url": "http://127.0.0.1:9999",
+            "incarnation": 10, "priority": 1, "electable": True}
+    with c.lock:
+        c.term = 10
+        code, resp = c.handle_heartbeat(
+            {"node": peer, "term": 10, "leader": False})
+        assert code == 200
+        assert resp["is_leader"] is False
+        assert resp["node_id"] == c.node_id
+        assert c.leader_lease_until == 0.0, "跟随者心跳不能签发租约"
+
+        code, resp = c.handle_heartbeat(
+            {"node": peer, "term": 10, "leader": True})
+        assert code == 200
+        assert c.leader_id == "peer-1"
+        assert c.leader_lease_until > time.time()
+        assert c._last_leader_heartbeat_at > 0
+
+
+def test_reply_is_from_leader_distinguishes_real_and_relayed():
+    """新版用 is_leader，老版本用 role 兜底；两者都不能把 follower 当主控。"""
+    assert hc._reply_is_from_leader({"is_leader": True}) is True
+    assert hc._reply_is_from_leader(
+        {"is_leader": False, "leader": {"id": "ghost"}}) is False
+    assert hc._reply_is_from_leader({"role": "leader"}) is True
+    assert hc._reply_is_from_leader({"role": "follower"}) is False
+    assert hc._reply_is_from_leader(None) is False
+
+
+def test_register_reply_with_mismatched_leader_is_rejected(tmp_path):
+    """「我 role=leader，但我认为 leader 是 .103」这种不一致状态不能灌回来。
+
+    现场旧版本节点就是这样：自己短暂当选，leader_id 却仍被同伴快照带偏到
+    已下线的 .103；它给 register 返回 200，新节点一注册就把幽灵读回磁盘。
+    """
+    c = _offline_cluster(tmp_path, name="mismatch")
+    snap = {
+        "term": 100, "role": "leader",
+        "self": {"id": "peer-101", "url": "http://192.168.0.101:8788"},
+        "leader": dict(_ghost_record(), lease_until_epoch=time.time() + 5),
+        "nodes": [], "events": [], "progress": {}, "leases": {},
+    }
+    with c.lock:
+        c.term = 100
+        c._merge_snapshot_locked(snap, from_leader=True, sender_id="peer-101")
+        assert c.leader_id is None
+        assert c.leader_lease_until == 0.0
+        # 换成「本人签发」的一致快照，正常采纳
+        ok = dict(snap)
+        ok["leader"] = {"id": "peer-101", "name": "peer",
+                        "url": "http://192.168.0.101:8788",
+                        "incarnation": 10,
+                        "lease_until_epoch": time.time() + 5}
+        c._merge_snapshot_locked(ok, from_leader=True, sender_id="peer-101")
+        assert c.leader_id == "peer-101"
+
+
+def test_leader_heartbeat_rejects_identity_mismatch(tmp_path):
+    """用旧 node.json 的身份（声明 .103）从 .110 发主控心跳 —— 必须拒绝。
+
+    现场最终取证：幽灵是 handle_heartbeat 的 `leader: True` 心跳写进来的，
+    一台 192.168.0.110 的机器沿用旧 Mac 身份，url 指向早已下线的 .103。
+    伪造身份的请求连 term 都不许推进，否则会把本机选举一遍遍打断。
+    """
+    c = _offline_cluster(tmp_path, name="spoof")
+    ghost_node = dict(_ghost_record())
+    with c.lock:
+        c.term = 100
+        c._become_leader_locked()
+        assert c.role == "leader"
+    code, resp = c.handle_heartbeat(
+        {"node": ghost_node, "term": 9999, "leader": True},
+        peer_ip="192.168.0.110")
+    assert code == 200
+    assert resp["term"] == 100
+    with c.lock:
+        assert c.term == 100, "伪造心跳推进了 term"
+        assert c.role == "leader"
+        assert c.leader_id == c.node_id
+        assert "ghost-103" not in c.nodes
+    # 来源 IP 与自述一致时才正常采纳
+    c2 = _offline_cluster(tmp_path, name="spoof-ok")
+    with c2.lock:
+        c2.term = 100
+        c2.handle_heartbeat(
+            {"node": ghost_node, "term": 100, "leader": True},
+            peer_ip="192.168.0.103")
+        assert c2.leader_id == "ghost-103"
+
+
+def test_node_url_host_matches_only_checks_ip_literals():
+    assert hc._node_url_host_matches(
+        "http://192.168.0.103:8788", "192.168.0.103") is True
+    assert hc._node_url_host_matches(
+        "http://192.168.0.103:8788", "192.168.0.101") is False
+    assert hc._node_url_host_matches("http://127.0.0.1:8788", "127.0.0.1") is True
+    assert hc._node_url_host_matches("http://192.168.0.9:8788",
+                                     "::ffff:192.168.0.9") is True
+    assert hc._node_url_host_matches("http://myhost.local:8788", "10.0.0.1") is True
+
+
+def test_follower_snapshot_cannot_refresh_ghost_last_seen(tmp_path):
+    """存活只认本机直接观测，不认跟随者转述的 last_seen。
+
+    否则两台 follower 互相把幽灵刷成「刚刚」，它永远占一票，quorum 被抬高，
+    选举就一直凑不够多数（现场 term 从 2170 一路涨到 2259）。
+    """
+    c = _offline_cluster(tmp_path, name="lastseen")
+    ghost = dict(_ghost_record())
+    with c.lock:
+        c.term = 100
+        assert c._update_node_locked(ghost, touch=True) is True
+        stale = time.time() - 100
+        c.nodes["ghost-103"]["last_seen_epoch"] = stale
+        snap = {"term": 100,
+                "nodes": [dict(ghost, last_seen_epoch=time.time())],
+                "events": [], "progress": {}, "leases": {}}
+        c._merge_snapshot_locked(snap, from_leader=False)
+        assert abs(c.nodes["ghost-103"]["last_seen_epoch"] - stale) < 1
+        # 主控本人发来的快照才有权刷新存活时间
+        c._merge_snapshot_locked(snap, from_leader=True, sender_id="ghost-103")
+        assert c.nodes["ghost-103"]["last_seen_epoch"] > stale + 50
+
+
+def test_unreachable_leader_is_cleared_even_with_long_lease(tmp_path):
+    """主控地址一直拨不通，就算租约被转述撑得很长也得清掉。"""
+    c = _offline_cluster(tmp_path, name="unreachable")
+    with c.lock:
+        c.term = 100
+        c._adopt_leader_locked(_ghost_record(), 100, refresh_lease=True)
+        c._leader_fail_at = time.time() - 100
+        c._last_leader_heartbeat_at = time.time()
+        c.leader_lease_until = time.time() + 100
+    c._maintenance_once()
+    with c.lock:
+        assert c.leader_id is None
+        assert c.leader_lease_until == 0.0
+
+
+def test_old_follower_replies_cannot_plant_ghost_leader(tmp_path, monkeypatch):
+    """模拟现场：旧节点回复 role=follower、leader 指向已下线的 .103。"""
+    c = _offline_cluster(tmp_path, name="oldreply")
+    resp = {
+        "ok": True, "term": 100, "role": "follower",
+        "leader": dict(_ghost_record(), lease_until_epoch=time.time() + 5),
+        "nodes": [], "events": [], "progress": {}, "leases": {},
+    }
+    monkeypatch.setattr(hc, "http_json", lambda *a, **k: (200, resp))
+    with c.lock:
+        c.term = 100
+    c._peer_heartbeat(
+        [{"id": "peer-101", "url": "http://192.168.0.101:8788"}], {})
+    c._follower_heartbeat("http://192.168.0.103:8788", {})
+    with c.lock:
+        assert c.leader_id is None, "跟随者回复把幽灵主控种回来了"
+        assert c.leader_lease_until == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# 优先级写在 config.json 里：默认 1，想让某台优先当家就写 2
+# --------------------------------------------------------------------------- #
+
+def test_leader_priority_is_read_from_config_json(tmp_path, monkeypatch):
+    """每台机器只改自己的 config.json 就能声明优先级，不用在别人机器上配。"""
+    d = tmp_path / "cfg"
+    d.mkdir()
+    monkeypatch.delenv("HIVE_CLUSTER_PRIORITY", raising=False)
+
+    def fresh():
+        return hc.Config(state_dir=d, name="n", discover=False,
+                         hive_dir=tmp_path / "repo")
+
+    assert fresh().leader_priority == 1, "不写就是 OSPF 默认值 1"
+    (d / "config.json").write_text(
+        json.dumps({"leader_priority": 2}), encoding="utf-8")
+    assert fresh().leader_priority == 2
+    monkeypatch.setenv("HIVE_CLUSTER_PRIORITY", "7")
+    assert fresh().leader_priority == 7, "环境变量优先于 config.json"

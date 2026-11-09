@@ -24,3 +24,5 @@ dashboard/plans.json.tmp.*
 dashboard/.demo-*.json
 # 可选的 jsdom 前端测试依赖（dev/*-ui-test.js）；仓库本身零依赖
 node_modules/
+# add config file .json
+config.json

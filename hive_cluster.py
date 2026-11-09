@@ -311,6 +311,54 @@ def _tail_text(text: str, lines: int = 12) -> str:
     return "\n".join(parts[-lines:])
 
 
+def _node_url_host_matches(url: str, ip: str) -> bool:
+    """节点自述的 URL 主机，是否就是这次 HTTP 请求的来源 IP。
+
+    挡的是「拿别人的身份自称主控」：一台机器若沿用旧 node.json 里的 id/url
+    （现场是旧 Mac 身份 + 早已下线的 192.168.0.103）发 leader 心跳，照单全收
+    就会把主控指向一个连不上的地址，随后同伴转述再把租约永久续命。
+    自述是域名/主机名时不做比对，避免误伤配了 advertise 域名的部署。
+    """
+    if not url or not ip:
+        return True
+    import ipaddress
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").strip("[]").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    peer = str(ip).strip("[]").lower()
+    if peer.startswith("::ffff:"):
+        peer = peer[7:]
+    if host == peer:
+        return True
+    # 回环的几种写法等价（单机/测试常用）
+    return (host in ("127.0.0.1", "::1", "localhost")
+            and peer in ("127.0.0.1", "::1", "localhost"))
+
+
+def _reply_is_from_leader(resp) -> bool:
+    """一次心跳/注册回复是否来自**主控本人**。
+
+    跟随者的回复里也会带 ``leader`` 字段，但那是它「听说」的主控视图，不是
+    主控本人。只有主控自己发的回复才有权给租约续命。``is_leader`` 是本次
+    新增的显式标记；老版本节点没有这个字段时用 ``role`` 兜底（role 一直是
+    真实角色，不像节点表里那条被标注出来的 role）。
+    """
+    if not isinstance(resp, dict):
+        return False
+    flag = resp.get("is_leader")
+    if flag is not None:
+        return flag is True
+    return str(resp.get("role") or "") == "leader"
+
+
 # --------------------------------------------------------------------------- #
 # 配置 / 身份 / 持久状态
 # --------------------------------------------------------------------------- #
@@ -1106,6 +1154,11 @@ class Cluster:
         self._dirty = False
         self._last_persist = 0.0
         self._last_election = 0.0
+        # 只有「主控本人发来的 leader 心跳」才刷新这个时间戳。跟随者之间转述
+        # leader 记录不算数 —— 否则每台都以为别人见过主控，幽灵主控的租约
+        # 被互相喂成永不过期（2026-11-09 的 .103 死循环）。
+        self._last_leader_heartbeat_at = 0.0
+        self._last_forged_log = 0.0
         self._leader_lost_at: float | None = None
         self._leader_fail_at: float | None = None
         self._election_inflight = False
@@ -1431,13 +1484,14 @@ class Cluster:
         if isinstance(leases, dict):
             self.leases = {str(k): v for k, v in leases.items() if isinstance(v, dict)}
 
-        # 重启后不能沿用上一世的「主节点」身份：租约过期就清掉，等心跳/选举。
-        if self.leader_lease_until <= _now():
-            self.leader_id = None
-            self.leader_url = None
-            self.leader_lease_until = 0.0
-        # 自己重启后不能沿用「上一世自己还是主节点」的身份：等心跳/选举重新确认。
-        if self.leader_id == self.node_id:
+        # 重启后**一律不继承**磁盘里的主控身份。真主控每秒发心跳，1 秒内就会
+        # 重新确立；而磁盘里若残留「查无此人」的幽灵（旧机器名、改过名的实例、
+        # 或 follower 互相喂出来的租约），原样读回就会让心跳继续给它续命，
+        # 谁都不发起选举 —— 这正是「改了盘、重启又复发」的根因（见
+        # 2026-11-09 幽灵 leader 死循环）。宁可短暂无主，也不要继承可疑身份。
+        if self.leader_id or self.leader_lease_until:
+            _log(f"集群状态加载：丢弃旧主控指向 {self.leader_id or '-'}，"
+                 f"等待主控心跳/重新选举确认")
             self.leader_id = None
             self.leader_url = None
             self.leader_lease_until = 0.0
@@ -1629,7 +1683,8 @@ class Cluster:
                 _log(f"集群状态加载：丢弃与 {url} 重复的旧身份 {nid}")
 
     def _update_node_locked(self, rec: dict, touch: bool = True,
-                            joined: bool = False) -> bool:
+                            joined: bool = False,
+                            trust_remote_seen: bool = True) -> bool:
         """合入一个节点记录。低化身号直接丢弃；返回是否写入。"""
         if not isinstance(rec, dict) or not rec.get("id"):
             return False
@@ -1674,9 +1729,16 @@ class Cluster:
             merged["last_seen_epoch"] = _now()
         else:
             # 远端快照里的 last_seen 可能比我们本地刚收到的心跳更旧；
-            # 只能取较新的那个，否则一次状态合并会把刚确认的 alive 又打回 dead。
+            # 通常取较新的那个，否则一次状态合并会把刚确认的 alive 又打回 dead。
             old_seen = float((known or {}).get("last_seen_epoch") or 0.0)
-            new_seen = max(old_seen, float(incoming.get("last_seen_epoch") or 0.0))
+            if trust_remote_seen:
+                new_seen = max(old_seen, float(incoming.get("last_seen_epoch") or 0.0))
+            else:
+                # 跟随者转述的存活时间**不能当证据**：两台 follower 互相把
+                # 同一台幽灵的 last_seen 刷成「刚刚」，它就永远 alive、永远占
+                # 一票，quorum 被抬高，选举反复凑不够多数。存活只认本机直接
+                # 观测（_peer_heartbeat 收到回复时会刷新），全新节点给一个窗口。
+                new_seen = old_seen or _now()
             merged["last_seen_epoch"] = new_seen
             merged["last_seen"] = _iso(new_seen) if new_seen else ""
         merged["id"] = nid
@@ -2224,7 +2286,15 @@ class Cluster:
         return ""
 
     # -- 合并远端状态 ------------------------------------------------------- #
-    def _merge_snapshot_locked(self, snap: dict, from_leader: bool = False) -> None:
+    def _merge_snapshot_locked(self, snap: dict, from_leader: bool = False,
+                               sender_id: str = "") -> None:
+        """合并远端快照。
+
+        ``sender_id`` 是这份快照的签发者。主控记录**必须由那个主控本人签发**：
+        一台机器可以自称 role=leader，却因为旧代码的转述把 ``leader_id`` 指向
+        一台早已下线的机器（现场就是 .103）。这种「我是主，但我认为主是别人」
+        的不一致状态曾让注册/双主路径把幽灵重新灌回刚清干净的磁盘。
+        """
         if not isinstance(snap, dict):
             return
         if isinstance(snap.get("state"), dict):
@@ -2239,12 +2309,18 @@ class Cluster:
                 self.leader_id = None
                 self.leader_url = None
             self._mark_dirty_locked()
+        # 主控身份**只能由主控本人确立**。跟随者的快照里也有 leader 字段，但那是
+        # 它听说的视图（幽灵常借这条路径在 follower 之间扩散）：只拿来展示/发现，
+        # 绝不写进 leader_id。真主控每秒给所有 peer 发心跳，不需要转述。
         leader = snap.get("leader")
-        if isinstance(leader, dict) and leader.get("id"):
-            self._adopt_leader_locked(leader, term, refresh_lease=from_leader)
+        if from_leader and isinstance(leader, dict) and leader.get("id"):
+            sid = str(sender_id or "")
+            if sid and str(leader.get("id")) == sid:
+                self._adopt_leader_locked(leader, term, refresh_lease=True)
         for rec in snap.get("nodes") or []:
             if isinstance(rec, dict):
-                self._update_node_locked(rec, touch=False)
+                self._update_node_locked(rec, touch=False,
+                                         trust_remote_seen=from_leader)
         for ev in snap.get("events") or []:
             self._merge_event_locked(ev)
         progress = snap.get("progress")
@@ -2276,6 +2352,14 @@ class Cluster:
     # -- 主节点 ------------------------------------------------------------ #
     def _adopt_leader_locked(self, rec: dict, term: int,
                              refresh_lease: bool = True) -> bool:
+        """采纳一条主控记录。
+
+        ``refresh_lease=True`` 是**签发租约**的权力，只允许用在「主控本人
+        发来的、已核验过身份的心跳」上（handle_heartbeat 的 leader 心跳通道）。
+        从同伴快照/心跳回复里「听说」的主控一律走 False：只转述对方给出的
+        绝对到期时间，绝不重新签发。否则两台跟随者互相转述就能把同一条
+        now+lease 一跳一跳往后推，旧主死了租约也永不过期（幽灵 leader）。
+        """
         if not isinstance(rec, dict) or not rec.get("id"):
             return False
         lid = str(rec["id"])
@@ -2298,15 +2382,19 @@ class Cluster:
             self._emit_locked("leader_step_down",
                               message=f"让位给 term={term} 的 {rec.get('name') or lid}")
             self.role = "follower"
-        self._update_node_locked(rec, touch=True)
+        # 只有真主控心跳才给这条记录 touch；转述不能把幽灵记录刷成 alive。
+        self._update_node_locked(rec, touch=refresh_lease)
         changed = self.leader_id != lid
         self.leader_id = lid
         self.leader_url = str(rec.get("url") or self.leader_url or "")
         if refresh_lease:
-            self.leader_lease_until = _now() + self.config.leader_lease
+            now = _now()
+            self.leader_lease_until = now + self.config.leader_lease
+            self._last_leader_heartbeat_at = now
         else:
-            # 从同伴快照里「听说」的主节点不能当直接心跳：沿用对方记录的租约，
-            # 绝不能续成 now+lease，否则两个跟随者会互相把已死的旧主保活。
+            # 从同伴快照里「听说」的主节点不能当直接心跳：只转述对方记录的
+            # 绝对到期时间。min(..., now+lease) 只做上限裁剪（防异常大值），
+            # 不会把租约往后推 —— 每跳 re-sign 成 now+lease 正是死循环的根因。
             remote_lease = float(rec.get("lease_until_epoch") or 0.0)
             if remote_lease > 0:
                 self.leader_lease_until = min(
@@ -2316,7 +2404,13 @@ class Cluster:
         self._leader_lost_at = None
         self._leader_fail_at = None
         if changed:
+            import traceback
+            caller = traceback.extract_stack()[-2].name
             self._emit_locked("leader_seen", message=f"主节点 -> {rec.get('name') or lid}")
+            # 排障用：主控指向变化时留下「谁把它写进来的」。幽灵 leader 反复
+            # 复活时，一眼就能看出是心跳、注册还是同伴转述带回来的。
+            _log(f"采纳主控 {rec.get('name') or lid}（来源 {caller}，"
+                 f"term={term}，签租={refresh_lease}）")
         self._mark_dirty_locked()
         return True
 
@@ -2327,6 +2421,8 @@ class Cluster:
         self.leader_id = None
         self.leader_url = None
         self.leader_lease_until = 0.0
+        # 主控指向变了，旧地址的「连续不可达」计时作废，别把新主也误清掉。
+        self._leader_fail_at = None
         self._leader_lost_at = _now()
         self._emit_locked("leader_lost", message=f"{old} 失联：{reason}")
         self._mark_dirty_locked()
@@ -2342,6 +2438,7 @@ class Cluster:
         self.leader_id = self.node_id
         self.leader_url = self.url
         self.leader_lease_until = _now() + self.config.leader_lease
+        self._last_leader_heartbeat_at = _now()
         self.voted_for = self.node_id
         self._leader_lost_at = None
         self._leader_fail_at = None
@@ -2554,6 +2651,12 @@ class Cluster:
         return became
 
     def _adopt_higher_term_locked(self, term: int, leader=None) -> None:
+        """只同步任期，不借机改主控指向。
+
+        ``leader`` 参数是历史遗留：更高任期消息（vote 回复、peer 心跳回复）里
+        带的 leader 只是对方「听说」的视图，采纳它正是幽灵扩散的一条路径。
+        主控归属交给主控本人的心跳重新确立即可。
+        """
         if term <= self.term:
             return
         self.term = term
@@ -2566,8 +2669,6 @@ class Cluster:
         self._leader_lost_at = _now()
         self._emit_locked("term_advanced", message=f"任期推进到 {term}")
         self._mark_dirty_locked()
-        if isinstance(leader, dict):
-            self._adopt_leader_locked(leader, term)
 
     # -- 心跳 / 维护循环 ---------------------------------------------------- #
     def _loop_heartbeat(self) -> None:
@@ -2640,10 +2741,20 @@ class Cluster:
                         rec["last_seen"] = _iso()
                         rec["last_seen_epoch"] = _now()
                     self._merge_body_state_locked(resp)
-                    if resp.get("leader") and int(resp.get("term") or 0) >= self.term:
-                        leader = resp["leader"]
-                        if isinstance(leader, dict) and leader.get("id") != self.node_id:
-                            self._adopt_leader_locked(leader, int(resp.get("term") or 0))
+                    # 只有对端也自称主控（同任期双主）才走让位规则。跟随者
+                    # 回复里的 leader 只是它听说的视图，不能把在位主控带偏。
+                    if (_reply_is_from_leader(resp)
+                            and int(resp.get("term") or 0) >= self.term):
+                        leader = resp.get("leader")
+                        # 双主让位也只认「对方本人签发的」主控记录；对方若自称
+                        # 主控却把 leader_id 指向第三台（幽灵），一律不理。
+                        peer_id = str(peer.get("id") or "")
+                        if (isinstance(leader, dict) and peer_id
+                                and str(leader.get("id") or "") == peer_id
+                                and peer_id != self.node_id):
+                            self._adopt_leader_locked(
+                                leader, int(resp.get("term") or 0),
+                                refresh_lease=True)
                     if int(resp.get("term") or 0) > self.term:
                         self._adopt_higher_term_locked(int(resp["term"]), resp.get("leader"))
                     self._mark_dirty_locked()
@@ -2654,10 +2765,23 @@ class Cluster:
         with self.lock:
             if isinstance(resp, dict):
                 self._leader_fail_at = None
-                self._merge_snapshot_locked(resp, from_leader=True)
                 leader = resp.get("leader")
-                if isinstance(leader, dict):
-                    self._adopt_leader_locked(leader, int(resp.get("term") or self.term))
+                # 关键防线：leader_url 指向的那台未必真是主控（历史上它可能是
+                # 旧机器、或自己也是 follower）。只有它明确自报 role=leader、
+                # 且它认为的主控就是它自己，才把这份回复当主控心跳续租。
+                # 否则一律只转述租约，绝不能 now+lease 重新签发 —— 这曾经让
+                # 几台 follower 互相把 .103 的幽灵租约喂成永不过期。
+                # 老版本不回 node_id：退而用「我们请求的那个 leader_id」当
+                # 期望签发者（leader_url 本来就是按它拼出来的）。
+                sender_id = str(resp.get("node_id") or self.leader_id or "")
+                verified = (_reply_is_from_leader(resp)
+                            and isinstance(leader, dict)
+                            and bool(sender_id)
+                            and str(leader.get("id") or "") == sender_id)
+                # verified 时由 _merge_snapshot_locked 统一采纳；verified=False
+                # 时连 leader_id 都不改，只同步节点表/进度/事件。
+                self._merge_snapshot_locked(resp, from_leader=verified,
+                                            sender_id=sender_id)
                 self._mark_dirty_locked()
             else:
                 self._leader_fail_at = _now()
@@ -2689,9 +2813,15 @@ class Cluster:
                         rec["last_seen"] = _iso()
                         rec["last_seen_epoch"] = _now()
                     leader = resp.get("leader")
-                    direct = (isinstance(leader, dict)
-                              and str(leader.get("id")) == str(peer.get("id")))
-                    self._merge_snapshot_locked(resp, from_leader=direct)
+                    # 跟随者互探不能当作主控心跳：即使它回复里的 leader 指向
+                    # 对方自己（幽灵常长这样），也只有当它真是主控时才续租。
+                    sender_id = str(peer.get("id") or "")
+                    direct = (_reply_is_from_leader(resp)
+                              and isinstance(leader, dict)
+                              and bool(sender_id)
+                              and str(leader.get("id") or "") == sender_id)
+                    self._merge_snapshot_locked(resp, from_leader=direct,
+                                                sender_id=sender_id)
                     self._mark_dirty_locked()
 
     def _loop_maintenance(self) -> None:
@@ -2721,6 +2851,22 @@ class Cluster:
             elif self.leader_id:
                 if self.leader_lease_until and now_epoch > self.leader_lease_until:
                     self._clear_leader_locked("主节点租约过期")
+                else:
+                    # 连不上自己认的主控，就不该继续认 —— 幽灵常声明一个
+                    # 早已下线的地址，靠同伴转述把租约撑着，本地却永远拨不通。
+                    unreachable_for = max(self.config.leader_lease * 2, 2.0)
+                    if (self._leader_fail_at
+                            and now_epoch - self._leader_fail_at > unreachable_for):
+                        self._clear_leader_locked("主控地址连续不可达")
+                    else:
+                        # 终极防线：租约时间可以被跟随者转述，但「主控本人
+                        # 心跳」不能转述。超过几个租约窗口没收到本人心跳，
+                        # 就认定是幽灵主控并清掉，让选举重新跑起来。
+                        since = self._last_leader_heartbeat_at or self.started_epoch
+                        ghost_after = max(self.config.leader_lease * 3, 2.0)
+                        if now_epoch - since > ghost_after:
+                            self._clear_leader_locked(
+                                "未收到主控本人心跳（疑似幽灵主控）")
             if not self.leader_id and self.role != "leader":
                 if self._leader_lost_at is None:
                     self._leader_lost_at = now_epoch
@@ -2831,11 +2977,20 @@ class Cluster:
         if code == 200 and isinstance(resp, dict) and resp.get("ok"):
             with self.lock:
                 state = resp.get("state")
+                # 只有 role=leader 的实例才会给 register 返回 200；但一台机器
+                # 可能「自己 role=leader，leader_id 却指向幽灵」（旧代码转述），
+                # 所以还要核对 leader 记录就是注册目标本人签发的。
+                self_id = (str((state.get("self") or {}).get("id") or "")
+                           if isinstance(state, dict) else "")
+                leader = ((state or {}).get("leader")
+                          if isinstance(state, dict) else None)
+                verified = (isinstance(state, dict)
+                            and str(state.get("role") or "") == "leader"
+                            and bool(self_id) and isinstance(leader, dict)
+                            and str(leader.get("id") or "") == self_id)
                 if isinstance(state, dict):
-                    self._merge_snapshot_locked(state, from_leader=True)
-                leader = (state or {}).get("leader") if isinstance(state, dict) else None
-                if isinstance(leader, dict):
-                    self._adopt_leader_locked(leader, int((state or {}).get("term") or 0))
+                    self._merge_snapshot_locked(state, from_leader=verified,
+                                                sender_id=self_id)
                 self._mark_dirty_locked()
             _log(f"已注册到主节点 {base}")
             if self.store is not None:
@@ -2853,8 +3008,19 @@ class Cluster:
                         {"node": self._self_node()}, 1.2, self.config.token)
                     if code2 == 200 and isinstance(resp2, dict) and resp2.get("ok"):
                         with self.lock:
+                            state2 = resp2.get("state")
+                            self_id2 = (str((state2.get("self") or {}).get("id") or "")
+                                        if isinstance(state2, dict) else "")
+                            leader2 = ((state2 or {}).get("leader")
+                                       if isinstance(state2, dict) else None)
+                            verified2 = (isinstance(state2, dict)
+                                         and str(state2.get("role") or "") == "leader"
+                                         and bool(self_id2)
+                                         and isinstance(leader2, dict)
+                                         and str(leader2.get("id") or "") == self_id2)
                             self._merge_snapshot_locked(
-                                resp2.get("state") or {}, from_leader=True)
+                                state2 or {}, from_leader=verified2,
+                                sender_id=self_id2)
                             self._mark_dirty_locked()
                         _log(f"已注册到主节点 {alt}")
                         if self.store is not None:
@@ -2900,21 +3066,54 @@ class Cluster:
             self._persist_locked()
             return 200, {"ok": True, "state": self._snapshot_locked()}
 
-    def handle_heartbeat(self, body: dict) -> tuple[int, dict]:
+    def handle_heartbeat(self, body: dict,
+                         peer_ip: str = "") -> tuple[int, dict]:
         node = body.get("node") if isinstance(body, dict) else None
         term = int(body.get("term") or 0) if isinstance(body, dict) else 0
+        # 身份校验：自述 url 的主机必须就是请求来源 IP。旧 node.json 里残留的
+        # 身份（现场：一台 192.168.0.110 的机器声明自己是已下线的 .103）会
+        # 以幽灵身份持续注入高 term 和 leader 心跳，把本机选举一遍遍打断。
+        # 这类请求**只读不写**：不合并节点、不推进 term、不采纳主控、不签租约。
+        forged = (bool(peer_ip) and isinstance(node, dict)
+                  and not _node_url_host_matches(
+                      str(node.get("url") or ""), peer_ip))
         with self.lock:
+            if forged:
+                # 幽灵每秒都来一次，日志节流到 30s 一条，别把 cluster.log 刷爆。
+                if _now() - self._last_forged_log > 30.0:
+                    self._last_forged_log = _now()
+                    _log(f"忽略伪造身份心跳：{node.get('name') or node.get('id')} "
+                         f"声明 {node.get('url')}，来自 {peer_ip}，term={term}")
+                return 200, {
+                    "ok": True, "term": self.term, "role": self.role,
+                    "is_leader": self.role == "leader",
+                    "node_id": self.node_id,
+                    "leader": self._leader_public_locked(),
+                    "leader_lease_until": _iso(self.leader_lease_until)
+                    if self.leader_lease_until else "",
+                    "nodes": [], "events": [], "progress": {}, "leases": {},
+                    "generation": self.generation,
+                    "store_commit_seq": (self.store.commit_seq()
+                                         if self.store is not None else 0),
+                }
             if isinstance(node, dict) and node.get("id"):
                 self._update_node_locked(node, touch=True)
             if term > self.term:
                 self._adopt_higher_term_locked(term, body.get("leader"))
-            if body.get("leader") and isinstance(node, dict):
-                self._adopt_leader_locked(node, max(term, self.term))
+            # 只有主控本人发来的心跳（_heartbeat_once 里 role=leader 才置 True）
+            # 有资格签发租约。跟随者的互探心跳带 leader=False，绝不能续租。
+            if body.get("leader") is True and isinstance(node, dict):
+                self._adopt_leader_locked(node, max(term, self.term),
+                                          refresh_lease=True)
             self._merge_body_state_locked(body)
             return 200, {
                 "ok": True,
                 "term": self.term,
                 "role": self.role,
+                # 让请求方能验证「这个回复是不是主控本人发的」。旧版本没有
+                # is_leader 字段，用 role 兜底即可（role 一直是真实角色）。
+                "is_leader": self.role == "leader",
+                "node_id": self.node_id,
                 "leader": self._leader_public_locked(),
                 "leader_lease_until": _iso(self.leader_lease_until)
                 if self.leader_lease_until else "",
@@ -3717,7 +3916,8 @@ def build_handler(cluster: Cluster):
                 if path == "/api/cluster/register":
                     code, payload = cluster.handle_register(body)
                 elif path == "/api/cluster/heartbeat":
-                    code, payload = cluster.handle_heartbeat(body)
+                    peer_ip = str((self.client_address or ("", 0))[0] or "")
+                    code, payload = cluster.handle_heartbeat(body, peer_ip=peer_ip)
                 elif path == "/api/cluster/vote":
                     code, payload = cluster.handle_vote(body)
                 elif path == "/api/cluster/resign":
