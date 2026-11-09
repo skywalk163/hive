@@ -1,0 +1,30 @@
+# 全量 pytest 的**已知基线**（T-0291）——只许登记「已被证实、且与本次改动无关」的
+# 存量失败，一行一条，不许写目录级/通配白名单。
+#
+# 两种写法，二者都可精确落到一条用例上：
+#   1) 精确 nodeid          tests/test_x.py::test_y
+#   2) 精确错误签名          signature:<正文里一定出现的一整段字面量>
+#
+# 签名只在该用例自己的 FAILURES / ERRORS 块里比对（见 check_full_baseline.py 的
+# 说明），所以同一条签名不会替别的用例开绿灯。
+#
+# 基线实测：FreeBSD 15.1（192.168.0.88），skywalk 身份，HEAD 4e459a1
+#   2 failed, 921 passed, 6 skipped, 16 errors in 975.09s
+# 归属：T-0275 的实测是 3 failed（第三条 test_pr 已在本轮前被修好，故不再列入）。
+
+# --------------------------------------------------------------------------- #
+# 真失败（本卡不修，只登记；修好了请把这两行删掉）
+# --------------------------------------------------------------------------- #
+
+# hive.py:470 的 ls-remote 没走 git_net()，网络 git 调用漏超时 —— 存量缺陷（T-0275 已归因）。
+tests/test_git_timeout.py::test_network_git_calls_all_go_through_git_net
+
+# agents/dumate-win.json 登记了白名单外的代码仓 lightplugin —— 真数据问题（T-0260 登记未同步）。
+tests/test_repo_scope.py::test_agent_repos_within_allowed_set
+
+# --------------------------------------------------------------------------- #
+# 环境导致的 error（验收机 git init 默认分支为 master，夹具里 push -u origin main 必失败）
+# 这 16 条全是同一个签名；签名前面钉住文件，只对 test_result_head_guard.py 生效，
+# 别的文件里出现同样字面量不算存量。
+# --------------------------------------------------------------------------- #
+signature:tests/test_result_head_guard.py::error: src refspec main does not match any
