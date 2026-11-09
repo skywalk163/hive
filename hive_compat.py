@@ -11,14 +11,31 @@
 未知写法原样交给 shell（绝不"猜一个成功"）。
 
 覆盖范围（**整条命令就是这一种写法**才生效）：`true` / `false` / `:`、
-`test -e/-f/-d/-r/-s/-x`（含 `! test ...`）、整数比较 `-eq/-ne/-lt/-gt/-le/-ge`。
+`test -e/-f/-d/-r/-s/-x`（含 `! test ...`）、整数比较 `-eq/-ne/-lt/-gt/-le/-ge`，
+以及**解释器前缀** `bash <script> [args]` / `python3 <args>`（T-0292）。
 `-x` 是 T-0237 补的：Windows 上没有 POSIX 执行位，语义退化为「存在即可执行」。
+
+`bash` / `python3` 为什么也要垫
+------------------------------
+任务卡的 verify 常直接写 `bash tests/run_pytest.sh ...`、`python3 -V`。Windows 的
+`cmd.exe` 里既没有 `bash`（Git for Windows 只把 git.exe 放进了 PATH，bash.exe 还在
+安装目录里）也没有 `python3.exe`（只有 python.exe），于是**产物合格也会 rc≠0**——
+T-0291 / T-0261 / T-0237 都栽在这个签名上，主控已人工改判过。
+
+这两类前缀不做「猜一个成功」的语义映射，而是**真的把子进程跑起来**：
+`bash` 依次用 `HIVE_BASH`（覆盖，显式指定）→ `shutil.which("bash")` →
+Git for Windows 常见安装位置；`python3` 直接映射到 `sys.executable`（正在跑 hive 的
+解释器），不去 PATH 里碰运气。参数按 POSIX shlex 拆成 argv 后**直接 exec**，
+不经过 cmd.exe 二次拼接引号（T-0287 的坑）；退出码原样透传，找不到解释器时
+明确报错并返回非零（127），**绝不返回 0**。
 
 用法（hive.py 内部的 run_verify 会调）::
 
     should_wrap(cmd)     -> bool   是否需要垫片
     rewrite(cmd)         -> str    `cmd` 或 `python hive_compat.py run "<cmd>"`
     run(cmd, cwd)         -> 退出码
+    interpreter_command(cmd) -> ("bash"|"python3", rest) | None
+    resolve_bash() / resolve_python3() -> 可执行文件绝对路径 | None
 
 另外提供子进程「无窗」出口（T-0206）：Windows 上不给 `creationflags`，console
 子进程（git 是 console 程序）在父进程没有控制台时会**自己新建一个可见控制台**
@@ -36,10 +53,24 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
 MARK = "hive_compat.py run"
+
+# `HIVE_BASH` 显式指定 bash.exe（PATH 里没有、又不在下面几个默认位置时装）。
+BASH_ENV = "HIVE_BASH"
+
+# Git for Windows 的常见安装位置。注意 PATH 里通常只有 git.exe，**没有** bash.exe，
+# 所以 `shutil.which("bash")` 在没装 Git 的机器上会直接落空。
+GIT_BASH_CANDIDATES = (
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+)
+
+MISSING_INTERPRETER_RC = 127      # POSIX 的「command not found」惯例，非零、可区分
 
 # 逃生阀：怀疑「隐藏窗口」影响了某个子进程（例如它自己要弹窗）时，
 # `HIVE_NO_WINDOW=0` 让全仓的 no_window_kwargs() 立刻退回空 dict，不用改代码。
@@ -78,6 +109,134 @@ _TEST_SUB = re.compile(r"^\s*(?:!\s*)?test\s+-(?P<flag>[efdrsx])\s+(?P<arg>.+?)\
 _NEG_TEST_SUB = re.compile(r"^\s*!\s*test\s+-(?P<flag>[efdrsx])\s+(?P<arg>.+?)\s*$")
 _COMPARE = re.compile(r'^\s*(?:test\s+)?"?(?P<a>[^"\s]+)"?\s*(?P<op>-eq|-ne|-lt|-gt|-le|-ge)\s*"?(?P<b>[^"\s]+)"?\s*$')
 
+# 解释器前缀：整条命令必须以 `bash` / `python3` 开头，且**后面还有东西**。
+# `bash` 单独一条不算（那是在找交互 shell，不是卡面 verify）。
+_BASH_CMD = re.compile(r"^\s*bash\b(?:\s+(?P<rest>\S.*?))?\s*$")
+_PY3_CMD = re.compile(r"^\s*python3\b(?:\s+(?P<rest>\S.*?))?\s*$")
+
+
+def interpreter_command(cmd: str) -> tuple[str, str] | None:
+    """认出 `bash <script> [args]` / `python3 <args>`，返回 `(kind, rest)`。
+
+    只认「整条命令以该前缀开头且还有后续参数」，别的写法一律返回 None —— 由调用方
+    原样交给 shell 或判成未知，**不猜成功**。
+    """
+    text = str(cmd or "").strip()
+    if not text:
+        return None
+    for kind, rx in (("bash", _BASH_CMD), ("python3", _PY3_CMD)):
+        m = rx.match(text)
+        rest = (m.group("rest") or "").strip() if m else ""
+        if rest:
+            return kind, rest
+    return None
+
+
+def _is_executable_file(path: str) -> bool:
+    try:
+        return bool(path) and os.path.isfile(path) and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def bash_path_arg(token: str) -> str:
+    """把（**已按 POSIX 语义加过引号**的）`C:\\a\\b` 换成 `C:/a/b`。
+
+    为什么需要：Git Bash 是 MSYS 程序，反斜杠在它那儿既不是分隔符也是转义符，
+    `bash "C:\\tmp\\x.sh"` 原样传会变成 `C:tmpx.sh`（实测：
+    `/usr/bin/bash: C:tmpx.sh: No such file or directory`）。
+
+    注意：未加引号的 `C:\\a\\b` 在**拆 argv 阶段**就被 POSIX shlex 吃掉反斜杠了
+    （bash 自己也一样），所以卡面写 Windows 路径要加引号 —— 垫片不替人猜转义语义。
+
+    只认「整个 argv 元素是一条盘符绝对路径」，不动 `-c "..."` 里的脚本内容
+    （那种 token 以 `echo`/`import` 之类开头，不会匹配盘符前缀）。
+    """
+    if os.name == "nt" and _DRIVE_PATH.match(token):
+        return token.replace("\\", "/")
+    return token
+
+
+def resolve_bash() -> str | None:
+    """定位 bash：`HIVE_BASH` 覆盖 → PATH → Git for Windows 常见位置。
+
+    返回 None 表示「确实没有」；调用方据此明确失败，绝不静默放行。
+    """
+    override = (os.environ.get(BASH_ENV) or "").strip()
+    if override:
+        # 显式指定就当权威：指定错了要立刻暴露，别偷偷退回别的 bash。
+        return override if _is_executable_file(override) else None
+    found = shutil.which("bash")
+    if found:
+        return found
+    for cand in GIT_BASH_CANDIDATES:
+        if _is_executable_file(cand):
+            return cand
+    return None
+
+
+def resolve_python3() -> str | None:
+    """`python3` 映射到当前跑 hive 的解释器 `sys.executable`，不去 PATH 里碰运气。"""
+    exe = getattr(sys, "executable", "") or ""
+    return exe if _is_executable_file(exe) else None
+
+
+def missing_interpreter_message(kind: str) -> str:
+    """找不到解释器时给人看的话：说清去哪儿配，而不是丢一句「不支持」。"""
+    if kind != "bash":
+        return ("hive_compat: 找不到 python3 —— 当前解释器 sys.executable "
+                f"({sys.executable or '空'!r}) 不可执行；检查 Python 安装")
+    override = (os.environ.get(BASH_ENV) or "").strip()
+    if override:
+        return (f"hive_compat: {BASH_ENV}={override} 指向的 bash 不存在或不可执行；"
+                f"改成真实路径，或清掉 {BASH_ENV} 让它自动探测")
+    return ("hive_compat: 找不到 bash —— 装了 Git for Windows 仍报这个，说明不在常见"
+            "安装位置；请设 HIVE_BASH=<bash.exe 绝对路径>（常见："
+            "C:\\Program Files\\Git\\bin\\bash.exe）")
+
+
+def _run_argv(argv: list[str], cwd: str | None = None) -> int:
+    """直接 exec argv（不经 cmd.exe），stdin 隔离、stdout/stderr 捕获后转发。"""
+    try:
+        proc = subprocess.run(
+            argv, cwd=cwd,
+            stdin=subprocess.DEVNULL,      # 与 hive.run 的口径一致：别继承父 stdin
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            **no_window_kwargs())
+    except OSError as exc:
+        print(f"hive_compat: 无法执行 {argv[0]!r}：{exc}", file=sys.stderr)
+        return MISSING_INTERPRETER_RC
+    if proc.stdout:
+        sys.stdout.write(proc.stdout)
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+    return proc.returncode
+
+
+def run_interpreter(cmd: str, cwd: str | None = None) -> int:
+    """把 `bash ...` / `python3 ...` 真正跑起来，退出码原样透传。"""
+    hit = interpreter_command(cmd)
+    if not hit:
+        print(f"hive_compat: 不是 bash/python3 命令 {cmd!r}", file=sys.stderr)
+        return 2
+    kind, rest = hit
+    try:
+        args = shlex.split(rest, posix=True)
+    except ValueError as exc:
+        print(f"hive_compat: 参数引号不成对（{exc}）：{rest}", file=sys.stderr)
+        return 2
+    exe = resolve_bash() if kind == "bash" else resolve_python3()
+    if not exe:
+        print(missing_interpreter_message(kind), file=sys.stderr)
+        return MISSING_INTERPRETER_RC
+    if kind == "bash":
+        # Git Bash 的解释器是 MSYS 程序：盘符路径要先转成 /c/... 风格才认
+        args = [bash_path_arg(a) for a in args]
+    return _run_argv([exe, *args], cwd=cwd)
+
 
 def should_wrap(cmd: str) -> bool:
     """这条命令是否需要垫片（只在 Windows 上返回 True）。"""
@@ -90,7 +249,8 @@ def should_wrap(cmd: str) -> bool:
         return False
     return bool(_PLAIN.match(text) or _NEG_PLAIN.match(text)
                 or _TEST_SUB.match(text) or _NEG_TEST_SUB.match(text)
-                or _COMPARE.match(text))
+                or _COMPARE.match(text)
+                or interpreter_command(text) is not None)
 
 
 def _split_arg(arg: str) -> str:
@@ -131,8 +291,12 @@ def _unquote(text: str) -> str:
     return t
 
 
-def evaluate(cmd: str) -> int:
-    """真正求值：返回 0/1。只支持 :func:`should_wrap` 认得的语法。"""
+def evaluate(cmd: str, cwd: str | None = None) -> int:
+    """真正求值：返回子进程/判断的退出码。只支持 :func:`should_wrap` 认得的语法。
+
+    `bash` / `python3` 前缀不是「语义映射」而是**真执行**（见 :func:`run_interpreter`），
+    所以这里可能真的起子进程；`cwd` 缺省就继承当前工作目录。
+    """
     text = _unquote(str(cmd or ""))
     if _PLAIN.match(text):
         return 0 if text.strip() in ("true", ":") else 1
@@ -183,6 +347,10 @@ def evaluate(cmd: str) -> int:
                  "-gt": ai > bi, "-le": ai <= bi, "-ge": ai >= bi}
         return 0 if table.get(op) else 1
 
+    # `bash <script>` / `python3 <args>`：真执行，退出码原样透传
+    if interpreter_command(text) is not None:
+        return run_interpreter(text, cwd=cwd)
+
     # 没有映射到的写法：判为「未知」，让调用方回退到原命令
     return 2
 
@@ -194,7 +362,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     cmd = " ".join(args[1:])
     rc = evaluate(cmd)
-    if rc == 2:
+    # 解释器前缀自己会打印更具体的错（引号不成对等），别在这里补一句误导的「不支持」
+    if rc == 2 and interpreter_command(cmd) is None:
         print(f"hive_compat: 不支持的写法 {cmd!r}", file=sys.stderr)
     return rc
 
