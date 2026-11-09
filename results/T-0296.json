@@ -1,0 +1,44 @@
+{
+  "task": "T-0296",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0296",
+  "base": "main",
+  "head": "72c248e2efb5df8a1286676712ffd49d1886b519",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-09T23:04:35+08:00",
+  "finished_at": "2026-11-10T01:13:30+08:00",
+  "duration_s": 7735.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_store_result_signal.py",
+      "code": 0,
+      "tail": [
+        ".............                                                            [100%]",
+        "13 passed in 1486.64s (0:24:46)"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_store_claim_errors.py tests/test_submit_summary.py",
+      "code": 0,
+      "tail": [
+        ".....................................                                    [100%]",
+        "37 passed in 384.65s (0:06:24)"
+      ]
+    }
+  ],
+  "summary": "# T-0296 小结：submit 不再假成功\n\n## 做了什么\n\n`store_result()` 以前 `except HiveError: return None`，`cmd_submit()` 又不看返回值，\n于是 store 写失败（换届 409 / 无主 / 超时）时照样打印 `T-xxxx done by ...` 并返回 0。\n结果在 Git 上看着 done、store 里没有结果行，看板看不到、close/land 不执行，租约一\n过期同一张卡被重新派发（T-0250 / T-0252 的现场）。\n\n现在结果写入是一条必须被看见的路径：\n\n1. 新增 `ResultWriteError(StoreCallError)`：保留原始 `kind` / `code` / `http`。\n2. `store_result()` 不再吞异常。失败按 **2s / 4s / 8s** 重试 **3 次**（总尝试 4 次），\n   每次失败都 emit 日志（`HIVE_RESULT_WRITE_RETRIES` / `HIVE_RESULT_WRITE_BASE` 可调），\n   最终失败抛 `ResultWriteError`。成功路径返回值与旧实现一致。\n3. `cmd_submit()` 检查写入状态，失败时：\n   - **保留 worktree 与 `res/<tid>`、`task/<tid>`**（Git 侧结果一个不丢）；\n   - **不释放租约**（未落库还被释放 = 卡被重派、结果没人认领）；\n   - 把「Git 已写 / store 未写」+ 下一步写进 `.hive/summary.md`，并把同样的标记\n     补进 `res/<tid>` 的 `store_write_error` 字段（看板/close/land 读的就是它）；\n   - 不打印成功回执，返回 **1**。`cmd_submit(args)` 把返回码透给 `main()`。\n4. 成功路径的 stdout 格式逐字未变（看板/脚本在解析它）。\n5. worker 侧 `_write_result()` 同样不再吞：失败文本进 `result.store_write_error`\n   与状态推送（`step=\"完成（store 未写入）\"`），日志另说一遍。\n\n## 改了哪些文件\n\n- `hive.py`：新增 `ResultWriteError`、`result_write_backoff_config()`、\n  `result_write_delays()`、`_result_write_sleep()`；改写 `store_result()`、\n  `Hive.cmd_submit()`（含返回码与失败收尾）、`Worker._write_result()`、\n  `Worker.run_task()` 的 store 失败标记、`cmd_submit(args)` 的返回码透传。\n- `tests/test_store_result_signal.py`（新增，13 条）。\n\n## 验证\n\n```\npython -m pytest -q tests/test_store_result_signal.py                 → 13 passed\npython -m pytest -q tests/test_store_claim_errors.py tests/test_submit_summary.py → 37 passed\npython -m pytest -q tests/test_fence.py tests/test_store.py tests/test_store_overlay.py → 30 passed\n```\n\n（Windows 本机，Python 3.14.7；均带 `--timeout`。）\n\n## 风险 / 边界\n\n- **行为变化**：store 后端下 submit 现在会返回非 0。已确认 MCP 侧走 `HiveError`\n  而不是看返回码，不受影响；shell/脚本调用方需要按退出码判交付是否真落地（这正\n  是本卡要的语义）。\n- 失败时会**故意不释放租约**，卡会一直挂在该 owner 名下直到租约过期或人工处理；\n  这是有意的（宁可让人看见，也不要静默重派）。\n- 未改 git 提交语义、`res/<tid>` 命名、verify 判定、`hive_cluster.py`、`state.json`。\n- 退避固定 2s/4s/8s（按卡面要求），最坏情况 submit 会多等约 14s。\n- 端到端那条 CLI 用例依赖「指向不可达集群」的真实超时，本机单跑约 1–2 分钟，\n  在慢机器上会更久（已用 `HIVE_RESULT_WRITE_RETRIES=1` 收窄）。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_store_result_signal.py"
+  ],
+  "changed_files": [
+    "hive.py",
+    "tests/test_store_result_signal.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "030e32efb79c4d5abcf32c599433eb4d"
+}
