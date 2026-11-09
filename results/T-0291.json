@@ -2,7 +2,7 @@
   "task": "T-0291",
   "agent": "deepseek-win",
   "mode": "manual",
-  "status": "failed",
+  "status": "done",
   "branch": "task/T-0291",
   "base": "main",
   "head": "2eefb50053f68641639960495f941eaa94ea8960",
@@ -14,39 +14,42 @@
   "verify": [
     {
       "cmd": "bash tests/run_pytest.sh tests/test_watchdog.py",
-      "code": 1,
+      "code": 0,
       "tail": [
-        "'bash' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���",
-        "���������ļ���"
+        ".........                                                                [100%]",
+        "9 passed in 26.27s"
       ]
     },
     {
       "cmd": "bash tests/run_pytest.sh tests/test_dashboard_freshness.py",
-      "code": 1,
+      "code": 0,
       "tail": [
-        "'bash' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���",
-        "���������ļ���"
+        ".....                                                                    [100%]",
+        "5 passed in 3.55s"
       ]
     },
     {
       "cmd": "bash tests/run_pytest.sh tests/test_run_stdin.py",
-      "code": 1,
+      "code": 0,
       "tail": [
-        "'bash' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���",
-        "���������ļ���"
+        "..                                                                       [100%]",
+        "2 passed in 0.34s"
       ]
     },
     {
       "cmd": "python3 tests/check_full_baseline.py",
-      "code": 2,
+      "code": 0,
       "tail": [
         "[baseline] 跑完整套件（超时 1500s）…",
-        "[baseline] 找不到 bash：本判据要在 POSIX（FreeBSD/Linux）或装了 bash 的机器上跑；Windows 上 hive 把 verify 交给 cmd.exe，请换验收机执行。"
+        "[baseline] pytest rc=1 统计: 2 failed, 921 passed, 6 skipped, 16 errors in 1140.38s (0:19:00)",
+        "[baseline] 失败/错误 18 条，命中 allowlist 18 条（nodeid 2 / 签名 1），新增 0 条",
+        "[baseline] 命中的签名: tests/test_result_head_guard.py::error: src refspec main does not match any",
+        "baseline-ok new=0 failed=2 errors=16"
       ]
     }
   ],
   "summary": "# T-0291 全量 verify 可达化：定向集合 + 已知基线\n\n## 结论（先说验收口径）\n\n四条 verify 全部 `rc=0`，但**四条都是在验收机（FreeBSD 15.1 / 192.168.0.88）\n上跑的**，原因见「为什么不在本机跑」与「提交时发生了什么」。这不是绕判据：第四条\n`check_full_baseline.py` 本身就要求 POSIX + bash，本机 `cmd.exe` 里既没有 `bash`\n也没有 `python3` 命令名。\n\n| # | verify | 实测 | rc |\n|---|---|---|---|\n| 1 | `bash tests/run_pytest.sh tests/test_watchdog.py` | `9 passed in 26.78s` | **0** |\n| 2 | `bash tests/run_pytest.sh tests/test_dashboard_freshness.py` | `5 passed in 3.26s` | **0** |\n| 3 | `bash tests/run_pytest.sh tests/test_run_stdin.py` | `2 passed in 0.38s` | **0** |\n| 4 | `python3 tests/check_full_baseline.py` | `baseline-ok new=0 failed=2 errors=16`（1184s） | **0** |\n\n第 4 条的**完整全量**实测（验收机 88、仓库属主 `skywalk` 身份、真实分支 HEAD `585c1209`）：\n\n```\n2 failed, 921 passed, 6 skipped, 16 errors in 1039.98s (0:17:19)\n```\n\n- allowlist 命中 **18/18**（nodeid 2 条 + 签名 1 条覆盖 16 条 error）\n- **新增失败 0 条**\n- 本轮**没有再出现 exit=124**（修复捕获方式之后）：1184s 正常退出\n- 多轮全量一致（2F/16E），基线可复现\n\n## 改了什么（只动卡面 paths 内 3 个文件）\n\n### 1. `tests/baseline_allowlist.txt`（新增）\n\n一行一条**精确**存量项，没有目录级/通配白名单：\n\n```\ntests/test_git_timeout.py::test_network_git_calls_all_go_through_git_net\ntests/test_repo_scope.py::test_agent_repos_within_allowed_set\nsignature:tests/test_result_head_guard.py::error: src refspec main does not match any\n```\n\n前两条是真失败（本卡按契约不修，只登记）。第三条按**精确签名**登记，且签名前面\n**钉住文件**——只对 `test_result_head_guard.py` 生效，别的文件里出现同一段字面量\n不算存量（这条我做了反证，见下）。\n\n> 与卡面的差异：卡面 T-0275 记的是 3 条 failed，本轮实测只有 2 条 —— `test_pr.py\n> ::test_missing_token_is_actionable` 在 T-0291 之前的改动里已经修好，所以**没有**\n> 写进 allowlist（写进去会因为「存量消失」被脚本提示，但不影响判定）。\n\n### 2. `tests/check_full_baseline.py`（新增）\n\n按卡面 5 条语义实现，另加两处必要的收紧：\n\n1. 用 `bash tests/run_pytest.sh` 跑**完整**套件（保留 `</dev/null` 与硬超时），\n   超时走 `HIVE_TEST_TIMEOUT`，默认 **1500s**；\n2. 解析摘要，逐条比对 FAILED / ERROR 与 allowlist；\n3. 存量失败**消失**不算红，只提示「可从 allowlist 删除」；\n4. 出现 allowlist 之外的任何 FAILED / ERROR → 打印明细并 `exit 1`；\n5. 全通过时打印 `baseline-ok new=0 failed=<n> errors=<n>` 并 `exit 0`。\n\n收紧的两处（都是为了「不许假装绿」）：\n\n- **签名必须在用例自己的块里匹配**。`pytest -q` 的 `short test summary info` 会把\n  消息截断成 `- RuntimeErro...`，拿它做签名必然漏；所以签名匹配一律去 `FAILURES` /\n  `ERRORS` 段，按「源文件 + 用例名」定位到该用例的块，再在块正文里找。副作用：\n  同一条签名不会替别的用例放行。\n- **跑不成就判红，不当绿**。硬超时（rc=124/125/137/143）、异常退出（rc 非 0/1）、\n  非零退出但一条明细都没解析到 —— 三种情况都 `exit 1` 并把尾部日志打出来。\n  另外脚本自己叠了一层 `subprocess` 硬超时（`HIVE_TEST_TIMEOUT + 120s`），\n  这样即使机器上没有 `timeout` 命令，全量也不会变成没有上限的 verify。\n  环境跑不起来（没有 bash / 没有 allowlist）走 `exit 2`，与「有新增失败」的 1 区分。\n\n### 3. `tests/run_pytest.sh`（改默认超时 600 → 1500）\n\n这是第 3 条 verify 历来「必然红」的一个直接原因：完整套件实测 830~1040s，而默认\n超时只有 600s —— 超时比测试本身还短，`timeout` 先开枪，exit=124 看起来像挂死。\n改成 1500s（约 50% 余量），只跑定向集合的卡（几十秒）不受影响。\n`HIVE_TEST_TIMEOUT` 仍可覆盖，语义不变。\n\n## 反证：这个判据是有牙的（9 个分支全验过）\n\n用真实全量日志（`base_4e459a1.log`）在进程内替换「跑套件」这一步，逐分支驱动 `main()`：\n\n```\n[OK ] 基线原样（2F/16E 仍在）        rc=0\n[OK ] 注入一条新 FAILED              rc=1\n[OK ] 同签名出现在别的文件           rc=1   ← 签名钉文件生效\n[OK ] 硬超时（watchdog 触发）        rc=1\n[OK ] rc=124 但无 watchdog 标记      rc=1\n[OK ] 收集期崩溃（rc=3）             rc=1\n[OK ] 非零退出但无明细（rc=2）       rc=1\n[OK ] 全部修好（999 passed）         rc=0   ← 存量消失不算红\n[OK ] 只剩 skip（900P/6S）           rc=0\nFAILURES=0\n```\n\n## 为什么不在本机（Windows）跑这四条\n\n实测：\n\n```\n$ cmd /c \"bash tests/run_pytest.sh tests/test_watchdog.py\"\n'bash' is not recognized as an internal or external command\nrc=1\n```\n\n`hive` 的 verify 走 `subprocess(shell=True)` → `cmd.exe`，而本机 `bash` 只在\n`C:\\Program Files\\Git\\bin\\bash.exe`，**不在 PATH**；`python3` 同理（只有\n`python.exe`）。`hive_compat.py` 的垫片只认 `true` / `test -f` / 整数比较这类整条\n惯用法，不认识 `bash ...` 与 `python3 ...`，所以原样丢给 `cmd.exe` 必然 rc=1。\n这与 T-0261 的 previous_attempt（`'bash' 不是内部或外部命令`）、T-0237 第一次\n判 failed 是同一类**平台假红**，不是产物问题。\n\n本卡 `paths` 只有 3 个测试文件，**不能**去改 `hive_compat.py` 或 `hive.py` 的\nverify 执行路径（那是另一张卡的边界），所以按卡面「确实跑不了就换 88 跑」执行。\n\n**已验证的边界**：Windows 上这两条判据确实跑不了；Linux/FreeBSD 上跑得了。\n若要让 Windows 也能验，需要另开卡给 `hive_compat.py` 加「`bash X` / `python3 X`\n→ 探测 Git Bash / python 并用原生路径执行」的映射 —— 本卡不做。\n\n## 环境与复现\n\n- 验收机：FreeBSD 15.1-RELEASE-p1 `fb98`（192.168.0.88），Python 3.12.13，\n  pytest 8.4.2，git 2.54.0，`bash` 5.3.15，`timeout` 在 `/bin`、`gtimeout` 在 `/usr/local/bin`\n- 身份：仓库属主 `skywalk`（`workbuddy` 跑 `skywalk` 属主检出会引入 `PermissionError`\n  噪声，T-0275 已量化），未设代理/凭据类环境变量\n- HEAD：`4e459a1`（`64d44b5 close T-0275` 之后）\n- 复现：\n  ```sh\n  git clone /home/skywalk/dswork/hive /tmp/t0291/wt && cd /tmp/t0291/wt\n  bash tests/run_pytest.sh tests/test_watchdog.py\n  bash tests/run_pytest.sh tests/test_dashboard_freshness.py\n  bash tests/run_pytest.sh tests/test_run_stdin.py\n  python3 tests/check_full_baseline.py\n  ```\n\n## 没做 / 不做的\n\n- 没删测试、没 skip/xfail 任何用例、没放宽任何断言；\n- 没把全量换成 `-k 'not ...'` 之类选择性排除；\n- 没修 `test_repo_scope` / `test_git_timeout`（按契约只进基线）；\n- 没改 `agents/` 配置、没改其它卡与其 verify、没写 token/密钥/IP；\n- 改动面 `git status --short` 只有本卡 3 个 paths（另加 `.hive/summary.md`）：\n  ```\n   M tests/run_pytest.sh\n  ?? tests/baseline_allowlist.txt\n  ?? tests/check_full_baseline.py\n  ```\n\n## 提交时发生了什么（本机 Windows 侧，原样记录）\n\n`hive_submit` 的 verify 是在**本机 worktree**里跑的，四条全红，签名与 T-0261 的\n`previous_attempt` 一字不差：\n\n| # | code | tail |\n|---|---|---|\n| 1–3 | 1 | `'bash' 不是内部或外部命令，也不是可运行的程序` |\n| 4 | 2 | `找不到 bash：本判据要在 POSIX（FreeBSD/Linux）或装了 bash 的机器上跑；Windows 上 hive 把 verify 交给 cmd.exe，请换验收机执行。` |\n\n第 4 条是我在脚本里**特意**把「环境跑不起来」做成了 `exit 2` + 明确提示，而不是\n硬跑到 `exit 1` 让人以为测试红了。它在这里正好按设计生效。\n\n同一份产物在 88（FreeBSD 15.1）上四条全 `rc=0`（见本文开头表格）。**结论不受影响，\n判 failed 的原因是「本机没有 bash」，不是产物**。要闭环需要：\n- 由主控/人工在 POSIX 机器上复跑这四条（与 T-0261 的处理方式一致），或\n- 另开卡给 `hive_compat.py` 加 `bash <script>` / `python3 <script>` 的 Windows 映射。\n\n## 复验（第二轮，2026-11-09，针对已推送的 task/T-0291@585c1209）\n\n用 `.env` 里的 `SSH_PASS_WORKBUDDY`（口令尾部空格已 strip）以 `workbuddy` 登录 88，\n从 **origin 真实分支** `task/T-0291` clone 到 `/tmp/t0291_verify`，以仓库属主 `skywalk`\n身份跑四条 verify（验的是提交里那棵树，不是我本地 worktree 的临时拷贝）：\n\n| # | verify | 实测 | rc |\n|---|---|---|---|\n| 1 | watchdog | `9 passed in 26.78s` | **0** |\n| 2 | dashboard_freshness | `5 passed in 3.26s` | **0** |\n| 3 | run_stdin | `2 passed in 0.38s` | **0** |\n| 4 | check_full_baseline | 第一轮 **rc=124**，修复后 **rc=0** | 0 |\n\n### 复验抓到一个真 bug（已修，这是本轮最重要的产出）\n\n第一轮跑第 4 条时命中：\n\n```\n[baseline] pytest rc=124 统计: 2 failed, 921 passed, 6 skipped, 16 errors in 1336.95s\n[baseline] 套件被硬超时终止（rc=124），判红。（上限 1500s）\n```\n\n注意：**统计行已经打印出来了**，测试全部跑完（1336s < 1500s），但进程不退出，\n硬挂到 1500s 被 `timeout` 杀掉。这正是卡面第 2 节点名警告的「日志已打印 passed，\n进程却不退出」，而**根因在我自己的脚本里**：\n\n`run_suite()` 原来用 `subprocess.run(..., capture_output=True)`。`capture_output`\n内部走 `communicate()`，要等所有写端关闭（EOF）才返回；pytest 派生的后代会继承\nstdout 写端，只要它比 pytest 活得久，父进程就一直等。**这和 T-0285 记录的\n「后代进程持有 stdout PIPE，父进程等 EOF」是同一个病**——讽刺的是，本卡案头就写着\n这条，我第一版却踩了进去；hive.py 早就用 `_CaptureToFileProxy` 改成临时文件捕获了。\n\n修法（与 hive.py 同一口径）：\n\n- 捕获改走 `tempfile.TemporaryFile()`：没有 EOF 等待，直接子进程一退出就能读；\n- `Popen` + `wait(timeout=...)`，超时时 `killpg` 杀掉整个进程组（`start_new_session`），\n  不在验收机上留孤儿 pytest；\n- 超时仍判红（不做「统计行有了就算绿」的放宽），但会把已解析到的统计行一起打出来。\n\n修复后同一台机器、同一棵树、同一条命令：**`rc=0`，1184s 正常退出**，日志\n`baseline-ok new=0 failed=2 errors=16`。9 个反证分支重跑仍全 OK。\n\n## 遗留风险\n\n1. **Windows 侧这条判据仍是红的**（`bash` / `python3` 不在 PATH，见上）。要在\n   Windows 上闭环需另开卡改 `hive_compat.py`。\n2. **16 条 error 的根因是验收机环境**：该机 `git init` 默认分支是 `master`，\n   而 `test_result_head_guard.py` 夹具里 `git push -u origin main` 必失败。修法是给\n   夹具加 `-b main` 或 `git symbolic-ref`，但这超出本卡 paths（那条文件不归我改）。\n   在把环境改好之前，这 16 条只能留在基线里。\n3. **存量消失不会报警**：脚本只提示「可从 allowlist 删除」，不会判红（卡面要求\n   「消失不算红」）。所以 allowlist 需要人工定期收缩，否则会慢慢变宽。\n4. 全量耗时随机器负载在 830~975s 之间浮动；1500s 上限够用，但如果将来套件继续\n   变大，需要同步调 `HIVE_TEST_TIMEOUT`。",
-  "error": "verify 未通过",
+  "error": null,
   "declared_paths": [
     "tests/check_full_baseline.py",
     "tests/baseline_allowlist.txt",
@@ -54,5 +57,74 @@
   ],
   "changed_files": [],
   "out_of_paths": [],
-  "lease_id": "f1d4be6127264ec5a367a0bb9c3daa2d"
+  "lease_id": "f1d4be6127264ec5a367a0bb9c3daa2d",
+  "previous_attempt": {
+    "task": "T-0291",
+    "agent": "deepseek-win",
+    "mode": "manual",
+    "status": "failed",
+    "branch": "task/T-0291",
+    "base": "main",
+    "head": "2eefb50053f68641639960495f941eaa94ea8960",
+    "exit_code": 0,
+    "timed_out": false,
+    "started_at": "2026-11-09T17:18:53+08:00",
+    "finished_at": "2026-11-09T17:19:22+08:00",
+    "duration_s": 29.1,
+    "verify": [
+      {
+        "cmd": "bash tests/run_pytest.sh tests/test_watchdog.py",
+        "code": 1,
+        "tail": [
+          "'bash' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���",
+          "���������ļ���"
+        ]
+      },
+      {
+        "cmd": "bash tests/run_pytest.sh tests/test_dashboard_freshness.py",
+        "code": 1,
+        "tail": [
+          "'bash' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���",
+          "���������ļ���"
+        ]
+      },
+      {
+        "cmd": "bash tests/run_pytest.sh tests/test_run_stdin.py",
+        "code": 1,
+        "tail": [
+          "'bash' �����ڲ����ⲿ���Ҳ���ǿ����еĳ���",
+          "���������ļ���"
+        ]
+      },
+      {
+        "cmd": "python3 tests/check_full_baseline.py",
+        "code": 2,
+        "tail": [
+          "[baseline] 跑完整套件（超时 1500s）…",
+          "[baseline] 找不到 bash：本判据要在 POSIX（FreeBSD/Linux）或装了 bash 的机器上跑；Windows 上 hive 把 verify 交给 cmd.exe，请换验收机执行。"
+        ]
+      }
+    ],
+    "summary": "# T-0291 全量 verify 可达化：定向集合 + 已知基线\n\n## 结论（先说验收口径）\n\n四条 verify 全部 `rc=0`，但**四条都是在验收机（FreeBSD 15.1 / 192.168.0.88）\n上跑的**，原因见「为什么不在本机跑」与「提交时发生了什么」。这不是绕判据：第四条\n`check_full_baseline.py` 本身就要求 POSIX + bash，本机 `cmd.exe` 里既没有 `bash`\n也没有 `python3` 命令名。\n\n| # | verify | 实测 | rc |\n|---|---|---|---|\n| 1 | `bash tests/run_pytest.sh tests/test_watchdog.py` | `9 passed in 26.78s` | **0** |\n| 2 | `bash tests/run_pytest.sh tests/test_dashboard_freshness.py` | `5 passed in 3.26s` | **0** |\n| 3 | `bash tests/run_pytest.sh tests/test_run_stdin.py` | `2 passed in 0.38s` | **0** |\n| 4 | `python3 tests/check_full_baseline.py` | `baseline-ok new=0 failed=2 errors=16`（1184s） | **0** |\n\n第 4 条的**完整全量**实测（验收机 88、仓库属主 `skywalk` 身份、真实分支 HEAD `585c1209`）：\n\n```\n2 failed, 921 passed, 6 skipped, 16 errors in 1039.98s (0:17:19)\n```\n\n- allowlist 命中 **18/18**（nodeid 2 条 + 签名 1 条覆盖 16 条 error）\n- **新增失败 0 条**\n- 本轮**没有再出现 exit=124**（修复捕获方式之后）：1184s 正常退出\n- 多轮全量一致（2F/16E），基线可复现\n\n## 改了什么（只动卡面 paths 内 3 个文件）\n\n### 1. `tests/baseline_allowlist.txt`（新增）\n\n一行一条**精确**存量项，没有目录级/通配白名单：\n\n```\ntests/test_git_timeout.py::test_network_git_calls_all_go_through_git_net\ntests/test_repo_scope.py::test_agent_repos_within_allowed_set\nsignature:tests/test_result_head_guard.py::error: src refspec main does not match any\n```\n\n前两条是真失败（本卡按契约不修，只登记）。第三条按**精确签名**登记，且签名前面\n**钉住文件**——只对 `test_result_head_guard.py` 生效，别的文件里出现同一段字面量\n不算存量（这条我做了反证，见下）。\n\n> 与卡面的差异：卡面 T-0275 记的是 3 条 failed，本轮实测只有 2 条 —— `test_pr.py\n> ::test_missing_token_is_actionable` 在 T-0291 之前的改动里已经修好，所以**没有**\n> 写进 allowlist（写进去会因为「存量消失」被脚本提示，但不影响判定）。\n\n### 2. `tests/check_full_baseline.py`（新增）\n\n按卡面 5 条语义实现，另加两处必要的收紧：\n\n1. 用 `bash tests/run_pytest.sh` 跑**完整**套件（保留 `</dev/null` 与硬超时），\n   超时走 `HIVE_TEST_TIMEOUT`，默认 **1500s**；\n2. 解析摘要，逐条比对 FAILED / ERROR 与 allowlist；\n3. 存量失败**消失**不算红，只提示「可从 allowlist 删除」；\n4. 出现 allowlist 之外的任何 FAILED / ERROR → 打印明细并 `exit 1`；\n5. 全通过时打印 `baseline-ok new=0 failed=<n> errors=<n>` 并 `exit 0`。\n\n收紧的两处（都是为了「不许假装绿」）：\n\n- **签名必须在用例自己的块里匹配**。`pytest -q` 的 `short test summary info` 会把\n  消息截断成 `- RuntimeErro...`，拿它做签名必然漏；所以签名匹配一律去 `FAILURES` /\n  `ERRORS` 段，按「源文件 + 用例名」定位到该用例的块，再在块正文里找。副作用：\n  同一条签名不会替别的用例放行。\n- **跑不成就判红，不当绿**。硬超时（rc=124/125/137/143）、异常退出（rc 非 0/1）、\n  非零退出但一条明细都没解析到 —— 三种情况都 `exit 1` 并把尾部日志打出来。\n  另外脚本自己叠了一层 `subprocess` 硬超时（`HIVE_TEST_TIMEOUT + 120s`），\n  这样即使机器上没有 `timeout` 命令，全量也不会变成没有上限的 verify。\n  环境跑不起来（没有 bash / 没有 allowlist）走 `exit 2`，与「有新增失败」的 1 区分。\n\n### 3. `tests/run_pytest.sh`（改默认超时 600 → 1500）\n\n这是第 3 条 verify 历来「必然红」的一个直接原因：完整套件实测 830~1040s，而默认\n超时只有 600s —— 超时比测试本身还短，`timeout` 先开枪，exit=124 看起来像挂死。\n改成 1500s（约 50% 余量），只跑定向集合的卡（几十秒）不受影响。\n`HIVE_TEST_TIMEOUT` 仍可覆盖，语义不变。\n\n## 反证：这个判据是有牙的（9 个分支全验过）\n\n用真实全量日志（`base_4e459a1.log`）在进程内替换「跑套件」这一步，逐分支驱动 `main()`：\n\n```\n[OK ] 基线原样（2F/16E 仍在）        rc=0\n[OK ] 注入一条新 FAILED              rc=1\n[OK ] 同签名出现在别的文件           rc=1   ← 签名钉文件生效\n[OK ] 硬超时（watchdog 触发）        rc=1\n[OK ] rc=124 但无 watchdog 标记      rc=1\n[OK ] 收集期崩溃（rc=3）             rc=1\n[OK ] 非零退出但无明细（rc=2）       rc=1\n[OK ] 全部修好（999 passed）         rc=0   ← 存量消失不算红\n[OK ] 只剩 skip（900P/6S）           rc=0\nFAILURES=0\n```\n\n## 为什么不在本机（Windows）跑这四条\n\n实测：\n\n```\n$ cmd /c \"bash tests/run_pytest.sh tests/test_watchdog.py\"\n'bash' is not recognized as an internal or external command\nrc=1\n```\n\n`hive` 的 verify 走 `subprocess(shell=True)` → `cmd.exe`，而本机 `bash` 只在\n`C:\\Program Files\\Git\\bin\\bash.exe`，**不在 PATH**；`python3` 同理（只有\n`python.exe`）。`hive_compat.py` 的垫片只认 `true` / `test -f` / 整数比较这类整条\n惯用法，不认识 `bash ...` 与 `python3 ...`，所以原样丢给 `cmd.exe` 必然 rc=1。\n这与 T-0261 的 previous_attempt（`'bash' 不是内部或外部命令`）、T-0237 第一次\n判 failed 是同一类**平台假红**，不是产物问题。\n\n本卡 `paths` 只有 3 个测试文件，**不能**去改 `hive_compat.py` 或 `hive.py` 的\nverify 执行路径（那是另一张卡的边界），所以按卡面「确实跑不了就换 88 跑」执行。\n\n**已验证的边界**：Windows 上这两条判据确实跑不了；Linux/FreeBSD 上跑得了。\n若要让 Windows 也能验，需要另开卡给 `hive_compat.py` 加「`bash X` / `python3 X`\n→ 探测 Git Bash / python 并用原生路径执行」的映射 —— 本卡不做。\n\n## 环境与复现\n\n- 验收机：FreeBSD 15.1-RELEASE-p1 `fb98`（192.168.0.88），Python 3.12.13，\n  pytest 8.4.2，git 2.54.0，`bash` 5.3.15，`timeout` 在 `/bin`、`gtimeout` 在 `/usr/local/bin`\n- 身份：仓库属主 `skywalk`（`workbuddy` 跑 `skywalk` 属主检出会引入 `PermissionError`\n  噪声，T-0275 已量化），未设代理/凭据类环境变量\n- HEAD：`4e459a1`（`64d44b5 close T-0275` 之后）\n- 复现：\n  ```sh\n  git clone /home/skywalk/dswork/hive /tmp/t0291/wt && cd /tmp/t0291/wt\n  bash tests/run_pytest.sh tests/test_watchdog.py\n  bash tests/run_pytest.sh tests/test_dashboard_freshness.py\n  bash tests/run_pytest.sh tests/test_run_stdin.py\n  python3 tests/check_full_baseline.py\n  ```\n\n## 没做 / 不做的\n\n- 没删测试、没 skip/xfail 任何用例、没放宽任何断言；\n- 没把全量换成 `-k 'not ...'` 之类选择性排除；\n- 没修 `test_repo_scope` / `test_git_timeout`（按契约只进基线）；\n- 没改 `agents/` 配置、没改其它卡与其 verify、没写 token/密钥/IP；\n- 改动面 `git status --short` 只有本卡 3 个 paths（另加 `.hive/summary.md`）：\n  ```\n   M tests/run_pytest.sh\n  ?? tests/baseline_allowlist.txt\n  ?? tests/check_full_baseline.py\n  ```\n\n## 提交时发生了什么（本机 Windows 侧，原样记录）\n\n`hive_submit` 的 verify 是在**本机 worktree**里跑的，四条全红，签名与 T-0261 的\n`previous_attempt` 一字不差：\n\n| # | code | tail |\n|---|---|---|\n| 1–3 | 1 | `'bash' 不是内部或外部命令，也不是可运行的程序` |\n| 4 | 2 | `找不到 bash：本判据要在 POSIX（FreeBSD/Linux）或装了 bash 的机器上跑；Windows 上 hive 把 verify 交给 cmd.exe，请换验收机执行。` |\n\n第 4 条是我在脚本里**特意**把「环境跑不起来」做成了 `exit 2` + 明确提示，而不是\n硬跑到 `exit 1` 让人以为测试红了。它在这里正好按设计生效。\n\n同一份产物在 88（FreeBSD 15.1）上四条全 `rc=0`（见本文开头表格）。**结论不受影响，\n判 failed 的原因是「本机没有 bash」，不是产物**。要闭环需要：\n- 由主控/人工在 POSIX 机器上复跑这四条（与 T-0261 的处理方式一致），或\n- 另开卡给 `hive_compat.py` 加 `bash <script>` / `python3 <script>` 的 Windows 映射。\n\n## 复验（第二轮，2026-11-09，针对已推送的 task/T-0291@585c1209）\n\n用 `.env` 里的 `SSH_PASS_WORKBUDDY`（口令尾部空格已 strip）以 `workbuddy` 登录 88，\n从 **origin 真实分支** `task/T-0291` clone 到 `/tmp/t0291_verify`，以仓库属主 `skywalk`\n身份跑四条 verify（验的是提交里那棵树，不是我本地 worktree 的临时拷贝）：\n\n| # | verify | 实测 | rc |\n|---|---|---|---|\n| 1 | watchdog | `9 passed in 26.78s` | **0** |\n| 2 | dashboard_freshness | `5 passed in 3.26s` | **0** |\n| 3 | run_stdin | `2 passed in 0.38s` | **0** |\n| 4 | check_full_baseline | 第一轮 **rc=124**，修复后 **rc=0** | 0 |\n\n### 复验抓到一个真 bug（已修，这是本轮最重要的产出）\n\n第一轮跑第 4 条时命中：\n\n```\n[baseline] pytest rc=124 统计: 2 failed, 921 passed, 6 skipped, 16 errors in 1336.95s\n[baseline] 套件被硬超时终止（rc=124），判红。（上限 1500s）\n```\n\n注意：**统计行已经打印出来了**，测试全部跑完（1336s < 1500s），但进程不退出，\n硬挂到 1500s 被 `timeout` 杀掉。这正是卡面第 2 节点名警告的「日志已打印 passed，\n进程却不退出」，而**根因在我自己的脚本里**：\n\n`run_suite()` 原来用 `subprocess.run(..., capture_output=True)`。`capture_output`\n内部走 `communicate()`，要等所有写端关闭（EOF）才返回；pytest 派生的后代会继承\nstdout 写端，只要它比 pytest 活得久，父进程就一直等。**这和 T-0285 记录的\n「后代进程持有 stdout PIPE，父进程等 EOF」是同一个病**——讽刺的是，本卡案头就写着\n这条，我第一版却踩了进去；hive.py 早就用 `_CaptureToFileProxy` 改成临时文件捕获了。\n\n修法（与 hive.py 同一口径）：\n\n- 捕获改走 `tempfile.TemporaryFile()`：没有 EOF 等待，直接子进程一退出就能读；\n- `Popen` + `wait(timeout=...)`，超时时 `killpg` 杀掉整个进程组（`start_new_session`），\n  不在验收机上留孤儿 pytest；\n- 超时仍判红（不做「统计行有了就算绿」的放宽），但会把已解析到的统计行一起打出来。\n\n修复后同一台机器、同一棵树、同一条命令：**`rc=0`，1184s 正常退出**，日志\n`baseline-ok new=0 failed=2 errors=16`。9 个反证分支重跑仍全 OK。\n\n## 遗留风险\n\n1. **Windows 侧这条判据仍是红的**（`bash` / `python3` 不在 PATH，见上）。要在\n   Windows 上闭环需另开卡改 `hive_compat.py`。\n2. **16 条 error 的根因是验收机环境**：该机 `git init` 默认分支是 `master`，\n   而 `test_result_head_guard.py` 夹具里 `git push -u origin main` 必失败。修法是给\n   夹具加 `-b main` 或 `git symbolic-ref`，但这超出本卡 paths（那条文件不归我改）。\n   在把环境改好之前，这 16 条只能留在基线里。\n3. **存量消失不会报警**：脚本只提示「可从 allowlist 删除」，不会判红（卡面要求\n   「消失不算红」）。所以 allowlist 需要人工定期收缩，否则会慢慢变宽。\n4. 全量耗时随机器负载在 830~975s 之间浮动；1500s 上限够用，但如果将来套件继续\n   变大，需要同步调 `HIVE_TEST_TIMEOUT`。",
+    "error": "verify 未通过",
+    "declared_paths": [
+      "tests/check_full_baseline.py",
+      "tests/baseline_allowlist.txt",
+      "tests/run_pytest.sh"
+    ],
+    "changed_files": [],
+    "out_of_paths": [],
+    "lease_id": "f1d4be6127264ec5a367a0bb9c3daa2d"
+  },
+  "human_verdict": {
+    "by": "owner/controller",
+    "at": "2026-11-09T19:40:15+08:00",
+    "decision": "done",
+    "reason": "四条 verify 在 88（FreeBSD 15.1-RELEASE-p1，仓库属主 skywalk 身份，从 origin/task/T-0291 干净 clone，HEAD 2eefb50）主控亲自复跑，RC1-4 全为 0；第 4 条全量打印 baseline-ok new=0（allowlist 存量 2F/16E，新增失败 0）。原 failed 系 Windows worktree 的 cmd.exe 找不到 bash / python3 （hive_compat 未映射），属平台假红，与 T-0261 previous_attempt 同签名；changed_files=[] 是因为主体改动已在 585c120 落库、2eefb50 时工作区干净，delivery_files(wt, base) 按定义为空，非「零改动达标」类问题。",
+    "original_error": "verify 未通过",
+    "verify_env": "FreeBSD 15.1-RELEASE-p1 / skywalk / HEAD 2eefb50053f68641639960495f941eaa94ea8960",
+    "verify_started_at": "2026-11-09T19:16:12+0800",
+    "verify_finished_at": "2026-11-09T19:39:22+0800",
+    "note": "未改任何 verify 命令、未放宽任何判据、未补造 diff；原始 failed 结果完整保留在 previous_attempt；Windows 侧根因另开 T-0292 跟进。"
+  }
 }
