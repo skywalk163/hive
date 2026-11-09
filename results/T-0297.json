@@ -1,0 +1,44 @@
+{
+  "task": "T-0297",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0297",
+  "base": "main",
+  "head": "84527dac768ed29f3d161241ee878e1e29a43c5a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-09T23:05:02+08:00",
+  "finished_at": "2026-11-09T23:26:12+08:00",
+  "duration_s": 1270.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_leader_self_last_seen.py",
+      "code": 0,
+      "tail": [
+        "........                                                                 [100%]",
+        "8 passed in 1.96s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_dashboard_cluster.py",
+      "code": 0,
+      "tail": [
+        ".......                                                                  [100%]",
+        "7 passed in 7.86s"
+      ]
+    }
+  ],
+  "summary": "# T-0297：leader 不刷新自身 last_seen —— 已修复\n\n## 结论\n\n`state.json` 里本机（尤其 leader）的 `last_seen` 不再停在启动时刻：维护循环每拍刷新\n自身记录，并按既有 1s 节流落盘。看板/体检（T-0288 `leader_record_stale`）读盘看到的是\n活时间；节点状态判定、quorum、generation/长轮询语义均未改变。\n\n## 根因\n\n`self.nodes[self.node_id][\"last_seen\"]` 只在三处写入：\n\n1. `_put_self_node_locked()`（进程启动 / `start()` / advertise 切换）；\n2. `_update_node_locked(touch=True)`。该函数对 `nid == self.node_id` 直接 `return False`，\n   本机永远走不到；而 `touch=True` 又只在对端给本机发心跳/快照时发生 —— leader 收不到\n   自己的心跳，于是时间戳一直停在启动时刻。\n3. `/api/cluster/state` 的 `_public_node_locked()` 对 self 回填 `now`，掩盖了磁盘上的旧值。\n\n## 改动（仅 `hive_cluster.py`）\n\n- `_self_node()`：自述记录补上 `last_seen` / `last_seen_epoch`（本机此刻必然活着）。\n  心跳 body 因此自带该公开字段，不再依赖对端 `touch` 回填。\n- `_put_self_node_locked()`：直接采用 `_self_node()` 的时间戳，去掉二次覆盖 ——\n  单一时间源，磁盘与 API 不再各写一份（避免继续分叉）。\n- 新增 `_touch_self_last_seen_locked(now_epoch)`：只更新本机记录的\n  `last_seen`/`last_seen_epoch`，置 `_dirty` 让下一次 `_persist()` 落盘；\n  **不**调 `_mark_dirty_locked()`，即不推进 `generation`、不唤醒长轮询\n  （与 `_loop_heartbeat` 里 leader 租约「不推进 generation」的取舍一致）。\n- `_maintenance_once()`：进入锁后立即调用上述方法。维护循环 5Hz，写盘由\n  `_persist()` 现有 1s 节流兜住，不会把磁盘打满（多节点本来也每 1s 落一次盘）。\n\n刻意**没有**改：`_node_status_locked()`（self 恒 `alive`、阈值不动）、`_public_node_locked()`\n（self 回填仍保留，作为安全网）、`state.json` 结构、看板代码、体检脚本、对端记录的\n`last_seen`（存活只认本机直接观测，沿用 T-0275/幽灵主控那套防御）。\n\n## 验证\n\n新增 `tests/test_leader_self_last_seen.py`（8 条，全部不起 HTTP/线程，直接驱动\n`_maintenance_once()`），先在修复前的代码上复现：5 failed / 3 passed；修复后：\n\n```\npython -m pytest -q tests/test_leader_self_last_seen.py   -> 8 passed\npython -m pytest -q tests/test_dashboard_cluster.py       -> 7 passed\n```\n\n覆盖点：\n\n- leader 维护一拍后，节点表里本机 `last_seen_epoch` 距当前 <1s，`last_seen` 字符串与\n  epoch 一致，`_node_status_locked(self) == \"alive\"`；\n- `/api/cluster/state` snapshot 的 `nodes[].self` 时间同样 <1s；\n- 落盘：先证明盘上是 7200s 前的旧值，维护一拍 + `_persist` 后 `state.json` 的\n  `nodes[本机].last_seen_epoch` 与 `snapshot.self` 都 <1s 且彼此不分叉；\n- 对端记录（`peer-101`）的 `last_seen`/`last_seen_epoch` 一字节不动，长期无心跳仍判 `dead`；\n- 刷新不推进 `generation`（长轮询不被「本机还活着」空转唤醒）；\n- follower 的**自身**记录同样刷新（自己恒 alive，口径一致），其 leader/对端记录不受影响；\n- `_self_node()` 与 `_put_self_node_locked()` 的时间戳同源、且 <1s。\n\n另外跑了集群相关回归（Windows 本机）：\n\n```\ntests/test_cluster.py tests/test_cluster_advertise_refresh.py tests/test_cluster_topology_check.py\ntests/test_cluster_sync.py tests/test_vote_store_behind.py + 本卡新增\n-> 106 passed, 3 failed\n```\n\n3 条失败是 **Windows 基线既有**、与本卡无关：`test_store_election_restriction`、\n`test_force_vote_overrides_store_behind`、`test_force_vote_can_be_disabled`\n（`git checkout -- hive_cluster.py` 原样复跑，同样 3 failed；且不在本卡 verify 范围、\n不在 baseline_allowlist 里 —— 供后续在 FreeBSD 上复核）。\n\n另做一次真起服务的端到端抽查（`Cluster.start()`，2.5s 后转 leader 再看 2.5s）：\n磁盘 `last_seen` age≈0.84s、snapshot age≈0.0s、status=alive。\n\n## 边界与风险\n\n- 单机集群从「空闲不写盘」变成「每 1s 写一次 state.json」（与其他节点有心跳时一致）；\n  写盘仍是原子替换（`_write_json` 临时文件 + `os.replace`），读者不会看到半截 JSON。\n- 只刷新自身；不重写历史节点记录，不动 url（与 T-0293 互不依赖）。\n- 未改任何阈值、quorum、选举逻辑；verify 两条命令均绿。",
+  "error": "",
+  "declared_paths": [
+    "hive_cluster.py",
+    "tests/test_leader_self_last_seen.py"
+  ],
+  "changed_files": [
+    "hive_cluster.py",
+    "tests/test_leader_self_last_seen.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "0ae98acde9d84da9bf6a1402c9ddf919"
+}
