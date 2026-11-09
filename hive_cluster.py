@@ -111,6 +111,9 @@ DEFAULT_ELECTION_MIN_S = 3.0
 DEFAULT_ELECTION_JITTER_S = 0.8
 DEFAULT_LEADER_LEASE_S = 5.0
 DEFAULT_DISCOVERY_INTERVAL_S = 5.0
+# 对外地址自校准周期（秒）。DHCP 租期远短于进程寿命：Wi-Fi 换网、笔记本
+# 睡眠唤醒都可能让本机 IP 变掉，而启动时算出的 advertise 不会自己跟进。
+DEFAULT_ADVERTISE_REFRESH_S = 30.0
 
 # OSPF 的 DR/BDR 接口优先级是 0..255 的 8bit 无符号值：默认 1，越大越优先，
 # 0 = 放弃选举资格（只能当 DRother）。取值域照搬，避免有人填 999 把排序搅乱。
@@ -338,9 +341,19 @@ class Config:
         if port is None:
             port = saved.get("port")
         self.port = int(DEFAULT_PORT if port is None else port)
+        # 显式 advertise（参数/环境变量/磁盘）是人指定的地址，自校准必须让路；
+        # 只有「自动猜」出来的地址才允许随网卡变化跟进。
         self.advertise = str(
             kw.get("advertise") or os.environ.get("HIVE_CLUSTER_ADVERTISE")
             or saved.get("advertise") or "")
+        self.advertise_explicit = bool(self.advertise)
+        refresh = kw.get("advertise_refresh")
+        if refresh is None:
+            refresh = os.environ.get("HIVE_CLUSTER_ADVERTISE_REFRESH")
+        if refresh is None:
+            refresh = saved.get("advertise_refresh")
+        self.advertise_refresh = float(
+            DEFAULT_ADVERTISE_REFRESH_S if refresh is None else refresh)
         self.discovery_port = int(
             kw.get("discovery_port") or os.environ.get(CLUSTER_DISCOVERY_ENV)
             or saved.get("discovery_port") or DEFAULT_DISCOVERY_PORT)
@@ -1095,6 +1108,10 @@ class Cluster:
         self._expired_reported: set[str] = set()
         self._last_store_sync = 0.0
         self._last_store_reconcile = 0.0
+        # 对外地址自校准：候选地址要连续两次探测一致才切换（多网卡/唤醒抖动）。
+        self._last_advertise_check = _now()
+        self._advertise_candidate = ""
+        self._advertise_candidate_hits = 0
 
         self.port = config.port
         self.advertise_host = config.advertise or (
@@ -1538,6 +1555,62 @@ class Cluster:
         rec["last_seen_epoch"] = _now()
         self.nodes[self.node_id] = rec
         self._mark_dirty_locked()
+
+    def _refresh_advertise(self, guess: str | None = None) -> bool:
+        """校准对外地址；返回是否真的发生了切换。
+
+        探测放在锁外：`_guess_lan_ip()` 在无路由时会走 DNS 兜底，不该占着
+        集群锁。显式指定 advertise 的节点直接跳过（人定的地址不自动改）。
+        """
+        if self.config.advertise_explicit:
+            return False
+        if guess is None:
+            guess = _guess_lan_ip()
+        with self.lock:
+            return self._refresh_advertise_locked(guess, _now())
+
+    def _refresh_advertise_locked(self, guess: str, now_epoch: float) -> bool:
+        """把新地址探测收成一条判定：连续两次一致才切换。
+
+        只切一次、并留 `advertise_changed` 事件：多网卡机器上地址可能来回跳，
+        没有去抖就会把节点表刷成「一秒一个新地址」，同伴反而更找不到本机。
+        """
+        if self.config.advertise_explicit or not guess:
+            return False
+        # 断网时 _guess_lan_ip() 会退到 127.0.0.1；把可达地址换成回环只会让
+        # 同伴更连不上本机，宁可保留旧值等网络恢复。
+        if (guess.startswith("127.") and self.advertise_host
+                and not self.advertise_host.startswith("127.")):
+            return False
+        if guess == self.advertise_host:
+            # 回到当前地址：清掉候选，避免「A→B→A」被误判成连续命中。
+            self._advertise_candidate = ""
+            self._advertise_candidate_hits = 0
+            return False
+        if guess != self._advertise_candidate:
+            self._advertise_candidate = guess
+            self._advertise_candidate_hits = 1
+            return False
+        self._advertise_candidate_hits += 1
+        if self._advertise_candidate_hits < 2:
+            return False
+        old = self.advertise_host
+        self.advertise_host = guess
+        self._advertise_candidate = ""
+        self._advertise_candidate_hits = 0
+        rec = self.nodes.get(self.node_id)
+        if rec is None:
+            self._put_self_node_locked()
+        else:
+            rec["host"] = guess
+            rec["url"] = self.url
+            rec["last_seen"] = _iso(now_epoch)
+            rec["last_seen_epoch"] = now_epoch
+            self._mark_dirty_locked()
+        self._emit_locked(
+            "advertise_changed", node_id=self.node_id,
+            message=f"对外地址 {old or '-'} → {guess}")
+        return True
 
     @staticmethod
     def _normalize_node(rec: dict) -> dict:
@@ -2602,6 +2675,7 @@ class Cluster:
 
     def _maintenance_once(self) -> None:
         need_election = False
+        refresh_advertise = False
         with self.lock:
             now_epoch = _now()
             for nid, rec in list(self.nodes.items()):
@@ -2637,11 +2711,23 @@ class Cluster:
                         self._emit_locked(
                             "lease_expired", task=tid,
                             message=f"{lease.get('agent') or '-'} 的租约已过期")
+            # 对外地址自校准：未显式指定 advertise 时按周期重新探测（见
+            # _refresh_advertise_locked）。探测本身放在锁外。
+            if (not self.config.advertise_explicit
+                    and now_epoch - self._last_advertise_check
+                    >= self.config.advertise_refresh):
+                self._last_advertise_check = now_epoch
+                refresh_advertise = True
         # 落盘不在锁内做（_persist 自己加锁），并且按 1s 节流；维护循环 5Hz，
         # 若每轮都写 state.json 会把磁盘打满。
         self._persist()
         # 长期不变式：启动后新增的卡也要进 store 并让所有副本追平。
         self._maybe_reconcile_store_cards()
+        if refresh_advertise and self._refresh_advertise():
+            # 地址变了就立刻广播一次：否则同伴还会按旧地址发包，直到租期超时
+            # 把本机判死——这正是「全群认为主节点已死」的起点。
+            if self.role == "leader":
+                self._heartbeat_once()
         if need_election:
             self._start_election()
 
