@@ -48,8 +48,10 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -265,25 +267,59 @@ def run_suite(timeout: int) -> tuple[int, str, bool]:
     用 `bash tests/run_pytest.sh`（保留 `</dev/null` 与硬超时），不在这里自己拼
     pytest 调用——入口只有一处，超时/隔离的语义才是同一份。再叠一层本进程的
     硬超时（timeout + 宽限），这样即使机器上没有 `timeout` 命令，也不会无上限。
+
+    **捕获必须走临时文件，不能用 PIPE**（T-0285 的教训，本卡实测复现）：
+    `capture_output=True` 内部是 `communicate()`，要等所有写端关闭（EOF）才返回；
+    pytest 派生的后代会继承 stdout 写端，只要它活得比 pytest 久，父进程就一直等
+    ——现象是「统计行已经打印出来了，进程却不退出」，最后被 timeout 杀掉记成
+    rc=124，看起来像挂死。临时文件没有 EOF 等待：直接子进程一退出就能读。
+    hive.py 的 `_CaptureToFileProxy` 是同一个口径。
     """
     if not RUNNER.exists():
         _fail_env(f"测试入口不存在：{RUNNER}")
     env = dict(os.environ)
     env[TIMEOUT_ENV] = str(timeout)
+    # start_new_session：让整个后代树落在独立进程组里，超时时能一起杀掉，
+    # 不给验收机留孤儿 pytest。
+    kwargs = {}
+    if os.name == "posix":
+        kwargs["start_new_session"] = True
+    with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
+        try:
+            p = subprocess.Popen(
+                ["bash", str(RUNNER)], cwd=str(ROOT), env=env,
+                stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr, **kwargs)
+        except FileNotFoundError:
+            _fail_env("找不到 bash：本判据要在 POSIX（FreeBSD/Linux）或装了 bash 的机器上跑；"
+                      "Windows 上 hive 把 verify 交给 cmd.exe，请换验收机执行。")
+        watchdog = False
+        try:
+            code = p.wait(timeout=timeout + WATCHDOG_GRACE)
+        except subprocess.TimeoutExpired:
+            watchdog = True
+            code = 124
+            _kill_tree(p)
+        # 直接子进程已退出（或被我们杀掉），此时读文件不会阻塞。
+        fout.seek(0)
+        ferr.seek(0)
+        out = (fout.read() or b"").decode("utf-8", "replace")
+        err = (ferr.read() or b"").decode("utf-8", "replace")
+    return code, out + err, watchdog
+
+
+def _kill_tree(p) -> None:
+    """杀掉子进程及其整个进程组，别在验收机上留下孤儿 pytest。"""
     try:
-        p = subprocess.run(
-            ["bash", str(RUNNER)], cwd=str(ROOT), env=env, text=True,
-            encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
-            capture_output=True, timeout=timeout + WATCHDOG_GRACE,
-        )
-    except FileNotFoundError:
-        _fail_env("找不到 bash：本判据要在 POSIX（FreeBSD/Linux）或装了 bash 的机器上跑；"
-                  "Windows 上 hive 把 verify 交给 cmd.exe，请换验收机执行。")
-    except subprocess.TimeoutExpired as exc:
-        out = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-        err = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
-        return 124, out + err, True
-    return p.returncode, (p.stdout or "") + (p.stderr or ""), False
+        if os.name == "posix":
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        else:
+            p.kill()
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        p.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -330,8 +366,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # 硬超时 / 收集中断 / 内部错误 / 没收集到用例：一律判红，不看明细。
+    #
+    # 注意这里**不放过**「统计行已经打印出来」的情况：套件跑完却退不出来，
+    # 说明有后代在拖住管道/进程（T-0285）。这种「绿了但不退出」正是本卡要治的病，
+    # 判红是对的——run_suite 已改成临时文件捕获，正常情况下不该再出现。
     if watchdog or code in TIMEOUT_CODES:
-        print(f"[baseline] 套件被硬超时终止（rc={code}），判红。"
+        detail = f"（已打印统计行: {tally}）" if tally else ""
+        print(f"[baseline] 套件被硬超时终止（rc={code}）{detail}，判红。"
               f"（上限 {args.timeout}s，可用 {TIMEOUT_ENV} 调整）")
         return 1
     if code not in (0, 1):
