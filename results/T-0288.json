@@ -1,0 +1,62 @@
+{
+  "task": "T-0288",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0288",
+  "base": "main",
+  "head": "b505add4e08028cd3beec78297128a5bc44fd7fb",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-09T03:16:27+08:00",
+  "finished_at": "2026-11-09T03:20:25+08:00",
+  "duration_s": 238.2,
+  "verify": [
+    {
+      "cmd": "python -c \"import subprocess,sys; r=subprocess.run([sys.executable,'-m','unittest','discover','-s','tests','-p','test_cluster_topology_check.py','-v'],stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=300); print(r.stdout[-3000:]); print(r.stderr[-1000:]); sys.exit(r.returncode)\"",
+      "code": 0,
+      "tail": [
+        "",
+        "----------------------------------------------------------------------",
+        "Ran 16 tests in 1.156s",
+        "",
+        "OK"
+      ]
+    },
+    {
+      "cmd": "python -c \"import subprocess,sys; r=subprocess.run([sys.executable,'scripts/verify_104_readiness.py','--self-test'],stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=120); print(r.stdout[-2000:]); sys.exit(r.returncode)\"",
+      "code": 0,
+      "tail": [
+        "      \"ok\": true,",
+        "      \"detail\": \"\"",
+        "    }",
+        "  ]",
+        "}"
+      ]
+    },
+    {
+      "cmd": "python -c \"import ast,pathlib,sys; s=pathlib.Path('scripts/verify_104_readiness.py').read_text(encoding='utf-8'); ast.parse(s); sys.exit(0 if '192.168.0.104' not in s else 1)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python -c \"import pathlib,sys; p=pathlib.Path('docs/运维记录/集群拓扑与身份口径收敛_20261108.md'); t=p.read_text(encoding='utf-8') if p.exists() else ''; sys.exit(0 if len(t)>1500 and all(x in t for x in ('192.168.0.101','192.168.0.102','192.168.0.103')) else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0288 交付说明\n\n把过期的「104 就绪验收」改造成通用集群拓扑体检工具，并补齐离线单测与运维收敛方案文档。\n\n## 改动（全部在卡面 paths 内）\n- `scripts/verify_104_readiness.py`：重写。删掉写死的节点 IP 与「恰好 2 个 URL」旧判据；改为从\n  `/api/cluster/health` 与 `state.json` 动态采集（`--leader-url` / `--state`，读不到明确报错），\n  输出结构化 JSON（term/role/peers/quorum/leader/nodes/dead_nodes/duplicate_ids/duplicate_urls/\n  ghost_leader/identity_mismatches/todos）；新增 `--roster`、`--strict`、`--dead-after`、`--self-test`\n  （内置离线夹具，不联网、不读真机）。保留 pytest 可收集性，仅剩离线用例。\n- `tests/test_cluster_topology_check.py`：新增 16 例标准库 unittest（正常 4 节点、幽灵 leader 三种情形、\n  dead 节点、leader 自记录陈旧、id/URL 重复、name/hostname 不一致、夹具与真机解耦、CLI 自检退出码）。\n- `docs/运维记录/集群拓扑与身份口径收敛_20261108.md`：新增 8.5KB 文档，含 11-09 只读现场数据\n  （health 摘要 + 5 条节点表含 last_seen）、与 11-08 快照差异（term 637→924、.109 也 dead）、\n  四项问题逐项判定（.103 路径 A/B 代价、.102 leave 方式与风险、.101 id 保持不变的建议）、\n  给主控的 5 步动作清单（明确不在本卡执行）、新旧判据对照表与复跑命令。\n\n## 验证（卡面 4 条，逐条实跑）\n1. unittest discover：`Ran 16 tests in 1.976s / OK`，rc=0。\n2. `--self-test`：`total 12 / passed 12 / failed 0`，rc=0。\n3. AST 解析 + 无写死 IP 字符串：rc=0。\n4. 文档长度与三个 IP 出现：rc=0（8529 字节）。\n\n## 现场只读结论（未改运行时）\n对当前集群体检得到 4 条 todos：`.102` dead（5 天）、`.109` dead（约 4 小时）、\n`.103` leader 自身 last_seen 停在启动时刻、`.101` 节点名 `DESKTOP-6LFQUO8` 与机器名 `win10` 不一致。\n工具不把它们写成通过；运行时收敛需另开运维卡。\n\n## 风险 / 遗留\n- `leader_record_stale(.103)` 可能是 leader 不回写自身 last_seen 的实现细节，文档已标注需人工确认。\n- 本卡未跑全量 pytest（与 paths 无关）；新增测试全部离线、无网络依赖。",
+  "error": "",
+  "declared_paths": [
+    "scripts/verify_104_readiness.py",
+    "tests/test_cluster_topology_check.py",
+    "docs/运维记录/集群拓扑与身份口径收敛_20261108.md"
+  ],
+  "changed_files": [
+    "scripts/verify_104_readiness.py",
+    "docs/运维记录/集群拓扑与身份口径收敛_20261108.md",
+    "tests/test_cluster_topology_check.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "a4d401a7a33945c78d7926e680feb809"
+}
