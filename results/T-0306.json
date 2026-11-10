@@ -1,0 +1,37 @@
+{
+  "task": "T-0306",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0306",
+  "base": "main",
+  "head": "84ddf3ae8292a14492563be6c00e9af99b9b6571",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T11:27:57+08:00",
+  "finished_at": "2026-11-10T11:31:02+08:00",
+  "duration_s": 185.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_control_pull.py",
+      "code": 0,
+      "tail": [
+        "...............                                                          [100%]",
+        "15 passed in 0.94s"
+      ]
+    }
+  ],
+  "summary": "# T-0306 提交摘要\n\n## 完成内容\n\n在 `hive_control/pull.py` 实现控制面拉取协议（母文档 §6，契约 §2.4 / §3.5）：\n\n- `PullService`：校验 `project` / `mode`；增量按请求里的逐条 `watermarks`（`(incarnation, version)`）过滤，缺失条目的水位回落到 `from` 全局下界，严格 `>` 比较；DNA 条目照常返回；全量按 `(project, tid)` 排序后以 `pull_page_size`（100）分页，每页带 `{\"type\":\"page\",\"page\":K,\"total_pages\":T}` 页头。\n- 配额：增量每 project 10 次/秒滑动窗口，全量每 project 1 次/60 秒；超限返回 `{\"type\":\"retry\",\"after_ms\":N}`，`after_ms > 0`；不同 project 互不影响，配额状态在锁内更新，并发安全。\n- 空变化：增量返回空列表，服务端只发送结尾空行。\n- `ControlTcpServer`：监听与上行共用端口；每条连接独立线程；首行及后续行 `type==\"pull\"` 交给 `PullService` 并回条目行/页头/重试行，最后发空行并关闭；其余行解析为状态条目后调用 `on_entries`；坏 JSON 跳过并计数，不崩连接；连接空闲超时 `tcp_idle_timeout`；`start()/stop()` 可重复调用，`stop()` 会关闭监听和所有客户端连接。\n- `PullClient`：发送 pull 请求，自动读完整分页直到空行；页头计数；坏行跳过并计数；收到 retry 抛 `PullRetry(after_ms)`；收到 error 抛 `ValueError`。\n\n`tests/test_control_pull.py` 覆盖卡面 6 条断言：250 条 → 3 页且客户端收全 250；逐条水位只回新条目；第 11 次增量 / 第 2 次全量 retry；空变化返回空；同端口先上行 entry 再 pull；坏行跳过不崩连接。另补充 incarnation 优先、配额线程安全、客户端分页/坏行/retry 等用例。\n\n## 验证\n\n命令：`python -m pytest -q tests/test_control_pull.py`\n结果：15 passed in 0.94s\n\n命令：`python3 -m pytest -q tests/test_control_model.py tests/test_control_pull.py`\n结果：32 passed in 1.14s\n\n## 集群状态说明\n\n领取时集群处于无主状态：fb98 的 `/api/cluster/health` 阻塞、`store/claim` 返回“没有主节点”，本机节点为 candidate（已知成员 1/6 alive，quorum 2），store 写不可用。因此本次通过 Git 后端完成 claim 与 submit（`HIVE_CLAIM_BACKEND=git`），结果写入 `task/T-0306` 与 `res/T-0306`。集群恢复后需由总控把结果同步进 leader store。\n\n## 改动文件\n\n- `hive_control/pull.py`（新增）\n- `tests/test_control_pull.py`（新增）",
+  "error": "",
+  "declared_paths": [
+    "hive_control/pull.py",
+    "tests/test_control_pull.py"
+  ],
+  "changed_files": [
+    "hive_control/pull.py",
+    "tests/test_control_pull.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "28a2723a649640dc8473de483aae1bdd",
+  "fence": 1
+}
