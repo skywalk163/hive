@@ -55,6 +55,9 @@ def cluster_factory(tmp_path):
             election_jitter=kw.pop("election_jitter", 0.1),
             leader_lease=kw.pop("leader_lease", 0.7),
             lease_grace=kw.pop("lease_grace", 2.0),
+            # 票池 TTL 在测试里缩短：既验证「成员>1 时不能自封」，又能在
+            # 几秒内看到成员自然过期、单节点重新当选，不把用例拖到分钟级。
+            membership_ttl=kw.pop("membership_ttl", 2.0),
             **kw,
         )
         c = hc.Cluster(cfg)
@@ -729,9 +732,12 @@ def test_higher_priority_gets_shorter_delay(cluster_factory):
     assert db < da, (da, db)
 
 
-def test_same_priority_falls_back_to_node_id(cluster_factory):
-    """同优先级按 node_id 定序（相当于 OSPF 用 Router ID 打平手），
-    保证「谁先跑」是确定的，不会两边同轮打平后反复重选。"""
+def test_same_priority_random_backoff(cluster_factory):
+    """同优先级用随机退避（CSMA/CD），不再按 node_id 固定排序。
+
+    两个节点的延迟都落在 [election_min, election_min+jitter] 里；撞车后由失败
+    退避再随机一轮，最终只会有一个主控。
+    """
     a = cluster_factory("a", leader_priority=3)
     assert wait_until(lambda: a.role == "leader")
     b = cluster_factory("b", seeds=[a.url], leader_priority=3)
@@ -739,12 +745,87 @@ def test_same_priority_falls_back_to_node_id(cluster_factory):
     with a.lock, b.lock:
         da = a._election_delay_locked()
         db = b._election_delay_locked()
-    assert da != db
-    # node_id 字典序小的排前面，等待更短
-    if a.node_id < b.node_id:
-        assert da < db
-    else:
-        assert db < da
+        lo = a.config.election_min
+        hi = a.config.election_min + a.config.election_jitter
+    assert lo <= da <= hi, da
+    assert lo <= db <= hi, db
+
+    # 主控消失后，两台同优先级节点应该通过随机退避选出一个（而不是都自封）。
+    a.stop()
+    assert wait_until(lambda: b.role == "leader", timeout=8), \
+        "同优先级僵持后应有一台先 CLAIM 并当选"
+
+
+def test_known_member_blocks_single_vote(cluster_factory):
+    """已知成员 >1 时，1 票不能当选；成员过了 TTL 才允许。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    with a.lock:
+        a.nodes["ghost"] = {
+            "id": "ghost", "name": "ghost", "url": "http://127.0.0.1:1",
+            "electable": True, "priority": 1,
+            "last_seen_epoch": time.time(), "incarnation": 1,
+        }
+        assert a._quorum_locked() == 2, "成员表有 2 台，quorum 必须是 2"
+        # 制造「无主」状态，再走正常选举通道
+        a.role = "follower"
+        a.leader_id = None
+        a.leader_lease_until = 0.0
+        a._leader_lost_at = 0.0
+        a._next_election_at = 0.0
+        a._last_election = 0.0
+    assert a._start_election() is False, "只有自己一票不能当选"
+    assert a.role != "leader"
+    snap = a.snapshot()
+    failed = [e for e in snap["events"] if e["type"] == "election_failed"]
+    assert failed and failed[-1]["data"]["quorum"] == 2
+    assert failed[-1]["data"]["votes"] == 1
+
+    # 成员超过 TTL 后退出票池，单节点重新具备当选资格
+    with a.lock:
+        a.nodes["ghost"]["last_seen_epoch"] = time.time() - 10
+        a._next_election_at = 0.0
+        a._last_election = 0.0
+        assert a._quorum_locked() == 1
+    assert wait_until(lambda: a.role == "leader", timeout=5)
+
+
+def test_highest_priority_claims_with_zero_delay(cluster_factory):
+    """优先级最高的节点 0 延迟直接 CLAIM，其它节点让出窗口。"""
+    a = cluster_factory("a", leader_priority=1)
+    assert wait_until(lambda: a.role == "leader")
+    b = cluster_factory("b", seeds=[a.url], leader_priority=9)
+    assert wait_until(lambda: b.leader_id == a.node_id)
+    assert wait_until(lambda: a._node_priority_locked(b.node_id) == 9)
+    with b.lock:
+        assert b._election_delay_locked() == 0.0
+    with a.lock:
+        assert a._election_delay_locked() > 0.0
+
+
+def test_health_not_blocked_by_long_lock(cluster_factory):
+    """长操作持集群锁时，health 仍然秒回（走缓存快照）。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    a.health_payload()  # 先填充缓存
+
+    import threading
+    started = threading.Event()
+
+    def hold_lock():
+        with a.lock:
+            started.set()
+            time.sleep(1.0)
+
+    t = threading.Thread(target=hold_lock, daemon=True)
+    t.start()
+    assert started.wait(1.0)
+    t0 = time.time()
+    payload = a.health_payload()
+    elapsed = time.time() - t0
+    assert elapsed < 0.5, f"health 被主锁拖住了 {elapsed:.2f}s"
+    assert payload["ok"] is True and payload.get("stale") is True
+    t.join(timeout=2)
 
 
 def test_priority_zero_never_starts_election(cluster_factory):

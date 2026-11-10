@@ -39,6 +39,7 @@ import copy
 import hmac
 import json
 import os
+import random
 import re
 import signal
 import socket
@@ -49,6 +50,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -115,6 +117,11 @@ DEFAULT_ELECTION_MIN_S = 3.0
 DEFAULT_ELECTION_JITTER_S = 0.8
 DEFAULT_LEADER_LEASE_S = 5.0
 DEFAULT_DISCOVERY_INTERVAL_S = 5.0
+# 「已知可参选成员」保留多久。peer_timeout/dead_timeout 只有秒级，网络抖一下
+# 就把同伴踢出票池，于是 quorum 退化成 1、单票自封，正是 T-0299 要修的病。
+# 这里给一个远长于 dead_timeout 的窗口：suspect/dead 的成员仍然算票，
+# 只有确实很久没出现（换机/退役/长期关机）才从票池里消失。
+DEFAULT_MEMBERSHIP_TTL_S = 300.0
 # 对外地址自校准周期（秒）。DHCP 租期远短于进程寿命：Wi-Fi 换网、笔记本
 # 睡眠唤醒都可能让本机 IP 变掉，而启动时算出的 advertise 不会自己跟进。
 DEFAULT_ADVERTISE_REFRESH_S = 30.0
@@ -538,6 +545,19 @@ class Config:
             kw.get("election_jitter") or _env_float("HIVE_CLUSTER_ELECTION_JITTER", DEFAULT_ELECTION_JITTER_S))
         self.leader_lease = float(
             kw.get("leader_lease") or _env_float("HIVE_CLUSTER_LEADER_LEASE", DEFAULT_LEADER_LEASE_S))
+        # 成员表 TTL：见 DEFAULT_MEMBERSHIP_TTL_S 的注释。比 dead_timeout 长得多，
+        # 但必须有限，否则退役机器会永久抬高 quorum，让整个集群再也选不出主。
+        self.membership_ttl = float(
+            kw.get("membership_ttl")
+            or _env_float("HIVE_CLUSTER_MEMBERSHIP_TTL", DEFAULT_MEMBERSHIP_TTL_S))
+        # 显式允许「1 票当选」（默认关）。只给单机/实验场景用；已知成员 >1 时
+        # 打开它等于放弃多数保护，运维必须自己知道这一点。
+        if kw.get("allow_single_vote") is None:
+            self.allow_single_vote = _env_bool(
+                "HIVE_CLUSTER_ALLOW_SINGLE_VOTE",
+                bool(saved.get("allow_single_vote", False)))
+        else:
+            self.allow_single_vote = bool(kw.get("allow_single_vote"))
         self.discovery_interval = float(
             kw.get("discovery_interval") or _env_float("HIVE_CLUSTER_DISCOVERY_INTERVAL",
                                                        DEFAULT_DISCOVERY_INTERVAL_S))
@@ -575,6 +595,8 @@ class Config:
             "electable": bool(self.electable),
             "leader_priority": int(self.leader_priority),
             "preferred_leader": self.preferred_leader,
+            "membership_ttl": float(self.membership_ttl),
+            "allow_single_vote": bool(self.allow_single_vote),
             "allow_forced_promote": bool(self.allow_forced_promote),
             "strict_store_freshness": bool(self.strict_store_freshness),
             "sync": bool(self.sync_enabled),
@@ -1210,6 +1232,20 @@ class Cluster:
         self._leader_lost_at: float | None = None
         self._leader_fail_at: float | None = None
         self._election_inflight = False
+        # 选举失败后的随机退避（CSMA/CD）：连续失败越多，等得越久；成功当选
+        # 或收到合法主控心跳后清零。没有它就会 3 秒一轮连打、term 膨胀。
+        self._election_failures = 0
+        self._next_election_at = 0.0
+        self._last_election_lock_wait = 0.0
+        # 启动宽限：配了 seed / 广播的节点刚起来时，先给发现+注册留一个窗口，
+        # 别让高优先级节点在「还没认识在位主控」时立刻 0 延迟抢主（会打断在位主控）。
+        self._startup_grace_until = 0.0
+        # health 快照缓存：HTTP 线程只读它，绝不等集群主锁（长 git/store 操作
+        # 持锁时也能秒回）。由维护循环/独立线程低频刷新。
+        self._health_cache: dict = {}
+        self._health_cache_at = 0.0
+        self._store_health_cache: dict = {"enabled": False}
+        self._store_reconcile_busy = False
         self._peer_errors: dict[str, float] = {}
         self._expired_reported: set[str] = set()
         self._last_store_sync = 0.0
@@ -1233,6 +1269,16 @@ class Cluster:
         self._put_self_node()
 
     # -- 生命周期 ---------------------------------------------------------- #
+    @contextmanager
+    def _timed_lock(self):
+        """带等待耗时的集群主锁，用于把「锁被长操作占住」写进日志。"""
+        started = _now()
+        self.lock.acquire()
+        try:
+            yield _now() - started
+        finally:
+            self.lock.release()
+
     @property
     def url(self) -> str:
         return _base_url(self.advertise_host or _guess_lan_ip(), self.port)
@@ -1306,6 +1352,7 @@ class Cluster:
         for target, name in ((self._loop_heartbeat, "hive-cluster-heartbeat"),
                              (self._loop_maintenance, "hive-cluster-maintenance"),
                              (self._loop_discovery, "hive-cluster-discovery"),
+                             (self._loop_health_cache, "hive-cluster-health"),
                              (self._loop_chat_sync, "hive-cluster-chat")):
             t = threading.Thread(target=target, name=name, daemon=True)
             t.start()
@@ -1368,6 +1415,31 @@ class Cluster:
         self._last_store_reconcile = now_epoch
         return self._ingest_store_cards()
 
+    def _schedule_store_reconcile(self) -> None:
+        """把 store 补卡挪到后台线程，别让 git 卡面读取拖住维护循环。
+
+        维护循环同时负责心跳/选举；以前 _maybe_reconcile_store_cards() 直接
+        在这里跑 `git`，一次慢 fetch 就能让选举停摆几十秒，且期间无人续租。
+        """
+        if self.store is None or self._store_reconcile_busy:
+            return
+        if self.role != "leader":
+            return
+        if _now() - self._last_store_reconcile < STORE_RECONCILE_S:
+            return
+        self._store_reconcile_busy = True
+
+        def _worker():
+            try:
+                self._maybe_reconcile_store_cards()
+            except Exception as exc:  # noqa: BLE001
+                _log(f"store: 后台补卡失败（忽略）: {exc}")
+            finally:
+                self._store_reconcile_busy = False
+
+        threading.Thread(target=_worker, name="hive-store-reconcile-cards",
+                         daemon=True).start()
+
     def _store_catch_up(self, base: str) -> None:
         """新节点/重连：先 snapshot，再拉已 commit 的 op。"""
         if self.store is None or not base:
@@ -1422,6 +1494,10 @@ class Cluster:
         try:
             if self.role == "leader":
                 self._resign_peers("shutdown")
+            # 优雅退出要显式 leave：把本机从同伴的成员表里删掉，quorum 立刻
+            # 回落到剩余节点。否则「停止一台机器」要等 membership_ttl（默认
+            # 5 分钟）才允许剩下那台当选，现场表现就是「停了 Mac，fb98 叫不到主」。
+            self._leave_peers()
             with self.lock:
                 if self.role == "leader":
                     self.role = "follower"
@@ -2329,21 +2405,140 @@ class Cluster:
             "alive": len(alive),
             "known": len(nodes),
             "quorum": self._quorum_locked(),
+            "voters": len(self._voter_ids_locked()),
+            "membership_ttl_s": round(float(self.config.membership_ttl), 1),
         }
 
     def snapshot(self) -> dict:
         with self.lock:
             return self._snapshot_locked()
 
-    def _quorum_locked(self) -> int:
-        voters = len(self._alive_voter_ids_locked())
-        return 1 if voters <= 1 else voters // 2 + 1
+    def _build_health_locked(self) -> dict:
+        """在持锁状态下拼 health。只做内存计算，绝不碰 sqlite/git 等慢资源。"""
+        now_epoch = _now()
+        alive = sum(1 for rec in self.nodes.values()
+                    if self._node_status_locked(rec, now_epoch) == "alive")
+        me = self.nodes.get(self.node_id) or {}
+        # 不用 _leader_record_locked：它对本机 leader 会走 _self_node() 读 agents 目录。
+        leader_rec = self.nodes.get(self.leader_id) if self.leader_id else None
+        leader = None
+        if leader_rec:
+            leader = {"id": leader_rec.get("id"),
+                      "name": leader_rec.get("name"),
+                      "url": leader_rec.get("url")}
+        return {
+            "ok": True,
+            "node": {"id": self.node_id,
+                     "name": str(me.get("name") or self.config.name),
+                     "url": self.url},
+            "role": self.role, "term": self.term,
+            "leader": ({"id": leader.get("id"), "name": leader.get("name"),
+                        "url": leader.get("url")} if leader else None),
+            "leader_lease_until_epoch": float(self.leader_lease_until or 0.0),
+            "cluster_id": self.config.cluster_id, "protocol": PROTOCOL,
+            "uptime_s": round(now_epoch - self.started_epoch, 1),
+            "peers": alive, "quorum": self._quorum_locked(),
+            "voters": len(self._voter_ids_locked()),
+            "membership_ttl_s": round(float(self.config.membership_ttl), 1),
+            "mcp": (self.mcp_service.status()
+                    if self.mcp_service is not None else {"enabled": False}),
+            # store.summary() 会碰 sqlite；用后台线程刷出来的缓存，避免 health
+            # 与 store 导入/压缩抢锁（现场 5s 超时就是这么来的）。
+            "store": copy.deepcopy(self._store_health_cache),
+            # archive.status() 会查 pending_results（sqlite），同样只给运行态。
+            "archive": ({"running": bool(self.archive_agent._thread
+                                         and self.archive_agent._thread.is_alive())}
+                        if self.archive_agent is not None else {"running": False}),
+            "coordinator": (self.coordinator_agent.status()
+                            if self.coordinator_agent is not None
+                            else {"enabled": False}),
+        }
 
-    def _alive_voter_ids_locked(self) -> list[str]:
+    def health_payload(self) -> dict:
+        """无阻塞 health 快照：拿不到集群主锁就返回上一份缓存。
+
+        长操作（git sync / store 导入）持锁时，HTTP 线程也必须能秒回，
+        否则主控本人看起来像「死」的，同伴会提前发起选举。
+        """
+        if self.lock.acquire(timeout=0.15):
+            try:
+                data = self._build_health_locked()
+                self._health_cache = data
+                self._health_cache_at = _now()
+                return copy.deepcopy(data)
+            finally:
+                self.lock.release()
+        cached = self._health_cache
+        if cached:
+            out = dict(cached)
+            out["stale"] = True
+            return out
+        return {"ok": True,
+                "node": {"id": self.node_id, "name": self.config.name,
+                         "url": self.url},
+                "role": self.role, "term": self.term, "leader": None,
+                "leader_lease_until_epoch": float(self.leader_lease_until or 0.0),
+                "cluster_id": self.config.cluster_id, "protocol": PROTOCOL,
+                "uptime_s": round(_now() - self.started_epoch, 1),
+                "peers": 0, "quorum": 1, "voters": 1,
+                "mcp": {"enabled": self.mcp_service is not None},
+                "store": {"enabled": self.store is not None},
+                "archive": {"running": self.archive_agent is not None},
+                "coordinator": {"enabled": self.coordinator_agent is not None},
+                "stale": True}
+
+    def _loop_health_cache(self) -> None:
+        """低频刷新 store 摘要。sqlite 再慢也只拖住这个线程，不拖 health。"""
+        while not self._stop.wait(1.0):
+            try:
+                self._store_health_cache = (
+                    self.store.summary() if self.store is not None
+                    else {"enabled": False})
+            except Exception as exc:  # noqa: BLE001
+                self._store_health_cache = {
+                    "enabled": self.store is not None, "error": str(exc)}
+
+    def _quorum_locked(self) -> int:
+        """多数门槛按**已知可参选成员**算，而不是「此刻还活着」的节点。
+
+        T-0299 的核心：peer_timeout（默认 4s）一到就把同伴踢出票池，任何一次
+        git/store 长操作都能让本机同时满足「无主」+「同伴全死」，于是 quorum
+        退化成 1、单票自封。成员表用 membership_ttl（默认 5 分钟）兜底，
+        短暂失联不再改变多数门槛；只有真正长期缺席的机器才会退出票池。
+        """
+        voters = len(self._voter_ids_locked())
+        if voters <= 1 or self.config.allow_single_vote:
+            return 1
+        return voters // 2 + 1
+
+    def _voter_ids_locked(self) -> list[str]:
+        """已知可参选成员（含 suspect/dead，长 TTL），用于 quorum 与拉票。"""
+        now_epoch = _now()
+        ttl = max(self.config.membership_ttl, self.config.dead_timeout)
         ids = [self.node_id] if self.config.electable else []
         for nid, rec in self.nodes.items():
-            if (nid != self.node_id and self._node_status_locked(rec) == "alive"
-                    and rec.get("electable", True)):
+            if nid == self.node_id:
+                continue
+            if not rec.get("electable", True):
+                continue
+            age = now_epoch - float(rec.get("last_seen_epoch") or 0.0)
+            if age <= ttl:
+                ids.append(nid)
+        return ids
+
+    def _reachable_voter_ids_locked(self) -> list[str]:
+        """成员表里最近还见过的那些：优先级排序只认它们。
+
+        dead 成员仍算 quorum（防止 1 票自封），但不该让一个永远连不上的高优先级
+        节点把所有人无限期按住 —— 高优先级只在「它还活着/可疑」时享受 0 延迟。
+        """
+        ids = []
+        for nid in self._voter_ids_locked():
+            if nid == self.node_id:
+                ids.append(nid)
+                continue
+            rec = self.nodes.get(nid) or {}
+            if self._node_status_locked(rec) in ("alive", "suspect"):
                 ids.append(nid)
         return ids
 
@@ -2366,49 +2561,75 @@ class Cluster:
         那时退化成人人 1（见 _election_delay_locked），0 就不再是禁赛标志，
         否则一个节点都不肯发起选举、集群永远没有主控。
         """
-        voters = self._alive_voter_ids_locked()
+        voters = self._reachable_voter_ids_locked()
         return any(self._node_priority_locked(n) > 0 for n in voters)
 
-    def _election_delay_locked(self) -> float:
-        """本机在「当前无主控」时该等多久才发起选举。
+    def _election_backoff_locked(self) -> float:
+        """选举失败后的随机退避（CSMA/CD 的 collision backoff）。
 
-        OSPF 的 DR 选举：优先级数值大的先当，同优先级按 Router ID 定序；
-        **不抢占**已经在位的 DR。这里完全照搬，所以：
-          - 只有当前没有主控时才调用（调用点在维护循环里，由 leader 租约决定）；
-          - 排序键是 (-priority, node_id)，名次越靠前等得越短。
-        优先级 0 = 不参选（OSPF 里 priority 0 的接口永远不会成为 DR），
-        所以返回一个「永远等不到」的值；但若全集群都是 0，就退化成人人 1，
-        否则会没有节点愿意发起选举、集群永远没有主控。
+        失败次数越多等得越久，上限约 4 个 election_min；乘 ±20% 抖动，
+        避免所有失败节点在同一刻再次撞车。成功当选/收到主控心跳后清零。
         """
-        voters = sorted(self._alive_voter_ids_locked())
-        # 同优先级用 node_id 兜底定序，和 OSPF 用 Router ID 打平手一个道理。
-        ordered = sorted(voters, key=lambda n: (-self._node_priority_locked(n), n))
-        rank = ordered.index(self.node_id) if self.node_id in ordered else 0
+        failures = max(0, int(self._election_failures) - 1)
+        base = max(self.config.election_min, MIN_ELECTION_STEP_S)
+        cap = max(base * 4.0, 1.5)
+        delay = min(base * (2 ** min(failures, 5)), cap)
+        return delay * random.uniform(0.8, 1.2)
+
+    def _election_delay_locked(self) -> float:
+        """本机在「当前无主控」时该等多久才发起选举（CLAIM）。
+
+        规则（T-0299，用户明确指定）：
+          1. priority 不同：**值最高者 0 延迟直接 CLAIM**，其它节点让出窗口、
+             不跟它竞争（只投票/承认）；
+          2. priority 相同：随机退避（以太网 CSMA/CD），谁先发出 CLAIM 谁为主；
+             撞车后由 _election_backoff_locked 再随机退一轮；
+          3. 只有两人且僵持：同上，随机重试直到一方先 CLAIM；
+          4. 0 仍是硬资格（弃权），全员 0 时退化成人人 1；
+          5. preferred 语义不变，仍压过 priority。
+        """
+        voters = sorted(self._voter_ids_locked())
+        if self.node_id not in voters:
+            return float("inf")
 
         # 0 = 放弃竞选资格：只要集群里还有正常优先级的节点，就永不发起选举。
-        # 全员 0 时退化成人人 1（_priority_zero_excludes_locked 返回假），不拦。
         if (self._node_priority_locked(self.node_id) <= 0
                 and self._priority_zero_excludes_locked()):
             return float("inf")
 
         step = max(self.config.election_jitter, MIN_ELECTION_STEP_S)
-        delay = self.config.election_min + rank * step
+        base = self.config.election_min
+        reachable = self._reachable_voter_ids_locked()
 
         pref = self._preferred_leader_id_locked()
         if pref and self._node_priority_locked(pref) <= 0:
             # 被 preferred 指定的那台自己弃了权，还让全集群给它让路会导致
             # 没人肯发起选举 —— 视同没配这个偏好，退回按优先级来。
             pref = ""
-        if not pref or pref not in voters:
-            # 没配偏好，或首选节点当前不在线 / 不参选：按优先级规则来。
-            # 这里必须退回原逻辑，否则一个永远离线的 preferred 会让整个集群
-            # 每次选主都白等一个 window。
-            return delay
         if pref == self.node_id:
             # 人工硬指定：立刻可竞选，压过一切优先级。
             return 0.0
-        # 其它节点让出一整个选举窗口，别跟被指定的那台同轮打平。
-        return delay + self.config.election_min
+        if pref and pref in voters and pref in reachable:
+            # 其它节点让出一整个选举窗口，别跟被指定的那台同轮打平。
+            return base + base
+
+        my_prio = self._node_priority_locked(self.node_id)
+        higher = [n for n in reachable
+                  if n != self.node_id and self._node_priority_locked(n) > my_prio]
+        if higher:
+            # 有更高优先级的节点在：它 0 延迟先 CLAIM，我们只等它/投它。
+            # 留一个 2 倍窗口的兜底，万一它其实发不出 CLAIM（网络单向、
+            # 进程半死），次高节点还有机会接手，不会永久无主。
+            return base * 3 + random.uniform(0, step)
+
+        same = [n for n in reachable
+                if n != self.node_id and self._node_priority_locked(n) == my_prio]
+        if same:
+            # 同优先级：随机退避，先发 CLAIM 者胜（CSMA/CD）。
+            return base + random.uniform(0, step)
+
+        # 唯一最高优先级：只有多成员时才有意义地「立刻」，单机仍走常规超时。
+        return 0.0 if len(voters) > 1 else base
 
     def _preferred_leader_id_locked(self) -> str:
         """把配置里的 preferred_leader 解析成节点 id。
@@ -2545,6 +2766,9 @@ class Cluster:
                 self.leader_lease_until = 0.0
         self._leader_lost_at = None
         self._leader_fail_at = None
+        # 已经有合法主控了：清掉选举失败计数与退避，下一次丢主从正常窗口开始。
+        self._election_failures = 0
+        self._next_election_at = 0.0
         if changed:
             import traceback
             caller = traceback.extract_stack()[-2].name
@@ -2570,11 +2794,6 @@ class Cluster:
         self._mark_dirty_locked()
 
     def _become_leader_locked(self) -> None:
-        if self.store is not None:
-            try:
-                self.store.truncate_uncommitted()
-            except Exception:  # noqa: BLE001
-                pass
         old_role = self.role
         self.role = "leader"
         self.leader_id = self.node_id
@@ -2587,7 +2806,9 @@ class Cluster:
         self.event_seq = 0
         self._recover_leases_locked()
         if self.store is not None:
-            threading.Thread(target=self._broadcast_truncate,
+            # 本地 truncate + 通知同伴 truncate 都是 sqlite/HTTP 级别的慢操作，
+            # 绝不能占着集群主锁做（T-0299：长操作持锁会让心跳/健康检查一起卡死）。
+            threading.Thread(target=self._truncate_stores_after_win,
                              name="hive-store-truncate", daemon=True).start()
         self._emit_locked(
             "leader_elected",
@@ -2597,6 +2818,14 @@ class Cluster:
         # 落后当选：先对齐 store 再服务写请求（与投票闸门配套，缺一半就是
         # 拿旧 commit_seq 起新 oplog 的分叉风险，见 T-0295）。
         self._arm_store_reconcile_locked()
+
+    def _truncate_stores_after_win(self) -> None:
+        if self.store is not None:
+            try:
+                self.store.truncate_uncommitted()
+            except Exception:  # noqa: BLE001
+                pass
+        self._broadcast_truncate()
 
     def _arm_store_reconcile_locked(self) -> bool:
         """落后当选时把「写请求」关到 store 追平为止；返回是否进入对齐态。
@@ -2693,15 +2922,84 @@ class Cluster:
                 self._adopt_higher_term_locked(best)
             _log(f"夺权前对齐任期：{best}")
 
+    def _carrier_sense(self) -> bool:
+        """发 CLAIM 前先「听」一下：有没有人在当主（以太网 carrier sense）。
+
+        同优先级随机退避后，两个节点仍有概率几乎同时开口。先并发问一圈
+        `/api/cluster/health`（0.5s 上限）：只要有人报出仍然有效的 leader，
+        本轮就不发 CLAIM，让主控心跳把状态带回来。顺带把本机任期追到集群
+        最高值，避免拿一个偏小的 term 去撞车。
+
+        返回 True = 检测到在位主控，应放弃本轮选举。
+        """
+        with self.lock:
+            voter_ids = set(self._voter_ids_locked())
+            peers = [dict(rec) for nid, rec in self.nodes.items()
+                     if nid != self.node_id and nid in voter_ids and rec.get("url")]
+            if not peers:
+                return False
+        best_term = 0
+        leader_seen = False
+        with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+            futs = [pool.submit(http_json,
+                                str(p["url"]).rstrip("/") + "/api/cluster/health",
+                                "GET", None, 0.5, self.config.token)
+                    for p in peers]
+            for fut in as_completed(futs):
+                try:
+                    code, resp = fut.result()
+                except Exception:  # noqa: BLE001  单个节点不通不能阻止选举
+                    continue
+                if code != 200 or not isinstance(resp, dict):
+                    continue
+                try:
+                    best_term = max(best_term, int(resp.get("term") or 0))
+                except (TypeError, ValueError):
+                    pass
+                leader = resp.get("leader")
+                lease = float(resp.get("leader_lease_until_epoch") or 0.0)
+                if (str(resp.get("role") or "") == "leader"
+                        and isinstance(leader, dict) and leader.get("id")
+                        and lease > _now()):
+                    leader_seen = True
+        if best_term > self.term:
+            with self.lock:
+                self._adopt_higher_term_locked(best_term)
+        if leader_seen:
+            # 已经有人当家：把本机的「主控丢失」计时重置，下一轮重新听。
+            with self.lock:
+                self._leader_lost_at = _now()
+                self._next_election_at = _now() + self.config.election_min
+            _log("选举前侦听到在位主控，本轮不发 CLAIM")
+            return True
+        return False
+
     def _start_election(self, force: bool = False) -> bool:
-        """发起一轮选举。force=True 是人工 promote 通道。
+        """发起一轮选举（CLAIM）。force=True 是人工 promote 通道。
 
         返回是否真的发起了 —— 已经是主控 / 不可参选 / 被节流都返回 False，
         调用方可以据此给出准确提示，而不是假装成功。
         """
         if force:
             self._sync_term_from_peers()
+        else:
+            # 先做廉价闸门，别让失败退避期间每 0.2s 都去发一圈 health 探测。
+            with self.lock:
+                now_epoch = _now()
+                if (self._last_election
+                        and now_epoch - self._last_election
+                        < self.config.election_min):
+                    return False
+                if now_epoch < self._next_election_at:
+                    return False
+                if now_epoch < self._startup_grace_until:
+                    return False
+            if self._carrier_sense():
+                return False
+        lock_wait_started = _now()
         with self.lock:
+            lock_wait = _now() - lock_wait_started
+            self._last_election_lock_wait = lock_wait
             if self._stop.is_set() or self._election_inflight:
                 return False
             if not self.config.electable:
@@ -2713,11 +3011,21 @@ class Cluster:
                 return False
             if self.role == "leader" and self.leader_lease_until > _now():
                 return False
+            # 已经认了别的主控且租约还有效：不要因为自己没收到心跳就抢跑。
+            # 随机退避的节点可能比心跳晚一步醒来，这一句能挡住大量「刚选完又重选」。
+            if (not force and self.leader_id
+                    and self.leader_id != self.node_id
+                    and self.leader_lease_until > _now()):
+                return False
             # 失败后不要每 0.2s 就 term+1：至少隔一个选举超时再试。
             # 人工 promote 是明确意图，不受这个节流限制 —— 否则用户点了之后
             # 还要等一个 window 才生效，会以为「没反应」。
             if (not force and self._last_election
                     and _now() - self._last_election < self.config.election_min):
+                return False
+            if not force and _now() < self._next_election_at:
+                return False
+            if not force and _now() < self._startup_grace_until:
                 return False
             self._election_inflight = True
             self.term += 1
@@ -2728,14 +3036,30 @@ class Cluster:
             self.leader_lease_until = 0.0
             self.event_seq = 0
             self._last_election = _now()
-            self._emit_locked("election_started",
-                              message=f"{self.config.name} 竞选 term={self.term}")
-            self._persist_locked()
             term = self.term
-            voters = self._alive_voter_ids_locked()
-            quorum = 1 if len(voters) <= 1 else len(voters) // 2 + 1
-            peers = [rec for nid, rec in self.nodes.items()
+            # 票池是「已知可参选成员」，不是「这 4 秒里还活着的节点」。
+            voters = self._voter_ids_locked()
+            quorum = self._quorum_locked()
+            now_epoch = _now()
+            peer_ages = {}
+            for nid in voters:
+                if nid == self.node_id:
+                    continue
+                rec = self.nodes.get(nid) or {}
+                peer_ages[str(rec.get("name") or nid)] = round(
+                    max(0.0, now_epoch - float(rec.get("last_seen_epoch") or 0.0)), 1)
+            peers = [dict(rec) for nid, rec in self.nodes.items()
                      if nid != self.node_id and nid in voters and rec.get("url")]
+            self._emit_locked(
+                "election_started",
+                message=(f"{self.config.name} 竞选 term={self.term}"
+                         f"（voters={len(voters)} quorum={quorum} "
+                         f"lock_wait={lock_wait * 1000:.0f}ms）"),
+                data={"voters": len(voters), "quorum": quorum,
+                      "peer_ages": peer_ages,
+                      "lock_wait_ms": round(lock_wait * 1000, 1),
+                      "force": bool(force)})
+            self._persist_locked()
             body = {"term": term, "candidate": self._self_node(),
                     "last_event": self.events[-1]["id"] if self.events else "",
                     "last_store_seq": self.store.commit_seq() if self.store else 0}
@@ -2772,24 +3096,42 @@ class Cluster:
         finally:
             with self.lock:
                 self._election_inflight = False
+        backoff = 0.0
         with self.lock:
             if (self.role == "candidate" and self.term == term
-                    and len(votes) >= quorum):
+                    and len(votes) >= quorum
+                    and not (self.leader_id
+                             and self.leader_id != self.node_id
+                             and self.leader_lease_until > _now())):
                 # 落后当选也要赢，但赢下来先对齐 store 再服务写：不让新主控拿
                 # 旧 commit_seq 起一段新 oplog（那才是「孤身称主」的真危险）。
                 self._store_lag_target = max(
                     store_ahead,
                     self.store.commit_seq() if self.store else 0)
                 self._become_leader_locked()
+                self._election_failures = 0
+                self._next_election_at = 0.0
                 self._persist_locked()
                 became = True
             else:
                 became = False
+                self._election_failures += 1
+                backoff = self._election_backoff_locked()
+                self._next_election_at = _now() + backoff
+                self._emit_locked(
+                    "election_failed",
+                    message=(f"term={term} 未获多数（{len(votes)}/{quorum}），"
+                             f"{backoff:.1f}s 后随机重试"),
+                    data={"votes": len(votes), "quorum": quorum,
+                          "voters": len(voters), "backoff_s": round(backoff, 2)})
+                self._persist_locked()
         if became:
-            _log(f"当选主节点：term={term}（{len(votes)}/{quorum} 票）")
+            _log(f"当选主节点：term={term}（{len(votes)}/{quorum} 票，"
+                 f"voters={len(voters)}，lock_wait={lock_wait * 1000:.0f}ms）")
             self._heartbeat_once()
         else:
-            _log(f"本轮选举未获多数：term={term}（{len(votes)}/{quorum} 票）")
+            _log(f"本轮选举未获多数：term={term}（{len(votes)}/{quorum} 票，"
+                 f"voters={len(voters)}，退避 {backoff:.1f}s）")
         return became
 
     def _adopt_higher_term_locked(self, term: int, leader=None) -> None:
@@ -2904,7 +3246,7 @@ class Cluster:
     def _follower_heartbeat(self, leader_url: str, body: dict) -> None:
         code, resp = http_json(str(leader_url).rstrip("/") + "/api/cluster/heartbeat",
                                "POST", body, 1.0, self.config.token)
-        with self.lock:
+        with self._timed_lock() as lock_wait:
             if isinstance(resp, dict):
                 self._leader_fail_at = None
                 leader = resp.get("leader")
@@ -2929,6 +3271,14 @@ class Cluster:
                 self._leader_fail_at = _now()
                 if (self.leader_lease_until and _now() > self.leader_lease_until
                         and self.role != "leader"):
+                    voters = self._voter_ids_locked()
+                    ages = [round(max(0.0, _now() - float(
+                        (self.nodes.get(nid) or {}).get("last_seen_epoch") or 0.0)), 1)
+                        for nid in voters if nid != self.node_id]
+                    _log(f"主控心跳超时：term={self.term} voters={len(voters)} "
+                         f"quorum={self._quorum_locked()} "
+                         f"peer_age={max(ages) if ages else 0:.1f}s "
+                         f"lock_wait={lock_wait * 1000:.0f}ms")
                     self._clear_leader_locked("心跳超时")
         target = int((resp or {}).get("store_commit_seq") or 0) if isinstance(resp, dict) else 0
         if (self.store is not None and target > self.store.commit_seq()
@@ -3041,7 +3391,8 @@ class Cluster:
         # 若每轮都写 state.json 会把磁盘打满。
         self._persist()
         # 长期不变式：启动后新增的卡也要进 store 并让所有副本追平。
-        self._maybe_reconcile_store_cards()
+        # 读卡面要跑 git，必须放后台；维护循环只负责发起，不陪它等。
+        self._schedule_store_reconcile()
         if refresh_advertise and self._refresh_advertise():
             # 地址变了就立刻广播一次：否则同伴还会按旧地址发包，直到租期超时
             # 把本机判死——这正是「全群认为主节点已死」的起点。
@@ -3096,6 +3447,10 @@ class Cluster:
                         # 别让「刚启动、还没握手」的节点先把自己选成主节点，回头
                         # 再拿更高 term 去顶掉已有的主节点。
                         self._leader_lost_at = _now()
+                        # 高优先级节点的 delay 是 0，光设置 lost_at 挡不住它。
+                        # 至少留 1s / 两个选举窗口，够一轮发现+注册+心跳。
+                        self._startup_grace_until = _now() + max(
+                            self.config.election_min * 2, 1.0)
                     else:
                         # 真正的单机 / 明确关发现 / 无 seed：立即具备当选条件。
                         self._leader_lost_at = _now() - self.config.election_min - 1
@@ -3203,6 +3558,20 @@ class Cluster:
         for peer in peers:
             try:
                 http_json(str(peer["url"]).rstrip("/") + "/api/cluster/resign",
+                          "POST", body, 0.5, self.config.token)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _leave_peers(self) -> None:
+        """优雅退出时请同伴把自己从成员表删掉（缩短 quorum 回落时间）。"""
+        with self.lock:
+            peers = [dict(rec) for nid, rec in self.nodes.items()
+                     if nid != self.node_id and rec.get("url")
+                     and self._node_status_locked(rec) in ("alive", "suspect")]
+            body = {"node": self._self_node(), "node_id": self.node_id}
+        for peer in peers:
+            try:
+                http_json(str(peer["url"]).rstrip("/") + "/api/cluster/leave",
                           "POST", body, 0.5, self.config.token)
             except Exception:  # noqa: BLE001
                 pass
@@ -3949,30 +4318,9 @@ def build_handler(cluster: Cluster):
 
         def _route_get(self, path, query):
             if path == "/api/cluster/health":
-                snap = cluster.snapshot()
-                me = snap.get("self") or {}
-                leader = snap.get("leader") or {}
-                # health 是免 token 的：只给最小身份信息，不泄露 agents/本地路径。
-                self._send(200, {
-                    "ok": True,
-                    "node": {"id": me.get("id"), "name": me.get("name"),
-                             "url": me.get("url")},
-                    "role": snap["role"], "term": snap["term"],
-                    "leader": ({"id": leader.get("id"), "name": leader.get("name"),
-                                "url": leader.get("url")} if leader else None),
-                    "cluster_id": snap["cluster_id"], "protocol": PROTOCOL,
-                    "uptime_s": round(_now() - cluster.started_epoch, 1),
-                    "peers": snap["alive"], "quorum": snap["quorum"],
-                    "mcp": (cluster.mcp_service.status()
-                            if cluster.mcp_service is not None else {"enabled": False}),
-                    "store": (cluster.store.summary()
-                              if cluster.store is not None else {"enabled": False}),
-                    "archive": (cluster.archive_agent.status()
-                                if cluster.archive_agent is not None else {"running": False}),
-                    "coordinator": (cluster.coordinator_agent.status()
-                                    if cluster.coordinator_agent is not None
-                                    else {"enabled": False}),
-                })
+                # 走无锁缓存：长 git/store 操作持锁时也必须秒回，否则同伴会
+                # 把「健康检查超时」误判成本机死亡，提前发起选举。
+                self._send(200, cluster.health_payload())
                 return
             if not self._authorized():
                 self._send(401, {"ok": False, "error": "token 不匹配"})
