@@ -1,0 +1,49 @@
+{
+  "task": "T-0321",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0321",
+  "base": "main",
+  "head": "833ba145e53250577eb3d5bc574257aa06bcdb63",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T21:09:41+08:00",
+  "finished_at": "2026-11-10T21:25:49+08:00",
+  "duration_s": 968.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/scenarios/",
+      "code": 0,
+      "tail": [
+        "0.35s teardown tests/scenarios/test_mvp_surface.py::test_http_json_scenario",
+        "0.01s setup    tests/scenarios/test_mvp_surface.py::test_http_json_scenario",
+        "",
+        "(7 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "8 passed in 63.76s (0:01:03)"
+      ]
+    }
+  ],
+  "summary": "# T-0321 Light 生态最小可用面（MVP Surface）\n\n## 交付内容\n\n- `docs/MVP_SURFACE.md`：定义 MVP Surface = 真实项目最常用的 20%，按五个方向列出状态（稳定/实验/缺失）、真实入口 API、已知坑、示例路径、最近验证日期；附本机实跑结果表、跨平台判据说明、4 条建议另开卡的坑。\n- `examples/mvp/`：五个可直接 `light run` 的完整示例，每个 ≤60 行：\n  - `01_file_io.light`：临时目录写 → 读 → 逐行统计 → 删文件删目录\n  - `02_http_json.light`：本机 HTTP GET → 状态码 → JSON 解析 → 取字段\n  - `03_process.light`：子进程 stdout/stderr → 非零退出码捕获\n  - `04_test_framework.light`：断言工具 3 条断言 + 1 条预期失败被捕获\n  - `05_pkg_module.light` + `统计工具.light`：同目录跨模块导入调用\n- `tests/scenarios/test_mvp_surface.py`：逐个真跑 5 个示例（subprocess 调 `python -m cli.light run`），网络场景在测试内起 `127.0.0.1` 随机端口 `http.server`，不依赖外网；另含示例 ≤60 行、文档覆盖五方向、一键脚本 --json 校验。\n- `scripts/run_scenarios.py`：一键跑 5 个场景，默认输出 `场景 | 结果 | 耗时(ms)` 表格，任一失败 rc=1；`--json` 输出结构化结果。\n\n## 验证\n\n- 命令：`python -m pytest -q tests/scenarios/`\n- 结果：`8 passed in 69.64s`\n- `python scripts/run_scenarios.py`：5/5 通过，rc=0（耗时明细见 docs/MVP_SURFACE.md）\n\n## 结论与坑\n\n五方向全部达到「稳定」并真跑通过，唯独 `light pkg run` 跨模块仍是缺失：生成代码执行时 `No module named '<模块>'`（退出码 3），且把生成 Python 全量打到 stdout；因此示例 05 走已验证可用的 `light run` + `从 … 导入` 路线，并在文档中标为缺失 + 建议另开卡。\n\n其他记录在文档里的坑：\n1. `导入 网络请求。` 后 `网络请求.获取(...)` 报 `'module' object is not subscriptable`，必须 `从 网络请求 导入 获取`。\n2. `导入 文件系统。` 后 `文件行列表` 未绑定，必须写 `文件系统.文件行列表`；其余文件函数可裸用，导出绑定不一致。\n3. `外部命令.light` 只有导出声明、无实现体，易被误认为纯光明实现。\n\n未修改 `stdlib/`，未引入第三方依赖，示例不联网、不写用户目录（临时目录用完即删）。",
+  "error": "",
+  "declared_paths": [
+    "docs/MVP_SURFACE.md",
+    "examples/mvp/",
+    "tests/scenarios/",
+    "scripts/run_scenarios.py"
+  ],
+  "changed_files": [
+    "docs/MVP_SURFACE.md",
+    "examples/mvp/01_file_io.light",
+    "examples/mvp/02_http_json.light",
+    "examples/mvp/03_process.light",
+    "examples/mvp/04_test_framework.light",
+    "examples/mvp/05_pkg_module.light",
+    "examples/mvp/统计工具.light",
+    "scripts/run_scenarios.py",
+    "tests/scenarios/test_mvp_surface.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "a02c6e2819804f14a87e02e4f574f745",
+  "store_write_error": "T-0321 结果写入 leader store 失败（已尝试 4 次）：T-0321 的租约已过期，结果被拒（lease lost）"
+}
