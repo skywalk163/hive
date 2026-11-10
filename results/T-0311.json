@@ -1,0 +1,44 @@
+{
+  "task": "T-0311",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0311",
+  "base": "main",
+  "head": "0c1fd19f95f3513b24a85b3c64410dd753372435",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T17:17:50+08:00",
+  "finished_at": "2026-11-10T17:36:42+08:00",
+  "duration_s": 1132.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_control_adapter.py",
+      "code": 0,
+      "tail": [
+        "............                                                             [100%]",
+        "12 passed in 2.47s"
+      ]
+    }
+  ],
+  "summary": "# T-0311 控制面接入 hive cluster serve\n\n## 前置说明\n\n`T-0311` 原本只是 `docs/控制面v0.5-实现约定.md` §3.10 里的规划编号，协调仓\n`tasks/` 中 T-0310~T-0315 整批未建卡（T-0309 之后直接跳到 T-0316），\n`hive_claim` 返回「没有任务 T-0311」。经确认后按契约补建了任务卡并推送 main，\n再领取本卡走完整流程。未改动其它任务卡与 `agents/` 配置。\n\n## 实现\n\n只改了 `paths` 内的 3 个文件：\n\n1. **`hive_control/adapter.py`（新增）** — `ClusterControlAdapter`，duck-typed\n   接 `cluster`，不 import `hive_cluster`。实现 `start` / `stop`（均幂等）、\n   `status`、`request_pull(body) -> (202, {request_id,...})`、\n   `pull_status(request_id) -> (200|202|404, ...)`；`peer_provider` 从\n   `cluster.nodes` 取 `url` 的 host + 控制端口，`local_agents` 从\n   `cluster._local_agents()` 取。`status()` 含 `multicast_mode`、\n   `control_leader`、`control_epoch`、队列长度、计数。适配器自身**不打开任何\n   端口、不起线程**。\n2. **`hive_cluster.py`（+71 行）**\n   - `Config.control_plane`（默认 False）与 `Config.control_limits`：进程内\n     内部属性，不读环境变量、不写进 `config.json` 白名单。\n   - `Cluster._start_control_plane()` / `_stop_control_plane()` /\n     `control_status()` / `control_request_pull()` / `control_pull_status()`。\n     `start()` 按开关装配；`stop()` 第一行先停控制面。\n   - `run_cli` 的 `action == \"serve\"` 分支把 `config.control_plane = True`\n     （后台 `start`/`restart` 最终也 spawn `cluster serve`，同样走这里）。\n   - 新增 `GET /api/cluster/status`、`POST /api/cluster/pull`、\n     `GET /api/cluster/pull/status?id=...`。旧 `GET /api/cluster/state`\n     一字未动。\n3. **`tests/test_control_adapter.py`（新增）** — 12 个用例，覆盖 D14 默认值、\n   serve 入口、启停幂等与 stop 顺序、适配器状态/拉取/校验/plane 委托，\n   以及三个 HTTP 端点在开关关闭(503)与开启(200/202/404/400)两种情形下的行为。\n\n## D14 的落点\n\n「只有 serve 入口开启，程序化 Cluster 默认关闭」由 `Config.control_plane`\n默认值 + `run_cli(serve)` 显式置位实现；适配器不碰端口，所以既有测试实例\n`Cluster(config)` 不会去抢 47899。测试 `test_programmatic_cluster_does_not_start_control_plane`\n与 `test_config_control_plane_off_by_default` 直接断言这一点。\n\n## 依赖降级（如实说明，未硬凑）\n\n编排器 `hive_control/plane.py`（T-0310）尚未落地。适配器通过可选\n`plane_factory` / 软导入装配：plane 存在时委托 `start`/`stop`/`status`/\n`request_pull`；不存在时 `status()` 返回 `plane_available=False`、\n`degraded=True`、`multicast_mode=\"off\"`，`request_pull` 仍返回 202 与\n`request_id`，只维护本地请求状态（queue 计数真实）。**没有伪造选举结果、\n组播状态或拉取数据**，等 T-0310 落地后无需改本卡接口即可接上真实编排器。\n\n## 验证输出\n\n```\n$ python -m pytest -q tests/test_control_adapter.py\n............                                                             [100%]\n12 passed in 8.54s\n\n$ python -m pytest -q tests/test_control_*.py\n........................................................................ [ 39%]\n........................................................................ [ 78%]\n............ssssssss                                                     [100%]\n176 passed, 8 skipped in 7.40s\n```\n\n控制面全套 10 个文件 176 passed / 8 skipped，说明 D14 未干扰既有实例。\n\n另外跑过 `python -m pytest -q`（全套 82 个测试文件）尝试查回归，7 分钟内\n没跑完被超时终止，未产生失败结论；这不作为验收依据，卡面 verify 已全绿。\n\n## 环境坑（现场记录）\n\nWindows 上 PATH 里第一个 `python` 是 WorkBuddy 自带的 3.13，起初**没有\npytest**，直接跑卡面 verify 会假失败。已给该解释器 `pip install pytest`\n（现 9.2.0），`python -m pytest -q ...` 可正常执行。未使用任何 token / 密钥，\n卡面只写了 `.env` 变量名，未写入值。\n\n## 契约遵守\n\n- 只改 `hive_control/adapter.py`、`hive_cluster.py`、\n  `tests/test_control_adapter.py`（`git status` 只有这 3 项）。\n- 未动其它任务卡、`agents/` 配置、token / 密钥。\n- 未使用 `head`/`grep`/`awk` 或 POSIX 判据，verify 是纯 pytest 命令。",
+  "error": "",
+  "declared_paths": [
+    "hive_control/adapter.py",
+    "hive_cluster.py",
+    "tests/test_control_adapter.py"
+  ],
+  "changed_files": [
+    "inbox/workbuddy-win11/T-0311.md",
+    "tasks/T-0311.md",
+    "hive_cluster.py",
+    "hive_control/adapter.py",
+    "tests/test_control_adapter.py"
+  ],
+  "out_of_paths": [
+    "inbox/workbuddy-win11/T-0311.md",
+    "tasks/T-0311.md"
+  ],
+  "lease_id": "b25094cd738445629cefdffd35cfd896",
+  "fence": 1
+}
