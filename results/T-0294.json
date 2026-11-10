@@ -1,0 +1,53 @@
+{
+  "task": "T-0294",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "failed",
+  "branch": "task/T-0294",
+  "base": "main",
+  "head": "802a9a0be72d3c705282ab4aa899ce8da4b7410e",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T09:26:06+08:00",
+  "finished_at": "2026-11-10T09:26:06+08:00",
+  "duration_s": 1.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_election_safety.py",
+      "code": 0,
+      "tail": [
+        "...........                                                              [100%]",
+        "11 passed in 5.84s"
+      ]
+    },
+    {
+      "cmd": "python -c \"import pathlib; s=pathlib.Path('hive_cluster.py').read_text(encoding='utf-8'); assert 'return 1 if voters <= 1 else' not in s, '无多数仍放行单票当选'; assert 'election_backoff' in s, '缺少选举退避'; print('election-safety-ok')\"",
+      "code": 0,
+      "tail": [
+        "election-safety-ok"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_cluster.py",
+      "code": 1,
+      "tail": [
+        "FAILED tests/test_cluster.py::test_store_election_restriction - AssertionErro...",
+        "FAILED tests/test_cluster.py::test_force_vote_overrides_store_behind - Assert...",
+        "FAILED tests/test_cluster.py::test_force_vote_can_be_disabled - AssertionErro...",
+        "3 failed, 69 passed in 278.67s (0:04:38)",
+        "[hive-cluster 09:22:49] 采纳主控 a（来源 _merge_snapshot_locked，term=1，签租=True）"
+      ]
+    }
+  ],
+  "summary": "# T-0294 选举安全：与 T-0299 合并后的最终交付（续做）\n\n## 一、结论先说（重要）\n\n**本卡的核心缺陷已被 T-0299（`6228389` / `7d3e1ee` land 到 main）修复**，两者改的是\n同一段代码（`hive_cluster.py` 的 quorum / 选举 / 退避）。T-0294 的上一轮提交\n（`2d9e024`，workbuddyai-win）基于旧 main；若强行合入会与 T-0299 的重写直接冲突，\n并有把已落地修复改回去的风险。因此本轮按「不重复造轮子」处理：\n\n1. 把本分支 rebase/重置到**当前 main（`7d3e1ee`，含 T-0299）**；\n2. **不再改 `hive_cluster.py`**（T-0299 已覆盖本卡全部语义，见第二节逐条对照）；\n3. 本卡的实际交付改为 `tests/test_election_safety.py` —— 用独立回归用例把\n   T-0294 的安全判据钉死在已落地实现上，防止后续改动把病放回来。\n\n## 二、T-0294 判据 vs 已落地实现（T-0299）逐条对照\n\n| 卡面要求 | 已落地实现（main） | 本卡回归用例 |\n| --- | --- | --- |\n| 去掉 `voters<=1 -> quorum=1` 退化；quorum 取已知成员多数 | `_quorum_locked()` = `_voter_ids_locked()//2+1`；成员用 `membership_ttl`(默认 300s) 兜底，不再按 4s alive 过滤 | `test_quorum_counts_known_members_not_alive_pool`、`test_expired_members_leave_the_voter_pool` |\n| 票池不足多数时禁止自任 leader | 向**全部已知成员**拉票；`len(votes) < quorum` 一律不当选 | `test_isolated_with_known_members_cannot_elect_itself`、`test_isolated_preferred_does_not_get_leadership` |\n| 失败退避（指数 + 抖动，收到 leader 心跳/当选后重置） | `_election_backoff_locked()`：`min(base*2**(n-1), 4×election_min) × U(0.8,1.2)`，`_next_election_at` 闸门；成功当选清零 | `test_failure_sets_backoff_and_blocks_immediate_retry`、`test_backoff_grows_exponentially_and_is_capped`、`test_backoff_resets_after_winning` |\n| 每次退避/拒绝当选 emit 审计事件 | `election_started`（带 voters/quorum/peer_ages/lock_wait）、`election_failed`（带 votes/quorum/voters/backoff_s） | 同上（断言事件与字段） |\n| 单机/小集群保留自举，不能一刀切 | `voters<=1` 返回 1；`allow_single_vote` 显式开关默认关 | `test_single_member_cluster_still_elects_immediately`、`test_allow_single_vote_is_explicit_optin` |\n| 启动宽限，避免刚启动抢跑称主 | `_startup_grace_until = now + max(2×election_min, 1s)` | `test_startup_grace_blocks_early_claim` |\n\n### 与卡面数值有出入、但**有意不改**的两点\n- 卡面建议退避 `base=3s / max=30s`；T-0299 落地的是 `cap = 4×election_min`（默认\n  12s）+ ±20% 抖动。T-0299 的验收明确要求「三节点停主秒级选主」，30s 上限与之\n  冲突，且 T-0299 已 land 并被其用例保护，本卡不擅自改回。\n- 卡面建议 `preferred_leader` 零延迟只在「能看到多数同伴」时生效。T-0299 改成\n  「按优先级直接 CLAIM，孤立者拉不到票自然失败」，安全性由 quorum 保证；\n  本卡只钉「孤立时不得称主」这个结果（`test_isolated_preferred_does_not_get_leadership`）。\n\n## 三、验证结果（本分支 = main(7d3e1ee) + 本卡测试文件）\n\n- verify 1 `python -m pytest -q tests/test_election_safety.py` → **11 passed**（本卡新增）\n- verify 2 静态判据 → **election-safety-ok**（main 上 `return 1 if voters <= 1 else`\n  已不存在；`election_backoff` 子串由 `_election_backoff_locked` 提供）\n- verify 3 `python -m pytest -q tests/test_cluster.py` → **有既有红**，见下。\n\n### verify 3 的红是 main 上的既有回归，与本卡无关\n在**未做任何改动的 main（`7d3e1ee`）**上单跑这三条，确定性失败：\n\n```\nFAILED tests/test_cluster.py::test_store_election_restriction\nFAILED tests/test_cluster.py::test_force_vote_overrides_store_behind\nFAILED tests/test_cluster.py::test_force_vote_can_be_disabled\n```\n\n成因是 T-0295 把 `strict_store_freshness` 默认改 False 后旧用例未同步\n（T-0299 的总结里也原样记录了这三条失败）。它们属于**投票内容校验/store 闸门**，\n本卡红线明确「不改投票内容校验（store_behind 见 T-0295）」，且 `tests/test_cluster.py`\n不在本卡可改路径内 —— 所以这三条红本卡**不修、也修不了**，不是本次交付引入的。\n\n## 四、历史（本卡前两轮做过什么、为什么被取代）\n\n- `2d9e024`（workbuddyai-win）：在旧 main 上实现了 quorum 钉成员数 +\n  指数退避 + 靴带期 + 投票往返存活证据，并把 `tests/test_election_safety.py`\n  写成 16 条用例；当时 verify 1/2 绿、verify 3 因时序用例红。\n- 本轮接手的未提交二轮改动：把「票池不足多数就禁止参选」与「平票快速重试」\n  做了一轮 A/B。\n- 这些实现与 T-0299 大范围重叠。T-0299 land 后旧分支已无合入价值，故本轮\n  放弃重复实现，只交付回归用例（见第一节）。\n\n## 五、红线自查\n\n- 只改本卡 paths 内文件（`tests/test_election_safety.py`；`hive_cluster.py` 本轮未改）；\n- 不动其它任务卡、agents 配置、`state.json`、运行时配置；\n- 未写入任何 token / 密钥；\n- 未改动 store 协议 / 投票内容校验 / `hive.py`。",
+  "error": "verify 未通过",
+  "declared_paths": [
+    "hive_cluster.py",
+    "tests/test_election_safety.py"
+  ],
+  "changed_files": [
+    "tests/test_election_safety.py"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
