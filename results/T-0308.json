@@ -1,0 +1,37 @@
+{
+  "task": "T-0308",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0308",
+  "base": "main",
+  "head": "ba9cd7c1004c9230f71e75f96d319ff032dbb4a8",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T12:37:43+08:00",
+  "finished_at": "2026-11-10T12:39:24+08:00",
+  "duration_s": 101.7,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_control_lease.py",
+      "code": 0,
+      "tail": [
+        "...............                                                          [100%]",
+        "15 passed in 0.20s"
+      ]
+    }
+  ],
+  "summary": "## T-0308 控制面租约\n\n- 新增 `hive_control/lease.py::LeaseBook`：本地 `claimed/running/releasing` 建租约，\n  `note()` 记录 owner/版本/`last_renewal_at`，同版本只刷新时间，新版本重置周期，\n  `released/steady/expiring` 直接清理；`renewals_due()` 每 `lease_ttl/3`（30s）\n  产出续约副本（version 不变、updated_at 刷新）；`expired()` 超 90s 产出\n  `state=\"expiring\" / urgent=True` 的提示副本（version 不变，D4 不安装、不碰 Git），\n  同一租约每 ttl 最多提示一次；`on_leader_change()` 设 30s 宽限，宽限内恒空。\n- 全部时间走注入时钟，记录加 `RLock` 保护；`status()` 汇报租约数/本地数/到点数/\n  宽限剩余。\n- `lease_ttl` / `grace_period` 用可选关键字参数（默认 90/30，与 ControlConfig 一致），\n  因为 `Limits` 里没有这两项；后续 T-0310 装配时从 `ControlConfig` 传入即可。\n- 新增 `tests/test_control_lease.py`：90s 过期、30s 续约、宽限 30s、提示只发一次、\n  续约复位计时、released 清理、版本更新/旧版本不误判、自定义窗口、status。\n- 验证：`python3 -m pytest -q tests/test_control_lease.py` → 15 passed；\n  另跑 model/view/lease 共 58 passed。\n- 风险：`renewal=True` 无法写进 `StateEntry`（骨架冻结），以“同版本条目=续约”\n  识别；Leader 收到同版本上行即刷新计时，语义一致。",
+  "error": "",
+  "declared_paths": [
+    "hive_control/lease.py",
+    "tests/test_control_lease.py"
+  ],
+  "changed_files": [
+    "hive_control/lease.py",
+    "tests/test_control_lease.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "34cff211f3b249ea9830ff977b0da9b6",
+  "fence": 1
+}
