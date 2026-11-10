@@ -855,11 +855,18 @@ def _control_reporter():
 
 
 def _control_card(tid: str) -> dict:
-    """按当前协调仓目录读卡面；读不到返回空 dict（best-effort 兜底）。"""
+    """按当前协调仓目录读卡面；读不到返回空 dict（best-effort 兜底）。
+
+    控制面上报路径必须保持纯本地：不触发 Git fetch / 网络拉取，也不读本机
+    store 覆盖（测试与冷启动场景下都不该为一条进度上报去碰网络）。
+    """
     try:
         hive_dir = os.environ.get("HIVE_DIR", ".").strip() or "."
-        h = Hive(hive_dir)
-        return h.card(tid)
+        p = Path(hive_dir) / "tasks" / f"{tid}.md"
+        if not p.exists():
+            return {}
+        data, _ = parse_card(p)
+        return data or {}
     except Exception:  # noqa: BLE001  卡面缺失/解析失败都不该打断上报
         return {}
 
@@ -869,15 +876,6 @@ def _control_owner(tid: str, payload: dict, card: dict) -> str:
     if owner:
         return owner
     owner = str(card.get("owner") or "").strip()
-    if owner:
-        return owner
-    try:
-        hive_dir = os.environ.get("HIVE_DIR", ".").strip() or "."
-        claim = Hive(hive_dir).claim_info(tid)
-        if isinstance(claim, dict):
-            owner = str(claim.get("agent") or "").strip()
-    except Exception:  # noqa: BLE001
-        owner = ""
     return owner or "unknown"
 
 
