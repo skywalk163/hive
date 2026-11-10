@@ -1,0 +1,113 @@
+#!/bin/sh
+# hive_cluster -- hive 生产集群（hived）常驻服务
+# PROVIDE: hive_cluster
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+#
+# 2026-11-10 现场：生产集群原本是「nohup 拉起的孤儿进程」（PPID=1），
+# 机器重启、OOM、或误 kill -9 之后没有任何东西把它拉起来，集群就永久无主，
+# 整个团队的派单/看板/训练调度一起停摆。本脚本把它交给 daemon(8) 托管：
+# 进程异常退出会被立即重启，开机也自动起来。
+#
+# /etc/rc.conf 里需要：
+#   hive_cluster_enable="YES"
+#   hive_cluster_chdir="/home/skywalk/dswork/hive"
+#   hive_cluster_user="skywalk"
+# 可选：
+#   hive_cluster_state="/home/skywalk/.hive/cluster"   (默认)
+#   hive_cluster_port="8788"
+#   hive_cluster_discovery_port="8789"
+#   hive_cluster_name="fb98"
+#   hive_cluster_mcp="YES"          (默认 YES)
+#   hive_cluster_mcp_port="8790"
+#   hive_cluster_store="YES"        (默认 YES)
+#   hive_cluster_extra_args=""      (追加到 serve 之后的参数)
+
+. /etc/rc.subr
+
+name="hive_cluster"
+rcvar="hive_cluster_enable"
+
+load_rc_config $name
+
+: ${hive_cluster_enable:="NO"}
+: ${hive_cluster_chdir:="/home/skywalk/dswork/hive"}
+: ${hive_cluster_user:="skywalk"}
+: ${hive_cluster_home:="$(eval echo ~${hive_cluster_user} 2>/dev/null)"}
+: ${hive_cluster_state:="${hive_cluster_home}/.hive/cluster"}
+: ${hive_cluster_port:="8788"}
+: ${hive_cluster_discovery_port:="8789"}
+: ${hive_cluster_name:="$(hostname -s)"}
+: ${hive_cluster_mcp:="YES"}
+: ${hive_cluster_mcp_port:="8790"}
+: ${hive_cluster_store:="YES"}
+: ${hive_cluster_extra_args:=""}
+: ${hive_cluster_log:="${hive_cluster_state}/cluster.log"}
+
+command="/usr/sbin/daemon"
+pidfile="${hive_cluster_state}/cluster.pid"
+
+# rc.subr 用 `su -m` 保留调用者环境，HOME 可能是 root 的 `/`，
+# 于是子进程里 $HOME/.hive 会被展开成 //.hive（Permission denied）。
+# 这里显式把正确 HOME 注入，daemon(8) 会原样传给 python。
+export HOME="${hive_cluster_home}"
+
+# daemon(8) 的重启策略：子进程异常退出后 5s 拉起，避免崩溃循环打满 CPU。
+# -r 是「持续重启」，-R 是重启前的等待秒数。
+command_args="-f -r -R 5 -P ${pidfile} -o ${hive_cluster_log} \
+    ${hive_cluster_chdir}/scripts/freebsd/hive-cluster-run.sh"
+
+# 运行前确认仓库与状态目录都在
+required_dirs="${hive_cluster_chdir} ${hive_cluster_state}"
+
+#
+# 停止：daemon -P 只记录了被托管的 pid，杀掉它并不会连带杀掉 python 子进程，
+# 残留的子进程仍占着 8788 端口，下一次 start 就会 EADDRINUSE。
+# 所以这里先 SIGTERM 托管进程，再按命令行精确匹配兜底清理。
+#
+hive_cluster_stop() {
+    if [ -f "$pidfile" ]; then
+        kill -TERM "$(cat "$pidfile")" 2>/dev/null
+    fi
+    # 先礼后兵：让 python 有机会优雅停机（落盘 state.json）
+    pkill -TERM -f "[h]ive.py --dir ${hive_cluster_chdir} cluster serve" 2>/dev/null
+    local i
+    for i in $(seq 1 30); do
+        if sockstat -4 -l -p "${hive_cluster_port}" 2>/dev/null | grep -q ":${hive_cluster_port}"; then
+            sleep 1
+        else
+            break
+        fi
+    done
+    pkill -KILL -f "[h]ive.py --dir ${hive_cluster_chdir} cluster serve" 2>/dev/null
+    rm -f "$pidfile"
+}
+
+hive_cluster_status() {
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        echo "hive_cluster 正在运行（pid=$(cat "$pidfile")）"
+    else
+        echo "hive_cluster 未运行"
+    fi
+}
+
+# daemon 托管时 pidfile 里的 pid 可能已被回收复用，rc.subr 默认的
+# 「pidfile 存在且 kill -0 通过」会误判。这里组合检查：端口在监听 + python
+# 进程存在，才算真的在跑。
+hive_cluster_status_cmd() {
+    port_up=$(sockstat -4 -l -p "${hive_cluster_port}" 2>/dev/null \
+              | grep -c ":${hive_cluster_port}" || true)
+    py=$(pgrep -f "[h]ive.py --dir ${hive_cluster_chdir} cluster serve" | head -1)
+    if [ "${port_up:-0}" -gt 0 ] && [ -n "${py:-}" ]; then
+        echo "hive_cluster is running as pid ${py}."
+        echo "  http://127.0.0.1:${hive_cluster_port}/api/cluster/health"
+        return 0
+    fi
+    echo "hive_cluster is not running."
+    return 1
+}
+
+extra_commands="status"
+status_cmd="hive_cluster_status_cmd"
+
+run_rc_command "$1"
