@@ -1,0 +1,43 @@
+{
+  "task": "T-0316",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0316",
+  "base": "main",
+  "head": "d24d8a72b0213a4d0cfb607a23785362f25d01c4",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T16:07:20+08:00",
+  "finished_at": "2026-11-10T16:29:02+08:00",
+  "duration_s": 1302.4,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_diagnostics_registry.py",
+      "code": 0,
+      "tail": [
+        "..............................................                           [100%]",
+        "============================ slowest 15 durations =============================",
+        "",
+        "(15 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "46 passed in 8.23s"
+      ]
+    }
+  ],
+  "summary": "# T-0316 交付说明：结构化错误码框架（Diagnostic + 19 条码表）\n\n## 一、交付物\n\n| 路径 | 内容 |\n|------|------|\n| `src/diagnostics/__init__.py` | 包出口，导出模型/码表/`explain`/`get`/`to_legacy_entry` |\n| `src/diagnostics/model.py` | `Diagnostic` dataclass：11 字段、`to_dict`/`from_dict`/`to_json`、构造校验 |\n| `src/diagnostics/registry.py` | `Rule` + 19 条码表 + `explain()` / `get()` / `all_codes()` / `duplicate_codes()` / `to_legacy_entry()` |\n| `tests/test_diagnostics_registry.py` | 46 个用例（19 条规则各一组正反例 + 判据测试） |\n| `docs/错误码规范.md` | 码段划分、字段语义、新增码流程、兼容承诺 |\n\n`git status --porcelain` 只有上述 5 个新增路径，**未改** `cli/light.py`、`src/enhanced_errors.py`、`src/errors.py`，无第三方依赖、无联网。\n\n## 二、条数统计与码段分布\n\n**共 19 条规则（≥14），零重复码。**\n\n| 码段 | 含义 | 条数 | 码 |\n|------|------|------|-----|\n| L1 | 词法/语法 | 7 | L1001–L1007 |\n| L2 | 类型 | 3 | L2001–L2003 |\n| L3 | 运行时 | 4 | L3001–L3004 |\n| L4 | 模块/导入 | 2 | L4001–L4002 |\n| L5 | 后端差异 | 3 | L5001–L5003 |\n\nseverity 分布：`error` 12 / `warning` 7 / `info` 0。\n任务卡点名的 8 个高频坑全部覆盖：缺导入 L4001、关键字冲突 L1006、类系统后端不兼容 L5002、列表索引赋值 L3002、`?:` L1004、`&&/||` L1003、段落实参数量 L2001、单行段落空跑 L1007。\n\n出处覆盖：`docs/AI编程指南.md`（六、最容易犯的 14 个错误 + B 段 + 12A 段）、`docs/STDLIB_REFERENCE.md`、`docs/tools.md`、`src/errors.py`、`src/enhanced_errors.py`、`src/keywords.py`、`src/parser_stmt.py`、`src/semantic_analyzer.py`、`src/llvm/codegen_typed.py`、`antlrparser/interpreter_core.py`。每条 `Rule` 都有 `source` 字段与 `# source:` 注释，**没有为凑数编造语言里不存在的问题**。\n\n明确不升级为 error 的 7 条 warning：L1005（linter I007 提示级）、L1007（`parser_stmt.py` 明写「单行段落体是合法语法，不是编译期错误」）、L3002/L3003/L3004（静默行为差异或文档 ⚠️ 陷阱）、L5002/L5003（`docs/tools.md` 暗坑 / 原生腿行为差异）。\n\n## 三、`explain()` 对真实报错的命中示例\n\n| # | 真实报错（仓库出处） | 命中码 | fixes |\n|---|---------------------|--------|-------|\n| 1 | `参数数量错误: 段落「加法」期望 2 个参数，实际传入 3 个`（`src/errors.py:636`） | **L2001** | ① 对照段落定义补齐或删掉多余实参 ② 参数之间用逗号分隔；默认参数可省略 |\n| 2 | `该函数来自『字符串处理』模块（不是未定义变量），请在文件顶部加一行：从 字符串处理 导入 子串位置`（`src/enhanced_errors.py:892`） | **L4001** | ① 按提示在文件顶部补 `从 <模块> 导入 <名字>` ② 全局内置（打印/长/字符串）无需导入 |\n| 3 | `原生后端暂不支持语句类型「YieldStmt」（源码行 12）：原生后端暂不支持，请用转译后端…`（`src/llvm/codegen_typed.py:6841`） | **L5001** | ① 按报错回退指引改用转译后端 `python -m cli.light_unified run` ② 开发调试先用默认 SRC 后端 |\n| 4 | `「空」是保留字（值类型），不可作标识符（变量名/下标名）。请改用其他名称。`（`src/keywords.py:684`） | **L1006** | ① 把作变量名的保留字换成别的名字 ② 对照 `src/keywords.py` 保留字清单避开 |\n\n无关文本（如「完全无关的报错文本」）、空串、非 str 一律返回 `None`，**不造兜底假码**；测试里也验证 `a != b` 不会被 L1003 的 `!` 规则误报。\n\n## 四、判据结果\n\n```\npython -m pytest -q tests/test_diagnostics_registry.py\n→ 46 passed in 12.46s（rc=0）\n```\n\n覆盖：19 条规则各一组正例/反例（反例断言**全局** `explain()` 返回 None）、`explain()` 未命中返回 None、stage 过滤、line=0 序列化保留 0、`to_dict` 字段顺序稳定、`from_dict` 往返相等、忽略未知字段、重复码检测（含人为注入重复码的反向验证，不是弱断言）、`to_legacy_entry` 对全部 19 条诊断的 `format()` 与直接构造 `ErrorEntry` **逐字相等**、warning 不升级验证。\n\n平台说明：本机默认 `python`/`python3` 解析到 managed 3.13.12（**无 pytest**），直接跑 verify 会假红；把 `C:\\Python314` 前置到 PATH 后为 3.14.7 / pytest 9.1.1，并已按 hive submit 的 `shell=True` 方式端到端模拟跑通 rc=0。任务卡提示的 POSIX 判据 `exit 255` 假失败在本卡不适用——verify 是纯 pytest，不含 `head/grep/awk`、`!`、`$()`，无需切 FreeBSD 0.88。\n\n## 五、关键设计\n\n- `Diagnostic` 固定 11 字段，`to_dict()` 顺序稳定可直接 JSON diff；`line/column == 0` = 位置未知，序列化原样保留 0，不从文本猜行号。\n- `provisional=True`：`explain()` 目前是自由文本正则推断，尚未与编译器内部异常绑定；等 T-0317/T-0318 接入真实坐标与带码异常后再翻 `False`。\n- `to_legacy_entry()` 只搬运 `stage/message/line/column/fixes → fix_suggestions`，**不把 code 拼进 message**，保证 `src/errors.py` 现有文本输出逐字不变。\n- 兼容承诺写进规范文档：码发布后不复用、不改变含义；字段顺序不重排；`explain()` 的 `None` 是稳定契约。\n\n## 六、边界与后续\n\n- 定位/人类可读提示（T-0317，`src/enhanced_errors.py`）与 CLI JSON 输出（T-0318，`cli/light.py`）由并行卡接入，本卡未触碰。\n- 本轮 hive MCP server 的 `hive_claim` / `hive_submit` 工具未在当前会话注册（server 仍显示 connecting），因此按**同一套抢锁、worktree、verify、结果落库逻辑**走等效 hive CLI `take` / `submit`；领取成功返回 lease，worktree 与 task 分支均由 hive 自己准备。\n- 同步 hive 仓时，本地 3 个并行 agent 的未跟踪草稿与 `origin/main` 新增文件同名，已先完整备份到 `G:/dswork/duan-light-merge/_tmp_hive_backup_20261110/` 再 ff-only 合并，未删除任何文件；备份与远端版本有差异，未回写覆盖。",
+  "error": "",
+  "declared_paths": [
+    "src/diagnostics/",
+    "tests/test_diagnostics_registry.py",
+    "docs/错误码规范.md"
+  ],
+  "changed_files": [
+    "docs/错误码规范.md",
+    "src/diagnostics/__init__.py",
+    "src/diagnostics/model.py",
+    "src/diagnostics/registry.py",
+    "tests/test_diagnostics_registry.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "b1809ab66384488b89de88e25d2efa58"
+}
