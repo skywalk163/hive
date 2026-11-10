@@ -1,0 +1,37 @@
+{
+  "task": "T-0305",
+  "agent": "dumate-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0305",
+  "base": "main",
+  "head": "7998563c9331eb36fceed1cc35e9aca6bc0f2d3a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T14:27:12+08:00",
+  "finished_at": "2026-11-10T14:38:48+08:00",
+  "duration_s": 696.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_control_uplink.py",
+      "code": 0,
+      "tail": [
+        ".............                                                            [100%]",
+        "13 passed in 0.77s"
+      ]
+    }
+  ],
+  "summary": "# T-0305 控制面上行 TCP 发送器\n\n## 做了什么\n\n新增 `hive_control/uplink.py` 的 `UplinkSender`（按实现约定 §3.4 冻结签名）：\n\n- 从 `UplinkQueue` 取聚合条目，**TCP 单播到 Leader 的 `port+1`**\n  （`limits.uplink_port_offset`，默认 1）；只发 `entry` 行，每行\n  `{\"type\":\"entry\",\"entry\":{...}}`，不做监听/拉取（T-0306 负责）。\n- 指数退避：失败后 500ms 起翻倍，上限 `limits.uplink_backoff_max`（10s），\n  成功清零；退避窗口内不重连、也不取空上报队列。\n- 切主重定向：`set_target()` 只改地址并清零退避，**队列与待发缓冲原样保留**；\n  连接失败时已发出的条目出队、未发的留在待发缓冲，下次继续发（不丢、不重放）。\n- `start()/stop()` 后台线程（`control-uplink`），`send_once()` 同步测试入口，\n  `status()` 给出 target/endpoint/pending/sent/failures/backoff/redirections 等。\n- 所有网络 I/O 有超时（连接 2s），失败路径不阻塞 Worker 上报（I6）。\n\n## 测试\n\n`tests/test_control_uplink.py`，13 条，覆盖：port+1 与线格式、退避序列\n0.5→1→2→4→8→10→10、窗口内不重连、成功清零、切主后待发条目完整送达、\n部分发送断链只丢已发、真实环回 TCP、后台线程启停幂等。\n\n```\npython -m pytest -q tests/test_control_uplink.py   # 13 passed\npython -m pytest -q tests/test_control_uplink.py tests/test_control_uplink_queue.py tests/test_control_pull.py  # 38 passed\n```\n\n## 实现说明 / 需要知道的点\n\n1. **退避初值口径**：母文档 §5.1 与本卡写 500ms，实现约定 §3.4 写\n   「初始 `rxmt_interval`（2s）」且 `Limits` 没有对应字段。本卡按母文档取\n   500ms 作为默认，`initial_backoff=` 可覆盖；`uplink_backoff_max` 走 `Limits`。\n   若集成卡（T-0310）要按 `ControlConfig.rxmt_interval` 装配，传\n   `initial_backoff=config.rxmt_interval` 即可，无需改签名。\n2. **卡面缺失（环境问题）**：`tasks/T-0305.md` 在 main/origin 上都不存在，\n   只有 leader store 里的 ingest 记录，导致 `hive take`/`hive submit` 读不到卡。\n   已按 store payload + 卡面正文补回本地卡文件后完成 take；这不是代码改动，\n   请在合入前确认协调侧是否需要把该卡补提交到 main。",
+  "error": "",
+  "declared_paths": [
+    "hive_control/uplink.py",
+    "tests/test_control_uplink.py"
+  ],
+  "changed_files": [
+    "hive_control/uplink.py",
+    "tests/test_control_uplink.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "1b8d6b88a83946f8acae22a04050f9eb",
+  "store_write_error": "T-0305 结果写入 leader store 失败（已尝试 4 次）：T-0305 的租约已过期，结果被拒（lease lost）"
+}
