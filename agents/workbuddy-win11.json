@@ -1,0 +1,25 @@
+{
+  "name": "workbuddy-win11",
+  "host": "desktop-ic6rtq4",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify"
+  ],
+  "capabilities": [
+    "windows",
+    "gui"
+  ],
+  "repos": {
+    "hive": "C:/dswork/hive",
+    "light": "C:/dswork/light",
+    "lighthive": "C:/dswork/lighthive"
+  },
+  "launch": "",
+  "worktrees": "C:/dswork/hive-wt",
+  "max_concurrency": 1,
+  "created": "2026-11-10T14:18:59+08:00"
+}
