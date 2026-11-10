@@ -1,0 +1,34 @@
+{
+  "task": "T-0312",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0312",
+  "base": "main",
+  "head": "fd3e339fa665eec818ef4583ab37530b2a5fb8b1",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T20:29:38+08:00",
+  "finished_at": "2026-11-10T20:32:27+08:00",
+  "duration_s": 169.8,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_control_plane_e2e.py",
+      "code": 0,
+      "tail": [
+        "...........                                                              [100%]",
+        "11 passed in 8.12s"
+      ]
+    }
+  ],
+  "summary": "# T-0312 交付说明\n\n## 产物\n\n只新增 `tests/test_control_plane_e2e.py`（卡面 paths 内唯一文件），未改动任何其它文件。\n\n## 实现\n\n用一条内存总线 `Bus` 把 3 个真实 `ControlPlane` 连起来，不依赖真实组播 / 网卡 / 外网：\n\n- `BusTransport` 实现 `Transport`：`send_multicast` 广播给所有其他 plane、\n  `send_unicast` 按地址定点投递，逐次记录 kind / 字节 / TTL；\n  `Bus.outbound_ttl` 与 `Bus.inject(..., ttl=...)` 都可注入 TTL。\n- `BusUplinkSender` / `BusPullClient` / `MemoryWorkerServer` / `MemoryTcpServer`\n  分别替换上行 TCP、拉取 TCP、Worker socket、控制面 TCP 监听，全部走同一条总线。\n  选举、视图单调、租约、聚合窗口、下行打包、TTL 校验、full 分页、缺口检测\n  全部是产品代码，不是 mock 出来的结论。\n- 注入 `Clock` + `start_threads=False`，由 `tick()` 确定性推进；单段真实\n  sleep 最大 0.05s（`wait_for` 轮询 0.01s），整套用例累计耗时 < 30s。\n- 注入同速率 `BandwidthProbe(speed_mbps=1000)`，让排名完全由 priority 决定，\n  不依赖「网卡速率探测不到」的平台相关回落路径。\n\n## 覆盖判据（11 个用例）\n\n1. 3 节点不同 priority 在 0.05s 级虚拟等待后收敛到唯一 Leader，leader_id 一致。\n2. I3：总线上所有 multicast 记录的发送方只有 Leader，follower 组播次数为 0。\n3. Leader 本地 claim → 两个 follower 安装并各收到 1 次 Worker 通知。\n4. follower 上报 claimed → Leader 视图出现并进下行队列；旧版本不覆盖、不回传、不发包。\n5. I4：端到端注入 TTL=2 的包被丢弃并计 `ttl_violations`；同条目 TTL=1 的\n   A/B 对照必须正常安装并通知。\n6. I5：同 `(incarnation, version)` 重复包与旧版本不重复通知、不覆盖视图。\n7. 切主：Leader `stop()` 后心跳超时窗口内产生次高优先级新 Leader、epoch 单调\n   增大；「未发上行」pending 不丢，新 Leader 出现后继续投递成功。\n8. G5：人工 full 拉取 5 条 / 3 页全收，不产生任何下行事件、不入下行队列。\n9. gap：连续 3 个「收到下行但 0 安装」周期产生 incremental 拉取请求（带 watermarks）。\n10. G1：`report()` 调用线程零网络 I/O；G3：上行队列满优先淘汰 steady、保留瞬态。\n11. 本文件用例累计耗时 < 30s（用 autouse 夹具累计，避免被全量 pytest 会话带上时假红）。\n\n## 本机复跑\n\n```\nC:/Python314/python.exe -m pytest -q tests/test_control_plane_e2e.py\n→ 11 passed\n```\n\n连跑 5 次分别 10.29s / 7.64s / 11.04s / 8.45s / 8.97s / 7.91s，均 < 30s、无 flaky。\n注意：本机 Bash 的 `python` 默认解析到 managed 3.13（无 pytest），本地验证一律用\n`C:/Python314/python.exe`（Python 3.14.7 / pytest 9.1.1）。系统 Machine PATH 中\n`C:\\Python314\\` 排在最前，MCP server 的 verify 应能解析到同一解释器。\n\n## 环境 / 过程记录\n\n- 主工作区存在未跟踪的 `hive_control/plane.py`、`tests/test_control_plane.py`\n  （其他任务产物），本卡未改动；worktree 基于 `origin/main`（`ea26bc0`，T-0311 已合入）\n  干净检出。\n- 领取走 store 后端，10 分钟租约在交付前过期且 store 拒绝续期；已用\n  `store_claim` 重新取得 `lease_seq=2` 的有效租约，并同步本地 lease 留底的\n  `lease_id`，再执行提交。\n- 测试内所有判据都是 Python 断言，不含 `head/grep/awk` 等 POSIX 命令，\n  不受 Windows `exit 255` 假失败影响。",
+  "error": "",
+  "declared_paths": [
+    "tests/test_control_plane_e2e.py"
+  ],
+  "changed_files": [
+    "tests/test_control_plane_e2e.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "4a7b59f6dc2e4f06b990bd6874f766da"
+}
