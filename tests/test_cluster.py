@@ -638,12 +638,53 @@ def test_non_preferred_node_yields_a_window(cluster_factory):
 
 
 def test_preferred_offline_falls_back(cluster_factory):
-    """首选节点不在线 / 不存在时退回默认延迟，不能拖慢整个集群。"""
+    """首选节点不在线 / 不存在时，本机立刻可竞选 —— 不能拖慢整个集群。
+
+    T-0328 之后更快：首选不在时本机就是最强候选，delay=0 直接 CLAIM。
+    用户明确要求「单台机器自己就是主」，不该再等 election_min。
+    """
     a = cluster_factory("a", preferred_leader="ghost-node")
     assert wait_until(lambda: a.role == "leader")
     with a.lock:
-        # 只剩自己一个 voter，rank=0 → 就是 election_min，没有额外惩罚
-        assert a._election_delay_locked() == a.config.election_min
+        assert a._election_delay_locked() == 0.0, \
+            "首选不在线、又没有更强节点时，本机应当立刻竞选"
+
+
+def test_single_node_becomes_leader_immediately(cluster_factory):
+    """单机必须直接当主（用户原话：单台机器自己就是主啊）。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader", timeout=5)
+    with a.lock:
+        assert a._election_delay_locked() == 0.0
+        assert a._has_stronger_peer_locked() == ""
+
+
+def test_higher_priority_joins_but_does_not_preempt(cluster_factory):
+    """后加入的高优先级节点**不抢**在任主控（OSPF DR 的 non-preemptive）。
+
+    用户原话：「竞争得主后，不手工关闭，几乎不会丢失主」。
+    """
+    a = cluster_factory("a", leader_priority=1)
+    assert wait_until(lambda: a.role == "leader")
+    b = cluster_factory("b", seeds=[a.url], leader_priority=9)
+    assert wait_until(lambda: b.leader_id == a.node_id, timeout=8)
+    # 稳定一段时间：b 虽然更强，但 a 是在任主控，不该被顶掉
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        assert a.role == "leader", "在任主控不得被后加入的高优先级节点顶掉"
+        assert b.role == "follower"
+        time.sleep(0.1)
+    # 但 b 自己知道"我更强"（无主时它才会接手）
+    with b.lock:
+        b.leader_id = None
+        b.leader_lease_until = 0.0
+        assert b._has_stronger_peer_locked() == ""
+    with a.lock:
+        a.leader_id = None
+        a.leader_lease_until = 0.0
+        a.role = "follower"
+        assert a._has_stronger_peer_locked() == b.node_id, \
+            "无主状态下，优先级高的 b 应当被认作更强候选"
 
 
 def test_force_vote_overrides_store_behind(cluster_factory):
@@ -745,62 +786,71 @@ def test_higher_priority_gets_shorter_delay(cluster_factory):
     assert db < da, (da, db)
 
 
-def test_same_priority_random_backoff(cluster_factory):
-    """同优先级用随机退避（CSMA/CD），不再按 node_id 固定排序。
+def test_same_priority_resolved_deterministically(cluster_factory):
+    """T-0328：同优先级不再随机抢（CSMA/CD），改为**确定性**择优。
 
-    两个节点的延迟都落在 [election_min, election_min+jitter] 里；撞车后由失败
-    退避再随机一轮，最终只会有一个主控。
+    原实现让两台同优先级机器随机退避、谁快谁当。那会撞车、要重选一轮，
+    也无法回答"谁更强"。现在用 priority → link_speed → node_id 四级链，
+    全集群对同一对候选算出同一个答案，于是不需要竞争。
     """
     a = cluster_factory("a", leader_priority=3)
     assert wait_until(lambda: a.role == "leader")
     b = cluster_factory("b", seeds=[a.url], leader_priority=3)
-    assert wait_until(lambda: b.leader_id == a.node_id)
-    with a.lock, b.lock:
-        da = a._election_delay_locked()
-        db = b._election_delay_locked()
-        lo = a.config.election_min
-        hi = a.config.election_min + a.config.election_jitter
-    assert lo <= da <= hi, da
-    assert lo <= db <= hi, db
+    assert wait_until(lambda: b.leader_id == a.node_id, timeout=8)
 
-    # 主控消失后，两台同优先级节点应该通过随机退避选出一个（而不是都自封）。
+    with a.lock, b.lock:
+        # 双方对"谁更强"必须给出**相反**且唯一确定的结论
+        a_beats_b = a._stronger_than_locked(a.node_id, b.node_id)
+        b_beats_a = b._stronger_than_locked(b.node_id, a.node_id)
+        assert a_beats_b != b_beats_a, "全集群口径必须恰好一个赢家"
+        # 在任主控不会被同优先级的后加入者顶掉（non-preemptive，照 OSPF DR）
+        assert b._has_stronger_peer_locked() == "", "在位主控有效时不许预占"
+
+    # 主控消失后，剩下那台立刻接手（不需要凑票、不需要随机退避抢）
     a.stop()
     assert wait_until(lambda: b.role == "leader", timeout=8), \
-        "同优先级僵持后应有一台先 CLAIM 并当选"
+        "主控消失后应立刻由剩下的节点接手"
 
 
-def test_known_member_blocks_single_vote(cluster_factory):
-    """已知成员 >1 时，1 票不能当选；成员过了 TTL 才允许。"""
-    a = cluster_factory("a")
+def test_stronger_reachable_peer_blocks_self_election(cluster_factory):
+    """T-0328 取代 T-0299 的「单票自封」防护：**更强的可达节点**让本机让位。
+
+    T-0299 原先靠 quorum（成员 >1 时 1 票不能当选）挡住自封。T-0328 不再要求
+    凑票（现场连续 382 次「未获多数」导致长期无主），改为择优：只要存在
+    **比我更强且可达**的候选，本机就不上任；没有更强候选时（哪怕只剩自己，
+    或者强的那些已经死了）本机直接当主 —— 主必须被选出来。
+    """
+    a = cluster_factory("a", leader_priority=1)
     assert wait_until(lambda: a.role == "leader")
+
+    # 更强的可达节点（priority 9，last_seen 新鲜 → alive）在等位：本机让位
     with a.lock:
-        a.nodes["ghost"] = {
-            "id": "ghost", "name": "ghost", "url": "http://127.0.0.1:1",
-            "electable": True, "priority": 1,
+        a.nodes["0000-stronger"] = {
+            "id": "0000-stronger", "name": "stronger",
+            "url": "http://127.0.0.1:1", "electable": True, "priority": 9,
             "last_seen_epoch": time.time(), "incarnation": 1,
         }
-        assert a._quorum_locked() == 2, "成员表有 2 台，quorum 必须是 2"
-        # 制造「无主」状态，再走正常选举通道
+        assert a._has_stronger_peer_locked() == "0000-stronger"
         a.role = "follower"
         a.leader_id = None
         a.leader_lease_until = 0.0
         a._leader_lost_at = 0.0
         a._next_election_at = 0.0
         a._last_election = 0.0
-    assert a._start_election() is False, "只有自己一票不能当选"
+    assert a._start_election() is False, "有更强的可达节点时不该自封为主"
     assert a.role != "leader"
-    snap = a.snapshot()
-    failed = [e for e in snap["events"] if e["type"] == "election_failed"]
-    assert failed and failed[-1]["data"]["quorum"] == 2
-    assert failed[-1]["data"]["votes"] == 1
 
-    # 成员超过 TTL 后退出票池，单节点重新具备当选资格
+    # 那个更强的节点死了（超过 dead_timeout）：本机就是最强的，直接当主。
+    # 这正是"主必须选出来"——不能因为票数不够就一直在无主状态。
     with a.lock:
-        a.nodes["ghost"]["last_seen_epoch"] = time.time() - 10
+        a.nodes["0000-stronger"]["last_seen_epoch"] = (
+            time.time() - (a.config.dead_timeout + 5))
         a._next_election_at = 0.0
         a._last_election = 0.0
-        assert a._quorum_locked() == 1
-    assert wait_until(lambda: a.role == "leader", timeout=5)
+        a._leader_lost_at = 0.0
+        assert a._has_stronger_peer_locked() == ""
+    assert wait_until(lambda: a.role == "leader", timeout=5), \
+        "更强的节点失联后，本机应当接手（不能永久无主）"
 
 
 def test_highest_priority_claims_with_zero_delay(cluster_factory):
@@ -981,17 +1031,39 @@ def test_preferred_pointing_at_abstaining_node_does_not_deadlock(cluster_factory
 
 
 def test_zero_jitter_still_orders_by_priority(cluster_factory):
-    """election_jitter 被设成 0 时，优先级不能退化成「同时开跑、谁快谁当」。"""
+    """election_jitter 为 0 时，优先级排序仍然有效（不靠随机数决胜负）。
+
+    注意 T-0328 之后语义变了：无主时**优先级高的节点自己当主**，低优先级
+    节点让位。所以本用例不再断言"b 尊 a 为主"，而是直接验证排序与让位。
+    """
     a = cluster_factory("a", leader_priority=1)
     b = cluster_factory("b", seeds=[a.url], leader_priority=9)
-    assert wait_until(lambda: b.leader_id == a.node_id)
+    assert wait_until(lambda: b.leader_id is not None, timeout=8)
     a.config.election_jitter = 0.0
     b.config.election_jitter = 0.0
+
     with a.lock:
+        a.role = "follower"
+        a.leader_id = None
+        a.leader_lease_until = 0.0
+        a._leader_lost_at = 0.0
+        a._next_election_at = 0.0
+        a._last_election = 0.0
         da = a._election_delay_locked()
     with b.lock:
+        b.role = "follower"
+        b.leader_id = None
+        b.leader_lease_until = 0.0
+        b._leader_lost_at = 0.0
+        b._next_election_at = 0.0
+        b._last_election = 0.0
         db = b._election_delay_locked()
-    assert db < da, (da, db)
+
+    # 高优先级（b, 9）立刻可竞选；低优先级（a, 1）让出窗口
+    assert db == 0.0, f"最高优先级应当 0 延迟竞选，实际 {db}"
+    assert da > 0.0, f"低优先级应当让位，实际 {da}"
+    assert b._stronger_than_locked(b.node_id, a.node_id) is True
+    assert a._stronger_than_locked(a.node_id, b.node_id) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -1594,3 +1666,119 @@ def test_node_relocation_is_idempotent_after_first_fix(cluster_factory):
         got = a.nodes.get("remote-1") or {}
     assert len(events_after_more) == 1, "重复迁移又记了事件，会变成新的日志噪音"
     assert got.get("url") == "http://10.9.9.50:8788"
+
+
+# --------------------------------------------------------------------------- #
+# T-0327：照 OSPF 邻居表修「僵尸占票池 → 永远选不出主」
+# 现场：3 台真机 + 2 条僵尸记录 → quorum 4 → 连续 382 次「未获多数」
+# --------------------------------------------------------------------------- #
+
+def test_transcribed_unknown_node_gets_no_recency(cluster_factory):
+    """转述进来的陌生节点不能「凭空当我刚见过它」。
+
+    T-0327 真因：_update_node_locked 在 known is None 且
+    trust_remote_seen=False 时写 `old_seen or _now()` —— 等于把一条从没
+    联系过的记录标成「此刻还活着」，它于是稳稳占住票池，把 quorum 抬高。
+    """
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader", timeout=6)
+    with a.lock:
+        before = a._quorum_locked()
+        a._update_node_locked(
+            {"id": "stranger", "name": "stranger", "url": "http://10.0.0.9:8788",
+             "electable": True, "incarnation": 1,
+             "last_seen_epoch": time.time()},
+            touch=False, trust_remote_seen=False)
+        rec = a.nodes.get("stranger") or {}
+        assert float(rec.get("last_seen_epoch") or 0.0) == 0.0, \
+            "转述来的陌生节点不该带「刚刚见过」的时间戳"
+        assert a._quorum_locked() == before, "陌生节点不得抬高 quorum"
+        assert "stranger" not in a._voter_ids_locked()
+
+
+def test_dead_node_leaves_voter_pool(cluster_factory):
+    """dead 节点不再占票位（OSPF：RouterDeadInterval 到期即出邻居表）。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader", timeout=6)
+    far = time.time() - (a.config.dead_timeout + 5)
+    with a.lock:
+        a.nodes["gone"] = {
+            "id": "gone", "name": "gone", "url": "http://10.0.0.7:8788",
+            "electable": True, "priority": 1,
+            "last_seen_epoch": far, "incarnation": 2,
+        }
+        assert "gone" not in a._voter_ids_locked()
+        assert a._quorum_locked() == 1
+
+
+def test_tombstoned_node_cannot_be_resurrected(cluster_factory):
+    """被显式 leave 的节点立墓碑：心跳/转述都不能把它带回来。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader", timeout=6)
+    with a.lock:
+        a.nodes["dead-one"] = {
+            "id": "dead-one", "name": "dead-one", "url": "http://10.0.0.6:8788",
+            "electable": True, "priority": 1,
+            "last_seen_epoch": time.time(), "incarnation": 5,
+        }
+        assert "dead-one" in a._voter_ids_locked()
+
+    code, resp = a.handle_leave({"node_id": "dead-one"})
+    assert code == 200 and resp["removed"] is True
+    with a.lock:
+        assert "dead-one" not in a.nodes
+        assert a._tombstoned_locked("dead-one")
+
+    # 同伴转述 + 直接心跳，都不许它复活
+    a.handle_heartbeat({
+        "node": {"id": "dead-one", "name": "dead-one",
+                 "url": "http://10.0.0.6:8788", "electable": True,
+                 "incarnation": 6, "last_seen_epoch": time.time()},
+        "term": a.term, "leader": False,
+    }, peer_ip="10.0.0.6")
+    with a.lock:
+        assert "dead-one" not in a.nodes, "墓碑期内不得被心跳复活"
+        assert a._quorum_locked() == 1
+
+
+def test_tombstone_expires_so_renamed_host_can_rejoin(cluster_factory):
+    """墓碑有保留期：过了 TOMBSTONE_TTL 允许重新入网（防永久封死）。"""
+    a = cluster_factory("a")
+    with a.lock:
+        a.nodes["old-box"] = {"id": "old-box", "name": "old-box",
+                              "url": "http://10.0.0.5:8788", "electable": True,
+                              "incarnation": 1, "last_seen_epoch": time.time()}
+    a.handle_leave({"node_id": "old-box"})
+    with a.lock:
+        assert a._tombstoned_locked("old-box")
+        # 把墓碑时间往前推过保留期
+        a._tombstones["old-box"] = time.time() - (hc.TOMBSTONE_TTL_S + 10)
+        assert not a._tombstoned_locked("old-box")
+    assert a._update_node_locked(
+        {"id": "old-box", "name": "old-box", "url": "http://10.0.0.5:8788",
+         "electable": True, "incarnation": 9, "last_seen_epoch": time.time()},
+        touch=True) is True
+
+
+def test_zombie_majority_does_not_wedge_election(cluster_factory):
+    """3 台真机 + 2 条僵尸，必须仍能选出主（现场死锁的复现）。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader", timeout=6)
+    far = time.time() - (a.config.dead_timeout + 30)
+    with a.lock:
+        for i, nid in enumerate(("z1", "z2")):
+            a.nodes[nid] = {"id": nid, "name": nid,
+                            "url": f"http://10.0.0.{20+i}:8788",
+                            "electable": True, "priority": 1,
+                            "incarnation": 3, "last_seen_epoch": far}
+        # 僵尸不进票池 → quorum 仍是 1（只有本机真实在线）
+        assert a._quorum_locked() == 1, \
+            "僵尸 dead 记录把 quorum 抬高就是死锁根因"
+        a.role = "follower"
+        a.leader_id = None
+        a.leader_lease_until = 0.0
+        a._leader_lost_at = 0.0
+        a._next_election_at = 0.0
+        a._last_election = 0.0
+    assert a._start_election() is True, "僵尸不该阻止本机当选"
+    assert a.role == "leader"

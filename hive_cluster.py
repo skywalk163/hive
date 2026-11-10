@@ -122,6 +122,10 @@ DEFAULT_DISCOVERY_INTERVAL_S = 5.0
 # 这里给一个远长于 dead_timeout 的窗口：suspect/dead 的成员仍然算票，
 # 只有确实很久没出现（换机/退役/长期关机）才从票池里消失。
 DEFAULT_MEMBERSHIP_TTL_S = 300.0
+# 墓碑保留期（秒）：被显式删除/清理的 node_id 在这么长时间内不许被转述复活。
+# 取 1 小时 —— 远长于一次故障排查，又不会让「机器改名后重新入网」永久被挡
+# （真重入网会带新 incarnation，且 1 小时后自动放行）。
+TOMBSTONE_TTL_S = 3600.0
 # 对外地址自校准周期（秒）。DHCP 租期远短于进程寿命：Wi-Fi 换网、笔记本
 # 睡眠唤醒都可能让本机 IP 变掉，而启动时算出的 advertise 不会自己跟进。
 DEFAULT_ADVERTISE_REFRESH_S = 30.0
@@ -454,6 +458,19 @@ class Config:
             raw_prio = saved.get("leader_priority")
         self.leader_priority = normalize_leader_priority(
             DEFAULT_LEADER_PRIORITY if raw_prio is None else raw_prio)
+        # 链路速率（Mbit/s），主控排序的第二权重（T-0328，用户指定）。
+        # priority 相等时，速率高的那台更该当主：它带得动更多同步/心跳负载。
+        # 0 = 未声明，排序时按「未知」处理（排在同 priority 的已知速率之后，
+        # 但不影响通过 priority 决胜）。可用 HIVE_CLUSTER_LINK_SPEED 覆盖。
+        raw_speed = kw.get("link_speed")
+        if raw_speed is None:
+            raw_speed = os.environ.get("HIVE_CLUSTER_LINK_SPEED")
+        if raw_speed is None:
+            raw_speed = saved.get("link_speed")
+        try:
+            self.link_speed = max(0, int(raw_speed or 0))
+        except (TypeError, ValueError):
+            self.link_speed = 0
         # 抢主控时是否允许比现任主控落后（见 promoted 相关逻辑）：
         # store 只是缓存、git 才是事实账，所以允许，但要留下审计痕迹。
         self.allow_forced_promote = _env_bool(
@@ -594,6 +611,7 @@ class Config:
             "lease_grace": self.lease_grace,
             "electable": bool(self.electable),
             "leader_priority": int(self.leader_priority),
+            "link_speed": int(self.link_speed),
             "preferred_leader": self.preferred_leader,
             "membership_ttl": float(self.membership_ttl),
             "allow_single_vote": bool(self.allow_single_vote),
@@ -1210,6 +1228,12 @@ class Cluster:
         self.leader_lease_until = 0.0
         self.lease_grace_until = 0.0
         self.nodes: dict[str, dict] = {}
+        # 墓碑（T-0327）: node_id -> 删除时刻 epoch。被显式 leave 掉的节点，
+        # 或长期 dead 后被本机清理的节点，转述/心跳再把它带回来时一律拒收。
+        # OSPF 里没有这个需求 —— 邻居表删了就删了，只有本机 Hello 能重建；
+        # 我们是 gossip 拓扑，必须自己记住「谁已经被删过」，否则删一个被转述
+        # 灌回一个，永远是打地鼠。
+        self._tombstones: dict[str, float] = {}
         self.events: deque = deque(maxlen=EVENT_LIMIT)
         self._event_ids: set[str] = set()
         self.event_seq = 0
@@ -1625,6 +1649,22 @@ class Cluster:
         # 多数、各自宣布当选，就是反复复发的「幽灵节点」。
         self._dedupe_node_urls_locked()
 
+        # 墓碑：被删过的身份在保留期内不许复活（重启后也要记住）。
+        tombs = raw.get("tombstones")
+        if isinstance(tombs, dict):
+            horizon = _now() - TOMBSTONE_TTL_S
+            for nid, at in tombs.items():
+                try:
+                    when = float(at)
+                except (TypeError, ValueError):
+                    continue
+                if when >= horizon:
+                    self._tombstones[str(nid)] = when
+        # 与墓碑冲突的记录一律不信
+        for nid in list(self.nodes):
+            if self._tombstoned_locked(nid):
+                self.nodes.pop(nid, None)
+
         events = raw.get("events")
         if isinstance(events, list):
             for ev in events:
@@ -1677,6 +1717,7 @@ class Cluster:
             "lease_grace_until": _iso(self.lease_grace_until) if self.lease_grace_until else "",
             "lease_grace_until_epoch": self.lease_grace_until,
             "nodes": copy.deepcopy(self.nodes),
+            "tombstones": dict(self._tombstones),
             "events": list(self.events),
             "event_seq": self.event_seq,
             "progress": copy.deepcopy(self.progress),
@@ -1777,6 +1818,8 @@ class Cluster:
             "electable": bool(self.config.electable),
             # 随自述广播出去：别的节点据此排选举顺序，不必各自配置「谁是首选」。
             "priority": int(self.config.leader_priority),
+            # 链路速率（Mbit/s），priority 相等时的第二权重（T-0328）。
+            "link_speed": int(self.config.link_speed),
             "last_store_seq": self._store_seq(),
             "hive_dir": str(self.config.hive_dir),
             # 本机此刻必然活着：这是「自身记录」而不是从别处收来的观测。
@@ -1949,6 +1992,10 @@ class Cluster:
         nid = str(rec["id"])
         if nid == self.node_id:
             return False
+        # 墓碑优先于一切：被显式删掉的身份，心跳/转述都不能把它带回来。
+        # 只有在保留期过后（_tombstoned_locked 会自动清过期条目）才允许重入。
+        if self._tombstoned_locked(nid):
+            return False
         incoming = self._normalize_node(rec)
         # 同一个 IP:port 不可能同时属于两个活节点。心跳/快照若把一个 URL 相同、
         # id 不同的旧身份送回来，多半是历史幽灵（配合 _adopt_leader_locked 的
@@ -1995,8 +2042,24 @@ class Cluster:
                 # 跟随者转述的存活时间**不能当证据**：两台 follower 互相把
                 # 同一台幽灵的 last_seen 刷成「刚刚」，它就永远 alive、永远占
                 # 一票，quorum 被抬高，选举反复凑不够多数。存活只认本机直接
-                # 观测（_peer_heartbeat 收到回复时会刷新），全新节点给一个窗口。
-                new_seen = old_seen or _now()
+                # 观测（_peer_heartbeat 收到回复时会刷新）。
+                #
+                # T-0327 追加修复：**本机从没见过的新节点**，绝不能拿「此刻」
+                # 给它垫时间。原先 `old_seen or _now()` 在 known is None 时
+                # 等于「凭空当我刚见过它」—— 现场就是删掉 probe / DESKTOP-2NRDKF0
+                # 之后，被同伴转述又灌回来，last_seen 被写成删除那一刻，于是
+                # 它们稳稳占住票池 300s、把 quorum 抬到 4，而真机只有 3 台，
+                # 连续 382 次「未获选举多数」，直到 TTL 过期才突然选出主。
+                # OSPF 的邻居表根本不接受第三方转述，只由本机 Hello 维护；
+                # 这里同理：没被本机亲手确认过，就以「从没见过」入表（时间 0），
+                # 它既不进票池也不影响 quorum，等它自己发心跳或本机探测成功
+                # 再成为真邻居。
+                #
+                # 注意 **不能** 采信转述方自带的 last_seen —— 那仍然是二手证据：
+                # 同伴把「它上次见到 ghost 的时间」抄给我们，ghost 照样能凭这个
+                # 时间戳赖在票池里。时间戳只由本机直接观测写入（touch=True 或
+                # _peer_heartbeat 收到回复），这里一律保持原值 / 归零。
+                new_seen = old_seen
             merged["last_seen_epoch"] = new_seen
             merged["last_seen"] = _iso(new_seen) if new_seen else ""
         merged["id"] = nid
@@ -2552,25 +2615,85 @@ class Cluster:
         git/store 长操作都能让本机同时满足「无主」+「同伴全死」，于是 quorum
         退化成 1、单票自封。成员表用 membership_ttl（默认 5 分钟）兜底，
         短暂失联不再改变多数门槛；只有真正长期缺席的机器才会退出票池。
+
+        T-0327 教训：这个「兜底」必须**只对真认识过的节点**生效。转述进来的
+        陌生 id 若也进票池，门槛会被凭空抬高，而现场只有 3 台真机 → 永远
+        凑不够多数。见 `_update_node_locked` 里 known is None 的处理。
         """
         voters = len(self._voter_ids_locked())
         if voters <= 1 or self.config.allow_single_vote:
             return 1
         return voters // 2 + 1
 
+    def _tombstoned_locked(self, nid: str) -> bool:
+        """该身份是否在墓碑保留期内（被删过，不许转述复活）。"""
+        when = self._tombstones.get(str(nid))
+        if when is None:
+            return False
+        if _now() - float(when) > TOMBSTONE_TTL_S:
+            self._tombstones.pop(str(nid), None)
+            return False
+        return True
+
+    def _tombstone_locked(self, nid: str, reason: str = "") -> None:
+        """给一个身份立墓碑：从成员表移除，并禁止转述把它带回来。"""
+        nid = str(nid or "")
+        if not nid or nid == self.node_id:
+            return
+        self._tombstones[nid] = _now()
+        removed = self.nodes.pop(nid, None)
+        if self.leader_id == nid:
+            self._clear_leader_locked(reason or "主节点被移除")
+        if removed is not None:
+            self._emit_locked(
+                "node_tombstoned", node_id=nid,
+                message=(f"{removed.get('name') or nid} 已移除"
+                         + (f"：{reason}" if reason else "")))
+        self._mark_dirty_locked()
+
+    def _gc_tombstones_locked(self) -> None:
+        """过期墓碑自动清理（否则 state.json 会无限长大）。"""
+        horizon = _now() - TOMBSTONE_TTL_S
+        for nid, when in list(self._tombstones.items()):
+            if float(when) < horizon:
+                self._tombstones.pop(nid, None)
+
     def _voter_ids_locked(self) -> list[str]:
-        """已知可参选成员（含 suspect/dead，长 TTL），用于 quorum 与拉票。"""
+        """票池：用于 quorum 与拉票。
+
+        OSPF 语义（T-0327 的重要修正）：邻居「超时即出票池」。OSPF 里
+        RouterDeadInterval 一到就把邻居从邻居表删掉，从此不参与任何计算；
+        我们这里的对等物是 `dead_timeout`。
+
+        T-0299 当初引入 membership_ttl 是为了防「一次 git/store 长操作让
+        同伴全判死、quorum 塌成 1、单票自封」。那个诉求仍然成立，但实现方式
+        错了：拿一个 5 分钟的窗口去兜，等于让**真正下线/从没见过的机器**也
+        一直占着票位 —— 现场 3 台真机 + 2 条僵尸记录 → quorum 4 → 永远
+        选不出主（连续 382 次未获多数），直到 TTL 到期才突然自愈。
+
+        正确做法（照 OSPF）：票池只收「本机确实亲眼见过它活着」的节点，
+        宽限期只覆盖 `suspect`（短暂失联），不覆盖长期 `dead`：
+          * alive / suspect —— 算票（suspect 覆盖长操作导致的瞬时失联）；
+          * dead 且仍在 membership_ttl 内 —— **不算票**；
+          * 从没被本机确认过（last_seen 为 0）—— 不算票。
+        """
         now_epoch = _now()
-        ttl = max(self.config.membership_ttl, self.config.dead_timeout)
         ids = [self.node_id] if self.config.electable else []
         for nid, rec in self.nodes.items():
             if nid == self.node_id:
                 continue
             if not rec.get("electable", True):
                 continue
-            age = now_epoch - float(rec.get("last_seen_epoch") or 0.0)
-            if age <= ttl:
+            if self._tombstoned_locked(nid):
+                continue
+            last_seen = float(rec.get("last_seen_epoch") or 0.0)
+            if last_seen <= 0.0:
+                # 从没被本机直接观测过：可能是转述来的陌生 id，不给票位。
+                continue
+            if self._node_status_locked(rec, now_epoch) in ("alive", "suspect"):
                 ids.append(nid)
+            # dead（超过 dead_timeout 没心跳）一律不给票位 —— 这就是 OSPF
+            # 的 RouterDeadInterval 语义：邻居死了就不再参与 DR 计算。
         return ids
 
     def _reachable_voter_ids_locked(self) -> list[str]:
@@ -2599,6 +2722,86 @@ class Cluster:
             return normalize_leader_priority(self.config.leader_priority)
         rec = self.nodes.get(nid) or {}
         return normalize_leader_priority(rec.get("priority"))
+
+    def _node_speed_locked(self, nid: str) -> int:
+        """某个可参选节点的链路速率（Mbit/s）；0 = 未知。"""
+        if nid == self.node_id:
+            return max(0, int(self.config.link_speed or 0))
+        rec = self.nodes.get(nid) or {}
+        try:
+            return max(0, int(rec.get("link_speed") or rec.get("speed") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _rank_key_locked(self, nid: str) -> tuple:
+        """主控竞争力排序键（越大越该当主）。T-0328，用户指定的四级链：
+
+          1. preferred_leader（人工硬指定）—— 单独在 _election_delay_locked 里处理
+          2. leader_priority：值大者胜（OSPF DR priority 语义）
+          3. link_speed：优先级相等时，链路快的胜（带得动更多同步/心跳）
+          4. node_id 字典序：全等时用它做**确定性**兜底
+
+        第 4 条是关键：没有它，两台同优先级的机器会算出「一样强」，
+        只能靠随机退避抢，撞车后又要重选一轮。有了 node_id 兜底，
+        全集群对「谁更强」得出**同一个答案**，可以直接让位、无需竞争。
+
+        注意第 4 项必须是**与 self 无关的纯函数**（这里用字符串本身），
+        否则每台机器按自己视角算出不同键，"谁更强"就没有全局一致性了。
+        """
+        nid = str(nid)
+        # node_id 越小越优先 —— 用取反的 ord 序列无法比较，改用「反转字符串」
+        # 这种简单可靠的技巧不对；直接把「字典序小」编码成一个可比较的整数：
+        # 用 hash 会引入碰撞与不可复现，所以最终改用元组末端放原串，
+        # 比较时方向由调用方决定（见 _stronger_than_locked）。
+        return (
+            self._node_priority_locked(nid),
+            self._node_speed_locked(nid),
+        )
+
+    def _stronger_than_locked(self, a: str, b: str) -> bool:
+        """a 是否比 b 更有资格当主（全集群口径一致）。
+
+        排序：priority（大胜） → link_speed（大胜） → node_id（**字典序小**胜）。
+        node_id 比较放在最后且方向固定，保证所有节点对同一对候选得出同一答案。
+        """
+        ka = self._rank_key_locked(a)
+        kb = self._rank_key_locked(b)
+        if ka != kb:
+            return ka > kb
+        return str(a) < str(b)
+
+    def _has_stronger_peer_locked(self) -> str:
+        """返回比本机更强的†可达节点 id（没有则空串）。
+
+        †「更强」= 按 _rank_key_locked 排序严格高于本机。只认可达（alive/suspect）
+        的节点：对一台早已关机的机器让位，等于永久放弃主控。
+
+        **T-0328 关键约束（non-preemptive，照 OSPF 的 DR 语义）**：
+        只要已经有**在位的活主控**，本函数一律返回空 —— 更高优先级节点后加入
+        不抢现任的位。OSPF 里 DR 一旦选出，即使来了优先级更高的路由器，在
+        DR 失效（Hello 超时）之前也不会被抢占；否则每次开机/重启都抖一次主，
+        集群根本没法用。用户原话：「竞争得主后，不手工关闭，几乎不会丢失主」。
+
+        所以「择优」只作用于**无主时的竞争**，不作用于「推翻在任者」。
+        """
+        if (self.role != "leader"
+                and self.leader_id
+                and self.leader_id != self.node_id
+                and self.leader_lease_until > _now()):
+            # 有活主控在任：不预占。
+            return ""
+        best = ""
+        for nid in self._reachable_voter_ids_locked():
+            if nid == self.node_id:
+                continue
+            try:
+                if not self._stronger_than_locked(nid, self.node_id):
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            if not best or self._stronger_than_locked(nid, best):
+                best = nid
+        return best
 
     def _priority_zero_excludes_locked(self) -> bool:
         """priority 0 此刻是否意味着「禁赛」。
@@ -2644,6 +2847,30 @@ class Cluster:
                 and self._priority_zero_excludes_locked()):
             return float("inf")
 
+    def _election_delay_locked(self) -> float:
+        """本机在「当前无主控」时该等多久才发起选举（CLAIM）。
+
+        T-0328 重写为**确定性择优**，取代原先「同优先级就随机抢」的 CSMA/CD。
+        四级链（用户明确指定）：
+          1. preferred_leader：人工硬指定，立刻可竞选；
+          2. leader_priority：值大者优先（OSPF DR priority）；
+          3. link_speed：优先级相等时链路快的优先；
+          4. node_id：全等时字典序兜底 —— **保证全集群对「谁更强」算出同一
+             答案**，于是不需要随机竞争、也就没有撞车与重选风暴。
+
+        比本机更强的节点可达时，本机让位（给一个「它可能已经死了」的兜底
+        窗口）；本机就是最强时才立刻 CLAIM。这样「依次启动」时先起来的
+        弱节点会主动让位给后起来的强节点，而不是各抢各的。
+        """
+        voters = sorted(self._voter_ids_locked())
+        if self.node_id not in voters:
+            return float("inf")
+
+        # 0 = 放弃竞选资格：只要集群里还有正常优先级的节点，就永不发起选举。
+        if (self._node_priority_locked(self.node_id) <= 0
+                and self._priority_zero_excludes_locked()):
+            return float("inf")
+
         step = max(self.config.election_jitter, MIN_ELECTION_STEP_S)
         base = self.config.election_min
         reachable = self._reachable_voter_ids_locked()
@@ -2660,23 +2887,15 @@ class Cluster:
             # 其它节点让出一整个选举窗口，别跟被指定的那台同轮打平。
             return base + base
 
-        my_prio = self._node_priority_locked(self.node_id)
-        higher = [n for n in reachable
-                  if n != self.node_id and self._node_priority_locked(n) > my_prio]
-        if higher:
-            # 有更高优先级的节点在：它 0 延迟先 CLAIM，我们只等它/投它。
-            # 留一个 2 倍窗口的兜底，万一它其实发不出 CLAIM（网络单向、
-            # 进程半死），次高节点还有机会接手，不会永久无主。
+        stronger = self._has_stronger_peer_locked()
+        if stronger:
+            # 有更强的可达节点：让它先上。留一个兜底窗口 —— 万一它其实发不出
+            # CLAIM（进程半死、网络单向），次强者仍能接手，不会永久无主。
             return base * 3 + random.uniform(0, step)
 
-        same = [n for n in reachable
-                if n != self.node_id and self._node_priority_locked(n) == my_prio]
-        if same:
-            # 同优先级：随机退避，先发 CLAIM 者胜（CSMA/CD）。
-            return base + random.uniform(0, step)
-
-        # 唯一最高优先级：只有多成员时才有意义地「立刻」，单机仍走常规超时。
-        return 0.0 if len(voters) > 1 else base
+        # 本机就是最强的那个：立刻 CLAIM。
+        # 单机也一样（本来它就该直接当主，不该等选举超时）。
+        return 0.0
 
     def _preferred_leader_id_locked(self) -> str:
         """把配置里的 preferred_leader 解析成节点 id。
@@ -3126,6 +3345,7 @@ class Cluster:
                             for p in peers}
                     for fut in as_completed(futs):
                         code, resp = fut.result()
+                        peer = futs[fut]
                         if not isinstance(resp, dict):
                             continue
                         if resp.get("term") and int(resp["term"]) > self.term:
@@ -3134,7 +3354,7 @@ class Cluster:
                                                                resp.get("leader"))
                             continue
                         if code == 200 and resp.get("granted"):
-                            votes.add(str(futs[fut].get("id")))
+                            votes.add(str(peer.get("id")))
                             try:
                                 store_ahead = max(store_ahead,
                                                   int(resp.get("store_seq") or 0))
@@ -3145,8 +3365,27 @@ class Cluster:
                 self._election_inflight = False
         backoff = 0.0
         with self.lock:
+            # T-0328 的核心：**主必须选出来**。
+            # 原先 `len(votes) >= quorum` 是 Raft 的一致性关卡；hive 的 store
+            # 只是缓存、git 才是事实账，卡在这里只会让集群长期无主（现场连续
+            # 382 次「未获多数」）。改为「择优当选」：
+            #   * 没有更强的可达节点在等位时，本机直接上任（不必凑够多数）；
+            #   * 有更强节点则让位 —— 但它只在**无主**时才让（见
+            #     _has_stronger_peer_locked 的 non-preemptive 约束），
+            #     在任主控不会被后来者顶掉；
+            #   * 票数只用于记录与告警，不再是否决条件。
+            #
+            # 但有一个必须尊重的例外：**比我强的节点明确投了我**，说明它
+            # 自己承认这轮该我当主（可能它正忙、priority 刚改、或它愿意让）。
+            # 这时不能反过来以「它更强」为由让位 —— 否则会出现「2/2 全票
+            # 当选却让位、然后谁都不当主」的怪圈（现场 T-0328 回归）。
+            stronger_reachable = self._has_stronger_peer_locked()
+            if stronger_reachable and stronger_reachable in votes:
+                stronger_reachable = ""
+            can_lead = not stronger_reachable
+            is_single = len(voters) <= 1
             if (self.role == "candidate" and self.term == term
-                    and len(votes) >= quorum
+                    and (can_lead or is_single or force)
                     and not (self.leader_id
                              and self.leader_id != self.node_id
                              and self.leader_lease_until > _now())):
@@ -3163,22 +3402,35 @@ class Cluster:
             else:
                 became = False
                 self._election_failures += 1
-                backoff = self._election_backoff_locked()
+                # 有更强节点时用短窗口：它才是正主，长退避只会让集群在
+                # 无主状态多停一会儿。本机仍是兜底（它若发不出 CLAIM，
+                # 我们会在短窗口后接手，绝不永久无主）。
+                backoff = (self.config.election_min
+                           if stronger_reachable
+                           else self._election_backoff_locked())
                 self._next_election_at = _now() + backoff
                 self._emit_locked(
-                    "election_failed",
-                    message=(f"term={term} 未获多数（{len(votes)}/{quorum}），"
-                             f"{backoff:.1f}s 后随机重试"),
+                    "election_yielded" if stronger_reachable else "election_failed",
+                    message=(f"term={term} 让位给更强的 {stronger_reachable}，"
+                             f"由它接手（本机 {len(votes)} 票）"
+                             if stronger_reachable else
+                             f"term={term} 未当选（{len(votes)}/{quorum} 票，"
+                             f"voters={len(voters)}），{backoff:.1f}s 后重试"),
                     data={"votes": len(votes), "quorum": quorum,
-                          "voters": len(voters), "backoff_s": round(backoff, 2)})
+                          "voters": len(voters), "backoff_s": round(backoff, 2),
+                          "yielded_to": stronger_reachable})
                 self._persist_locked()
         if became:
             _log(f"当选主节点：term={term}（{len(votes)}/{quorum} 票，"
                  f"voters={len(voters)}，lock_wait={lock_wait * 1000:.0f}ms）")
             self._heartbeat_once()
         else:
-            _log(f"本轮选举未获多数：term={term}（{len(votes)}/{quorum} 票，"
-                 f"voters={len(voters)}，退避 {backoff:.1f}s）")
+            if stronger_reachable:
+                _log(f"让位给更强的 {stronger_reachable}：term={term}"
+                     f"（本机 {len(votes)}/{quorum} 票，voters={len(voters)}）")
+            else:
+                _log(f"本轮未当选：term={term}（{len(votes)}/{quorum} 票，"
+                     f"voters={len(voters)}，退避 {backoff:.1f}s）")
         return became
 
     def _adopt_higher_term_locked(self, term: int, leader=None) -> None:
@@ -3434,6 +3686,10 @@ class Cluster:
                     >= self.config.advertise_refresh):
                 self._last_advertise_check = now_epoch
                 refresh_advertise = True
+            # 墓碑过期回收（T-0327）：删过的身份过保留期自动放行，避免
+            # state.json 被历史墓碑无限撑大，也避免机器改名后永久进不来。
+            if self._tombstones:
+                self._gc_tombstones_locked()
         # 落盘不在锁内做（_persist 自己加锁），并且按 1s 节流；维护循环 5Hz，
         # 若每轮都写 state.json 会把磁盘打满。
         self._persist()
@@ -3770,6 +4026,18 @@ class Cluster:
         # 管理员能选择「宁可没主控，也不接受落后节点」这种更严的策略。
         forced = bool(body.get("force")) and self.config.allow_forced_promote
         behind = cand_seq < my_seq
+        # 注意顺序：**任期/化身号这类「硬门槛」必须排在「择优」前面**。
+        # 一个陈旧任期的候选应该拿到 stale_term，而不是 stronger_candidate ——
+        # 后者语义是「你够格，但我更有资格」，会让候选人误以为只差让位。
+        if term < self.term:
+            return 200, {"ok": True, "granted": False, "term": self.term,
+                         "leader": self._leader_public_locked(),
+                         "reason": "stale_term"}
+        with self.lock:
+            stored = self.nodes.get(cid)
+        if stored and int(cand.get("incarnation") or 0) < int(stored.get("incarnation") or 0):
+            return 200, {"ok": True, "granted": False, "term": self.term,
+                         "reason": "stale_incarnation"}
         if behind and not forced and self.config.strict_store_freshness:
             # 严格模式（默认关闭，见 Config.strict_store_freshness）：管理员显式
             # 选择「宁可没有主控，也不接受 store 落后的主」。命中必须留下可追的
@@ -3790,16 +4058,8 @@ class Cluster:
                          "candidate_seq": cand_seq, "my_seq": my_seq,
                          "strict": True}
         with self.lock:
-            if term < self.term:
-                return 200, {"ok": True, "granted": False, "term": self.term,
-                             "leader": self._leader_public_locked(),
-                             "reason": "stale_term"}
             if term > self.term:
                 self._adopt_higher_term_locked(term)
-            known = self.nodes.get(cid)
-            if known and int(cand.get("incarnation") or 0) < int(known.get("incarnation") or 0):
-                return 200, {"ok": True, "granted": False, "term": self.term,
-                             "reason": "stale_incarnation"}
             if self.voted_for not in (None, cid):
                 return 200, {"ok": True, "granted": False, "term": self.term,
                              "voted_for": self.voted_for, "leader": self._leader_public_locked()}
@@ -3864,6 +4124,11 @@ class Cluster:
             比等它被更高任期压下去干净。
         """
         force = bool(body.get("force", True))
+        # nudge=True：这是**弱节点让位后请我接手**的礼貌请求，不是人工夺权。
+        # 区别必须体现出来（T-0328）：
+        #   * 不去踢现任主控下台 —— 现任若是活的好主，不该因为一次让位就震掉；
+        #   * 只在「确实没有主控」时才真的发起竞选。
+        nudge = bool(body.get("nudge"))
         if not self.config.electable:
             return 409, {"ok": False, "role": self.role, "node": self.node_id,
                          "error": "本机 electable=false（observer），不能当主控"}
@@ -3873,6 +4138,13 @@ class Cluster:
                 return 200, {"ok": True, "already": True, "role": "leader",
                              "term": self.term, "node": self.node_id,
                              "previous_leader": self.node_id}
+            if nudge and self.leader_id and self.leader_id != self.node_id \
+                    and self.leader_lease_until > _now():
+                # 已有在位主控：这个 nudge 是过期的，什么都不做。
+                return 200, {"ok": True, "already": True, "role": self.role,
+                             "term": self.term, "node": self.node_id,
+                             "previous_leader": self.leader_id,
+                             "ignored": "leader_alive"}
             # 人工 promote 也不越过 OSPF 的硬资格。提前拦在这里，比让选举
             # 发起后被同伴拒票（term 白涨一轮、还留下半截状态）好排查。
             if (self.config.leader_priority <= 0
@@ -3886,7 +4158,7 @@ class Cluster:
             me = self.node_id
 
         resigned = False
-        if leader_url and leader_id and leader_id != me:
+        if (not nudge) and leader_url and leader_id and leader_id != me:
             code, _ = http_json(str(leader_url).rstrip("/") + "/api/cluster/resign",
                                 "POST", {"node_id": leader_id}, 1.5, self.config.token)
             resigned = code == 200
@@ -3903,6 +4175,13 @@ class Cluster:
     def handle_leave(self, body: dict) -> tuple[int, dict]:
         node_id = str(body.get("node_id") or (body.get("node") or {}).get("id") or "")
         with self.lock:
+            # 「本机退出」是优雅下线，不该给自己立墓碑（否则本机再也回不来）。
+            # 其他节点被 leave = 运维显式剔除，必须立墓碑，否则下一跳就被
+            # 同伴的转述灌回成员表、继续占票池抬 quorum（现场见 T-0327）。
+            if node_id and node_id != self.node_id and node_id in self.nodes:
+                self._tombstone_locked(node_id, "operator leave")
+                self._persist_locked()
+                return 200, {"ok": True, "removed": True}
             rec = self.nodes.pop(node_id, None) if node_id else None
             if rec is not None:
                 self._emit_locked("node_leave", node_id=node_id,

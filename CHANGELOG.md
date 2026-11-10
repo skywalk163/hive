@@ -4,6 +4,34 @@
 
 ### Fixed
 
+- **T-0328：选主改为「择优」，去掉「凑够多数票才能当选」——集群不再长期无主**。
+  现场（2026-11-10）：看板显示集群无主。日志里 `本轮选举未获多数` 累计 **382 次**，
+  term 每分钟涨 4~5 次。
+  - **根因是把 Raft 的一致性关卡套到了可用性优先的系统上**。当选条件原本是
+    `len(votes) >= quorum`；那是为防止网络分区双主而设的强一致约束，而 hive 的
+    store 只是缓存、**git 才是事实账**。卡在这条上等于自愿放弃可用性：3 台真机 +
+    2 条僵尸记录 → quorum 抬到 4 → 永远凑不够 → 直到僵尸超过 `membership_ttl`
+    才突然自愈。单机反而还要等 `election_min` 才当主。
+  - **改为四级择优链**（全集群算出同一答案，不靠随机抢）：`preferred_leader` →
+    `leader_priority`（值大胜）→ **`link_speed`**（新增，速率大胜）→ `node_id`
+    字典序（确定性兜底）。`link_speed` 以 Mbit/s 计，随节点自述广播，
+    可用 `HIVE_CLUSTER_LINK_SPEED` 覆盖。
+  - **票数不再是否决条件**：没有更强的可达候选时本机直接上任，票数只用于记录与告警。
+    这是「主必须被选出来」的落点 —— 除非真的只剩自己，否则不会停在没有主的状态。
+  - **单机立刻当主**，不再等 `election_min`。
+  - **non-preemptive（照 OSPF 的 DR 语义）**：只要在位主控还活着，更高优先级的节点
+    后加入也**不抢占**它的位。原先每次都重新按优先级排，导致每次开机/重启都抖一次主。
+  - **尊重已经投给我的票**：比我强的节点若明确投了我，说明它承认这轮该我当主，
+    此时不再以「它更强」为由让位 —— 否则会出现「2/2 全票当选却让位、谁都不当主」
+    的死循环（实现过程中真实踩到）。
+  - 实测：5 分钟 55 次采样**无主 0 次**，term 稳定在 3802；单机 0.25s 当选；
+    主控挂掉后立刻接手；5 个僵尸 + 主控挂掉仍能正常选主。
+  - 回归用例见 `tests/test_cluster.py` 的
+    `test_stronger_reachable_peer_blocks_self_election` /
+    `test_same_priority_resolved_deterministically` /
+    `test_single_node_becomes_leader_immediately` /
+    `test_higher_priority_joins_but_does_not_preempt`。
+  - 关联：T-0327（主锁饥饿）修好了「卡顿」，本条修「选主本身」。
 - **T-0327：主锁被长操作占住 → 集群周期性「假死」，看板显示「集群：未启动」**。
   现场（2026-11-10，FreeBSD）：看板每 40~45 秒显示一次「未启动」，`hive cluster
   start` 报「15s 内尚未响应 health」，日志里 term 一天涨了 1289 次、`leader_lost`
