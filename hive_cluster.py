@@ -117,10 +117,14 @@ DEFAULT_ELECTION_MIN_S = 3.0
 DEFAULT_ELECTION_JITTER_S = 0.8
 DEFAULT_LEADER_LEASE_S = 5.0
 DEFAULT_DISCOVERY_INTERVAL_S = 5.0
-# 「已知可参选成员」保留多久。peer_timeout/dead_timeout 只有秒级，网络抖一下
-# 就把同伴踢出票池，于是 quorum 退化成 1、单票自封，正是 T-0299 要修的病。
-# 这里给一个远长于 dead_timeout 的窗口：suspect/dead 的成员仍然算票，
-# 只有确实很久没出现（换机/退役/长期关机）才从票池里消失。
+# 成员表保留多久（仅用于展示与 GC）。
+#
+# 历史：T-0299 曾用它做「dead 成员仍算票」的兜底，防「网络抖一下 quorum 塌成 1、
+# 单票自封」。那个兜底后来被证明是灾难：真正下线/从没见过的机器会一直占票位，
+# 把 quorum 抬高到实际凑不够（现场 3 台真机 + 2 条僵尸 → quorum 4 → 连续 382 次
+# 「未获多数」）。T-0328 起票池只收 alive/suspect，dead 一律出池，与 OSPF 的
+# RouterDeadInterval 一致；选主本身也不再要求多数票。这个 TTL 现在只影响
+# 节点表的展示时长与墓碑回收节奏。
 DEFAULT_MEMBERSHIP_TTL_S = 300.0
 # 墓碑保留期（秒）：被显式删除/清理的 node_id 在这么长时间内不许被转述复活。
 # 取 1 小时 —— 远长于一次故障排查，又不会让「机器改名后重新入网」永久被挡
@@ -562,12 +566,13 @@ class Config:
             kw.get("election_jitter") or _env_float("HIVE_CLUSTER_ELECTION_JITTER", DEFAULT_ELECTION_JITTER_S))
         self.leader_lease = float(
             kw.get("leader_lease") or _env_float("HIVE_CLUSTER_LEADER_LEASE", DEFAULT_LEADER_LEASE_S))
-        # 成员表 TTL：见 DEFAULT_MEMBERSHIP_TTL_S 的注释。比 dead_timeout 长得多，
-        # 但必须有限，否则退役机器会永久抬高 quorum，让整个集群再也选不出主。
+        # 成员表 TTL：见 DEFAULT_MEMBERSHIP_TTL_S 的注释。仅用于展示/GC；
+        # 票池口径自 T-0328 起只认 alive/suspect，dead 不再抬高 quorum。
         self.membership_ttl = float(
             kw.get("membership_ttl")
             or _env_float("HIVE_CLUSTER_MEMBERSHIP_TTL", DEFAULT_MEMBERSHIP_TTL_S))
-        # 显式允许「1 票当选」（默认关）。只给单机/实验场景用；已知成员 >1 时
+        # 显式允许「1 票当选」（默认关）。T-0328 起选主不再要求多数票，
+        # 这个开关仅保留给 op 复制的多数判定与历史兼容；已知成员 >1 时
         # 打开它等于放弃多数保护，运维必须自己知道这一点。
         if kw.get("allow_single_vote") is None:
             self.allow_single_vote = _env_bool(
