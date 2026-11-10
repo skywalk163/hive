@@ -1,0 +1,36 @@
+{
+  "task": "T-0315",
+  "agent": "raccoon",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0315",
+  "base": "main",
+  "head": "dea735c86bdae50fdd20bff7931447ebc4553d4a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T20:54:42+08:00",
+  "finished_at": "2026-11-10T13:01:20+00:00",
+  "duration_s": 398.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_control_scale.py",
+      "code": 0,
+      "tail": [
+        "..........                                                               [100%]",
+        "10 passed in 2.37s",
+        "No entry for terminal type \"unknown\";",
+        "using dumb terminal settings."
+      ]
+    }
+  ],
+  "summary": "# T-0315 控制面规模基准\n\n## 做了什么\n\n新增 `tests/test_control_scale.py`（只加测试，未改实现），10 个用例覆盖任务卡全部判据：\n\n1. `StateView` 安装 10,000 条（20 project × 500 tid）< 5s；\n2. 1 万条中 2,000 条有变化时，按 project 增量查询 < 1s（floor 水位与逐条水位两条路径）；\n3. 单次 1 万条同 project 视图的增量查询延迟 < 0.2s（防实现退化）；\n4. `pack(entries)` 每包 ≤1400B、10,000 条拆包 < 2s，且拼回与原 JSON 行逐字节一致（D8 不断行）；\n5. `DownlinkSender` 周期包确实走 `Limits.max_packet_bytes`；\n6. `UplinkQueue.put` 10,000 次平均 <1ms（队列满走 G3 淘汰 / 未满两条路径）；\n7. `Aggregator.submit` 10,000 次平均 <1ms，且 key 不丢；\n8. `Aggregator.flush` 1 万 key < 2s；\n9. `DownlinkSender.interval` 在 500 / 2000 / 2001 及两端取值正确，且与 `config.dynamic_multicast_interval` 同源；\n10. `tracemalloc` 粗检 1 万条视图峰值/常驻 < 100MB。\n\n上报阈值在 Windows 放宽到 2ms（任务卡要求），其余不变。计时取 3 轮最好值，压掉负载抖动；全部不依赖真实组播、端口、时钟，无 sleep。\n\n## 验证\n\n- `python -m pytest -q tests/test_control_scale.py` → **10 passed**（连跑 3 轮均绿，约 2s）；\n- 回归相关套件：`test_control_view.py` + `test_control_downlink.py` + `test_control_uplink_queue.py` → **61 passed**。\n\n## 遗留风险\n\n- 任务卡里 \"2,000 条 `changed_after` 查询 < 1s\" 有两种理解：单次查询返回 2,000 条（本卡采用，实测约 0.07–0.08s），或累计 2,000 次小查询。后者实测约 27s 必然超预算，因为 `StateView.changed_after` 每次调用都会 `sorted()` 全量条目再按 project 过滤，成本随视图总量线性增长。这属于实现层特性，超出本卡\"只加测试\"的允许范围，故未改实现，只记录了实测数据与单次延迟上界。\n- 若后续要支撑高 QPS 的逐条增量查询，建议另开卡把 `_entries` 换成按 project 分桶或加水位索引；本卡的 `test_view_changed_after_single_call_latency` 会在退化时继续报警。\n- 规模基准对机器负载敏感，已用\"3 轮取最好\"缓解，但极端 CI 抢占下仍有小概率抖动。",
+  "error": "",
+  "declared_paths": [
+    "tests/test_control_scale.py"
+  ],
+  "changed_files": [
+    "tests/test_control_scale.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "06633542e82d4acaaaeb524f347b64f4"
+}
