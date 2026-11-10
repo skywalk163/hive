@@ -137,14 +137,29 @@ def test_default_mode_grants_lagging_candidate_and_records_lag(cluster_factory):
 
 
 def test_lagging_candidate_wins_election_without_force(cluster_factory):
-    """没有 force 也能当选：闸门不再把「数据新鲜度」当「选举资格」。"""
+    """没有 force 也能当选：闸门不再把「数据新鲜度」当「选举资格」。
+
+    T-0299 起「不抢占在位主控」是硬规则（`_start_election` 看到有效主控租约
+    就直接返回 False，发 CLAIM 前还有 `_carrier_sense()` 询问成员）。所以这里
+    先让在位主控正常下野，模拟一次正常切主，再让落后的 b 竞选；a 仍是成员、
+    仍是活着的投票人，默认模式（非严格）下会给 b 投赞成票并留 `vote_store_lag`
+    —— 这样既守住不抢占规则，又仍然钉住「store 落后不是选举资格」。
+    """
     a, b = _two_nodes(cluster_factory)
     a.store = _FakeStore(99)          # 在位主控领先很多
     b.store = None                    # 候选人 last_store_seq=0，明显落后
     try:
+        # 让 a 下野后不再自己参选（priority=0 是 OSPF 的弃权硬资格），
+        # 否则 a 会抢在 b 前面重新当选，这条用例就测不到 b 了。
+        a.config.leader_priority = 0
+        code, _ = a.handle_resign({"node_id": a.node_id})
+        assert code == 200
+        # 等 b 自己把「主控租约」放掉（正常切主的第一步）
+        assert wait_until(lambda: b.leader_id is None), "b 仍视 a 为在位主控"
         won = b._start_election(force=False)
         assert won is True, "落后候选默认应能当选，而不是等到 quorum 退化"
         assert wait_until(lambda: b.role == "leader")
+        assert a.role == "follower", "原主控必须下野，不能留双主"
     finally:
         a.store = None
 
