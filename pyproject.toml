@@ -62,3 +62,5 @@ py-modules = [
     "pending_matcher",
     "selftest",
 ]
+# v0.5 控制面是唯一按包组织的子系统（多模块 + 明确边界，便于并行开发）。
+packages = ["hive_control"]
