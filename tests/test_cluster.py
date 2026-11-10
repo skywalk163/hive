@@ -10,6 +10,7 @@ import json
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -1405,3 +1406,191 @@ def test_config_source_without_shadow(tmp_path):
     assert hc.ignored_config_path(cfg) is None
     assert len(hc.config_source_lines(cfg)) == 1
 
+
+
+# --------------------------------------------------------------------------- #
+# T-0327：主锁饥饿（2026-11-10 现场：集群看似「没起来」，实则每 40s 卡 20s）
+# --------------------------------------------------------------------------- #
+
+def test_persist_locked_does_not_touch_disk(cluster_factory):
+    """持主锁时只打脏标记，绝不写盘。
+
+    现场根因之一：_persist_locked 在 self.lock 里直接 _write_json（state.json
+    实测 521KB，一次 40ms+，ZFS 上还会撞 fsync）。选举路径每次持锁调它，
+    心跳和 HTTP 全排队 —— 对外表现就是整个集群周期性无响应。
+    """
+    c = cluster_factory("a")
+    state_path = c.config.state_path
+    before = state_path.read_text(encoding="utf-8") if state_path.exists() else ""
+    with c.lock:
+        c._persist_locked()
+        c._persist_locked()
+        # 锁内不得发生任何磁盘写：文件内容必须与调用前一致
+        after = state_path.read_text(encoding="utf-8") if state_path.exists() else ""
+        assert after == before
+        # 但状态必须标记为待落盘
+        assert c._dirty is True
+
+
+def test_persist_writes_outside_lock(cluster_factory):
+    """真正的落盘由 _persist() 完成，且在释放主锁之后才写。"""
+    c = cluster_factory("a")
+    with c.lock:
+        c._persist_locked()
+    assert c._dirty is True
+    c._persist(force=True)
+    assert c._dirty is False
+    assert c.config.state_path.exists()
+    data = json.loads(c.config.state_path.read_text(encoding="utf-8"))
+    assert data.get("node") == c.node_id
+
+
+def test_store_seq_cache_never_blocks_on_store_lock(cluster_factory):
+    """持有主锁读 store 位点时，绝不能去抢 store._lock。
+
+    现场：补卡线程持 store 锁 18s，而 _self_node()/心跳响应在持主锁时
+    commit_seq() —— 两把锁互等，整集群 20s 无响应。
+    这里用「store 锁已被占住」模拟，_store_seq() 必须立即返回缓存值。
+    """
+    c = cluster_factory("a", store_enabled=True)
+    c._commit_seq_cache = 7
+    assert c._store_seq() == 7
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_store_lock():
+        with c.store._lock:
+            held.set()
+            release.wait(timeout=10)
+
+    t = threading.Thread(target=hold_store_lock, daemon=True)
+    t.start()
+    assert held.wait(timeout=5)
+    try:
+        # store 锁被占住期间，持主锁读位点必须立刻返回（读缓存），不能卡
+        started = time.monotonic()
+        with c.lock:
+            value = c._store_seq()
+            payload = c._state_payload_locked()
+        elapsed = time.monotonic() - started
+        assert value == 7
+        assert payload["node"] == c.node_id
+        assert elapsed < 1.0, f"持主锁读位点被 store 锁拖住了 {elapsed:.2f}s"
+    finally:
+        release.set()
+        t.join(timeout=5)
+
+
+def test_stop_persists_latest_state(cluster_factory):
+    """停机要强制落盘：离线视图（cluster status --json）靠 state.json。"""
+    c = cluster_factory("a")
+    assert wait_until(lambda: c.role == "leader", timeout=6)
+    term = c.term
+    c.stop()
+    raw = json.loads(c.config.state_path.read_text(encoding="utf-8"))
+    assert int(raw.get("term") or 0) >= term
+
+
+def test_node_relocation_same_incarnation_is_accepted(cluster_factory):
+    """真机换 IP（进程未重启）应自愈，而不是被身份校验永久拒之门外。
+
+    现场：DESKTOP-IC6RTQ4 从 192.168.0.109 迁到 192.168.0.100，incarnation
+    全程未变；旧代码只看 url 与来源 IP 是否一致，于是每 30s 丢一条
+    「忽略伪造身份心跳」，该节点再也回不了成员表。
+    """
+    a = cluster_factory("a")
+    # 登记成「来自别的 IP」的节点，incarnation 记下来
+    rec = dict(a._self_node())
+    rec.update({"id": "remote-1", "name": "remote", "port": 8788,
+                "host": "10.9.9.9", "url": "http://10.9.9.9:8788",
+                "incarnation": 123456789})
+    with a.lock:
+        a._update_node_locked(rec, touch=True)
+
+    # 同一实例从新 IP 发心跳：自述 url 仍是旧地址
+    body = {
+        "node": dict(rec, url="http://10.9.9.9:8788", host="10.9.9.9"),
+        "term": a.term,
+        "leader": False,
+    }
+    code, resp = a.handle_heartbeat(body, peer_ip="10.9.9.50")
+    assert code == 200
+    with a.lock:
+        got = a.nodes.get("remote-1") or {}
+    # 登记地址被改写到请求来源 IP，成员表恢复正常
+    assert got.get("url") == "http://10.9.9.50:8788", got.get("url")
+    assert got.get("host") == "10.9.9.50"
+
+
+def test_node_relocation_different_incarnation_still_rejected(cluster_factory):
+    """换了实例（incarnation 不同）仍按伪造处理，身份校验不能因此放宽。"""
+    a = cluster_factory("a")
+    rec = dict(a._self_node())
+    rec.update({"id": "remote-1", "name": "remote",
+                "host": "10.9.9.9", "url": "http://10.9.9.9:8788",
+                "incarnation": 111})
+    with a.lock:
+        a._update_node_locked(rec, touch=True)
+
+    body = {
+        # 冒充同一 id，但 incarnation 对不上 => 不是同一个进程
+        "node": dict(rec, incarnation=222),
+        "term": a.term,
+        "leader": True,
+    }
+    code, resp = a.handle_heartbeat(body, peer_ip="10.9.9.50")
+    assert code == 200
+    with a.lock:
+        got = a.nodes.get("remote-1") or {}
+    # 地址不得被改写；也没资格签租约
+    assert got.get("url") == "http://10.9.9.9:8788"
+    assert a.leader_id != "remote-1"
+
+
+def test_node_relocation_unknown_id_is_rejected(cluster_factory):
+    """册上没有的 id，即便声明某 incarnation，也不能靠「迁移」混进成员表。"""
+    a = cluster_factory("a")
+    body = {
+        "node": {"id": "stranger", "name": "stranger",
+                 "host": "10.9.9.9", "url": "http://10.9.9.9:8788",
+                 "incarnation": 123456789},
+        "term": a.term,
+        "leader": True,
+    }
+    code, resp = a.handle_heartbeat(body, peer_ip="10.9.9.50")
+    assert code == 200
+    with a.lock:
+        assert "stranger" not in a.nodes
+        assert a.leader_id != "stranger"
+
+
+def test_node_relocation_is_idempotent_after_first_fix(cluster_factory):
+    """迁移修好之后，对端仍每跳带旧地址 —— 不能每次都记一条「迁移」噪音。
+
+    现场：旧进程只在上游广播前刷新 advertise，重启前会一直上报旧 IP。
+    册上地址已是新值后就该当作普通心跳静默放行。
+    """
+    a = cluster_factory("a")
+    rec = dict(a._self_node())
+    rec.update({"id": "remote-1", "name": "remote", "port": 8788,
+                "host": "10.9.9.9", "url": "http://10.9.9.9:8788",
+                "incarnation": 123456789})
+    with a.lock:
+        a._update_node_locked(rec, touch=True)
+
+    body = {"node": dict(rec), "term": a.term, "leader": False}
+    # 第一次：真的迁移，留一条事件
+    a.handle_heartbeat(body, peer_ip="10.9.9.50")
+    with a.lock:
+        events_after_first = [e for e in a.events if e.get("type") == "node_relocated"]
+    assert len(events_after_first) == 1
+
+    # 后续同地址心跳（对端仍带旧 url）：不得再产生事件
+    for _ in range(3):
+        a.handle_heartbeat(body, peer_ip="10.9.9.50")
+    with a.lock:
+        events_after_more = [e for e in a.events if e.get("type") == "node_relocated"]
+        got = a.nodes.get("remote-1") or {}
+    assert len(events_after_more) == 1, "重复迁移又记了事件，会变成新的日志噪音"
+    assert got.get("url") == "http://10.9.9.50:8788"

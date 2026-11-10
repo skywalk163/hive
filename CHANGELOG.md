@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+### Fixed
+
+- **T-0327：主锁被长操作占住 → 集群周期性「假死」，看板显示「集群：未启动」**。
+  现场（2026-11-10，FreeBSD）：看板每 40~45 秒显示一次「未启动」，`hive cluster
+  start` 报「15s 内尚未响应 health」，日志里 term 一天涨了 1289 次、`leader_lost`
+  反复报「主节点租约过期」。实测 `/api/cluster/state` 每 40s 卡 20s，
+  而看板的探测超时只有 0.6s —— 一次卡顿就足以判定「没起来」。
+  - **根因（两把锁互等）**：`_persist_locked()` 在 `self.lock` 里直接
+    `_write_json`（state.json 521KB，一次 40ms+，ZFS 上还撞 `zil_commit` 的
+    fsync）；`_self_node()` / 心跳响应 / 选票闸门在**持主锁**时调
+    `store.commit_seq()`，而 `_ingest_store_cards()` 会去抢 `store._lock`。
+    补卡线程占住 store 锁 → 持主锁的线程排队 → 心跳发不出 → 租约过期 → 重选
+    → 重选又要持锁落盘 → 雪崩。
+  - **`_persist_locked` 改为只打脏标记**，写盘统一由 `_persist()` 在锁外完成
+    （锁内只取快照）。停机路径补 `_persist(force=True)`，保证 `cluster status`
+    离线视图仍是最新任期。
+  - **新增 `_store_seq()` 位点缓存**：持主锁的路径只读缓存值，绝不跨到
+    `store._lock` 上排队；缓存由 `_loop_health_cache` 在锁外每秒刷新。
+    `handle_vote` / `handle_store` 本来就在锁外，仍取实时值（严格模式靠它判落后）。
+  - **`Store.ingest_cards()` 改为单事务批量提交**（`batch=200` 分段）。
+    连接是 `isolation_level=None`（autocommit），原先逐行 execute 等于逐行
+    fsync：PRAGMA `synchronous=FULL` 下 194 张卡要 **18 秒**，整条 store 锁
+    被占死；改后 **47ms**（约 379 倍）。
+  - 回归用例见 `tests/test_cluster.py` 的
+    `test_persist_locked_does_not_touch_disk` /
+    `test_persist_writes_outside_lock` /
+    `test_store_seq_cache_never_blocks_on_store_lock` /
+    `test_stop_persists_latest_state`。
+  - 详情见 `docs/` 与发布说明。
+- **节点换 IP 不再被永久误判为「伪造身份」**（T-0327 附带修复）。
+  现场：`DESKTOP-IC6RTQ4` 的地址从 `192.168.0.109` 变成 `192.168.0.100`，
+  进程没重启，自述 url 还停在旧 IP —— 每一跳都被身份校验拒掉，该节点
+  再也回不了成员表，还每 30 秒往 `cluster.log` 丢一条「忽略伪造身份心跳」。
+  - 判据从严，只认**同一个进程实例**：node_id 已登记在册，且对端自述的
+    `incarnation` 与册上那条完全相等（`incarnation` 是启动时刻毫秒戳，
+    换实例必变）。命中则只把登记地址改写成请求来源 IP，不改身份。
+  - 幂等：对端进程未重启前会一直上报旧 url，册上地址已是新值后
+    **静默放行**（等同普通心跳），不再重复记日志/事件，避免「迁移日志」
+    自己变成新的噪音源。
+  - 换了实例（incarnation 不同）或册上没有该 id 时，仍按伪造处理 ——
+    身份校验的前置防线不因此放宽。回归用例见
+    `test_node_relocation_same_incarnation_is_accepted` /
+    `test_node_relocation_different_incarnation_still_rejected` /
+    `test_node_relocation_unknown_id_is_rejected` /
+    `test_node_relocation_is_idempotent_after_first_fix`。
+
 ### Added
 
 - **第四种 agent 模式 `accept`（派单—接单）**。给「主控发布任务 → agent 通过定时任务

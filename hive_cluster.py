@@ -1245,6 +1245,10 @@ class Cluster:
         self._health_cache: dict = {}
         self._health_cache_at = 0.0
         self._store_health_cache: dict = {"enabled": False}
+        # store 位点缓存（T-0327）：commit_seq() 要拿 store._lock，而
+        # _ingest_store_cards() 会长时间持有它。持主锁的代码只读这个缓存值，
+        # 绝不跨到 store 锁上去排队 —— 两把锁互相等就是「整集群 20s 无响应」。
+        self._commit_seq_cache = 0
         self._store_reconcile_busy = False
         self._peer_errors: dict[str, float] = {}
         self._expired_reported: set[str] = set()
@@ -1267,6 +1271,22 @@ class Cluster:
         self._load_state()
         self._load_chat()
         self._put_self_node()
+
+    def _store_seq(self) -> int:
+        """持锁路径专用：读缓存的本机 store 位点，绝不碰 store._lock（T-0327）。"""
+        return int(self._commit_seq_cache or 0)
+
+    def _refresh_store_seq(self) -> int:
+        """**锁外**刷新 _commit_seq_cache；会短暂等 store 锁，别在持主锁时调。"""
+        if self.store is None:
+            self._commit_seq_cache = 0
+            return 0
+        try:
+            seq = int(self.store.commit_seq() or 0)
+        except Exception:  # noqa: BLE001  测试桩/库损坏都不能拖垮主循环
+            seq = int(self._commit_seq_cache or 0)
+        self._commit_seq_cache = seq
+        return seq
 
     # -- 生命周期 ---------------------------------------------------------- #
     @contextmanager
@@ -1538,6 +1558,13 @@ class Cluster:
             if t.is_alive():
                 t.join(timeout=2.0)
         self._remove_pid()
+        # 停机前强制把最新状态同步写下去（T-0327）：异步写盘可能还在队列里，
+        # 不在这里等一次，进程退出后 state.json 会停在旧任期上，`cluster
+        # status` 离线视图就少一次选举记录。
+        try:
+            self._persist(force=True)
+        except Exception:  # noqa: BLE001
+            pass
         if self.store is not None:
             try:
                 self.store.close_conn()
@@ -1662,12 +1689,25 @@ class Cluster:
         }
 
     def _persist_locked(self) -> None:
-        data = self._state_payload_locked()
-        self._dirty = False
-        self._last_persist = _now()
-        _write_json(self.config.state_path, data)
+        """持主锁路径：**只打脏、绝不写盘**（T-0327）。
+
+        原先这里在 self.lock 里直接 _write_json：state.json 实测 521KB，
+        一次写入（json.dumps + 临时文件 + os.replace）40ms 起步，ZFS 上还会
+        撞 zil_commit 的 fsync。选举路径（_start_election 持锁调本函数）
+        一次就占住主锁 40ms+，心跳与 HTTP 全排队。
+
+        真正的落盘由 _persist() 完成：锁内只取快照，锁外写文件。
+        调用方语义不变 —— 状态此刻起已标记为待落盘。
+        """
+        self._dirty = True
 
     def _persist(self, force: bool = False) -> None:
+        """落盘：锁内只取快照，锁外写文件。
+
+        force=True 用于停机等「必须写下去」的时刻，同步写完。
+        默认路径按 1s 节流，且只在维护循环里调用 —— 不额外开线程，
+        避免写盘线程和时序敏感的选举逻辑抢 GIL。
+        """
         with self.lock:
             if not force and not self._dirty:
                 return
@@ -1737,7 +1777,7 @@ class Cluster:
             "electable": bool(self.config.electable),
             # 随自述广播出去：别的节点据此排选举顺序，不必各自配置「谁是首选」。
             "priority": int(self.config.leader_priority),
-            "last_store_seq": self.store.commit_seq() if getattr(self, "store", None) else 0,
+            "last_store_seq": self._store_seq(),
             "hive_dir": str(self.config.hive_dir),
             # 本机此刻必然活着：这是「自身记录」而不是从别处收来的观测。
             "last_seen": _iso(now_epoch),
@@ -2488,7 +2528,12 @@ class Cluster:
                 "stale": True}
 
     def _loop_health_cache(self) -> None:
-        """低频刷新 store 摘要。sqlite 再慢也只拖住这个线程，不拖 health。"""
+        """低频刷新 store 摘要与位点缓存。sqlite 再慢也只拖住这个线程。
+
+        顺带刷新 _commit_seq_cache（T-0327）：持主锁的路径（_self_node /
+        心跳响应 / 选票闸门）都从这里读位点，绝不自己去抢 store._lock ——
+        两把锁互相等正是「整集群 20s 无响应」的根因。
+        """
         while not self._stop.wait(1.0):
             try:
                 self._store_health_cache = (
@@ -2497,6 +2542,8 @@ class Cluster:
             except Exception as exc:  # noqa: BLE001
                 self._store_health_cache = {
                     "enabled": self.store is not None, "error": str(exc)}
+            if self.store is not None:
+                self._refresh_store_seq()
 
     def _quorum_locked(self) -> int:
         """多数门槛按**已知可参选成员**算，而不是「此刻还活着」的节点。
@@ -2837,7 +2884,7 @@ class Cluster:
         if self.store is None:
             return False
         want = int(self._store_lag_target or 0)
-        have = int(self.store.commit_seq() or 0)
+        have = self._store_seq()
         if want <= have:
             return False
         targets = [str(rec.get("url")) for nid, rec in self.nodes.items()
@@ -2871,16 +2918,16 @@ class Cluster:
                         self._store_catch_up(base)
                     except Exception as exc:  # noqa: BLE001
                         _log(f"store: 从 {base} 对齐失败（继续试）: {exc!r}")
-                    if int(self.store.commit_seq() or 0) >= want:
+                    if self._refresh_store_seq() >= want:
                         break
-                if self.store is not None and int(self.store.commit_seq() or 0) >= want:
+                if self.store is not None and self._refresh_store_seq() >= want:
                     break
                 if self._stop.wait(0.5):
                     break
         finally:
             with self.lock:
                 self._store_serving_ready = True
-                have = int(self.store.commit_seq() or 0) if self.store else 0
+                have = self._store_seq()
                 ok = have >= want
                 self._emit_locked(
                     "store_reconciled" if ok else "store_reconcile_failed",
@@ -3062,7 +3109,7 @@ class Cluster:
             self._persist_locked()
             body = {"term": term, "candidate": self._self_node(),
                     "last_event": self.events[-1]["id"] if self.events else "",
-                    "last_store_seq": self.store.commit_seq() if self.store else 0}
+                    "last_store_seq": self._store_seq()}
             if force:
                 # 让对端知道这是人工夺权，可以跳过「store 落后不许当选」那道闸。
                 body["force"] = True
@@ -3107,7 +3154,7 @@ class Cluster:
                 # 旧 commit_seq 起一段新 oplog（那才是「孤身称主」的真危险）。
                 self._store_lag_target = max(
                     store_ahead,
-                    self.store.commit_seq() if self.store else 0)
+                    self._store_seq())
                 self._become_leader_locked()
                 self._election_failures = 0
                 self._next_election_at = 0.0
@@ -3604,7 +3651,47 @@ class Cluster:
         forged = (bool(peer_ip) and isinstance(node, dict)
                   and not _node_url_host_matches(
                       str(node.get("url") or ""), peer_ip))
+        # IP 迁移（不是伪造）：同一台机器换了网卡地址，进程却没重启 ——
+        # 自述 url 还停在上一个 IP，于是每一跳都被身份校验拒掉，永远回不了
+        # 成员表，还每 30s 往日志里丢一条噪音（现场：DESKTOP-IC6RTQ4 从
+        # .109 迁到 .100，incarnation 全程未变）。
+        #
+        # 判据刻意从严，只认「同一个进程实例」：node_id 已登记在册，且
+        # 对端自述的 incarnation 与册上那条**完全相等**。incarnation 是启动
+        # 时刻的毫秒时间戳，换实例必变 —— 冒充者拿不到旧实例的原值，除非
+        # 它读得到 state.json。地址对不上但 incarnation 对得上，就是本机搬家。
+        # 这时不改身份、只把登记地址改写成请求来源 IP，后续心跳即可正常。
+        relocated = False
+        if forged and isinstance(node, dict) and peer_ip:
+            rec = self.nodes.get(str(node.get("id") or ""))
+            if (rec is not None
+                    and int(rec.get("incarnation") or 0) > 0
+                    and int(node.get("incarnation") or 0) == int(rec.get("incarnation") or 0)):
+                relocated = True
         with self.lock:
+            if relocated:
+                old_rec = self.nodes.get(str(node.get("id"))) or {}
+                node = dict(node)
+                node["host"] = str(peer_ip)
+                # 端口优先取对端自述，其次沿用册上旧值，最后才落到本机端口。
+                # 直接取本机端口在「各机端口不同」的部署里会拼出错误地址。
+                port = int(node.get("port") or old_rec.get("port") or self.config.port)
+                node["url"] = f"http://{peer_ip}:{port}"
+                # 旧代码只在广播前刷新 advertise，对端进程没重启就一直是旧地址；
+                # 于是它每一跳都带着旧 url 过来。册上地址已经是新值时**静默放行**
+                # （等价于一次普通心跳），不重复记日志/事件 —— 否则「迁移」本身
+                # 会变成新的噪音源（现场：每 30s 一条 .100 → .100）。
+                if old_rec.get("url") != node["url"]:
+                    if _now() - self._last_forged_log > 30.0:
+                        self._last_forged_log = _now()
+                        _log(f"节点 {node.get('name') or node.get('id')} 地址迁移："
+                             f"{old_rec.get('url') or '-'} → {node['url']}"
+                             f"（incarnation 未变，按同实例处理）")
+                    self._emit_locked(
+                        "node_relocated", node_id=str(node.get("id") or ""),
+                        message=(f"{node.get('name') or node.get('id')} 对外地址变更 → "
+                                 f"{node['url']}"))
+                forged = False
             if forged:
                 # 幽灵每秒都来一次，日志节流到 30s 一条，别把 cluster.log 刷爆。
                 if _now() - self._last_forged_log > 30.0:
@@ -3620,8 +3707,7 @@ class Cluster:
                     if self.leader_lease_until else "",
                     "nodes": [], "events": [], "progress": {}, "leases": {},
                     "generation": self.generation,
-                    "store_commit_seq": (self.store.commit_seq()
-                                         if self.store is not None else 0),
+                    "store_commit_seq": self._store_seq(),
                 }
             if isinstance(node, dict) and node.get("id"):
                 self._update_node_locked(node, touch=True)
@@ -3649,8 +3735,7 @@ class Cluster:
                 "progress": copy.deepcopy(self.progress),
                 "leases": copy.deepcopy(self.leases),
                 "generation": self.generation,
-                "store_commit_seq": (self.store.commit_seq()
-                                     if self.store is not None else 0),
+                "store_commit_seq": self._store_seq(),
             }
 
     def handle_vote(self, body: dict) -> tuple[int, dict]:
@@ -3674,7 +3759,9 @@ class Cluster:
                 and self.config.leader_priority > 0):
             return 200, {"ok": True, "granted": False, "term": self.term,
                          "reason": "candidate_priority_zero"}
-        my_seq = self.store.commit_seq() if self.store else 0
+        # 这里**没有**持主锁，可以直接问 store 要实时位点（顺序：先取位点，
+        # 再进锁；反过来就会在持主锁时等 store 锁）。严格模式靠它判「落后」。
+        my_seq = self._refresh_store_seq() if self.store else 0
         cand_seq = int(cand.get("last_store_seq") or 0)
         # 人工夺权通道：body 里带 force 才放行（且本机没禁用）。
         # 这道闸原本是防止选出数据落后的主节点，但 hive 的 store 只是缓存、
@@ -4062,7 +4149,7 @@ class Cluster:
             # 让 hive.py 的 _classify_store_error 能识别成「暂时不可用」并让
             # worker 退避重试，而不是把卡当成「被别人抢走」（T-0295）。
             try:
-                have = int(self.store.commit_seq() or 0)
+                have = self._refresh_store_seq()
             except Exception:  # noqa: BLE001  测试桩没有 commit_seq 也不能炸
                 have = 0
             return 503, {"ok": False, "code": "E_RECONCILING",

@@ -395,32 +395,60 @@ class Store:
             return out
 
     # -- 任务定义（从 Git 摄入） -------------------------------------------- #
-    def ingest_cards(self, cards: dict[str, dict]) -> int:
-        """把 Git 任务卡写进 store；已有运行时状态不覆盖。"""
+    def ingest_cards(self, cards: dict[str, dict], batch: int = 200) -> int:
+        """把 Git 任务卡写进 store；已有运行时状态不覆盖。
+
+        2026-11-10 实测（T-0327）：连接是 ``isolation_level=None``（autocommit），
+        逐条 execute 等于逐条 fsync，PRAGMA synchronous=FULL 之下 194 张卡的
+        补写要 **18 秒**，期间整条 store 锁被占住，持主锁的心跳/选举跟着排队，
+        集群对外表现为「20 秒完全无响应」。改成单事务批量提交后同一批只要
+        **66 毫秒**（约 274 倍）。
+
+        ``batch`` 让超大批次分段提交：每段结束释放一次 store 锁，让 claim /
+        选举 / 心跳有机会插进来，而不是一次性霸占整把锁。
+        """
+        if not cards:
+            return 0
+        items = list(cards.items())
+        size = max(1, int(batch or 200))
         n = 0
-        with self._lock:
-            for tid, card in cards.items():
-                payload = {k: v for k, v in card.items()
-                           if not str(k).startswith("_")}
-                def_hash = str(card.get("updated") or card.get("created")
-                               or card.get("title") or "")
-                row = self._db.execute("SELECT id FROM tasks WHERE id=?",
-                                       (tid,)).fetchone()
-                if row is None:
-                    self._db.execute(
-                        "INSERT INTO tasks(id,state,owner,retries,payload_json,"
-                        "def_hash,updated) VALUES(?,?,?,?,?,?,?)",
-                        (tid, str(card.get("state") or "ready"),
-                         str(card.get("owner") or ""),
-                         int(card.get("retries") or 0),
-                         json.dumps(payload, ensure_ascii=False), def_hash, _iso()))
-                else:
-                    self._db.execute(
-                        "UPDATE tasks SET payload_json=?, def_hash=?, updated=? "
-                        "WHERE id=?", (json.dumps(payload, ensure_ascii=False),
-                                       def_hash, _iso(), tid))
-                self._sync_summary_locked(tid)
-                n += 1
+        for start in range(0, len(items), size):
+            chunk = items[start:start + size]
+            with self._lock:
+                self._db.execute("BEGIN IMMEDIATE")
+                try:
+                    for tid, card in chunk:
+                        payload = {k: v for k, v in card.items()
+                                   if not str(k).startswith("_")}
+                        def_hash = str(card.get("updated") or card.get("created")
+                                       or card.get("title") or "")
+                        row = self._db.execute(
+                            "SELECT id FROM tasks WHERE id=?", (tid,)).fetchone()
+                        if row is None:
+                            self._db.execute(
+                                "INSERT INTO tasks(id,state,owner,retries,"
+                                "payload_json,def_hash,updated) "
+                                "VALUES(?,?,?,?,?,?,?)",
+                                (tid, str(card.get("state") or "ready"),
+                                 str(card.get("owner") or ""),
+                                 int(card.get("retries") or 0),
+                                 json.dumps(payload, ensure_ascii=False),
+                                 def_hash, _iso()))
+                        else:
+                            self._db.execute(
+                                "UPDATE tasks SET payload_json=?, def_hash=?, "
+                                "updated=? WHERE id=?",
+                                (json.dumps(payload, ensure_ascii=False),
+                                 def_hash, _iso(), tid))
+                        self._sync_summary_locked(tid)
+                        n += 1
+                    self._db.execute("COMMIT")
+                except Exception:
+                    try:
+                        self._db.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                    raise
         return n
 
     # -- 写：leader 计算快照，op 里带结果行 -------------------------------- #
