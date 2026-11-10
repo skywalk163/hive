@@ -1,0 +1,42 @@
+{
+  "task": "T-0318",
+  "agent": "dumate-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0318",
+  "base": "main",
+  "head": "13404d2db687110c291c32872f445f42122c26de",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T20:10:31+08:00",
+  "finished_at": "2026-11-10T20:24:11+08:00",
+  "duration_s": 820.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_ai_check_json.py",
+      "code": 0,
+      "tail": [
+        "0.46s setup    tests/test_ai_check_json.py::TestExitCodeContract::test_missing_file_exits_2",
+        "0.43s call     tests/test_ai_check_json.py::TestTextPathUnchanged::test_missing_file_text_output",
+        "0.42s setup    tests/test_ai_check_json.py::TestTextPathUnchanged::test_clean_text_output",
+        "0.39s setup    tests/test_ai_check_json.py::TestTextPathUnchanged::test_error_text_output",
+        "18 passed in 14.67s"
+      ]
+    }
+  ],
+  "summary": "## T-0318 交付摘要\n\n- 目标：`light ai check --json` 吐出机器可读诊断（错误码/位置/候选修复）+ 退出码契约，支撑 `generate → check → fix → re-check` 闭环。\n- 改动（cli/light.py）：新增 `_ai_check_json` 与解析辅助（enhanced_errors 边框块 → 诊断、运行期报错 → 诊断、`src.diagnostics.explain` 软依赖）；`ai check` 增加 `--json`（可与 `--run` 组合）；后端关键字表提取为 `_AI_BACKEND_KEYWORDS` 供文本/JSON 两条路径共用。无 `--json` 的文本输出与退出码逐字不变，`cmd_check` / `cmd_type_check` 未改。\n- 改动（docs/AI编程指南.md）：新增 §12C —— stdout/stderr 分工、顶层与 diagnostics 字段表、退出码表、Agent 闭环示例、`L0000` + `provisional` 的诚实口径。\n- 改动（tests/test_ai_check_json.py）：18 条用例，全部 subprocess 跑真实 CLI；覆盖三种退出码、单 JSON、字段类型、真实行列（2 行 5 列）、后端提示、`--run` 的 stage=\"运行\"、stderr 进度、文本基线。\n- 验证：`python -m pytest -q tests/test_ai_check_json.py` → **18 passed**（16.16s）。`light check` 干净文件 rc=0 / 语法错误 rc=1、`type-check` rc=0，与改前一致。\n- 真实 `--json` 输出（语法错文件，第 2 行第 5 列缺右括号；已用 `python -m json.tool` 校验）：\n  `{\"schema_version\": 1, \"ok\": false, \"file\": \"bad.light\", \"backend_hints\": [], \"diagnostics\": [{\"code\": \"L0000\", \"severity\": \"error\", \"stage\": \"语法检查\", \"line\": 2, \"column\": 5, \"message\": \"输入意外结束 (期望 右括号「)」)（建议检查是否缺少表达式或语句）\", \"hint\": \"代码可能不完整，请检查是否缺少右括号「)」或冒号「:」。；30分钟入门光明.md 第6章「函数/段落」\", \"fixes\": [\"代码可能不完整，请检查是否缺少右括号「)」或冒号「:」\"], \"candidates\": [], \"provisional\": true}], \"duration_ms\": 589}`\n- 遗留风险：`src/diagnostics`（T-0316）尚未合入本分支，故当前 `code=L0000` + `provisional=true`；该包合入后同一路径自动带真实码，CLI 输出结构不变。\n- 说明：任务卡提到快照文件 `tests/fixtures/ai_check_text_baseline.txt`，但卡面 `paths` 只允许 3 个路径，故关键行基线内联在测试文件常量里（只比关键行，不新增文件）。",
+  "error": "",
+  "declared_paths": [
+    "cli/light.py",
+    "tests/test_ai_check_json.py",
+    "docs/AI编程指南.md"
+  ],
+  "changed_files": [
+    "cli/light.py",
+    "docs/AI编程指南.md",
+    "tests/test_ai_check_json.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "f8d8e881546443e4872220392e5a2228",
+  "store_write_error": "T-0318 结果写入 leader store 失败（已尝试 4 次）：T-0318 的租约已过期，结果被拒（lease lost）"
+}
