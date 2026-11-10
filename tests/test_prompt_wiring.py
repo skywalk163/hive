@@ -52,6 +52,7 @@ def test_prompt_markdown_prints_card_body(world):
     out = p.stdout
     assert "请领取任务 T-0100" in out
     assert "接线测试" in out
+    assert "代码仓：light" in out               # 卡面 repo 必须出现在指令里
     assert "允许修改路径" in out
     assert "src/a.py" in out
     assert "hive_claim" in out
@@ -66,6 +67,7 @@ def test_prompt_json_is_single_json_object(world):
     assert isinstance(obj, dict)
     assert obj["task_id"] == "T-0100"
     assert obj["agent"] is None
+    assert obj["repo"] == "light"
     assert "contract" in obj and "text" in obj
     assert "claim_tool" in obj and obj["claim_tool"]["name"] == "hive_claim"
     assert "hive" not in p.stderr.lower().replace("[hive", "") or True

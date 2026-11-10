@@ -2,7 +2,8 @@
 
 分三层测，坏在哪一层一眼能看出来：
 
-1. **逐字**：六段骨架、五段契约与任务卡规定的格式逐字符对齐（`test_markdown_*`）；
+1. **逐字**：骨架（领取 / 摘要 / 代码仓 / 契约 / 领取方式 / 完成后）、五段契约与任务卡
+   规定的格式逐字符对齐（`test_markdown_*`）；
 2. **回退**：缺 `paths` / 缺 `verify` / 缺「不要做什么」时各自的默认文案，
    以及「缺任何字段都不抛异常」（`test_missing_*` / `test_contract_*`）；
 3. **给粘贴服务的硬约束**：确定性、无 ANSI、无表格行、单行 ≤ 200、行尾 `\\n`
@@ -27,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CARD = {
     "id": "T-0184",
     "title": "派发指令渲染",
+    "repo": "light",
     "paths": ["dispatch_prompt.py", "tests/test_dispatch_prompt.py"],
     "verify": ["python -m pytest -q tests/test_dispatch_prompt.py"],
     "timeout_minutes": 90,
@@ -46,6 +48,7 @@ BODY = """
 EXPECTED = "\n".join([
     "请领取任务 T-0184。",
     "任务摘要：派发指令渲染。看板看卡 → 手打 prompt，三类稳定损耗。",
+    "代码仓：light",
     "执行契约：",
     "- 允许修改路径：dispatch_prompt.py、tests/test_dispatch_prompt.py",
     "- 预期输出：python -m pytest -q tests/test_dispatch_prompt.py",
@@ -69,15 +72,25 @@ def test_markdown_matches_card_spec_verbatim():
 
 
 def test_markdown_section_order_and_labels():
-    """五段齐全且顺序固定：领取 / 摘要 / 契约 / 领取方式 / 完成后。"""
+    """六段齐全且顺序固定：领取 / 摘要 / 代码仓 / 契约 / 领取方式 / 完成后。"""
     lines = dp.render_dispatch_prompt(CARD, body=BODY).split("\n")
     assert lines[0] == "请领取任务 T-0184。"
     assert lines[1].startswith("任务摘要：")
-    assert lines[2] == "执行契约："
-    labels = [ln.split("：", 1)[0] for ln in lines[3:8]]
+    assert lines[2] == "代码仓：light"
+    assert lines[3] == "执行契约："
+    labels = [ln.split("：", 1)[0] for ln in lines[4:9]]
     assert labels == ["- 允许修改路径", "- 预期输出", "- 平台与判据", "- 失败策略", "- 禁止行为"]
-    assert lines[8] == "领取方式：调用 MCP 工具 hive_claim，参数 task_id=T-0184"
+    assert lines[9] == "领取方式：调用 MCP 工具 hive_claim，参数 task_id=T-0184"
     assert lines[-1] == "完成后调用 hive_submit 提交。"
+
+
+def test_repo_line_missing_when_card_has_no_repo():
+    """卡上没有 `repo`：不编仓库名、整行省略，其余逐字不变（老卡向后兼容）。"""
+    card = {k: v for k, v in CARD.items() if k != "repo"}
+    text = dp.render_dispatch_prompt(card, body=BODY)
+    assert not any(ln.startswith("代码仓：") for ln in text.split("\n"))
+    assert text == EXPECTED.replace("代码仓：light\n", "")
+    assert dp.render_dispatch_payload(card, body=BODY)["repo"] is None
 
 
 def test_missing_paths_uses_acceptance_fallback():
@@ -204,10 +217,11 @@ def test_agent_line_injected_after_claim_line():
 def test_json_payload_structure_and_text_equality():
     """json 载荷结构完整，`payload["text"]` 与 markdown 渲染逐字相等。"""
     payload = dp.render_dispatch_payload(CARD, agent="doubao-win", body=BODY)
-    assert list(payload) == ["task_id", "agent", "summary", "contract",
+    assert list(payload) == ["task_id", "agent", "summary", "repo", "contract",
                              "claim_tool", "submit_tool", "text"]
     assert payload["task_id"] == "T-0184"
     assert payload["agent"] == "doubao-win"
+    assert payload["repo"] == "light"
     assert payload["claim_tool"] == {"name": "hive_claim", "arguments": {"task_id": "T-0184"}}
     assert payload["submit_tool"] == "hive_submit"
     assert payload["text"] == dp.render_dispatch_prompt(
@@ -271,6 +285,7 @@ def test_real_card_T0184():
     lines = text.split("\n")
 
     assert lines[0] == "请领取任务 T-0184。"
+    assert "代码仓：hive" in lines
     assert "- 允许修改路径：dispatch_prompt.py、tests/test_dispatch_prompt.py" in lines
     assert "- 预期输出：python -m pytest -q tests/test_dispatch_prompt.py" in lines
     assert "- 失败策略：90 分钟内未完成即放弃；" in text

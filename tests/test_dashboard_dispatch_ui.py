@@ -120,6 +120,7 @@ def test_dispatch_prompt_markdown_ok(tasks_dir, status_file):
     assert body["format"] == "markdown"
     text = body["text"]
     assert "请领取任务 T-0001" in text
+    assert "代码仓：hive" in text               # 卡面 repo 进了指令（去哪干活）
     assert "hive_claim" in text                 # 验收口径：能直接粘给 agent
     assert "dashboard/app.js" in text           # 允许修改路径来自卡面
     assert "30 分钟内未完成即放弃" in text      # timeout_minutes 进了失败策略
@@ -135,6 +136,7 @@ def test_dispatch_prompt_json_format(tasks_dir, status_file):
     assert body["format"] == "json"
     payload = json.loads(body["text"])
     assert payload["task_id"] == "T-0001"
+    assert payload["repo"] == "hive"
     assert payload["claim_tool"]["name"] == "hive_claim"
     assert payload["contract"]["allowed_paths"] == ["dashboard/app.js",
                                                     "tests/test_dashboard_dispatch_ui.py"]
@@ -207,6 +209,7 @@ def test_real_card_T0184_renders():
 
     assert code == 200
     assert "请领取任务 T-0184" in body["text"]
+    assert "代码仓：hive" in body["text"]
     assert "hive_claim" in body["text"]
 
 
@@ -273,6 +276,7 @@ def test_dispatch_prompt_abnormal_carries_trace(tasks_dir, tmp_path):
     assert body["mode"] == "abnormal"
     text = body["text"]
     assert "请领取任务 T-0001" in text              # 重派语义保留
+    assert "代码仓：hive" in text                   # 重派也告诉新 agent 去哪个仓
     assert "异常信息（供溯源）" in text
     assert "此前领取 agent：fb88-dsh" in text        # 用户要的溯源信息
     assert "异常状态：failed" in text
@@ -293,7 +297,7 @@ def test_dispatch_prompt_stale_is_abnormal(tasks_dir, tmp_path):
 
 
 def test_dispatch_prompt_ready_keeps_claim_text(tasks_dir, tmp_path):
-    """待领取 / 进行中 / 已关闭：mode=claim，正文与旧行为逐字一致。"""
+    """待领取 / 进行中 / 已关闭：mode=claim，正文仍是领取指令（多一行卡面 repo）。"""
     for rec in ({"id": "T-0001", "state": "ready"},
                 {"id": "T-0001", "state": "running", "claim_agent": "trae-win"},
                 {"id": "T-0001", "state": "done", "result_status": "done"}):

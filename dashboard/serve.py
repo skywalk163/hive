@@ -911,7 +911,7 @@ def build_handler(status_path, write_auth="off"):
             try:
                 card, body = load_card_file(card_path)
                 # 状态感知：待合入的卡渲染「给主控的合入指令」，异常卡附带溯源块，
-                # 其余状态保持原派发指令（逐字不变）。快照读不到就当没记录。
+                # 其余状态保持原派发指令（卡上有 repo 时多一行「代码仓」）。快照读不到就当没记录。
                 import dispatch_prompt
                 record = load_status_record(status_path, tid)
                 mode = dispatch_prompt.detect_mode(record)

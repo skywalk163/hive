@@ -296,10 +296,17 @@ def _contract_line(label: str, items: list[str], sep: str, fallback: str) -> str
     return "\n".join([f"- {label}："] + [f"    - {it}" for it in items])
 
 
-def _render_markdown(task_id: str, summary: str, contract: dict, agent: str | None) -> str:
+def _render_markdown(task_id: str, summary: str, contract: dict,
+                     agent: str | None, repo: str = "") -> str:
     lines = [
         f"请领取任务 {task_id}。",
         f"任务摘要：{summary}",
+    ]
+    # 代码仓是「去哪干活」的前置信息，和合入指令（render_merge）里的「代码仓」同一口径：
+    # 卡上写了就照实报，没写就整行省略 —— 不替老卡编一个仓库名。
+    if repo:
+        lines.append(f"代码仓：{repo}")
+    lines += [
         "执行契约：",
         _contract_line("允许修改路径", contract["allowed_paths"], "、", _FALLBACK_PATHS),
         _contract_line("预期输出", contract["expected_output"], "；", _FALLBACK_VERIFY),
@@ -319,21 +326,23 @@ def _render_markdown(task_id: str, summary: str, contract: dict, agent: str | No
 def render_dispatch_payload(card: dict, *, agent: str | None = None, body: str = "") -> dict:
     """渲染成可直接 `json.dumps` 的载荷（`text` 与 markdown 输出逐字一致）。
 
-    键顺序固定：`task_id / agent / summary / contract / claim_tool / submit_tool / text`，
+    键顺序固定：`task_id / agent / summary / repo / contract / claim_tool / submit_tool / text`，
     方便脚本用 `json.tool` 肉眼比对，也让快照测试不会因为键序抖动。
     """
     card = card if isinstance(card, dict) else {}
     task_id = _clean(card.get("id"))
     summary = extract_task_summary(card, body)
+    repo = _clean(card.get("repo"))
     contract = build_dispatch_contract(card, body)
     return {
         "task_id": task_id,
         "agent": agent,
         "summary": summary,
+        "repo": repo or None,
         "contract": contract,
         "claim_tool": {"name": "hive_claim", "arguments": {"task_id": task_id}},
         "submit_tool": "hive_submit",
-        "text": _render_markdown(task_id, summary, contract, agent),
+        "text": _render_markdown(task_id, summary, contract, agent, repo),
     }
 
 
@@ -536,7 +545,7 @@ def render_status_prompt(card: dict, record, *, agent: str | None = None,
     * merge    → render_merge_prompt（发给主控）
     * abnormal → 派发指令 + 异常溯源块（重派时新 agent 知道前情）
     * shelved  → 搁置说明（明确告诉 agent 别领）
-    * claim    → render_dispatch_prompt（原有行为，逐字不变）
+    * claim    → render_dispatch_prompt（原有行为；卡上有 repo 时多一行「代码仓」）
     """
     mode = detect_mode(record)
     if mode == SHELVED:
