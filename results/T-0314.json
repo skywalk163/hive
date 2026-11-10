@@ -1,0 +1,38 @@
+{
+  "task": "T-0314",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0314",
+  "base": "main",
+  "head": "e4021947d355666c29fd1f2d75ebd1a2601dfb32",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T20:48:27+08:00",
+  "finished_at": "2026-11-10T20:53:16+08:00",
+  "duration_s": 289.7,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_control_docs.py",
+      "code": 0,
+      "tail": [
+        "............                                                             [100%]",
+        "12 passed in 0.29s"
+      ]
+    }
+  ],
+  "summary": "# T-0314 交付摘要\n\n## 做了什么\n\n- 新增 `docs/控制面v0.5-运维.md`（约 300 行）：双面并存与 D1/D14 边界、端口/套接字表\n  （HTTP 8788、上行/拉取 TCP 8789 = HTTP+1、组播 `239.255.42.1:47899`、Unix socket）、\n  `/api/cluster/status` 字段解释与实测样例、`/api/cluster/pull` + `/pull/status` 异步流程、\n  组播回退的触发/确认/恢复、常见故障定位表、灰度判据与版本回滚步骤、安全边界。\n- `CHANGELOG.md`：在 `Unreleased` 顶部新增 `### Added`（T-0314 条目），未改动他人段落。\n- 新增 `tests/test_control_docs.py`：12 条防漂移断言（小节顺序、端口、API 路径、\n  status 字段、回退三要素、故障关键词、安全表述、相对链接存在、代码围栏配对、\n  CHANGELOG 位置），纯标准库、跨平台。\n\n## 验证\n\n- `python -m pytest -q tests/test_control_docs.py` → **12 passed**。\n- 文档命令实跑：本机用隔离实例 `cluster serve --port 18788 --no-discover --no-sync`\n  跑通 status / pull / pull-status 与 §4 的 python 单行命令；FreeBSD 15.1（192.168.0.88）\n  只读复核了 `curl` / `sockstat` 写法（health=200）。集群内没有 Linux 节点，未能在 Linux 实跑。\n\n## 风险与遗留\n\n- 实测发现当前 main 的装配缺陷：`hive_control/adapter.py` 构造 `ControlPlane` 时未传\n  `node/address/listen_port/config`，`serve` 下恒为 `plane_available:false / degraded:true`。\n  该缺陷属 T-0311 的 `hive_cluster.py`/`adapter.py`，不在本卡允许路径内，未修；\n  已在手册「上线前必读」和故障表中如实标注，避免运维误判为已上线。\n- 手册其余内容按实现约定描述目标行为；T-0311 修复后无需改文档，测试仍应通过。",
+  "error": "",
+  "declared_paths": [
+    "docs/控制面v0.5-运维.md",
+    "CHANGELOG.md",
+    "tests/test_control_docs.py"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/控制面v0.5-运维.md",
+    "tests/test_control_docs.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "6a32b635c01b46e388519fbca7b0d298"
+}
