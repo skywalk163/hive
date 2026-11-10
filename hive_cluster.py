@@ -564,6 +564,12 @@ class Config:
         self.hive_dir = Path(
             kw.get("hive_dir") or os.environ.get("HIVE_DIR") or Path.cwd()
         ).expanduser().resolve()
+        # D14（实现约定 §4）：控制面只在 `hive cluster serve` 入口开启。
+        # 程序化构造的 Cluster 一律默认关闭 —— 既有 50+ 测试实例会同时
+        # 实例化 Cluster，默认开启会一起抢 47899 组播端口互相干扰。
+        # 进程内内部属性：不读环境变量、不写进 config.json。
+        self.control_plane = bool(kw.get("control_plane", False))
+        self.control_limits = kw.get("control_limits") or None
 
     @property
     def pid_path(self) -> Path:
@@ -1198,6 +1204,7 @@ class Cluster:
         self.discovery: Discovery | None = None
         self.sync_agent: RepoSyncAgent | None = None
         self.mcp_service = None
+        self.control_adapter = None
         self.store = None
         self.archive_agent: ArchiveAgent | None = None
         self.coordinator_agent: CoordinatorAgent | None = None
@@ -1310,6 +1317,55 @@ class Cluster:
     def wait_stopped(self, timeout: float | None = None) -> bool:
         return self._stop.wait(timeout)
 
+    # -- 控制面（D14：只有 serve 入口开启） -------------------------------- #
+    def _start_control_plane(self) -> None:
+        """按配置装配控制面适配器；失败只记日志，不拖垮集群启动。"""
+        if not self.config.control_plane or self.control_adapter is not None:
+            return
+        try:
+            from hive_control.adapter import ClusterControlAdapter
+            self.control_adapter = ClusterControlAdapter(
+                self, limits=self.config.control_limits)
+            self.control_adapter.start()
+            _log("control: 控制面适配器已启动")
+        except Exception as exc:  # noqa: BLE001  控制面是可选件
+            self.control_adapter = None
+            _log(f"control: 启动失败（忽略）: {exc}")
+
+    def _stop_control_plane(self) -> None:
+        """停止控制面；Cluster.stop() 最先调用它（约定 §3.10）。"""
+        adapter, self.control_adapter = self.control_adapter, None
+        if adapter is None:
+            return
+        try:
+            adapter.stop()
+        except Exception:  # noqa: BLE001  停止路径尽力而为
+            pass
+
+    def control_status(self) -> dict:
+        """GET /api/cluster/status 的 control 段。"""
+        if self.control_adapter is None:
+            return {"enabled": False, "running": False, "plane_available": False}
+        try:
+            return self.control_adapter.status()
+        except Exception as exc:  # noqa: BLE001
+            return {"enabled": True, "running": False,
+                    "error": f"{type(exc).__name__}: {exc}"}
+
+    def control_request_pull(self, body: dict) -> tuple[int, dict]:
+        """POST /api/cluster/pull。"""
+        if self.control_adapter is None:
+            return 503, {"ok": False,
+                         "error": "控制面未启用（仅 hive cluster serve 开启）"}
+        return self.control_adapter.request_pull(body)
+
+    def control_pull_status(self, request_id: str) -> tuple[int, dict]:
+        """GET /api/cluster/pull/status?id=...。"""
+        if self.control_adapter is None:
+            return 503, {"ok": False,
+                         "error": "控制面未启用（仅 hive cluster serve 开启）"}
+        return self.control_adapter.pull_status(request_id)
+
     def start(self) -> "Cluster":
         if self.config.store_enabled or self.config.claim_backend == "store":
             try:
@@ -1352,6 +1408,7 @@ class Cluster:
         self.discovery.start()
         self.sync_agent = RepoSyncAgent(self)
         self.sync_agent.start()
+        self._start_control_plane()
         if self.config.mcp_enabled:
             try:
                 from mcp_http import McpHttpService
@@ -1511,6 +1568,7 @@ class Cluster:
         if self._stop.is_set():
             return
         self._stop.set()
+        self._stop_control_plane()   # 约定 §3.10：先停控制面
         try:
             if self.role == "leader":
                 self._resign_peers("shutdown")
@@ -4415,6 +4473,14 @@ def build_handler(cluster: Cluster):
             if path == "/api/cluster/state":
                 self._send(200, {"ok": True, "state": cluster.snapshot()})
                 return
+            if path == "/api/cluster/status":
+                self._send(200, {"ok": True, "control": cluster.control_status()})
+                return
+            if path == "/api/cluster/pull/status":
+                rid = (query.get("id") or [""])[0]
+                code, payload = cluster.control_pull_status(rid)
+                self._send(code, payload)
+                return
             if path == "/api/cluster/task-status":
                 snap = cluster.snapshot()
                 self._send(200, {"ok": True, "leader": snap["leader"],
@@ -4542,6 +4608,8 @@ def build_handler(cluster: Cluster):
                     code, payload = cluster.handle_seed(body)
                 elif path == "/api/cluster/discover":
                     code, payload = cluster.handle_discover_trigger(body)
+                elif path == "/api/cluster/pull":
+                    code, payload = cluster.control_request_pull(body)
                 else:
                     code, payload = 404, {"ok": False, "error": f"未知资源 {path}"}
             except Exception as exc:  # noqa: BLE001  服务端不能因一个请求崩掉
@@ -5271,6 +5339,9 @@ def run_cli(args) -> int:
             print(f"[hive-cluster] {line}", file=sys.stderr)
 
     if action == "serve":
+        # D14：只有 serve 入口开启控制面。后台 start/restart 最终也是
+        # _spawn_background 拉起 `hive.py cluster serve`，同样走这里。
+        config.control_plane = True
         cluster = Cluster(config)
         try:
             _clear_stopped(config)
