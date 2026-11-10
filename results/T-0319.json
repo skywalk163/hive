@@ -1,0 +1,41 @@
+{
+  "task": "T-0319",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0319",
+  "base": "main",
+  "head": "45ea1766948dbc2d58b34f8773175673b1d6a673",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T20:19:52+08:00",
+  "finished_at": "2026-11-10T20:23:45+08:00",
+  "duration_s": 233.9,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_error_corpus.py",
+      "code": 0,
+      "tail": [
+        "0.01s setup    tests/test_error_corpus.py::test_export_pairs_structure_and_min_hits",
+        "0.01s call     tests/test_error_corpus.py::test_record_writes_valid_jsonl",
+        "",
+        "(8 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "8 passed in 3.75s"
+      ]
+    }
+  ],
+  "summary": "# T-0319 完成说明\n\n## 做了什么\n- 新增报错数据集库 `tools/ai_copilot/error_corpus.py`（纯标准库）：`record` / `export_pairs` / `summary` / `purge`。\n- 去重：同 `(code, source_hash)` 只写一行 JSONL，命中时更新 `index.json` 的 `hits` / `last_seen`，不重写 JSONL。\n- 脱敏：绝对路径（POSIX / Windows 盘符 / `~/`）只留 basename，32 位以上疑似 token 打码为 `***`；不采集环境变量、主机名、用户名。\n- 并发：JSONL 单行追加；索引读改写用 `.lock`（POSIX flock / Windows msvcrt）串行化，锁或索引写失败只 warn。\n- 新增 `docs/报错数据集.md`：存储布局、字段、隐私边界、清理、导出喂训练脚本说明。\n- 新增 `tests/test_error_corpus.py`：8 个用例覆盖归档、去重、脱敏、导出、统计窗口、清理、100 并发、环境变量覆盖。\n\n## 验证\n`python -m pytest -q tests/test_error_corpus.py` → `8 passed`。\n\n## 真实产物（临时目录生成，已脱敏）\nJSONL 2 行：\n```jsonl\n{\"ts\":\"2026-11-10T20:23:03+08:00\",\"last_seen\":\"2026-11-10T20:23:03+08:00\",\"code\":\"L1001\",\"message\":\"未知关键字 'models'\",\"hint\":\"Light 用 define 声明变量\",\"fixes\":[\"把 models 改成 define models\"],\"source_snippet\":\"define main() {\\n    models x = 1\\n    print(\\\"main.light\\\")\\n}\",\"source_hash\":\"8d56f4a3c1d4ce76\",\"lang_level\":\"v3\",\"backend\":\"src\",\"light_version\":\"3.2\",\"hits\":1}\n{\"ts\":\"2026-11-10T20:23:03+08:00\",\"last_seen\":\"2026-11-10T20:23:03+08:00\",\"code\":\"L2003\",\"message\":\"字符串不能直接与整数相加\",\"hint\":\"先显式转换类型\",\"fixes\":[\"用 to_string() 转换整数\"],\"source_snippet\":\"define n = 1\\nprint(\\\"n=\\\" + n)\\n\",\"source_hash\":\"b3a8a5043dc893ee\",\"lang_level\":\"v3\",\"backend\":\"llvm\",\"light_version\":null,\"hits\":1}\n```\n一条 export pair：\n```json\n{\"prompt\": \"报错代码: L1001\\n报错信息: 未知关键字 'models'\\n代码片段:\\ndefine main() {\\n    models x = 1\\n    print(\\\"main.light\\\")\\n}\", \"completion\": \"修复步骤:\\n1. 把 models 改成 define models\\n提示: Light 用 define 声明变量\"}\n```\n同一条 L1001 连记 2 次后：JSONL 仍 1 行，`index.json` 中 `hits=2`；`summary()` 返回 `L1001 hits=2` 在前、`L2003 hits=1` 在后。\n\n## 遗留 / 风险\n- 按卡面约定本卡不接 CLI；`light ai check` 的写盘接线留给 T-0326，且必须可关闭。\n- JSONL 行内 `hits` 是首次归档快照（固定 1），累计次数以 `index.json` 为准，已在文档中注明。",
+  "error": "",
+  "declared_paths": [
+    "tools/ai_copilot/error_corpus.py",
+    "tests/test_error_corpus.py",
+    "docs/报错数据集.md"
+  ],
+  "changed_files": [
+    "docs/报错数据集.md",
+    "tests/test_error_corpus.py",
+    "tools/ai_copilot/error_corpus.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "ed2489f514f34606b9b819d92bd85846"
+}
