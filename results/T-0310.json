@@ -1,0 +1,36 @@
+{
+  "task": "T-0310",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0310",
+  "base": "main",
+  "head": "82d0df8ceb6a003690bc5777993cc78be894f5fd",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T19:23:56+08:00",
+  "finished_at": "2026-11-10T19:27:59+08:00",
+  "duration_s": 244.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_control_plane.py",
+      "code": 0,
+      "tail": [
+        "...s.....................................................                [100%]",
+        "56 passed, 1 skipped in 12.65s"
+      ]
+    }
+  ],
+  "summary": "# T-0310 工作说明（deepseek-win）\n\n## 做了什么\n\n实现 `hive_control/plane.py::ControlPlane`：把 T-0302~T-0309 的八个模块装配成可运行\n控制面，按 `docs/控制面v0.5-实现约定.md` §3.9 签名 + §6 线程模型 + §7 测试约定。\n\n## 改了哪些文件\n\n- `hive_control/plane.py`（新增，1310 行）\n- `tests/test_control_plane.py`（新增，56 条用例）\n\n## 验证\n\n- `python -m pytest -q tests/test_control_plane.py` → **56 passed, 1 skipped**（连跑 3 次一致）\n- 控制面其余 7 个模块回归 → **147 passed**\n- 唯一 skip：本机 Python 3.14 的 `socket` 没有 `AF_UNIX`，占位 socket 造不出来（平台缺失，与实现无关）\n\n## 卡面要点落点\n\n- **线程装配**：`control-election` / `-downlink-tx` / `-lease` / `-pull` 四守护线程，\n  外加人工拉取 4 线程池、缺口拉取 2 线程池（inflight 串行）。`stop()` 先 flush 聚合器\n  再逆序停组件，幂等；`start/stop` 均可重复调用。\n- **D5 盖号**：以视图为准，首次见 key 用本 serve incarnation + ≥1，之后严格 +1，\n  Worker 报小号也回不去。**只有 `install().installed` 才刷新租约 / 通知 Worker**。\n- **路由**：Leader 本地条目入下行队列，瞬态/urgent 另发立即事件包；Follower 走聚合 → 上行。\n- **切主**：`become_leader` 时 `lease.on_leader_change()`（30s 宽限）、**停上行并清 target**、\n  把视图已有条目重灌下行队列；`leader_lost` 清 target；新 Leader 出现后重定向并重启发送线程，\n  未发条目留在待发缓冲不丢。\n- **DNA**：置位即从下行队列 `drop`，仍留在视图里可被拉取。\n- **缺口拉取**：连续 3 个周期「收到下行但 0 安装」且本机有 claimed/releasing → 后台增量拉取。\n- **人工拉取**：独立队列（64）+ 独立线程池；参数非法/队列满都不抛（返回 error/rejected）；\n  结果按安装规则合并、通知 Worker、**不发下行**（G5）。\n- **status()**：`enabled / role(leader|follower|waiting|candidate) / leader_id / epoch /\n  multicast_mode / downlink_queue / uplink_queue / counters / errors` 齐全。\n\n## 两处装配缺口（本卡内补齐，未改别人的文件）\n\n1. `DownlinkReceiver` 按契约 §3.6 只分发 entry/heartbeat/expiring，**入站 hello 会被静默丢弃**，\n   选举永远建不起邻居表。plane 加 `_HelloSplittingTransport`：收包摘出 hello 送\n   `election.observe`，原包照旧整份转给接收器，其余行行为不变。\n2. `listen_port=0` 时 `port+1` 会算出 1（要 root）：临时端口模式下整族退到临时端口，\n   `status()[\"control_port\"]` 报真实端口。\n\n## 遗留风险\n\n- 缺口统计基线在 `start()` 落定，启动前的安装不计入第一个周期（符合 §6.2 语义，但换编排方式时要留意）。\n- 本机无 `AF_UNIX`：`WorkerServer` 起不来时 `start()` 只记账（`status()[\"errors\"]` 可见）不抛，\n  单 socket 失败不该拖死整个 serve；真机需在支持 AF_UNIX 的平台复核 Worker socket 通路。\n- 组播收发在单测里全部走假 transport；真组播（TTL/LOOP/回退）由 T-0307 / T-0311 覆盖。",
+  "error": "",
+  "declared_paths": [
+    "hive_control/plane.py",
+    "tests/test_control_plane.py"
+  ],
+  "changed_files": [
+    "hive_control/plane.py",
+    "tests/test_control_plane.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "83e32beffa7b4a2da4a33f062fe2bcef"
+}
