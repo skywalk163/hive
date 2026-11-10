@@ -480,8 +480,14 @@ def test_store_claim_replicates_and_failover(cluster_factory):
 
 
 def test_store_election_restriction(cluster_factory):
-    """P2a：候选人的 store seq 落后时不能当选。"""
-    c = cluster_factory("a", store_enabled=True)
+    """P2a：严格模式下，候选人 store seq 落后时拒票（store_behind）。
+
+    T-0295 的契约：默认 `strict_store_freshness=False` —— store 只是缓存、
+    git 才是事实账，落后候选照拿赞成票并留 `vote_store_lag` 痕迹；只有管理员
+    显式打开严格模式，商店落后才被当作拒票理由。本用例钉的是「严格模式」这一半
+    （默认放行那一半见 tests/test_vote_store_behind.py）。
+    """
+    c = cluster_factory("a", store_enabled=True, strict_store_freshness=True)
     c.store.ingest_cards({"T-0001": {"id": "T-0001", "state": "ready"}})
     c.store.claim("T-0001", "A", term=c.term, lease_minutes=10)
     assert c.store.last_seq() >= 1
@@ -494,6 +500,7 @@ def test_store_election_restriction(cluster_factory):
     assert code == 200
     assert resp.get("granted") is False
     assert resp.get("reason") == "store_behind", resp
+    assert resp.get("strict") is True
 
 
 def test_worker_claim_store_backend(world, cluster_factory, monkeypatch, tmp_path):
@@ -639,8 +646,12 @@ def test_preferred_offline_falls_back(cluster_factory):
 
 
 def test_force_vote_overrides_store_behind(cluster_factory):
-    """人工夺权时允许候选人 store 落后（git 才是事实账），且留下审计事件。"""
-    a = cluster_factory("a")
+    """严格模式下人工夺权仍放行落后候选（git 才是事实账），且留审计事件。
+
+    T-0295：`force` 只在与严格闸门共存时才有意义 —— 默认模式本来就放行。
+    所以本用例显式打开 `strict_store_freshness=True` 来验证「force 能压过闸门」。
+    """
+    a = cluster_factory("a", strict_store_freshness=True)
     assert wait_until(lambda: a.role == "leader")
     b = cluster_factory("b", seeds=[a.url])
     assert wait_until(lambda: b.leader_id == a.node_id)
@@ -667,11 +678,12 @@ def test_force_vote_overrides_store_behind(cluster_factory):
 
 
 def test_force_vote_can_be_disabled(cluster_factory):
-    """HIVE_CLUSTER_ALLOW_FORCE_PROMOTE=0 时，force 也压不过 store 闸门。
+    """HIVE_CLUSTER_ALLOW_FORCE_PROMOTE=0 时，严格闸门下 force 也压不过去。
 
-    给「宁可没主控也不接受落后节点」这种更严的策略留出口。
+    给「宁可没主控也不接受落后节点」这种更严的策略留出口；默认（非严格）模式下
+    store 落根本不是拒票理由，force 开关也就无从发力 —— 见 T-0295 的契约。
     """
-    a = cluster_factory("a")
+    a = cluster_factory("a", strict_store_freshness=True)
     assert wait_until(lambda: a.role == "leader")
     b = cluster_factory("b", seeds=[a.url])
     assert wait_until(lambda: b.leader_id == a.node_id)
