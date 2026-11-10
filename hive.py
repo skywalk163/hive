@@ -1943,7 +1943,7 @@ class Hive:
         宁可报错也不 reset（T-0129 立下的防数据丢失底线，不动它）；而 close 这类操作
         **只提交 tasks/<tid>.md + results/<tid>.json 两个指定路径**，本来就不该被
         工作区里无关的未提交改动拦住——多 agent 共用一台机器、主仓有人写到一半，那是
-        日常（T-0133/T-0135 两晚被这块石头绊倒：合并推成功了，关卡却被拦下）。
+        日常（T-0133/T-0135 两晚被这块石头绊倒：合入推成功了，关卡却被拦下）。
 
         做法：落后就试 `merge --ff-only`。git 保证 ff 只更新 HEAD→origin/main 之间
         真正变化的文件——未提交改动只要不在其中就原样保留；万一真在其中，git 自己
@@ -2339,8 +2339,8 @@ class Hive:
                  remote: str | None = None) -> dict:
         """把一张已完成的任务分支合进代码仓 main，再 close。
 
-        默认不推任何东西：先在临时 worktree 里把合并做一遍，这样冲突是**真的**冲突，
-        不是靠猜。 dry-run 时装作合并完就收工（并把这个 worktree 拆掉）。
+        默认不推任何东西：先在临时 worktree 里把合入做一遍，这样冲突是**真的**冲突，
+        不是靠猜。 dry-run 时装作合入完就收工（并把这个 worktree 拆掉）。
 
         `remote` 为 None 时自动探测（见 `_pick_remote`），显式给了就用它取分支 + 推 main。
         """
@@ -2410,7 +2410,7 @@ class Hive:
             # task 分支与 base 一致：代码已在 main。两种来源都要补 close：
             #   1) 零改动复核卡（目标状态早已在 main，submit 靠 allow_empty_diff 放行）；
             #   2) 上次 land push 到了远端但 close 没走完（典型：push 超时没收到回执）。
-            # 不能只说"无需合并"就 return，否则看板永远卡在"待合并"列，要人手工
+            # 不能只说"无需合入"就 return，否则看板永远卡在"待合入"列，要人手工
             # 改卡面（T-0211 踩过）。提示语必须把两种来源都点出来 —— 只写"上次 push
             # 超时"会让复核卡的收尾记录误导排查方向（T-0279 现场就是这样）。
             if card.get("state") in IN_FLIGHT_STATES:
@@ -2430,7 +2430,7 @@ class Hive:
                         f"跑 hive close {tid} 收尾")
                 self._after_land(plan)
                 return plan
-            plan["problems"].append(f"已经合进 {target} 了（内容一致，无需合并）")
+            plan["problems"].append(f"已经合进 {target} 了（内容一致，无需合入）")
             return plan
 
         wt = DEFAULT_STATE / "land" / tid
@@ -2512,12 +2512,12 @@ class Hive:
         try:
             self.cmd_close(tid, note=note or f"land {tid}")
         except HiveError as e:
-            # 合并已经推上去了：必须说清"代码合入了、只是卡片没关成"，并给出收尾命令，
+            # 合入已经推上去了：必须说清"代码合入了、只是卡片没关成"，并给出收尾命令，
             # 不能裸抛同步错误让人以为整个 land 失败（T-0133/T-0135 都被这个坑过）
             plan["merged"] = True
             plan["status"] = "merged-not-closed"
             plan["problems"].append(
-                f"合并已推入 {target}，但关卡失败：{e}。"
+                f"合入已推入 {target}，但关卡失败：{e}。"
                 f"处理好协调仓的未提交改动后跑 hive close {tid} 收尾")
             self._after_land(plan)
             return plan
@@ -2603,7 +2603,7 @@ class Hive:
     def _print_land(r: dict, apply: bool) -> None:
         tag = {"landed": "已合入并关闭", "would-merge": "可以合入（dry-run，没动）",
                "merged-not-closed": "已合入但未关闭（需补 hive close）",
-               "conflict": "合并冲突", "failed": "合并失败",
+               "conflict": "合入冲突（git 合并冲突）", "failed": "合入失败",
                "blocked": "不满足合入条件"}.get(r["status"], r["status"])
         extra = f" [{r['strategy']}]" if r.get("strategy") else ""
         where = f" remote={r['remote']}" if r.get("remote") else ""
@@ -3429,7 +3429,7 @@ class Hive:
             print(f"[FAIL] {len(errors)} 个错误，{len(warns)} 个警告")
             return False
         print(f"[ OK ] {len(cards)} 张任务，{len(agents)} 个 agent，"
-              f"{running_claims} 个进行中租约，{len(res_refs)} 个待合并结果")
+              f"{running_claims} 个进行中租约，{len(res_refs)} 个待合入结果")
         return True
 
     def cmd_stats(self, as_json: bool = False, days: int = 0) -> None:
@@ -3503,7 +3503,7 @@ class Hive:
 
         merge = sum(1 for r in rows if r["status"] == "done" and r["state"] != "done")
         print(f"任务 {len(rows)} ｜ 完成 {len(done)} ｜ 失败 {len(failed)} ｜ "
-              f"进行中 {sum(1 for r in rows if r['running'])} ｜ 待合并 {merge} ｜ "
+              f"进行中 {sum(1 for r in rows if r['running'])} ｜ 待合入 {merge} ｜ "
               f"待领取 {sum(1 for r in rows if r['state'] == 'ready' and not r['agent'])} ｜ "
               f"已关闭 {sum(1 for r in rows if r['state'] == 'done')}")
         print(f"一次通过率 {rate:.1f}% ｜ 中位耗时 {_fmt_dur(median)} ｜ P90 {_fmt_dur(p90)}")

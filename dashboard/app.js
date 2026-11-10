@@ -19,7 +19,7 @@
   var COLUMNS = [
     { key: 'ready', title: '待领取', hint: 'state = ready 且无人抢锁' },
     { key: 'running', title: '进行中', hint: '已抢锁 / assigned / running，暂无结果' },
-    { key: 'merging', title: '待合并', hint: 'result_status = done，state 还不是 done' },
+    { key: 'merging', title: '待合入', hint: 'result_status = done，state 还不是 done' },
     { key: 'abnormal', title: '异常', hint: 'failed / blocked / 租约过期' },
     { key: 'recent', title: '最近完成', hint: '已完成中按完成时间倒序的前 N 个（数量可在设置里改）' },
     { key: 'closed', title: '已关闭', hint: '其余已完成的任务（默认折叠）', collapsible: true }
@@ -651,16 +651,16 @@
     h += '</div>';
 
     // 复制指令：每张卡都有（含已完成/已关闭），只复制文本，不领卡不改状态。
-    // 待合并的卡复制的是「给主控 agent 的合并指令」（让它跑 hive land），
+    // 待合入的卡复制的是「给主控 agent 的合入指令」（让它跑 hive land），
     // 其余状态复制派发指令 —— 文案跟着语义走，别再让主控收到一句「请领取任务」。
     var chatN = chatCountFor(t.id);
     var isMerging = col === 'merging';
     h += '<div class="card-copy">' +
       '<button type="button" class="act act-copy" data-copy="' + esc(t.id) +
       '" title="' + (isMerging
-        ? '把合并指令复制到剪贴板，粘给主控 agent 执行 hive land 合并'
+        ? '把合入指令复制到剪贴板，粘给主控 agent 执行 hive land 合入'
         : '把这张卡的派发指令复制到剪贴板，粘到 agent 对话框即可') + '">' +
-      (isMerging ? '复制合并指令' : '复制派发指令') + '</button>' +
+      (isMerging ? '复制合入指令' : '复制派发指令') + '</button>' +
       '<button type="button" class="act act-chat" data-chat="' + esc(t.id) +
       '" title="打开这张卡的留言线程：留提示 / 看 agent 的疑问">讨论' +
       (chatN ? '<span class="n">' + chatN + '</span>' : '') + '</button>' +
@@ -761,11 +761,11 @@
       .then(function (body) {
         return writeClipboard(body.text || '').then(function () {
           flashCopied(btn);
-          // mode 由服务端按卡的状态定：merge=给主控的合并指令，abnormal=附带溯源块
+          // mode 由服务端按卡的状态定：merge=给主控的合入指令，abnormal=附带溯源块
           var msg = body.mode === 'shelved'
             ? '已复制 ' + tid + ' 的搁置说明（写着不要领取），别贴给 agent 派活'
             : (body.mode === 'merge'
-              ? '已复制 ' + tid + ' 的合并指令，切到主控 agent 粘贴即可'
+              ? '已复制 ' + tid + ' 的合入指令，切到主控 agent 粘贴即可'
               : (body.mode === 'abnormal'
                 ? '已复制 ' + tid + ' 的派发指令（含异常溯源信息），切到 agent 粘贴即可'
                 : '已复制 ' + tid + ' 的派发指令，切到 agent 粘贴即可'));
@@ -849,7 +849,7 @@
   var COL_EMPTY = {
     ready: '没有待领取的任务卡。',
     running: '没有进行中的任务。',
-    merging: '当 Worker 完成并推送 res/ 分支后，这里会自动出现任务卡；请用 CLI 运行 hive land 合并。',
+    merging: '当 Worker 完成并推送 res/ 分支后，这里会自动出现任务卡；请用 CLI 运行 hive land 合入。',
     abnormal: '没有异常任务。',
     recent: '最近还没有完成的任务。',
     closed: '暂无已关闭任务（点上方「展开」查看）'
@@ -1441,7 +1441,7 @@
     h += '<div class="drawer-copy">' +
       '<button type="button" class="act act-copy" data-copy="' + esc(t.id) + '">' +
       (col === 'shelved' ? '复制搁置说明'
-        : (col === 'merging' ? '复制合并指令' : '复制派发指令')) + '</button>' +
+        : (col === 'merging' ? '复制合入指令' : '复制派发指令')) + '</button>' +
       '<button type="button" class="act act-chat" data-chat="' + esc(t.id) + '">讨论' +
       (chatCountFor(t.id) ? '<span class="n">' + chatCountFor(t.id) + '</span>' : '') +
       '</button>' +

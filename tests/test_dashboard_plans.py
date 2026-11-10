@@ -49,7 +49,7 @@ def plans_file(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def status_full(tmp_path):
-    """带若干任务的快照：T-0001 done、T-0002 待领取、T-0003 待合并。"""
+    """带若干任务的快照：T-0001 done、T-0002 待领取、T-0003 待合入。"""
     rows = [
         {"id": "T-0001", "state": "done", "result_status": "done"},
         {"id": "T-0002", "state": "ready", "result_status": ""},

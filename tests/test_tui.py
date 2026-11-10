@@ -38,7 +38,7 @@ WIDTH = 80
 
 TID_RE = re.compile(r"^\s+(T-\d{4,})\s")
 
-# 9 张卡：3 待领取 / 2 进行中 / 2 待合并 / 2 异常
+# 9 张卡：3 待领取 / 2 进行中 / 2 待合入 / 2 异常
 # 标题故意写长（中英混排），宽度判据才有东西可截
 TASKS = [
     {"id": "T-9001", "title": "待领取示例一：一个足够长的中文标题，用来验证中文按双宽计算不会溢出 80 列",
@@ -49,9 +49,9 @@ TASKS = [
     {"id": "T-9010", "title": "进行中示例一：worker 正在跑，标题很长很长很长很长很长很长很长很长很长",
      "state": "assigned", "owner": "workbuddy"},
     {"id": "T-9011", "title": "进行中示例二：租约还有效", "state": "running", "owner": "fb88-dsh"},
-    {"id": "T-9020", "title": "待合并示例一：结果已提交但还没 land", "state": "assigned",
+    {"id": "T-9020", "title": "待合入示例一：结果已提交但还没 land", "state": "assigned",
      "owner": "workbuddy", "result_status": "done"},
-    {"id": "T-9021", "title": "待合并示例二：结果 done 等合入", "state": "running",
+    {"id": "T-9021", "title": "待合入示例二：结果 done 等合入", "state": "running",
      "owner": "fb88-dsh", "result_status": "done"},
     {"id": "T-9030", "title": "异常示例一：verify 失败", "state": "assigned",
      "owner": "workbuddy", "result_status": "failed"},
@@ -249,7 +249,7 @@ def test_once_四组齐全且卡片数与快照一致(stub_url, tmp_path):
     expected = {
         "待领取": ["T-9001", "T-9002", "T-9003"],
         "进行中": ["T-9010", "T-9011"],
-        "待合并": ["T-9020", "T-9021"],
+        "待合入": ["T-9020", "T-9021"],
         "异常": ["T-9030", "T-9031"],
         "搁置": [],
     }
@@ -343,7 +343,7 @@ def test_分类优先级():
                                           source="http")["tasks"][0]
     assert hive_tui.classify(pick(state="ready")) == "待领取"
     assert hive_tui.classify(pick(state="assigned", owner="a")) == "进行中"
-    assert hive_tui.classify(pick(state="assigned", result_status="done")) == "待合并"
+    assert hive_tui.classify(pick(state="assigned", result_status="done")) == "待合入"
     assert hive_tui.classify(pick(state="assigned",
                                   result_status="failed")) == "异常"
     assert hive_tui.classify(pick(state="ready", stale=True)) == "异常"

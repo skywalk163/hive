@@ -211,7 +211,7 @@ def test_real_card_T0184_renders():
 
 
 # --------------------------------------------------------------------------- #
-# 1.5 状态感知（2026-11-03）：待合并 → 给主控的合并指令；异常 → 附溯源块
+# 1.5 状态感知（2026-11-03）：待合入 → 给主控的合入指令；异常 → 附溯源块
 # --------------------------------------------------------------------------- #
 
 def write_status(tmp_path, records):
@@ -222,7 +222,7 @@ def write_status(tmp_path, records):
 
 
 def test_dispatch_prompt_merging_is_merge_prompt(tasks_dir, tmp_path):
-    """待合并卡：复制出的是给主控的合并指令，不再是「请领取任务」。"""
+    """待合入卡：复制出的是给主控的合入指令，不再是「请领取任务」。"""
     status = write_status(tmp_path, [{"id": "T-0001", "state": "assigned",
                                       "result_status": "done",
                                       "claim_agent": "deepseek-win",
@@ -234,7 +234,7 @@ def test_dispatch_prompt_merging_is_merge_prompt(tasks_dir, tmp_path):
     assert code == 200
     assert body["mode"] == "merge"
     text = body["text"]
-    assert "任务 T-0001 已完成，请合并" in text
+    assert "任务 T-0001 已完成，请把它合入" in text
     assert "hive land T-0001 --apply" in text       # 主控要跑的命令
     assert "执行 agent：deepseek-win" in text        # 溯源：谁做完的
     assert "res/T-0001" in text                     # 结果分支
@@ -256,7 +256,7 @@ def test_dispatch_prompt_merging_json_payload(tasks_dir, tmp_path):
     assert payload["land_cmd"] == "hive land T-0001 --apply"
     assert payload["branch"] == "res/T-0001"
     assert payload["agent"] == "deepseek-win"
-    assert "任务 T-0001 已完成，请合并" in payload["text"]
+    assert "任务 T-0001 已完成，请把它合入" in payload["text"]
 
 
 def test_dispatch_prompt_abnormal_carries_trace(tasks_dir, tmp_path):
@@ -325,7 +325,7 @@ def test_detect_mode_matches_board_columns():
     assert dispatch_prompt.detect_mode({}) == "claim"
     assert dispatch_prompt.detect_mode({"state": "assigned",
                                         "result_status": "done"}) == "merge"
-    # 已经 close 的不算待合并（合完的卡再喊主控合并就是空转）
+    # 已经 close 的不算待合入（合完的卡再喊主控合入就是空转）
     assert dispatch_prompt.detect_mode({"state": "done",
                                         "result_status": "done"}) == "claim"
     assert dispatch_prompt.detect_mode({"state": "closed",
@@ -426,12 +426,12 @@ def test_app_js_calls_dispatch_prompt_api():
 
 
 def test_app_js_merge_button_for_merging_cards():
-    """待合并卡的按钮文案是「复制合并指令」，复制提示按 mode 区分收件人。"""
+    """待合入卡的按钮文案是「复制合入指令」，复制提示按 mode 区分收件人。"""
     card = js_function("cardInner")
-    assert "复制合并指令" in card
+    assert "复制合入指令" in card
     assert "col === 'merging'" in card
     drawer = js_function("drawerHTML")
-    assert "复制合并指令" in drawer
+    assert "复制合入指令" in drawer
     copy = js_function("copyDispatch")
     assert "body.mode === 'merge'" in copy
     assert "主控 agent" in copy

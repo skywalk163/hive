@@ -45,7 +45,7 @@ FORMATS = (MARKDOWN, JSON)
 #
 # 同一个按钮在不同状态的卡上复制出的文本不该是同一段话：
 #   * claim    = 发给干活 agent 的领取指令（原有行为，向后兼容的默认值）
-#   * merge    = 发给主控 agent 的合并指令（卡已完成待 land，再喊人领取就闹笑话了）
+#   * merge    = 发给主控 agent 的合入指令（卡已完成待 land，再喊人领取就闹笑话了）
 #   * abnormal = 领取指令 + 异常溯源块（重派前让新 agent 知道上一个 agent 栽在哪）
 #   * shelved  = 已封存说明（绝不能给搁置卡生成领取指令，否则 agent 又去领了）
 CLAIM = "claim"
@@ -364,7 +364,7 @@ def detect_mode(record) -> str:
     record 来自 `hive status --json` 的单卡记录；没有记录（None / 空对象 /
     字段缺失）一律回 claim —— 和旧行为完全一致，快照坏了不影响复制按钮。
 
-    * merge    = result_status=done 且还没 close（看板「待合并」列）
+    * merge    = result_status=done 且还没 close（看板「待合入」列）
     * abnormal = result_status=failed / state=blocked / 租约过期（看板「异常」列）
     * shelved  = 已搁置（不进任何看板列，也不该被领取）
     * claim    = 其余所有状态（待领取 / 进行中 / 已关闭…）
@@ -410,7 +410,7 @@ def _result_summary(record) -> str:
 
 
 def render_merge_payload(card: dict, record: dict) -> dict:
-    """渲染「给主控 agent 的合并指令」载荷（text 与 markdown 输出逐字一致）。
+    """渲染「给主控 agent 的合入指令」载荷（text 与 markdown 输出逐字一致）。
 
     收件人不是干活 agent 而是负责收尾的主控：所以正文不再讲领取契约，
     而是给出结果分支、head、执行 agent 这些 land 需要的溯源信息。
@@ -440,7 +440,7 @@ def _render_merge(task_id: str, card: dict, record: dict) -> str:
     head = _clean(record.get("head"))
     repo = _clean(card.get("repo") or record.get("repo"))
     lines = [
-        f"任务 {task_id} 已完成，请合并（land）。",
+        f"任务 {task_id} 已完成，请把它合入（land）。",
         f"任务摘要：{extract_task_summary(card, '')}",
     ]
     if agent:
@@ -453,7 +453,7 @@ def _render_merge(task_id: str, card: dict, record: dict) -> str:
     if rs:
         lines.append(f"结果摘要：{rs}")
     lines += [
-        f"合并方式：在协调仓运行 CLI 命令 hive land {task_id} --apply"
+        f"合入方式：在协调仓运行 CLI 命令 hive land {task_id} --apply"
         "（合入代码仓 main 并自动关闭任务卡）",
         "冲突处理：先解决冲突再重跑同一命令；解决不了就把冲突现场写进该任务的留言线程。",
     ]
@@ -462,7 +462,7 @@ def _render_merge(task_id: str, card: dict, record: dict) -> str:
 
 def render_merge_prompt(card: dict, record: dict, *,
                         output_format: str = MARKDOWN) -> str:
-    """渲染合并指令：markdown 返正文，json 返载荷的 JSON 字符串。"""
+    """渲染合入指令：markdown 返正文，json 返载荷的 JSON 字符串。"""
     if output_format not in FORMATS:
         raise ValueError(
             f"不支持的 output_format: {output_format!r}（可选：{'/'.join(FORMATS)}）"

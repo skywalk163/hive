@@ -787,7 +787,7 @@ class HiveMcp:
                   duration_s=res.get("duration_s"),
                   verify=res.get("verify") or [],
                   error=res.get("error") or "",
-                  hint=("verify 全绿就等总控合并；有红就改完再 hive_submit 一次"
+                  hint=("verify 全绿就等总控合入；有红就改完再 hive_submit 一次"
                         if res.get("status") == "done" else
                         "verify 没过，看 verify 里的 tail 改代码后重新 hive_submit"))
 
@@ -1056,7 +1056,7 @@ class HiveMcp:
             claim = h.claim_info(tid)
             res = h.result_info(tid)
             if claim and res and tid not in [r for r in cards if cards[r].get("state") == "done"]:
-                issues.append(f"{tid}: 有结果但没 close（待合并）")
+                issues.append(f"{tid}: 有结果但没 close（待合入）")
             if claim and not res and parse_iso(claim.get("lease_until") or iso()) < now():
                 issues.append(f"{tid}: 租约已过期（{claim.get('agent')}），该 gc 回收")
         for name in h.agents():

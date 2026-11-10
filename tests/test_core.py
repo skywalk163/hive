@@ -528,7 +528,7 @@ def test_land_reports_merged_not_closed_when_sync_impossible(world, fake_cmd):
     # 不崩（JSON 正常返回），状态说清"合入了但没关成"
     assert out["status"] == "merged-not-closed", out
     assert out["merged"] is True and out["closed"] is False
-    assert any("合并已推入" in p and "hive close T-0001" in p
+    assert any("合入已推入" in p and "hive close T-0001" in p
                for p in out["problems"]), out["problems"]
     assert any("agents/fb.json" in p for p in out["problems"]), out["problems"]
     # 卡片确实没关；代码合并确实已在主线

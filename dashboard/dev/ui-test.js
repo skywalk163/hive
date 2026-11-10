@@ -43,7 +43,7 @@ function assert(cond, msg) {
 
   assert(colCards('running').length === 1 && byId('T-0101'), '进行中 1 张（T-0101）');
   assert(colCards('abnormal').length === 2 && byId('T-0102') && byId('T-0104'), '异常 2 张（T-0102/T-0104）');
-  assert(colCards('merging').length === 1 && byId('T-0103'), '待合并 1 张（T-0103）');
+  assert(colCards('merging').length === 1 && byId('T-0103'), '待合入 1 张（T-0103）');
   // 样例后来加过 T-0189/T-0190 两张 ready 卡，别再按老版的 6 张硬编码
   assert(colCards('ready').length === 3 && byId('T-0105') && byId('T-0189')
          && byId('T-0190'), '待领取 3 张（T-0105/T-0189/T-0190）');

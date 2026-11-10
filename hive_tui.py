@@ -40,7 +40,7 @@ DASH_PORT_DEFAULT = 8787
 
 GROUP_READY = "待领取"
 GROUP_RUNNING = "进行中"
-GROUP_MERGE = "待合并"
+GROUP_MERGE = "待合入"
 GROUP_BAD = "异常"
 GROUP_SHELVED = "搁置"
 # 搁置放在最后一组：不抢前四组的注意力，但计数常驻 —— 别忘了还有几张卡封着

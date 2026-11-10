@@ -57,7 +57,7 @@ DESC_MAX = 4000
 MAX_TASKS = 200
 
 # 任务算「已完成」的判定：与看板 classify() 的口径一致 —— done 归档、结果已出
-# 但还没 close 的（待合并）也算这张卡干完了。closed 是「作废」，不算完成。
+# 但还没 close 的（待合入）也算这张卡干完了。closed 是「作废」，不算完成。
 DONE_STATES = ("done",)
 
 
