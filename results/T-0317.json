@@ -1,0 +1,52 @@
+{
+  "task": "T-0317",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0317",
+  "base": "main",
+  "head": "ab49d75069de2021ded45a403b62ec6130860f67",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T16:07:13+08:00",
+  "finished_at": "2026-11-10T16:25:13+08:00",
+  "duration_s": 1080.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_error_anchor.py",
+      "code": 0,
+      "tail": [
+        "7.92s call     tests/test_error_anchor.py::TestStdlibImportHint::test_stdlib_hint_not_for_builtin",
+        "0.94s call     tests/test_error_anchor.py::TestGeneratorCheck::test_gen_script_check",
+        "",
+        "(9 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "6 passed in 27.31s"
+      ]
+    },
+    {
+      "cmd": "python scripts/gen_stdlib_name_map.py --check",
+      "code": 0,
+      "tail": [
+        "--check: OK，1708 条映射与 stdlib 导出表一致。"
+      ]
+    }
+  ],
+  "summary": "# T-0317 完成总结\n\n## 做了什么\n\n### 1. 新建 scripts/gen_stdlib_name_map.py\n- 扫描 `stdlib/*.light` 所有 `导出 ...` 行，解析导出名 → 模块名映射\n- 自动从 code_generator 的 builtin_map 提取全局内置名并过滤（避免把「忘打括号」误报成缺导入）\n- 生成 `src/stdlib_name_map.py`（`NAME_TO_MODULE: dict`），文件头标注「生成物，勿手改」\n- `--check` 模式：重新生成并与现有文件比对，不一致时打印 diff 摘要并 rc=1\n\n### 2. 重构 src/enhanced_errors.py\n- 删除手写的 87 条 `_STDLIB_NAME_TO_MODULE` 静态表\n- 改为 `from stdlib_name_map import NAME_TO_MODULE as _STDLIB_NAME_TO_MODULE`（带 try/except 兜底）\n- `_stdlib_import_hint` 返回文案保持不变\n- 行号锚定修复：拿不到 py→light 映射行号时不再猜 Python 内部行号，写 0 并显示「行号未知」\n\n### 3. 新建 tests/test_error_anchor.py\n6 个测试用例覆盖三个场景 + 生成脚本校验。\n\n## 验收结果\n\n- `python -m pytest -q tests/test_error_anchor.py` → **6 passed**\n- `python scripts/gen_stdlib_name_map.py --check` → **rc=0**（1708 条映射）\n\n## 三场景真实报错输出\n\n### (a) 只调 子串位置 不导入\n\n```\n错误: 名称错误\n  name '子串位置' is not defined\n 1 打印(子串位置(\"hello\", \"ll\"))\n │\n │                       ^\n │\n 2 \n  建议: 该函数来自『字符串处理』模块（不是未定义变量），请在文件顶部加一行：从 字符串处理 导入 子串位置\n```\n\n- 含「从 字符串处理 导入 子串位置」✓\n- 不含「先通过『设』定义变量」✓\n\n### (b) 变量名拼错（打印(甲甲)），行号 == 真实出错行\n\n```\n错误: 名称错误\n  name '甲甲' is not defined\n 1 设 甲 为 10\n 2 设 乙 为 20\n 3 打印(甲甲)\n │\n │      ^\n │\n 4 \n  建议: 请检查变量名是否拼写正确，使用前需先通过「设」关键字定义变量。光明中变量必须先定义后使用。\n```\n\n- 行号锚定第 3 行（打印(甲甲)）✓\n- 给拼写/定义建议 ✓\n\n### (c) 真未定义变量（甲甲），不误报缺导入\n\n- 输出中无「该函数来自」「从 X 导入 Y」✓\n- 走通用 NameError 建议 ✓\n\n## 生成表条目数\n\n- 总计 **1708** 条 `NAME_TO_MODULE` 映射\n- 覆盖 stdlib/*.light 全部导出清单（已过滤 builtin_map 全局内置名）\n- 对比旧手写表（87 条，仅 3 个模块）：新表覆盖全部 stdlib 模块，且自动同步\n\n## 修改文件清单\n\n- `scripts/gen_stdlib_name_map.py`（新建）\n- `src/stdlib_name_map.py`（新建，生成物）\n- `src/enhanced_errors.py`（删手写表→import 生成表；行号锚定修复）\n- `tests/test_error_anchor.py`（新建）\n\n## 边界确认\n\n- 未改 cli/light.py ✓\n- 未改 src/diagnostics/ ✓\n- 未改 stdlib/*.light ✓\n- 未把测试文件名特判进产品代码 ✓",
+  "error": "",
+  "declared_paths": [
+    "src/enhanced_errors.py",
+    "src/errors.py",
+    "src/stdlib_name_map.py",
+    "scripts/gen_stdlib_name_map.py",
+    "tests/test_error_anchor.py"
+  ],
+  "changed_files": [
+    "src/enhanced_errors.py",
+    "scripts/gen_stdlib_name_map.py",
+    "src/stdlib_name_map.py",
+    "tests/test_error_anchor.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "4e52607909684dcaa480a12a16bd39fa",
+  "store_write_error": "T-0317 结果写入 leader store 失败（已尝试 4 次）：T-0317 的租约已过期，结果被拒（lease lost）"
+}
