@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.16.03 — 2026-11-11
+
+### Fixed
+
+- **空闲期网卡持续 2-3 Mbps、state.json 每秒重写（心跳把全量状态当心跳发）**：
+  集群空闲时仍按 1s 一拍，每拍在节点间搬全量 `progress`+`leases`，响应还带
+  `nodes` 与最近 120 条 `events`；实测一次往返约 140KB/节点，空转就吃掉
+  2-3 Mbps，并因每拍 `_mark_dirty_locked` 让 565KB 的 `state.json` 每秒全量
+  落盘（磁盘写 1.8MB/s）、8788 端口 TIME_WAIT 堆到 429 条。修复：
+  - 心跳按「是否有在跑的活儿」自适应：空闲走 `HIVE_CLUSTER_IDLE_HEARTBEAT`
+    （默认 5s），有有效租约/进行中任务时立刻回 1s；
+  - 全量 `progress`/`leases` 只在 generation 真的变化、或每 30s 兜底重传时
+    附带；响应按请求方 `gen`/`event_seq` 只回增量，旧节点不带 `gen` 仍走全量；
+  - 心跳路径的 `last_seen`/租约续签不再推进 generation（新增
+    `_mark_touch_locked`），`_update_node_locked` 只按实质字段变化置脏；
+  - `alive` 判定窗口不小于两次心跳，避免空闲期在 alive/suspect 间抖动刷
+    `node_up` 事件；
+  - `state.json` 落盘节流 1s → 5s，`snapshot` 不再重复序列化 events；
+  - `http_json` 改进程级 keep-alive 连接池，消除每拍新建连接与 TIME_WAIT。
+
+  实测（两节点本地、空闲 25s）：心跳请求 48KB → 685B、响应 91KB → 2.4KB，
+  总吞吐约 350KB/s → 1.2KB/s，TIME_WAIT 恒为 0，generation 全程不变。
+
 ## 0.16.02 — 2026-11-11
 
 ### Fixed

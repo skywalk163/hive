@@ -55,9 +55,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import http.client as httpclient
 from pathlib import Path
-from urllib import error as urlerror
-from urllib import request as urlrequest
+from urllib.parse import urlsplit
 from urllib.parse import parse_qs, urlparse
 
 # --------------------------------------------------------------------------- #
@@ -138,6 +138,23 @@ DEFAULT_LEASE_GRACE = 120.0
 
 # 这些默认值可被构造函数参数或环境变量覆盖；测试会用更短的超时。
 DEFAULT_HEARTBEAT_S = 1.0
+# 空闲期（没有在跑的任务、没有有效租约）的心跳间隔。1s 一拍会把全量
+# progress+leases 每秒在节点间来回搬：现场实测空转就有 2-3 Mbps 收发，
+# state.json 也每秒重写一次（565KB）。空闲降频，任务一动立刻回 1s。
+DEFAULT_IDLE_HEARTBEAT_S = 5.0
+# 空闲期仍然定期全量重传一次：某一跳丢包时，对端不会永远停在旧视图上。
+FULL_BROADCAST_S = 30.0
+# state.json 落盘节流（秒）。原先 1s 一次全量序列化 + os.replace，空闲期
+# 也能把磁盘写到 1.8MB/s；5s 足够让「重启后视图」保持新鲜。
+PERSIST_INTERVAL_S = 5.0
+# 心跳响应最多回多少条增量事件（events 本身是 deque(EVENT_LIMIT)）。
+EVENT_PUSH_LIMIT = 120
+# 节点记录里「只表示它还活着/租约刚续」的字段：只有这些变化时不算状态
+# 变更，不能推进 generation。lease_until* 每跳都会被主控刷新，若算变化，
+# follower 每次心跳都会把 generation 推一格，全量广播永远停不下来。
+_NODE_VOLATILE_KEYS = ("last_seen", "last_seen_epoch", "_status",
+                       "lease_until", "lease_until_epoch",
+                       "grace_until", "grace_until_epoch")
 DEFAULT_PEER_TIMEOUT_S = 4.0
 DEFAULT_DEAD_TIMEOUT_S = 15.0
 DEFAULT_ELECTION_MIN_S = 3.0
@@ -583,6 +600,15 @@ class Config:
 
         self.heartbeat_interval = float(
             kw.get("heartbeat_interval") or _env_float("HIVE_CLUSTER_HEARTBEAT", DEFAULT_HEARTBEAT_S))
+        # 空闲期心跳间隔：必须 >= heartbeat_interval，否则「空闲更勤」。
+        # 显式传入 heartbeat_interval 的调用方（测试、私有部署）默认不额外
+        # 降频，保持「你设多少就多少」；只有走默认值/环境变量时才用 5s。
+        _idle_default = (kw["heartbeat_interval"] if kw.get("heartbeat_interval")
+                         else _env_float("HIVE_CLUSTER_IDLE_HEARTBEAT",
+                                         DEFAULT_IDLE_HEARTBEAT_S))
+        self.idle_heartbeat_interval = max(
+            self.heartbeat_interval,
+            float(kw.get("idle_heartbeat_interval") or _idle_default))
         self.peer_timeout = float(
             kw.get("peer_timeout") or _env_float("HIVE_CLUSTER_PEER_TIMEOUT", DEFAULT_PEER_TIMEOUT_S))
         self.dead_timeout = float(
@@ -738,9 +764,100 @@ class Identity:
 # --------------------------------------------------------------------------- #
 # HTTP 客户端
 # --------------------------------------------------------------------------- #
+# 注意：这里直接走 http.client，不读 HTTP(S)_PROXY —— 集群节点在同一局域网，
+# 走代理只会超时（旧实现靠 ProxyHandler({}) 达到同样效果）。
 
-# 跳过环境里的 HTTP(S)_PROXY：集群节点在同一局域网，走代理只会超时。
-_OPENER = urlrequest.build_opener(urlrequest.ProxyHandler({}))
+
+# --------------------------------------------------------------------------- #
+# HTTP（keep-alive 连接池）
+# --------------------------------------------------------------------------- #
+# 心跳一秒一拍，原来每次 urlopen 都新建 TCP 连接：对端刚处理完这条连接就被
+# 丢弃，两台机器各留一份 TIME_WAIT（现场 429 条）。
+#
+# 池必须是**进程级共享**的：每次心跳都新建一个 ThreadPoolExecutor，池里的
+# 线程用完即销毁，threading.local 缓存等于每拍都从空池开始（实测 TIME_WAIT
+# 仍然每拍 +1）。共享池用「取出即独占、用完放回」的语义，不需要担心同一条
+# socket 被两个线程同时写。
+_CONN_POOL: dict = {}
+_CONN_POOL_LOCK = threading.Lock()
+_CONN_POOL_MAX = 32
+
+
+def _pool_take(key):
+    with _CONN_POOL_LOCK:
+        return _CONN_POOL.pop(key, None)
+
+
+def _pool_put(key, conn) -> None:
+    with _CONN_POOL_LOCK:
+        old = _CONN_POOL.pop(key, None)
+        if old is not None:
+            try:
+                old.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if len(_CONN_POOL) >= _CONN_POOL_MAX:
+            # 池里 key 本来就只有「几个同伴 × 几个超时档」，正常不会到上限；
+            # 真到了就放弃缓存，宁可多一条短连接也不无限占 fd。
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        _CONN_POOL[key] = conn
+
+
+def _new_conn(scheme: str, host: str, port: int, timeout: float):
+    if scheme == "https":
+        return httpclient.HTTPSConnection(host, port, timeout=timeout)
+    return httpclient.HTTPConnection(host, port, timeout=timeout)
+
+
+def _http_round_trip(url: str, method: str, data, headers: dict,
+                     timeout: float) -> tuple[int, bytes]:
+    """发一次请求，复用本线程池里的连接。返回 (status, raw)。"""
+    parsed = urlsplit(url)
+    scheme = (parsed.scheme or "http").lower()
+    host = parsed.hostname or ""
+    if not host:
+        raise ValueError(f"URL 缺少主机：{url}")
+    port = parsed.port or (443 if scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    key = (scheme, host, port, round(float(timeout), 2))
+    for attempt in (0, 1):
+        conn = _pool_take(key)
+        reused = conn is not None
+        if conn is None:
+            conn = _new_conn(scheme, host, port, timeout)
+        try:
+            conn.request(method, path, body=data, headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read(MAX_BODY)
+            code = int(resp.status)
+            # body 没读完/对端要关：这条连接不能再复用，否则下一次 request
+            # 会读到上一条的残留响应。
+            leftover = (getattr(resp, "length", None) or 0) - len(raw)
+            if resp.will_close or leftover > 0:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                _pool_put(key, conn)
+            return code, raw
+        except Exception:  # noqa: BLE001
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            # 复用的长连接可能已被对端静默关闭（重启/空闲超时）：换一条新
+            # 连接重试一次。新连接也失败，就是真不可达，交给调用方处理。
+            if reused and attempt == 0:
+                continue
+            raise
+    raise RuntimeError("unreachable")
 
 
 def http_json(url: str, method: str = "GET", payload=None,
@@ -753,17 +870,9 @@ def http_json(url: str, method: str = "GET", payload=None,
         headers["Content-Type"] = "application/json; charset=utf-8"
     if token:
         headers["X-Hive-Cluster-Token"] = token
-    req = urlrequest.Request(url, data=data, headers=headers, method=method)
     try:
-        with _OPENER.open(req, timeout=max(0.1, float(timeout))) as resp:
-            raw = resp.read(MAX_BODY)
-            code = getattr(resp, "status", resp.getcode())
-    except urlerror.HTTPError as exc:
-        try:
-            raw = exc.read(MAX_BODY)
-        except Exception:  # noqa: BLE001
-            raw = b""
-        code = exc.code
+        code, raw = _http_round_trip(url, method, data, headers,
+                                     max(0.1, float(timeout)))
     except Exception:  # noqa: BLE001  URLError / timeout / reset 都当节点不可达
         return None, None
     if not raw:
@@ -1286,6 +1395,10 @@ class Cluster:
 
         self._dirty = False
         self._last_persist = 0.0
+        # 上次向同伴广播全量 progress/leases 时的 generation 与时刻。
+        # 0 表示「还没广播过」，第一次心跳必定带全量。
+        self._broadcast_gen = 0
+        self._broadcast_at = 0.0
         self._last_election = 0.0
         # 只有「主控本人发来的 leader 心跳」才刷新这个时间戳。跟随者之间转述
         # leader 记录不算数 —— 否则每台都以为别人见过主控，幽灵主控的租约
@@ -1792,6 +1905,19 @@ class Cluster:
         except RuntimeError:      # 没拿到锁时 notify 会抛，调用方本应持锁
             pass
 
+    def _mark_touch_locked(self) -> None:
+        """只「碰一下」：唤醒长轮询，但不推进 generation、不置脏。
+
+        心跳和同伴快照里的 last_seen 刷新只说明「它还活着」，不是「状态
+        变了」。原先这条路径也走 _mark_dirty_locked，后果是每拍 generation
+        +1：对端永远拿不到相等的 gen，心跳响应次次退化成全量；同时每秒把
+        565KB 的 state.json 重写一遍（实测空闲期磁盘写 1.8MB/s）。
+        """
+        try:
+            self.cond.notify_all()
+        except RuntimeError:
+            pass
+
     def _state_payload_locked(self) -> dict:
         return {
             "protocol": PROTOCOL,
@@ -1808,14 +1934,17 @@ class Cluster:
             "lease_grace_until_epoch": self.lease_grace_until,
             "nodes": copy.deepcopy(self.nodes),
             "tombstones": dict(self._tombstones),
-            "events": list(self.events),
+            # 磁盘只留最近一批事件：events 本身是 deque(EVENT_LIMIT)，
+            # 再整份塞进 snapshot 会把 state.json 直接抬高一倍。
+            "events": list(self.events)[-EVENT_PUSH_LIMIT:],
             "event_seq": self.event_seq,
             "progress": copy.deepcopy(self.progress),
             "leases": copy.deepcopy(self.leases),
             "generation": self.generation,
             "updated_at": self.updated_at,
             # 进程没跑时 `hive cluster status` 读 state.json 也能拿到和 HTTP 一样的视图
-            "snapshot": self._snapshot_locked(),
+            # snapshot 不带 events：上面已经有一份了，重复序列化 135KB 纯浪费。
+            "snapshot": self._snapshot_locked(include_events=False),
             "saved_at": _iso(),
         }
 
@@ -1836,13 +1965,16 @@ class Cluster:
         """落盘：锁内只取快照，锁外写文件。
 
         force=True 用于停机等「必须写下去」的时刻，同步写完。
-        默认路径按 1s 节流，且只在维护循环里调用 —— 不额外开线程，
-        避免写盘线程和时序敏感的选举逻辑抢 GIL。
+        默认路径按 PERSIST_INTERVAL_S 节流，且只在维护循环里调用 —— 不额外开
+        线程，避免写盘线程和时序敏感的选举逻辑抢 GIL。
+
+        节流从 1s 调到 5s：state.json 实测 565KB，原先 1s 一次的全量
+        json.dumps + 临时文件 + os.replace 让空闲期磁盘稳定写到 1.8MB/s。
         """
         with self.lock:
             if not force and not self._dirty:
                 return
-            if not force and _now() - self._last_persist < 1.0:
+            if not force and _now() - self._last_persist < PERSIST_INTERVAL_S:
                 return
             try:
                 data = self._state_payload_locked()
@@ -2030,10 +2162,19 @@ class Cluster:
     def _node_status_locked(self, rec: dict, now_epoch: float | None = None) -> str:
         if rec.get("id") == self.node_id:
             return "alive"
+        # alive 窗口不能比「最慢一次心跳」还窄：空闲期 5s 一拍、peer_timeout
+        # 4s 时，节点会在 alive/suspect 之间每拍抖一次，维护循环就会不停
+        # 发 node_up 事件、推进 generation（实测每 2-3 秒一次）。
+        dead_timeout = max(0.05, float(self.config.dead_timeout))
+        alive_window = max(float(self.config.peer_timeout),
+                           2.0 * float(self.config.idle_heartbeat_interval))
+        # 但 alive 窗口必须给 dead 留缓冲，否则一次丢包就直接判死。
+        alive_window = min(alive_window, dead_timeout * 0.75)
+        alive_window = max(alive_window, float(self.config.peer_timeout))
         age = (now_epoch or _now()) - float(rec.get("last_seen_epoch") or 0.0)
-        if age <= self.config.peer_timeout:
+        if age <= alive_window:
             return "alive"
-        if age <= self.config.dead_timeout:
+        if age <= dead_timeout:
             return "suspect"
         return "dead"
 
@@ -2155,11 +2296,19 @@ class Cluster:
         merged["id"] = nid
         if joined or known is None:
             merged["joined_at"] = merged.get("joined_at") or _iso()
+        prev_sig = {k: v for k, v in (known or {}).items()
+                    if k not in _NODE_VOLATILE_KEYS}
+        cur_sig = {k: v for k, v in merged.items()
+                   if k not in _NODE_VOLATILE_KEYS}
         self.nodes[nid] = merged
         if known is None:
             self._emit_locked("node_join", node_id=nid,
                               message=f"{merged.get('name') or nid} 加入")
-        self._mark_dirty_locked()
+        if known is not None and cur_sig == prev_sig:
+            # 只有 last_seen 被刷新：这不是状态变更，绝不能推进 generation。
+            self._mark_touch_locked()
+        else:
+            self._mark_dirty_locked()
         return True
 
     def _public_node_locked(self, rec: dict, now_epoch: float | None = None) -> dict:
@@ -3052,7 +3201,10 @@ class Cluster:
             for tid, item in leases.items():
                 if isinstance(item, dict):
                     self._merge_lease_locked(str(tid), item)
-        self._mark_dirty_locked()
+        # 不在这收尾处无条件 _mark_dirty_locked：合并里的每一条写入
+        # （_merge_progress/_merge_lease/_update_node/_merge_event）已经各自
+        # 按「是否真的变了」置脏。原先这里再补一刀，等于每次心跳都把
+        # generation 推一格，全量响应与全量落盘永远停不下来。
 
     def _merge_body_state_locked(self, body: dict) -> None:
         for key in ("progress", "leases"):
@@ -3084,6 +3236,9 @@ class Cluster:
         lid = str(rec["id"])
         if lid == self.node_id:
             return True
+        # 续租（refresh_lease）每拍都会刷新 leader_lease_until，这属于「主控
+        # 还活着」，不是「集群视图变了」：按关键字段判断，未变就只 touch。
+        before = (self.leader_id, self.leader_url, self.term, self.role)
         if term < self.term:
             return False
         known = self.nodes.get(lid)
@@ -3133,7 +3288,12 @@ class Cluster:
             # 复活时，一眼就能看出是心跳、注册还是同伴转述带回来的。
             _log(f"采纳主控 {rec.get('name') or lid}（来源 {caller}，"
                  f"term={term}，签租={refresh_lease}）")
-        self._mark_dirty_locked()
+        if (self.leader_id, self.leader_url, self.term, self.role) != before:
+            self._mark_dirty_locked()
+        else:
+            # 单纯的续租：别把 generation 推一格，否则每次心跳都会触发一次
+            # 全量状态广播 + 全量落盘。
+            self._mark_touch_locked()
         return True
 
     def _clear_leader_locked(self, reason: str) -> None:
@@ -3544,8 +3704,42 @@ class Cluster:
         self._mark_dirty_locked()
 
     # -- 心跳 / 维护循环 ---------------------------------------------------- #
+    def _state_stale_for_peers_locked(self) -> bool:
+        """上次全量广播之后 generation 动过，或兜底重传窗口到了？
+
+        调用方必须已持锁。FULL_BROADCAST_S 的兜底很关键：某一拍的全量包
+        丢了、对端又恰好不在线，没有它就会永远停在旧视图上。
+        """
+        return (self.generation != self._broadcast_gen
+                or _now() - self._broadcast_at >= FULL_BROADCAST_S)
+
+    def _has_active_work_locked(self) -> bool:
+        """有在跑的活儿吗？判定只看内存里已有的租约/进度，不打任何 IO。"""
+        now_epoch = _now()
+        for lease in self.leases.values():
+            if lease.get("released"):
+                continue
+            if float(lease.get("lease_until_epoch") or 0.0) > now_epoch:
+                return True
+        settled = ("done", "completed", "finished", "failed", "cancelled",
+                   "canceled", "blocked", "released")
+        for item in self.progress.values():
+            state = str(item.get("state") or "").strip().lower()
+            if state and state not in settled:
+                # 十分钟没推进的老进度不算「在跑」，否则会永远把心跳钉在 1s。
+                if float(item.get("updated_epoch") or 0.0) >= now_epoch - 600:
+                    return True
+        return False
+
+    def _heartbeat_interval_now(self) -> float:
+        """活跃期 1s 一拍，空闲期降频。空闲期仍每秒全量同步就是这次故障。"""
+        with self.lock:
+            active = self._has_active_work_locked()
+        return (self.config.heartbeat_interval if active
+                else self.config.idle_heartbeat_interval)
+
     def _loop_heartbeat(self) -> None:
-        while not self._stop.wait(max(0.05, self.config.heartbeat_interval)):
+        while not self._stop.wait(max(0.05, self._heartbeat_interval_now())):
             try:
                 self._heartbeat_once()
             except Exception as exc:  # noqa: BLE001  单次心跳失败不能杀循环
@@ -3571,15 +3765,21 @@ class Cluster:
                 body = {"node": self._self_node(), "term": self.term,
                         "leader": True, "leader_url": self.url,
                         "lease_until": _iso(self.leader_lease_until),
-                        "progress": copy.deepcopy(self.progress),
-                        "leases": copy.deepcopy(self.leases)}
+                        "gen": self.generation, "event_seq": self.event_seq}
                 # 心跳更新 leader_lease_until 但不推进 generation：长轮询等的是
                 # 真实状态变化，不是「主节点还活着」这件事。
             else:
                 body = {"node": self._self_node(), "term": self.term,
                         "leader": False,
-                        "progress": copy.deepcopy(self.progress),
-                        "leases": copy.deepcopy(self.leases)}
+                        "gen": self.generation, "event_seq": self.event_seq}
+            # 全量 progress+leases 是 40-50KB；空闲期每秒搬一遍就是这次
+            # 2-3 Mbps 的来源。只在「自上次广播后 generation 真的动过」或
+            # 超过 FULL_BROADCAST_S 兜底重传时才附带，其余每拍只发主干。
+            if self._state_stale_for_peers_locked():
+                body["progress"] = copy.deepcopy(self.progress)
+                body["leases"] = copy.deepcopy(self.leases)
+                self._broadcast_gen = self.generation
+                self._broadcast_at = _now()
         if role == "leader":
             self._leader_heartbeat(peers, body)
         elif role == "follower":
@@ -3630,7 +3830,7 @@ class Cluster:
                                 refresh_lease=True)
                     if int(resp.get("term") or 0) > self.term:
                         self._adopt_higher_term_locked(int(resp["term"]), resp.get("leader"))
-                    self._mark_dirty_locked()
+                    self._mark_touch_locked()
 
     def _follower_heartbeat(self, leader_url: str, body: dict) -> None:
         code, resp = http_json(str(leader_url).rstrip("/") + "/api/cluster/heartbeat",
@@ -3655,7 +3855,7 @@ class Cluster:
                 # 时连 leader_id 都不改，只同步节点表/进度/事件。
                 self._merge_snapshot_locked(resp, from_leader=verified,
                                             sender_id=sender_id)
-                self._mark_dirty_locked()
+                self._mark_touch_locked()
             else:
                 self._leader_fail_at = _now()
                 if (self.leader_lease_until and _now() > self.leader_lease_until
@@ -3703,7 +3903,7 @@ class Cluster:
                               and str(leader.get("id") or "") == sender_id)
                     self._merge_snapshot_locked(resp, from_leader=direct,
                                                 sender_id=sender_id)
-                    self._mark_dirty_locked()
+                    self._mark_touch_locked()
 
     def _loop_maintenance(self) -> None:
         while not self._stop.wait(0.2):
@@ -4093,6 +4293,22 @@ class Cluster:
                 self._adopt_leader_locked(node, max(term, self.term),
                                           refresh_lease=True)
             self._merge_body_state_locked(body)
+            # 对端自报的视图版本：gen 一致说明它已经有这份 progress/leases，
+            # 再塞 40-50KB 纯属浪费带宽（这就是空闲期 2-3 Mbps 的主因）。
+            # 旧版本不带 gen（视为 0）→ 永远拿到全量，保持向后兼容。
+            req_gen = int(body.get("gen") or 0) if isinstance(body, dict) else 0
+            req_event_seq = (int(body.get("event_seq") or 0)
+                             if isinstance(body, dict) else 0)
+            same_term = (int(body.get("term") or 0) == self.term
+                         if isinstance(body, dict) else False)
+            changed = req_gen != self.generation
+            # 事件按 seq 增量下发；任期变了 seq 会重置，此时整段重发。
+            if same_term:
+                events = [copy.deepcopy(ev) for ev in self.events
+                          if int(ev.get("seq") or 0) > req_event_seq]
+                events = events[-EVENT_PUSH_LIMIT:]
+            else:
+                events = copy.deepcopy(list(self.events))[-EVENT_PUSH_LIMIT:]
             return 200, {
                 "ok": True,
                 "term": self.term,
@@ -4105,10 +4321,11 @@ class Cluster:
                 "leader_lease_until": _iso(self.leader_lease_until)
                 if self.leader_lease_until else "",
                 "nodes": [self._public_node_locked(n) for n in self.nodes.values()],
-                "events": copy.deepcopy(list(self.events))[-120:],
-                "progress": copy.deepcopy(self.progress),
-                "leases": copy.deepcopy(self.leases),
+                "events": events,
+                "progress": copy.deepcopy(self.progress) if changed else {},
+                "leases": copy.deepcopy(self.leases) if changed else {},
                 "generation": self.generation,
+                "event_seq": self.event_seq,
                 "store_commit_seq": self._store_seq(),
             }
 
