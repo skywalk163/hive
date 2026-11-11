@@ -285,3 +285,36 @@ def test_rollout_reports_failure_and_returns_nonzero(world, monkeypatch):
     monkeypatch.setattr(h, "cmd_upgrade", lambda *a, **kw: 0)
     rc = h._upgrade_rollout({"remote_version": "0.16.00"}, as_json=True)
     assert rc == 1
+
+
+def test_rollout_restart_schedules_on_local_branch(world, monkeypatch):
+    """主控本机分支也必须安排重启（远端那支由对端 handle_upgrade_trigger 安排）。
+
+    现场：加了 --restart 却只有子节点重启，主控自己仍跑旧代码 —— 集群面板
+    上主控那一行版本永远不变。根因是本地分支只调了 cmd_upgrade 就 continue，
+    压根没走到安排重启那一步。
+    """
+    h = hive.Hive(world.hive1)
+    _fake_state(monkeypatch, [_node("self-1", "fb98", "0.15.00")],
+                self_name="fb98", self_id="self-1")
+    scheduled = []
+    monkeypatch.setattr(h, "cmd_upgrade", lambda *a, **kw: 0)
+    monkeypatch.setattr(h, "_request_local_restart",
+                        lambda: scheduled.append(1) or True)
+    rc = h._upgrade_rollout({"remote_version": "0.16.00"}, as_json=True,
+                            restart=True)
+    assert rc == 0
+    assert scheduled == [1], "主控自己没有安排重启"
+
+
+def test_rollout_without_restart_leaves_process_alone(world, monkeypatch):
+    """不带 --restart 时不能去杀别人的守护进程。"""
+    h = hive.Hive(world.hive1)
+    _fake_state(monkeypatch, [_node("self-1", "fb98", "0.15.00")],
+                self_name="fb98", self_id="self-1")
+    scheduled = []
+    monkeypatch.setattr(h, "cmd_upgrade", lambda *a, **kw: 0)
+    monkeypatch.setattr(h, "_request_local_restart",
+                        lambda: scheduled.append(1) or True)
+    assert h._upgrade_rollout({"remote_version": "0.16.00"}, as_json=True) == 0
+    assert scheduled == [], "没要 --restart 却安排了重启"

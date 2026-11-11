@@ -4390,6 +4390,19 @@ class Cluster:
                              "error": f"只有主控能触发升级（发起方 {requester}，"
                                       f"主控 {leader or '无'}，本机 {self.node_id}）"}
             target = str(body.get("version") or "")
+        # `skip_apply`：调用方自己已经完成快进，只想让本进程安排重启。
+        # 主控那一行走「本地 apply + 请本机 hived 重启」，若不再跑一次 apply，
+        # 第二次 apply 只会回「已是最新」。这条分支不做任何 git 动作。
+        if body.get("skip_apply"):
+            restarted = self._schedule_self_restart() if body.get("restart") else False
+            with self.lock:
+                self._emit_locked(
+                    "upgrade.restart_scheduled",
+                    message=f"按主控 {requester[:12]} 的指令安排重启以加载新代码")
+                self._persist_locked()
+            return 200, {"ok": True, "skipped_apply": True,
+                         "node_id": self.node_id, "node": self.config.name,
+                         "restart_scheduled": bool(restarted)}
         try:
             import hive as _hive
         except Exception as exc:  # noqa: BLE001

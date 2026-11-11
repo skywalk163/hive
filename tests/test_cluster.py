@@ -1983,3 +1983,26 @@ def test_upgrade_trigger_rejects_arbitrary_requester_when_self_is_leader(
         {"requester": "somebody-else", "version": "0.16.02"})
     assert code == 403
     assert not called, "非法 requester 竟然触发了升级"
+
+
+def test_upgrade_trigger_skip_apply_only_schedules_restart(cluster_factory,
+                                                           monkeypatch):
+    """`skip_apply` 只安排重启，不跑第二次 apply。
+
+    主控自己那一行走「本地快进 + 请本机 hived 重启」：若不区分，第二次 apply
+    只会回「已是最新版本」，而重启被静默丢掉 —— 加了 --restart 却只有子节点
+    生效，这种半生效最难查。
+    """
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    called = []
+    monkeypatch.setattr(hive, "Hive", lambda *x, **kw: type("H", (), {
+        "cmd_upgrade": lambda self, *a, **kw: called.append(1) or 0})())
+    monkeypatch.setattr(a, "_schedule_self_restart", lambda **kw: True)
+
+    code, resp = a.handle_upgrade_trigger(
+        {"requester": a.node_id, "skip_apply": True, "restart": True})
+    assert code == 200 and resp["ok"] is True
+    assert resp["skipped_apply"] is True
+    assert resp["restart_scheduled"] is True
+    assert not called, "skip_apply 仍然跑了 apply"

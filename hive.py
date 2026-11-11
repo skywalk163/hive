@@ -4094,6 +4094,33 @@ class Hive:
                               else "集群不可用，子节点下次 fetch 也能看到"))
         return 0
 
+    def _request_local_restart(self) -> bool:
+        """本机 hived 升级后安排自重启；本机没跑 hived 时什么都不做。
+
+        主控自己那一行在 rollout 里走「本地快进」，不经过
+        `handle_upgrade_trigger`，所以重启得在这里补。本机进程知道自己的 pid
+        与托管方式，让它自己安排最稳（helper 会先清 stopped 标记、再 SIGTERM、
+        最后看有没有托管方接管）—— 这里只负责把「请重启」这一句传给它。
+
+        返回是否真的安排了重启。本机没有 hived 在跑时返回 False（这不算失败：
+        在笔记本上手工跑一次 `upgrade rollout --restart` 不该报错）。
+        """
+        health = _cluster_http("GET", "health", timeout=3.0)
+        code, resp = health
+        if code != 200 or not isinstance(resp, dict):
+            return False
+        node = (resp.get("node") or {})
+        my_id = str(node.get("id") or "")
+        if not my_id:
+            return False
+        code, resp = _cluster_http(
+            "POST", "upgrade",
+            {"requester": my_id, "restart": True, "yes": True,
+             "skip_apply": True},
+            timeout=10.0)
+        return code == 200 and isinstance(resp, dict) and \
+            bool(resp.get("restart_scheduled"))
+
     def _upgrade_apply(self, info: dict, yes: bool = False,
                        as_json: bool = False, dry_run: bool = False) -> int:
         """子节点升级：只做 ff-only 快进；脏工作区 / 非快进一律拒绝。"""
@@ -4216,7 +4243,16 @@ class Hive:
                     buf = io.StringIO()
                     with contextlib.redirect_stdout(buf):
                         rc = self.cmd_upgrade("apply", yes=yes, as_json=True)
+                    restarted = False
+                    if rc == 0 and restart:
+                        # 远端那条分支会由对端的 handle_upgrade_trigger 安排
+                        # 重启；本地分支不补这一段，主控自己就永远不会重启 ——
+                        # 加了 --restart 却只有子节点生效，最难查。
+                        # 只有本机确实跑着 hived 才安排（CLI 单独跑一次
+                        # upgrade 的时候不该去杀一个不存在的守护进程）。
+                        restarted = self._request_local_restart()
                     results.append(dict(row, ok=rc == 0, code=rc,
+                                        restart_scheduled=restarted,
                                         detail=buf.getvalue().strip()[-1500:]))
                 except HiveError as exc:
                     results.append(dict(row, ok=False, error=str(exc)))
@@ -4231,9 +4267,17 @@ class Hive:
                  "yes": True, "restart": bool(restart)}, 
                 timeout=UPGRADE_ROLLOUT_TIMEOUT, url=url)
             resp = resp if isinstance(resp, dict) else {}
+            err = str(resp.get("error") or "")
+            # 「未知资源 /api/cluster/upgrade」= 对端 hived 还是**没有这个端点
+            # 的老进程**。这是工具自身的启动顺序问题（新端点只存在于磁盘代码，
+            # 常驻进程要重启才加载），不是配置错。首次上线必然遇到一次，所以
+            # 给一条能照做的指引，而不是让运维去猜 404 是什么意思。
+            if code == 404 and "upgrade" in err:
+                err = ("该节点的 hived 仍是旧进程（没有 /api/cluster/upgrade 端点）。"
+                       "先在这台机器上手工 `hive cluster restart` 加载新代码，"
+                       "之后的一键升级才能覆盖它")
             results.append(dict(row, ok=code == 200 and bool(resp.get("ok")),
-                                code=code,
-                                error=str(resp.get("error") or ""),
+                                code=code, error=err,
                                 detail=str(resp.get("detail") or "")[-1500:]))
 
         if as_json:
