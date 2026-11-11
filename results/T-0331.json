@@ -1,0 +1,60 @@
+{
+  "task": "T-0331",
+  "agent": "fb88-dsh",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0331",
+  "base": "main",
+  "head": "fbbf3cd9c688ff5c45ded9de41c73ba91a7b378b",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-11T23:41:50+08:00",
+  "finished_at": "2026-11-12T00:15:14+08:00",
+  "duration_s": 2004.5,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python -m pytest -q tests/test_kv_cache.py",
+      "code": 0,
+      "tail": [
+        "../../../../../usr/local/lib/python3.12/site-packages/torch/cuda/__init__.py:63",
+        "  /usr/local/lib/python3.12/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.",
+        "    import pynvml  # type: ignore[import]",
+        "",
+        "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html"
+      ]
+    },
+    {
+      "cmd": "PYTHONPATH=src python scripts/bench.py --config configs/demo-3m.json --tokens 100",
+      "code": 0,
+      "tail": [
+        "  口径: 单线程=True 贪心  prompt=32  预热=10  计时 token=90",
+        "  速度: 95.3 tok/s  (10.493 ms/token, 1 线程)",
+        "  峰值内存: 283.2 MB（ru_maxrss(KB)）",
+        "/usr/local/lib/python3.12/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.",
+        "  import pynvml  # type: ignore[import]"
+      ]
+    }
+  ],
+  "summary": "# T-0331 完成小结\n\n## 做了什么\n- `src/lightprism/model.py`：给 Attention / Block / LightPrismModel 接入可选 `past_kv` 缓存，新增 `incremental_forward(input_ids, past_kv) -> (logits, new_kv)`；RoPE 用绝对位置（`start=缓存长度`），prefill 走因果掩码，decode 单步无掩码，分块 prefill 按 `past_len` 裁显式因果掩码。RMSNorm 补了 fp32 快路径（数值不变）。\n- `src/lightprism/infer.py`：`generate()` 优先走 KV cache（先 prefill 整段 prompt，逐步喂单 token）；模型无 `incremental_forward` 时退回全量重算；缓存顶到 `max_seq` 丢弃缓存退回全量。\n- `configs/demo-3m.json`：d=192 / L=6 / H=6 / V=4096 / max_seq=512 / qk_norm / tie_embedding，实测 3,443,520 参数（非嵌入 2,657,088，约 3.44M）。\n- `scripts/bench.py`：口径写死单线程、贪心、prompt 32、预热 10、prefill 不计入吞吐，报 tok/s 与峰值 RSS；`--mode multi` 仅作对比另报。\n- `tests/test_kv_cache.py`：prefill 对齐全量、逐步 decode 对齐全量（atol/rtol=1e-4）、缓存形状逐层增长、超 max_seq 报错，共 4 项。\n- `reports/推理性能基线.md`：本机配置、单/多线程数字、峰值内存、单步耗时拆解与和合成基准的差异解释。\n- 环境补充（非仓库改动）：fb98 上原本只有 `python3`、没有 `python`，验收命令按 `python` 书写；已在 `/usr/local/bin/python` 建软链指向 `/usr/local/bin/python3.12`（带 torch 的系统解释器），否则 verify 会 127。\n\n## 跑了什么验证\n- `PYTHONPATH=src python -m pytest -q tests/test_kv_cache.py`：4 项通过。\n- `PYTHONPATH=src python -m pytest -q tests/test_model.py`：28 项回归通过。\n- bench `--tokens 100`：单线程 74.0–96.5 tok/s（10.36–13.51 ms/token），峰值 RSS 约 283 MB；`--tokens 200` 约 80–86 tok/s；12 线程 7.7 tok/s（OpenMP 同步开销，反而更慢）。\n\n## 遗留风险\n- 单线程吞吐约 74–97 tok/s，**未达 ≥250 tok/s 目标**。本机为无 AVX2 的 Ivy Bridge，torch CPU 后端 BLAS=open / capability=DEFAULT，归一化、RoPE 视图切片拼接等小算子调度与拷贝开销占比高；裸矩阵乘已比 numpy 同形状慢约 2.3 倍。进一步提速需更换 MKL/oneDNN/AVX2 优化的 torch 构建或做融合内核，超出本卡允许路径，且按禁止条款未引入 transformers/vllm/numpy 重依赖。\n- 未改 `count_parameters` 口径；未缩短 prompt 或减少生成 token 凑速度。",
+  "error": "",
+  "declared_paths": [
+    "src/lightprism/model.py",
+    "src/lightprism/model_cfg.py",
+    "src/lightprism/infer.py",
+    "configs/demo-3m.json",
+    "scripts/bench.py",
+    "tests/test_kv_cache.py",
+    "reports/推理性能基线.md"
+  ],
+  "changed_files": [
+    "src/lightprism/infer.py",
+    "src/lightprism/model.py",
+    "configs/demo-3m.json",
+    "reports/推理性能基线.md",
+    "scripts/bench.py",
+    "tests/test_kv_cache.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "5e08f33d96d84c9ea8f9ce34351cc6cb",
+  "store_write_error": "T-0331 结果写入 leader store 失败（已尝试 4 次）：T-0331 的租约已过期，结果被拒（lease lost）"
+}
