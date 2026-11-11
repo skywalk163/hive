@@ -1,7 +1,7 @@
 {
-  "version": "0.16.01",
-  "commit": "d761a7805460f32702a6731a776673f2dda12d1d",
-  "published_at": "2026-11-11T14:53:34+08:00",
+  "version": "0.16.02",
+  "commit": "b7e6974872f13e0ff32c7f2b13e7e53a58152825",
+  "published_at": "2026-11-11T09:22:15+00:00",
   "published_by": "controller",
-  "notes": "发布0.16.02"
+  "notes": "修复节点优雅下线后一小时不可见（墓碑误伤）；新增主控一键节点升级"
 }
