@@ -1,0 +1,93 @@
+---
+id: T-0335
+title: 文档与一键 demo
+repo: lightprism
+base: main
+state: ready
+owner: null
+agent: null
+priority: P2
+needs:
+  - docs
+paths:
+  - Makefile
+  - README.md
+  - docs/Demo使用.md
+  - scripts/demo.sh
+locks:
+  - Makefile
+  - docs/Demo使用.md
+verify:
+  - make demo
+  - make bench
+depends_on: []
+lease_minutes: 120
+timeout_minutes: 90
+created: 2026-11-11T22:10:00+08:00
+max_retries: 2
+---
+
+# 文档与一键 demo
+
+## 背景
+
+Demo 的门面是「一条命令跑通」。这张卡可以把骨架先搭起来（不依赖 checkpoint 存在），
+等 T-0332 出了模型再填真实输出。
+
+**全程可并行**，但收口要在 T-0334 之前。
+
+## 要做的事
+
+### 1. `Makefile`
+
+```make
+demo:      # 一条命令跑通：用一个内置 prompt 生成代码
+bench:     # 跑速度基准，输出 tok/s 与峰值内存
+check:     # pytest + 词表校验 + 预算核算
+clean:     # 清 outputs/ 与 __pycache__
+```
+
+`make demo` **必须能在没有 checkpoint 时给出可读提示**，而不是 traceback：
+「未找到 checkpoints/demo-3m/model.pt，请先跑 make train 或从 releases 下载」。
+
+### 2. `scripts/demo.sh`
+
+```sh
+./scripts/demo.sh "把这三个文件按大小排序"
+./scripts/demo.sh --format json "报告磁盘使用率"
+```
+
+- 默认读 `checkpoints/demo-3m/model.pt`
+- 打印：生成的 token 数、耗时、tok/s、内存峰值、是否通过 `light ai check`
+- 输出要**同时**给人看（格式化）和给脚本用（`--json`）
+
+### 3. `docs/Demo使用.md`
+
+必须含：
+
+- 环境要求（Python 版本、内存、**不需要 GPU**）
+- 三种跑法：`make demo` / `python -m lightprism.demo` / `scripts/demo.sh`
+- 怎么换 prompt、怎么换 format
+- **已知限制**：3MB 语料训练，超出训练分布的任务会失败 —— 要有真实失败样例
+- 常见报错：找不到 checkpoint、内存不足、速度不达标怎么查
+
+### 4. README 增加「五分钟跑通 demo」段
+
+放在现有「这个仓库现在是什么」之后。要求：
+
+- 含**真实输出样例**（不许编造）
+- 明确写「这是 3.4M 参数的 demo 模型，不是 1B 版本」
+- 速度数字引用 `reports/推理性能基线.md`，不自己写
+
+## 完成标准
+
+- `make demo` / `make bench` / `make check` 三个目标可用
+- `docs/Demo使用.md` 完整，含真实失败样例
+- README 新增段落，输出样例来自实际运行
+- `scripts/demo.sh` 有可执行权限
+
+## 禁止
+
+- **不要编造输出样例**。没跑过就跑一遍再粘，跑不出来就写「待 T-0332 完成后补」
+- 不要在 README 里承诺 demo 模型能做它做不到的事（3MB 语料的能力边界见计划书 §1.2）
+- 不要改 `docs/Demo开发计划.md`（那是计划的事实源，改要走新卡）

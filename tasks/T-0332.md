@@ -1,0 +1,101 @@
+---
+id: T-0332
+title: 训练出 demo checkpoint（3.4M 参数）
+repo: lightprism
+base: main
+state: blocked
+owner: null
+agent: null
+priority: P0
+needs:
+  - python
+paths:
+  - src/lightprism/train.py
+  - src/lightprism/demo/train_demo.py
+  - checkpoints/demo-3m/
+  - reports/训练报告.md
+  - tests/test_train_demo.py
+locks:
+  - src/lightprism/train.py
+verify:
+  - PYTHONPATH=src python -m lightprism.demo.train_demo --config configs/demo-3m.json --steps 50
+  - PYTHONPATH=src python -m lightprism.demo.smoke --ckpt checkpoints/demo-3m/model.pt
+depends_on:
+  - T-0330
+  - T-0331
+lease_minutes: 480
+timeout_minutes: 360
+created: 2026-11-11T22:10:00+08:00
+max_retries: 1
+exclusive: true
+---
+
+# 训练出 demo checkpoint（3.4M 参数）
+
+> **`state: blocked` —— 等 T-0330（词表）与 T-0331（推理核）完成后改成 `ready`。**
+> 现在不要领这张卡：没有词表就不知道嵌入层多大，没有 KV cache 就不知道速度能否达标。
+
+## 背景
+
+用 T-0330 的 4096 词表 + T-0331 的模型核，在 3MB 光明语料上训出能生成语法合法代码的
+3.4M 参数模型。
+
+**这台卡必须独占机器**（`exclusive: true`）：训练期间如果同机再跑 T-0331 的 benchmark，
+CPU 核被抢，速度数字会失真。
+
+## 现实预期（必须先接受再开工）
+
+- 3MB 语料 + 3.4M 参数 → **必然过拟合**。报告里必须写清「val loss 从第几步开始上升」，
+  那是真实能力边界。
+- 目标**不是**通用编程能力，而是：
+  1. 生成的代码**语法合法**（`light ai check` 无 error）；
+  2. 对训练分布内的任务能给出模仿得像的代码；
+  3. 模型能加载、能推理、速度达标。
+- 不要为了「好看」挑 cherry-picked 样例。**失败样例比成功样例更有价值**。
+
+## 要做的事
+
+### 1. 数据准备
+
+- 输入：T-0330 的 `data/corpus/`（508 个去重文件）
+- 留 5% 文件做 val（**按文件切，不按行切** —— 按行切会导致同一函数出现在 train 与 val，
+  val loss 虚低）
+- 序列化：直接按字符 token 走 T-0330 的词表，长文件按 `max_seq=512` 切块
+
+### 2. 训练（复用 `train.py`）
+
+- 复用现有 `Trainer`，但**必须先确认/修复**：`grad_accum` 是串行累加、没有 all-reduce。
+  单机单卡无所谓，但要在报告里写明这一限制。
+- 阶段一配方：控制 token 权重 1.0（方案书 §6）
+- 学习率：3e-4 余弦退火，warmup 5%
+- **记录每一步的 train loss 与每 N 步的 val loss**，落 `reports/训练报告.md`
+- checkpoint 必须含 `base_vocab` 本体（v0.2.0 修过这个坑，别退化）
+
+### 3. 第一轮 vs 第二轮
+
+- **第一轮**：只用语料（本卡主目标）
+- **第二轮**（可选，等 T-0333）：混入 `data/sft/json_tasks.jsonl`，学会 JSON 输出
+
+两轮结果都写进报告，对比 JSON 输出能力。
+
+### 4. `--smoke` 冒烟
+
+给一个固定 prompt，生成 32 token，验证：
+- 不抛异常
+- 输出非空
+- 输出能被 `parse_sequence` 解析（若含控制 token）
+
+## 完成标准
+
+- `checkpoints/demo-3m/model.pt` 存在，`--smoke` 通过
+- `reports/训练报告.md` 含：语料统计、train/val loss 曲线（表格或文本图）、
+  **过拟合起始步**、生成样例（含失败样例）、耗时与硬件
+- 生成的光明代码抽样 20 条跑 `light ai check`，**语法合法率 ≥ 80%**（写进报告）
+- `tests/test_train_demo.py` 覆盖：小步数能跑完、checkpoint 能加载、smoke 不崩
+
+## 禁止
+
+- 不要提交 checkpoint 到 git（`checkpoints/` 已在 `.gitignore`）
+- 不要跑超过 6 小时。跑不完就减小步数并在报告里说明
+- **不要挑样例**。报告中成功与失败样例都要贴
+- 不要在训练期间让同机跑其他 CPU 密集任务
