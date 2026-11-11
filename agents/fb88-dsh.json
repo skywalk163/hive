@@ -24,7 +24,8 @@
                   "lightharness":  "/home/skywalk/dswork/lightharness",
                   "light":  "/home/skywalk/dswork/light",
                   "lighthive":  "/home/skywalk/dswork/lighthive",
-                  "lightplugin":  "/home/skywalk/dswork/lightplugin"
+                  "lightplugin":  "/home/skywalk/dswork/lightplugin",
+                  "lightprism":  "/home/skywalk/dswork/lightprism"
               },
     "launch":  "",
     "worktrees":  "/home/skywalk/.hive/wt",
