@@ -1531,17 +1531,20 @@ def rev_parse(cwd, ref) -> str | None:
     return p.stdout.strip() if p.returncode == 0 else None
 
 
-def remote_branch_head(repo: Path, ref: str) -> str | None:
-    """`git ls-remote origin refs/heads/<ref>` 取回远端 sha。
+def remote_branch_head(repo: Path, ref: str,
+                       remote: str = "origin") -> str | None:
+    """`git ls-remote <remote> refs/heads/<ref>` 取回远端 sha。
 
     网络失败/超时重试一次（「失败按未推送处理并重试一次」）；两次都失败按
     「远端无此分支」处理（宁严勿纵：缺检出的代价是假成功，比多报一次失败严重）。
     返回 None 表示分支不存在或无法确认。
+
+    `remote` 可指定：交付侧要逐个核对网络远端，不能只盯着 origin（T-0320）。
     """
     last: HiveError | None = None
     for _ in range(2):
         try:
-            p = git_net(["ls-remote", "origin", f"refs/heads/{ref}"], repo,
+            p = git_net(["ls-remote", remote, f"refs/heads/{ref}"], repo,
                         check=False)
         except HiveError as e:  # 网络失败/超时：重试一次
             last = e
@@ -1550,7 +1553,7 @@ def remote_branch_head(repo: Path, ref: str) -> str | None:
         if not line:
             return None  # 命令跑通了但没匹配：分支确实不存在
         return line.split("\t", 1)[0]
-    log(f"ls-remote {ref} 两次都失败，按未推送处理：{last}")
+    log(f"ls-remote {remote}:{ref} 两次都失败，按未推送处理：{last}")
     return None
 
 
@@ -1571,6 +1574,58 @@ def code_remotes(repo: Path) -> list[str]:
     names = [ln.strip() for ln in (p.stdout or "").splitlines() if ln.strip()]
     head = [n for n in LAND_REMOTE_ORDER if n in names]
     return head + sorted(n for n in names if n not in head)
+
+
+def network_code_remotes(repo: Path) -> list[str]:
+    """代码仓里物理指向**网络地址**的远端名（排除本机路径裸仓）。
+
+    T-0320 / T-0324 / T-0326 的共同根因：Windows 交付机把 `origin` 配成了
+    本机路径裸仓（如 `g:\\github\\light`），push 成功、`ls-remote origin` 也能
+    读回同一个 head，结果 JSON 于是写成 done；而主控机的 origin 是内网 Gitea，
+    三个网络远端上都没有 `task/<tid>`，land 只能报「分支不存在」。
+    「push 和回读用同一个别名」验证不了这个别名指向哪里，必须按 URL 分辨。
+
+    本地路径判定：/、./、../、file://、Windows 盘符开头；其余（http(s)://、
+    ssh://、git@…、git://）算网络远端。测试环境常见的单 origin 裸仓会被判为
+    本地，此时返回空列表，交付行为保持旧版不变。
+    """
+    out: list[str] = []
+    for name in code_remotes(repo):
+        url = (git(["config", "--get", f"remote.{name}.url"], repo,
+                   check=False).stdout or "").strip()
+        if not url:
+            continue
+        if (url.startswith(("file://", "./", "../", "/"))
+                or re.match(r"^[A-Za-z]:[\\/]", url)):
+            continue
+        out.append(name)
+    return out
+
+
+def push_task_branch(repo: Path, tid: str, head: str) -> tuple[list[str], list[str]]:
+    """把 `task/<tid>` 推到 origin **和所有网络远端**，返回 (成功的网络远端, 失败明细)。
+
+    origin 必须成功（失败抛 HiveError，由调用方判 failed）；其余网络远端尽力推，
+    单个失败不阻断交付，交给 `guard_result_head` 要求「至少一个网络远端到位」。
+    这样即使交付机的 origin 是本机路径，主控机也能在 Gitea/gitcode/github 上
+    找到分支，不会再出现「结果 done 却合不了」的卡住。
+    """
+    ref = f"task/{tid}"
+    nets = network_code_remotes(repo)
+    targets = ["origin"] + [n for n in nets if n != "origin"]
+    pushed: list[str] = []
+    failed: list[str] = []
+    for name in targets:
+        try:
+            git_net(["push", "--force", name,
+                     f"{head}:refs/heads/{ref}"], repo)
+            if name in nets:
+                pushed.append(name)
+        except HiveError as e:
+            if name == "origin":
+                raise
+            failed.append(f"{name}: {str(e).splitlines()[0]}")
+    return pushed, failed
 
 
 # --------------------------------------------------------------------------- #
@@ -1660,6 +1715,19 @@ def guard_result_head(repo: Path, tid: str, head: str | None,
         if remote != head:
             return False, (f"head 未推送/不一致：本地 {head}，"
                            f"远端 {remote or '无'}")
+        # 只核对 origin 是不够的：origin 可能是交付机上的本机路径裸仓。
+        # 有网络远端时，至少要有一个网络远端真的拿到了这个 head，否则
+        # 结果写 done、主控却合不了（T-0320 / T-0324 / T-0326 的卡住现场）。
+        nets = network_code_remotes(repo)
+        if nets:
+            reached = [n for n in nets
+                       if remote_branch_head(repo, f"task/{tid}", n) == head]
+            if not reached:
+                return False, (
+                    f"代码分支只落在本机路径远端：网络远端 {', '.join(nets)} "
+                    f"上都没有 task/{tid}（或 head 不一致）。请补推 "
+                    f"git push <远端> {head}:refs/heads/task/{tid}；"
+                    f"否则主控 land 必然报「分支不存在」")
     return True, ""
 
 
@@ -1677,7 +1745,8 @@ def result_diff_files(repo: Path, base: str, head: str) -> list[str]:
 
 def guard_land_self_consistency(repo: Path, tid: str, base: str,
                                 result: dict, allow_empty_diff: bool,
-                                check_remote: bool = True) -> tuple[bool, str]:
+                                check_remote: bool = True,
+                                task_ref: str | None = None) -> tuple[bool, str]:
     """land 前置的结果自洽性校验（T-0205 追加证据）。
 
     防止「结果记的 head 与实际分支头对不上、verify 是在另一棵树上跑的」被当成
@@ -1692,19 +1761,32 @@ def guard_land_self_consistency(repo: Path, tid: str, base: str,
        `git diff --name-only base...origin/task/<tid>` 数量级大致一致
        （防「零改动也 done」）。
     """
+    ref = task_ref or f"origin/task/{tid}"
     recorded_head = (result or {}).get("head")
-    task_head = rev_parse(repo, f"origin/task/{tid}")
+    task_head = rev_parse(repo, ref)
     if check_remote and recorded_head:
+        if not task_head:
+            return False, (f"结果记录的 head {recorded_head} 与远端分支头 无 "
+                           f"不一致：{ref} 不存在，请交付机补推 "
+                           f"task/{tid} 分支后再 land")
         if task_head != recorded_head:
-            return False, (f"结果记录的 head {recorded_head} 与远端分支头 "
-                           f"{task_head or '无'} 不一致：结果对应的是另一棵树，"
-                           f"请重跑验收")
+            # 交付后主控可能在分支上又合了一次 main 来解冲突（T-0326：
+            # bf778988 的父之一才是结果里记的 bae769e4）。只要结果里的 head
+            # 仍是当前分支头的祖先，就仍是同一棵树，放行；否则才是
+            # 「verify 在另一棵树上跑过」的假验收。
+            same_tree = git(["merge-base", "--is-ancestor",
+                             recorded_head, task_head], repo,
+                            check=False).returncode == 0
+            if not same_tree:
+                return False, (f"结果记录的 head {recorded_head} 与远端分支头 "
+                               f"{task_head} 不一致：结果对应的是另一棵树，"
+                               f"请重跑验收")
     recorded_changed = (result or {}).get("changed_files") or []
     if not allow_empty_diff and not recorded_changed:
         return False, ("结果 changed_files 为空（零改动），拒绝合入；"
                        "若是纯调查/台账类卡请在任务卡声明 allow_empty_diff: true")
     if recorded_changed and task_head:
-        actual = result_diff_files(repo, base, f"origin/task/{tid}")
+        actual = result_diff_files(repo, base, ref)
         if not actual and not allow_empty_diff:
             return False, (f"远端分支相对 {base} 无任何改动，"
                            f"与结果记录的 {len(recorded_changed)} 个文件不符")
@@ -2210,7 +2292,27 @@ class Hive:
                 return json.loads(local.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 return None
-        return read_ref_file(self.dir, "origin/main", f"results/{tid}.json")
+        # main 上的归档是「审计记录」，不是「本次结果」。reopen 会删掉工作区
+        # 里的 results/<tid>.json，但 git 历史里那份还在；若对 ready/running 卡
+        # 也回退，cmd_submit 的「已经有结果」闸门会把重跑永远挡住。
+        # 所以第三层只对已关闭的卡生效。
+        p = self.dir / "tasks" / f"{tid}.md"
+        state = ""
+        if p.exists():
+            try:
+                card_data, _ = parse_card(p)
+                state = str(card_data.get("state") or "").strip().lower()
+            except (HiveError, OSError):
+                state = ""
+        else:
+            # 归档卡在 tasks/archive/ 下，走 card() 的冷卡查找
+            try:
+                state = str(self.card(tid).get("state") or "").strip().lower()
+            except HiveError:
+                state = ""
+        if state in ("done", "closed"):
+            return read_ref_file(self.dir, "origin/main", f"results/{tid}.json")
+        return None
 
     # -- 命令 -------------------------------------------------------------- #
     def cmd_assign(self, tid: str, agent: str) -> None:
@@ -2278,14 +2380,30 @@ class Hive:
         card = self.card(tid)
         old_state = card.get("state") or "?"
         old_owner = card.get("owner") or ""
-        res = read_ref_file(self.dir, f"origin/res/{tid}", f"results/{tid}.json")
+        explicit = done is not None
+        # 口径统一（T-0324）：这里过去只读 origin/res/<tid>，而 land / status 用
+        # result_info() 的三层回退；close 自己又会删掉 res 分支。于是同一张卡的
+        # 第二次 close 必然读到 None → done=False → 把已完成的卡改判成 closed
+        # （作废），424a99b cancel 就是这么来的。统一口径 + 终态幂等一起掐掉循环。
+        res = self.result_info(tid)
+        if done is None:
+            done = res is not None
+
+        # 终态幂等：重复 close / 重复 land 不许再写卡面、删分支或动 store。
+        # 唯一例外是显式 --as-done 纠正一个被误判成 closed 的卡（人工纠错）。
+        if old_state in ("done", "closed"):
+            if not (explicit and done and old_state == "closed"
+                    and res is not None):
+                log(f"{tid} 已处于终态 {old_state}，close 幂等跳过"
+                    f"（不重写卡面 / 不删分支 / 不动 store）")
+                return
+            log(f"{tid} 人工纠正：closed → done（有归档结果）")
+
         if res is not None:
             # 归档到 main：分支可以删，审计不会丢
             (self.dir / "results").mkdir(exist_ok=True)
             (self.dir / "results" / f"{tid}.json").write_text(
                 json.dumps(res, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        if done is None:
-            done = res is not None
         card["state"] = "done" if done else "closed"
 
         # 现场：这些信息不写进去，事后就再也拼不出来了
@@ -2479,6 +2597,14 @@ class Hive:
         if card.get("state") == "done":
             plan["problems"].append("已经 close 过了")
             return plan
+        if card.get("state") == "closed":
+            # 已作废的卡之前不拦：land 会在 main 上做一次空操作 merge，然后
+            # 走 close —— 而 close 那时读不到已删除的 res 分支，会再 cancel
+            # 一次，形成「越 land 越坏」的循环。
+            plan["problems"].append(
+                f"卡已作废（closed）：先 hive reopen {tid} 再 land；"
+                f"不要对已合入的卡重复 land")
+            return plan
         if card.get("state") == SHELVED_STATE:
             plan["problems"].append("卡已搁置，先 hive unshelve 才能合入")
             return plan
@@ -2523,10 +2649,14 @@ class Hive:
         base_head = rev_parse(repo, base)
         task_head = rev_parse(repo, branch)
         if not task_head:
+            recorded = str(res.get("head") or "")[:12]
             plan["problems"].append(
                 f"代码仓里没有 {branch} 分支（远端 "
-                f"{', '.join(code_remotes(repo)) or '无'} 都找过了；"
-                f"分支在别的远端时用 --remote 指定）")
+                f"{', '.join(code_remotes(repo)) or '无'} 都找过了）："
+                f"请交付机补推 git push <远端> "
+                f"{recorded}:refs/heads/task/{tid}"
+                f"（结果记录的 head={recorded or '无'}）；"
+                f"分支只在别的远端上时用 --remote 点名")
             return plan
         if task_head == base_head:
             # task 分支与 base 一致：代码已在 main。两种来源都要补 close：
@@ -2553,6 +2683,18 @@ class Hive:
                 self._after_land(plan)
                 return plan
             plan["problems"].append(f"已经合进 {target} 了（内容一致，无需合入）")
+            return plan
+
+        # 接线 T-0205 的 land 前置自洽校验：这道防线以前只有测试在调，
+        # 生产里从没跑过，于是「结果 done 但代码在另一棵树 / 零改动」的卡
+        # 要一路走到 merge 才暴露。放在「分支与 base 一致」的特例之后，
+        # 免得把零改动复核卡误判成无改动。
+        guard_ok, guard_err = guard_land_self_consistency(
+            repo, tid, base, res, bool(card.get("allow_empty_diff")),
+            task_ref=f"{remote_name}/task/{tid}")
+        if not guard_ok:
+            plan["status"] = "blocked"
+            plan["problems"].append(guard_err)
             return plan
 
         wt = DEFAULT_STATE / "land" / tid
@@ -3351,6 +3493,34 @@ class Hive:
                 "重启 hived 或走 store/ingest 补齐")
         local_n, local_seq = len(rows), store.commit_seq()
 
+        # 逐卡对账：终态卡的 store.state 必须与 Git 卡面一致；lease lost
+        # 会造成「Git 有归档结果、store.results 缺记录」，两边视图各说各话。
+        state_diff: list[str] = []
+        result_missing: list[str] = []
+        for tid, c in cards.items():
+            git_state = str(c.get("state") or "").strip().lower()
+            store_state = str((rows.get(tid) or {}).get("state") or "").strip().lower()
+            if git_state in ("done", "closed") and store_state != git_state:
+                state_diff.append(
+                    f"{tid}(卡面{git_state}/store{store_state or '无'})")
+            if (git_state == "done"
+                    and (self.dir / "results" / f"{tid}.json").exists()
+                    and store.result_info(tid) is None):
+                result_missing.append(tid)
+        if state_diff:
+            warns.append(
+                f"store 状态与 Git 卡面不一致（{len(state_diff)} 张）："
+                f"{', '.join(state_diff[:6])}{' …' if len(state_diff) > 6 else ''}"
+                f" —— hive repair --apply 可对齐")
+        if result_missing:
+            warns.append(
+                f"Git 有归档结果但 store.results 缺记录（{len(result_missing)} 张）："
+                f"{', '.join(result_missing[:6])}"
+                f"{' …' if len(result_missing) > 6 else ''}"
+                f" —— Git 侧归档完整，land 读 Git 不受影响；"
+                f"多为历史结果已归档或本机 store 尚未从 leader 追平，"
+                f"若看板/claim 视图缺结果再核对副本水位")
+
         code, data = _cluster_http("GET", "state", timeout=1.0)
         if not isinstance(data, dict):
             return   # 集群没起 / 测试环境：跨节点检查优雅跳过
@@ -3456,6 +3626,8 @@ class Hive:
 
         res_refs = git(["for-each-ref", "--format=%(refname)",
                         "refs/remotes/origin/res/"], self.dir).stdout.split()
+        merge_ready = 0
+        stale_res: list[str] = []
         for ref in res_refs:
             tid = ref.rsplit("/", 1)[-1]
             data = read_ref_file(self.dir, ref, f"results/{tid}.json")
@@ -3473,6 +3645,17 @@ class Hive:
                 warns.append(
                     f"结果 {tid} 由过期租约写入（fence {data.get('fence')} < "
                     f"卡面 {self._fence_of(card)}），land 会拒绝；请 retry")
+            # 「待合入」的正确口径 = 结果 done 且卡面还没关。旧版直接拿
+            # res 分支总数当待合入，failed 结果、close 后没删干净的残留
+            # 分支全算进来，数字虚高（今天实测 7 个里只有 1 个是真的）。
+            if (data.get("status") == "done" and card is not None
+                    and card.get("state") not in ("done", "closed")):
+                merge_ready += 1
+            if card is not None and card.get("state") in ("done", "closed"):
+                stale_res.append(tid)
+                warns.append(
+                    f"{tid}: 卡已 {card.get('state')} 但 res/{tid} 分支还在"
+                    f"（残留分支；hive repair --apply 可清理）")
 
         inbox = self.dir / "inbox"
         if inbox.is_dir():
@@ -3524,6 +3707,16 @@ class Hive:
             if st == "done" and not self.result_info(tid):
                 warns.append(f"任务 {tid} 已关闭但没有结果记录")
             res_d = self.result_info(tid)
+            # 结果 head 在代码仓不可达 / 代码分支根本没推上来，以前 doctor
+            # 一声不吭，只有人真的去跑 land 才发现 blocked。
+            if (st not in ("done", "closed") and res_d
+                    and res_d.get("status") == "done"):
+                try:
+                    ready, block = self._land_probe(tid, c, res_d, cards)
+                    if not ready:
+                        warns.append(f"{tid}: 结果 done 但不能合入 —— {block}")
+                except Exception as exc:  # noqa: BLE001 —— 体检不能被单卡拖崩
+                    warns.append(f"{tid}: 可合入性探测失败（忽略）：{exc}")
             if res_d and res_d.get("verify"):
                 v = _verify_verdict(res_d["verify"])
                 if v["verdict"] == "weak-pass":
@@ -3551,8 +3744,64 @@ class Hive:
             print(f"[FAIL] {len(errors)} 个错误，{len(warns)} 个警告")
             return False
         print(f"[ OK ] {len(cards)} 张任务，{len(agents)} 个 agent，"
-              f"{running_claims} 个进行中租约，{len(res_refs)} 个待合入结果")
+              f"{running_claims} 个进行中租约，{merge_ready} 个待合入结果"
+              + (f"（另有 {len(stale_res)} 个残留 res 分支）" if stale_res else ""))
         return True
+
+    def cmd_repair(self, apply: bool = False) -> None:
+        """修 doctor 检出的两类状态分叉（默认 dry-run，`--apply` 才动手）。
+
+        只做安全、可重放、不碰内容的动作：
+          1) 终态卡还留着 `res/<tid>` 分支 → 删分支（审计记录已在
+             `main:results/<tid>.json`，分支只是历史残留，还让「待合入」数虚高）；
+          2) 终态卡的 store.state 与 Git 卡面不一致 → 走 `store/close` 对齐，
+             经过 oplog 让其它节点能追平，不直接改本机 SQLite。
+        刻意不动：卡面本身、代码仓 main、结果 JSON 内容、store.results 记录
+        （结果缺记录由 lease lost 造成，Git 侧归档完整，land 读 Git 不受影响）。
+        """
+        self.fetch()
+        cards = self.cards()
+        res_refs = git(["for-each-ref", "--format=%(refname:short)",
+                        "refs/remotes/origin/res/"], self.dir).stdout.split()
+        stale: list[str] = []
+        for ref in res_refs:
+            tid = ref.rsplit("/", 1)[-1]
+            c = cards.get(tid)
+            if c and c.get("state") in ("done", "closed"):
+                stale.append(tid)
+
+        state_fix: list[tuple[str, bool]] = []
+        if claim_backend() == "store":
+            _store = local_store()
+            srows = _store.tasks() if _store is not None else {}
+            for tid, c in cards.items():
+                git_state = str(c.get("state") or "").strip().lower()
+                sstate = str((srows.get(tid) or {}).get("state") or "").strip().lower()
+                if git_state in ("done", "closed") and sstate != git_state:
+                    state_fix.append((tid, git_state == "done"))
+
+        print(f"repair 检出：残留 res 分支 {len(stale)} 个，"
+              f"store 状态不一致 {len(state_fix)} 张")
+        for tid in stale:
+            print(f"  res/{tid}: 卡已关闭，分支应删除")
+        for tid, done in state_fix:
+            print(f"  store {tid}: 应对齐为 {'done' if done else 'closed'}")
+        if not apply:
+            print("（dry-run，未改动任何东西；加 --apply 生效）")
+            return
+        for tid in stale:
+            try:
+                git_net(["push", "origin", f":refs/heads/res/{tid}"], self.dir,
+                        check=False)
+                log(f"repair: 已删除残留分支 res/{tid}")
+            except HiveError as e:
+                print(f"[WARN] repair: 删 res/{tid} 失败：{e}")
+        for tid, done in state_fix:
+            if store_close(tid, done=done, note="repair: 对齐 Git 卡面") is None:
+                print(f"[WARN] repair: store 对齐 {tid} 失败（集群不可达？）")
+            else:
+                log(f"repair: store {tid} 已对齐为 "
+                    f"{'done' if done else 'closed'}")
 
     def cmd_stats(self, as_json: bool = False, days: int = 0) -> None:
         self.fetch()
@@ -3882,8 +4131,12 @@ class Hive:
                 git([*IDENT, "commit", "-m",
                      f"hive({tid}): {card.get('title', '')} (manual submit)"], wt)
             head = rev_parse(wt, "HEAD")
-            git_net(["push", "--force", "origin",
-                     f"HEAD:refs/heads/task/{tid}"], wt)
+            # 不只推 origin：origin 可能是交付机上的本机路径裸仓
+            # （T-0320 的 g:\github\light），结果写了 done 主控却拿不到分支。
+            _, push_failures = push_task_branch(wt, tid, head)
+            if push_failures:
+                log(f"{tid} 部分网络远端推送失败（结果闸门会核对）："
+                    + " | ".join(push_failures))
         except HiveError as e:
             raise HiveError(f"提交/推送失败: {e}")
 
@@ -3985,10 +4238,13 @@ class Hive:
                         f"\n\n## 结果未落 store（T-0296）\n\n"
                         f"- Git 侧已完成：res/{tid} 分支、task/{tid}（head {head}）\n"
                         f"- store 侧**未写入**：{store_write_error}\n"
-                        f"- 影响：看板看不到结果、close/land 不执行，租约过期后这张卡"
-                        f"可能被重新派发；git 结果不会丢。\n"
-                        f"- 下一步：集群恢复后重跑 `hive submit {tid}`（或让总控 retry）"
-                        f"把结果补进 store。\n")
+                        f"- 影响：看板/claim 的 store 视图看不到结果，租约过期后"
+                        f"这张卡可能被重新派发；Git 结果不会丢，`hive land` 读的是"
+                        f"Git 侧 res/{tid}，可以照常合入。\n"
+                        f"- 下一步：**不要直接重跑 `hive submit {tid}`**"
+                        f"（`result_info` 会报「已经有结果」把重跑挡住）；"
+                        f"要让 store 视图一致，先删 res/{tid} 分支再重跑，"
+                        f"或用 `hive doctor` 体检 / `hive repair --apply` 对齐状态。\n")
                     with open(summary_file, "a", encoding="utf-8") as fh:
                         fh.write(marker)
                 except OSError as e:   # 写不了备注也不能再抛出，报错信息已经打出来了
@@ -3997,7 +4253,9 @@ class Hive:
                       f"但未写入 leader store。\n"
                       f"原因: {store_write_error}\n"
                       f"worktree 已保留: {wt}\n"
-                      f"集群恢复后重跑 `hive submit {tid}` 补写结果。",
+                      f"Git 侧结果可由 `hive land {tid} --apply` 正常合入；"
+                      f"store 视图不一致请用 `hive doctor` / `hive repair --apply` 对齐，"
+                      f"不要直接重跑 submit（会被「已经有结果」挡住）。",
                       file=sys.stderr, flush=True)
                 # 不删 worktree、不释放租约：未落库还被释放 = 卡被重新派发、
                 # 结果彻底没人认领（T-0250 / T-0252 的现场）。
@@ -4167,6 +4425,35 @@ class Hive:
                   f"{r['finished_at'][:19]:<20} {r['title'][:40]}")
         return rows
 
+    def _land_probe(self, tid: str, card: dict, res: dict,
+                    cards: dict) -> tuple[bool, str]:
+        """「结果 done」的卡到底能不能 land —— 看板不该只凭结果 JSON 就说待合入。
+
+        以前 `result_status === 'done'` 就进「待合入」列，可结果可能只有 JSON、
+        代码分支根本没推到协同服务器（T-0320 / 0324 / 0326）；人复制了合入
+        指令，跑出来却是 blocked。这里按 land 的真实前置条件核一遍。
+        """
+        for dep in (card.get("depends_on") or []):
+            if (cards.get(dep) or {}).get("state") != "done":
+                return False, f"依赖未 close: {dep}"
+        try:
+            repo = self.code_repo(card.get("repo") or "")
+        except HiveError as e:
+            return False, str(e)
+        remotes = code_remotes(repo)
+        if not remotes:
+            return False, "代码仓没有配置远端"
+        ref = next((f"{n}/task/{tid}" for n in remotes
+                    if rev_parse(repo, f"refs/remotes/{n}/task/{tid}")), None)
+        if not ref:
+            return False, f"代码仓没有 task/{tid} 分支（请交付机补推）"
+        remote_name = ref.split("/", 1)[0]
+        base = f"{remote_name}/{card.get('base') or 'main'}"
+        ok, err = guard_land_self_consistency(
+            repo, tid, base, res, bool(card.get("allow_empty_diff")),
+            task_ref=ref)
+        return (True, "") if ok else (False, err)
+
     def cmd_status(self, as_json: bool = False, with_board: bool = False,
                    summary: bool = False, include_archived: bool = False) -> None:
         # T-0216：先 ls-remote 比对远端 SHA，没变就不白跑 git fetch --prune。
@@ -4178,6 +4465,15 @@ class Hive:
             self._status_summary(as_json=as_json, include_archived=include_archived)
             return
         cards = self.cards()
+        # 读视角滞后：status 只 fetch 不 reset 工作区，本机落后 origin/main 时
+        # 看板读的是旧卡面，多机就各说各话（T-0324 曾被本看成 done、服务器
+        # 上是 closed）。不擅自替用户 merge，但必须把这件事显式标出来。
+        head_sha = rev_parse(self.dir, "HEAD")
+        remote_sha = rev_parse(self.dir, "origin/main")
+        local_stale = bool(
+            head_sha and remote_sha and head_sha != remote_sha
+            and git(["merge-base", "--is-ancestor", "origin/main", "HEAD"],
+                    self.dir, check=False).returncode != 0)
         rows = []
         for tid, c in cards.items():
             claim = self.claim_info(tid) or {}
@@ -4190,6 +4486,12 @@ class Hive:
             lease_until = claim.get("lease_until")
             stale = bool(lease_until and not res and parse_iso(lease_until) < now())
             st = self.status_info(tid) or {}   # agent 主动上报的进度（status/<tid>）
+            # 只有「有 done 结果、卡面还没关」的卡需要探一次真实可合入性，
+            # 避免对 200 张历史卡逐个访问代码仓。
+            land_ready = None
+            land_block = ""
+            if res.get("status") == "done" and state not in ("done", "closed"):
+                land_ready, land_block = self._land_probe(tid, c, res, cards)
             rows.append({
                 "id": tid,
                 "state": state,
@@ -4220,6 +4522,10 @@ class Hive:
                 "result_fence": res.get("fence"),
                 "fenced": self.result_fenced(c, res),
                 "stale": stale,
+                # 看板靠这三个字段区分「结果交了」和「真的能合入」
+                "land_ready": land_ready,
+                "land_block": land_block,
+                "local_stale": local_stale,
                 "result": res.get("status", ""),
                 "result_status": res.get("status", ""),
                 "finished_at": res.get("finished_at") or "",
@@ -4245,6 +4551,9 @@ class Hive:
                 out = rows
             print(json.dumps(out, ensure_ascii=False, indent=2))
             return
+        if local_stale:
+            print("[WARN] 本地协调仓落后 origin/main，显示的卡面可能不是最新；"
+                  "跑 git pull（或 hive sync-repos）后再看状态")
         if not rows:
             print("（还没有任务）")
             return
@@ -5848,8 +6157,12 @@ class Worker:
                 if git(["diff", "--cached", "--quiet"], wt, check=False).returncode != 0:
                     git([*IDENT, "commit", "-m", f"hive({tid}): {card.get('title', '')}"], wt)
                 head = rev_parse(wt, "HEAD")
-                git_net(["push", "--force", "origin",
-                         f"HEAD:refs/heads/task/{tid}"], wt)
+                # 同 cmd_submit：把交付分支推到所有网络远端，别让
+                # 「本机路径 origin」造成「结果 done 但主控 land 不了」。
+                _, push_failures = push_task_branch(wt, tid, head)
+                if push_failures:
+                    log(f"{tid} 部分网络远端推送失败（结果闸门会核对）："
+                        + " | ".join(push_failures))
             except HiveError as e:
                 log(f"{tid} 推送代码分支失败: {e}")
                 push_failed = True
@@ -6625,6 +6938,10 @@ def cmd_store(args) -> int:
 def cmd_doctor(args) -> None:
     if not Hive(args.dir).cmd_doctor():
         sys.exit(1)
+
+
+def cmd_repair(args) -> None:
+    Hive(args.dir).cmd_repair(apply=bool(getattr(args, "apply", False)))
 
 
 def cmd_digest(args) -> None:
@@ -7527,6 +7844,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("doctor", help="检查协调仓库/任务/租约/结果")
     s.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser(
+        "repair", help="修 doctor 检出的残留 res 分支 / store 状态分叉（默认 dry-run）")
+    s.add_argument("--apply", action="store_true", help="真正执行修复（默认只预演）")
+    s.set_defaults(func=cmd_repair)
 
     s = sub.add_parser("digest", help="复盘摘要：失败归因 + 慢卡 + 反复重跑的卡（只读）")
     s.add_argument("--days", type=int, default=7, help="只看最近 N 天（默认 7，0=全部）")

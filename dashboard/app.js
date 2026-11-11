@@ -19,7 +19,7 @@
   var COLUMNS = [
     { key: 'ready', title: '待领取', hint: 'state = ready 且无人抢锁' },
     { key: 'running', title: '进行中', hint: '已抢锁 / assigned / running，暂无结果' },
-    { key: 'merging', title: '待合入', hint: 'result_status = done，state 还不是 done' },
+    { key: 'merging', title: '待合入', hint: '结果 done、代码分支已核验到位（land_ready），可跑 hive land；分支缺失的卡会进异常列' },
     { key: 'abnormal', title: '异常', hint: 'failed / blocked / 租约过期' },
     { key: 'recent', title: '最近完成', hint: '已完成中按完成时间倒序的前 N 个（数量可在设置里改）' },
     { key: 'closed', title: '已关闭', hint: '其余已完成的任务（默认折叠）', collapsible: true }
@@ -260,7 +260,14 @@
       return 'closed';
     }
     if (t.result_status === 'failed' || t.state === 'blocked' || isStale(t)) return 'abnormal';
-    if (t.result_status === 'done') return 'merging';
+    if (t.result_status === 'done') {
+      // 「结果 JSON 写了 done」不等于「代码分支到了协同服务器」。后端
+      // land_ready=false 时若仍放进「待合入」，人会复制一条必然 blocked 的
+      // 合入指令（T-0320 / T-0324 / T-0326 反复踩过）。land_ready 为 undefined
+      // 表示老版本后端没给这个字段，按旧行为处理，避免整列消失。
+      if (t.land_ready === false) return 'abnormal';
+      return 'merging';
+    }
     if (t.claim_agent || t.state === 'assigned' || t.state === 'running') return 'running';
     return 'ready';
   }
@@ -614,6 +621,12 @@
     if (col === 'merging' || col === 'abnormal' || t.result_status) {
       var rl = resultLine(t);
       if (rl) h += '<div class="card-meta">' + rl + '</div>';
+    }
+
+    // 结果写了 done 但代码分支没到协同服务器时，直接把原因写在卡上，
+    // 免得人拿着「复制合入指令」去跑一条必然 blocked 的命令。
+    if (t.land_ready === false && t.land_block) {
+      h += '<div class="card-meta">合入受阻：' + esc(t.land_block) + '</div>';
     }
 
     // —— agent 主动上报的进度：进度条 + 当前阶段 + 一句话状态 + 最后通信时间 ——
@@ -1057,6 +1070,12 @@
       btn.textContent = '重试';
       btn.addEventListener('click', function () { loadStatus(); });
       el.banner.appendChild(btn);
+      el.banner.hidden = false;
+    } else if (state.tasks.some(function (t) { return t.local_stale; })) {
+      // status 读的是本地工作区卡面；本机落后 origin/main 时，看板会把旧的
+      // done / closed 当成真相，多机显示互相打架（T-0324）。
+      el.banner.innerHTML = '<span>本地协调仓落后 origin/main，卡面状态可能不是最新；'
+        + '在协调仓执行 git pull（或 hive sync-repos）后刷新看板</span>';
       el.banner.hidden = false;
     } else {
       el.banner.hidden = true;
