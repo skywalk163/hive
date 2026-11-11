@@ -1,0 +1,41 @@
+{
+  "task": "T-0325",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0325",
+  "base": "main",
+  "head": "9b19d433cebad6a60498b781edb39dba1545bc0b",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-10T22:05:34+08:00",
+  "finished_at": "2026-11-10T22:49:39+08:00",
+  "duration_s": 2645.1,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_lsp_identifier_lang.py",
+      "code": 0,
+      "tail": [
+        "0.01s setup    tests/test_lsp_identifier_lang.py::test_load_mode_reads_toml",
+        "0.01s call     tests/test_lsp_identifier_lang.py::test_mixed_is_warning_in_either_active_mode",
+        "",
+        "(7 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "25 passed in 13.16s"
+      ]
+    }
+  ],
+  "summary": "# T-0325 收口总结：LSP 标识符语言一致性检查（中文/英文命名建议，非强制）\n\n## 做了什么\n在 LSP 层新增「标识符命名风格」可选诊断源：复用既有 `src/lexer.py` token 流抽取标识符，\n按 `zh` / `en` / `mixed` 判定语言，按 `light.toml` 的 `[lsp.identifier] mode` 给\n`info`（风格不符）或 `warning`（中英文混排）建议；**不做重命名、不给 code action**，\n命名风格永不升级为 `error`，默认 `any` 不打扰。\n\n## 改动文件（均在卡面 paths 白名单内）\n- `lsp/identifier_language.py`（新增，纯标准库）：`detect_lang` / `iter_identifiers` /\n  `load_mode` / `check` / `check_from_config`；抽取声明名、参数名、导入名、导入别名，\n  普通引用（`ident`）不重复提示。\n- `lsp/diagnostic_extension.py`（修改）：新增 `identifier_diagnostics_for_source`，\n  作为可选诊断源**追加在既有语义诊断之后**；既有语义诊断的顺序与 severity 未改。\n  坐标在边界统一 1-based → 0-based；severity 仅映射 warning=2 / info=3，不出现 1(错误)。\n- `tests/test_lsp_identifier_lang.py`（新增）：三 mode 判定矩阵、字符串/注释不误判、\n  关键字与中文标点不当作标识符、配置读取、LSP 接线形状、性能粗测。\n\n## 验证\n- `python -m pytest -q tests/test_lsp_identifier_lang.py` → **25 passed**（本机 Windows，xdist 原样）。\n- 回归 `tests/test_lsp_protocol.py` / `test_lsp_protocol_full.py` → 2 passed, 1 skipped。\n- 未改 `cli/light.py`、L1/L2 语法、`src/` 编译器；未引入 pygls 等第三方依赖。\n\n## 三模式对同一段示例的真实输出对比\n示例：\n```\n设 甲为 1\n设 username为 2\n设 user名字 为 3\n段落 加法(甲，乙)：\n  返回 甲 加 乙\n类 学生：\n导入 工具库 为 utils\n```\n- **mode=any**：`[]`（默认不打扰）。\n- **mode=zh**（规范中文，英文名 info，混排 warning）：\n  - `username` L2:C3 decl en → info「本项目规范为中文命名…」\n  - `user名字` L3:C3 decl mixed → warning「中英文混排，建议拆分为纯中文或纯英文」\n  - `utils` L7:C10 import_alias en → info\n- **mode=en**（规范英文，中文名 info，混排 warning）：\n  - `甲` L1:C3 decl zh → info；`加法` L4:C4 decl zh → info；`甲/乙` L4:C7/C9 param zh → info；\n    `学生` L6:C3 decl zh → info；`工具库` L7:C4 import zh → info；`user名字` mixed → warning。\n\n## 遗留风险 / 口径说明\n- 性能：既有 `src/lexer.py` 是全仓共用重量级分词器，单跑 1000 行在本机基线约 90–220ms\n  （与本模块无关，且禁止改 src/）。本模块自身后置扫描为纯线性 O(n)，测试分两层：\n  后置扫描 < 50ms（防本模块 O(n²)）；端到端 `check()` 只做宽松冒烟（< 1000ms），\n  不把 lexer 基线算到本模块头上。\n- 配置缺省 `any`；`light.toml` 未在白名单内，本次未改，用户需自行加\n  `[lsp.identifier] mode = \"zh\"|\"en\"|\"any\"` 才会发出命名诊断。\n- kind 为上下文粗分类（decl/param/import/import_alias/ident），仅作标注，不参与成败判定；\n  极少数 lexer 把词尾 `为` 并入标识符的场景，名字以 token 原值为准。",
+  "error": "",
+  "declared_paths": [
+    "lsp/identifier_language.py",
+    "lsp/diagnostic_extension.py",
+    "tests/test_lsp_identifier_lang.py"
+  ],
+  "changed_files": [
+    "lsp/diagnostic_extension.py",
+    "lsp/identifier_language.py",
+    "tests/test_lsp_identifier_lang.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "643511392af14dc09f215ec960342092"
+}
