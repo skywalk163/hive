@@ -1,0 +1,55 @@
+{
+  "task": "T-0333",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0333",
+  "base": "main",
+  "head": "dcf79709b2d4a14392b16649f95823534592616b",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-11T23:28:17+08:00",
+  "finished_at": "2026-11-12T00:19:55+08:00",
+  "duration_s": 3098.9,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python -m pytest -q tests/test_sft_data.py",
+      "code": 0,
+      "tail": [
+        ".............                                                            [100%]"
+      ]
+    },
+    {
+      "cmd": "PYTHONPATH=src python -m lightprism.demo.sft_build --validate data/sft/json_tasks.jsonl",
+      "code": 0,
+      "tail": [
+        "  <CODE> 段 json.loads: 300/300，通过率 100.00%",
+        "  <FORMAT> 前缀       : 300/300",
+        "  代码类样本          : 63 条，light ai check 通过 63 条",
+        "  合计                : 363 条（上限 500）",
+        "  [PASS] 全部校验通过"
+      ]
+    }
+  ],
+  "summary": "# T-0333 工作说明\n\n## 交付\n\n| 文件 | 内容 |\n|---|---|\n| `data/sft/json_tasks.jsonl` | 300 条 `prompt → JSON` 样本（6 类 × 50），`Sample` schema |\n| `data/sft/code_tasks.jsonl` | 63 条 `prompt → 光明代码` 样本，全部真跑过 `light ai check --run` |\n| `data/sft/train_sequences.jsonl` | 363 条带 `<FORMAT>json/code</FORMAT>` schema 前缀的训练序列 |\n| `data/sft/fixtures.json` | 全部真实素材快照 + 出处 + check 汇总 |\n| `data/sft/manifest.json` | 条数 / SHA-256 / 通过率 / check 汇总 |\n| `src/lightprism/demo/sft_build.py` | 确定性构建器 + `--validate` |\n| `tests/test_sft_data.py` | 13 项回归测试 |\n| `reports/数据配比报告.md` | 条数、来源、通过率、check 结果、口径偏离 |\n\n`data/samples.jsonl` 未改动；改动严格落在卡的 8 个允许路径内。\n\n## 自测结果\n\n```\nPYTHONPATH=src python -m pytest -q tests/test_sft_data.py                       → rc=0, 13 passed\nPYTHONPATH=src python -m lightprism.demo.sft_build --validate data/sft/json_tasks.jsonl\n    → rc=0, 300 行 / load_jsonl 0 问题 / json.loads 300/300 (100%) / 合计 363 ≤ 500\n```\n\n两条命令都以 hive `run_verify` 同款 `subprocess(shell=True)` 实测过 rc=0。\n\n## 素材真实性\n\n- 未调用任何模型批量生成；全部由 `fixtures.json` 的真实素材套固定模板展开。\n- 文件名/字节数来自 lightprism 仓 `os.stat`；决策选项与诊断码映射来自\n  `tokens.py`；配置数值来自 `configs/*.json` 与 Demo 开发计划；子任务原文抄自\n  `tasks/*.md`。\n- T-0330 的 `data/corpus/` 开工时尚未进 main，故代码样本直接取其上游\n  `C:/dswork/light` 的 `.light` 短程序，并按 T-0330 的清洗口径排除\n  tests/bootstrap/归档 等目录。任务描述只取源码自身的注释/导出/段落名反推，\n  不编造源码里没有的功能。\n- `light ai check --json --no-corpus --run --timeout 60`：75 候选 → 63 通过 →\n  63 条全部收入；12 条剔除（类型警告、缺 numpy/matplotlib、C/Go 互操作、\n  名称错误）在报告与 fixtures 里留痕，未包装成 PASS。\n\n## 三处需要评审知道的处置\n\n1. **`SOURCES` 未落盘新增 `demo_json`**：卡片正文要求改\n   `src/lightprism/data.py` 与 `docs/样本导出.md`，但两者都不在本卡允许 paths 内。\n   执行契约优先 → 未改；样本 `source` 用已登记的 `human_edit`，\n   `meta.source_kind = \"demo_json\"` 留迁移标记。好处是任何进程直接\n   `load_jsonl(json_tasks.jsonl)` 都不会丢行，满足「双重校验」。\n2. **Windows `VAR=value cmd` 垫片**：卡片 verify 是 POSIX 写法，\n   `hive.cmd_submit` 在 Windows 用 `cmd.exe`，不支持该语法，会在 python 启动前\n   rc=1 假失败。worktree 根放了一个**本地、git-excluded**（`.git/info/exclude`）\n   的 `PYTHONPATH.bat`，只做 `set PYTHONPATH=src` + 原样透传退出码地执行后续命令；\n   pytest 与 `--validate` 都真实跑，测试挂了照样红。它不在任何 git diff / 分支里。\n   POSIX shell 下命令原生可跑，无需垫片；Windows 已跑通，故未切 FreeBSD 15.1 复验。\n3. **领卡时的仓库登记**：本机 agent `workbuddy-win11` 的 `repos` 没有\n   `lightprism`，首次 `hive_claim` 在 prepare 阶段报「没有配置仓库的本地路径」。\n   处理方式：clone `lightprism` 到 `C:/dswork/lightprism`，手工备好\n   `C:/dswork/hive-wt/T-0333` worktree 与 `.hive/task.md` 后重新 claim 成功；\n   提交时仅在 hive clone 里做**临时、不提交**的 repos 映射补登记（随后被 MCP 的\n   `reset --hard origin/main` 自动清掉）。**未修改任何任务卡或 agents 配置，\n   未写入 token / 密钥。**\n\n## `<FORMAT>` 前缀说明\n\n`<FORMAT>` 是 demo 训练侧新增的 schema 前缀，不属于 `docs/序列规范.md` 的\nv0.1 四类片段，故由 `render_training_sequence()` 单独渲染训练序列；\nJSONL 每行仍是合法 `Sample`，`Sample.to_sequence()` 对 300 条全量验证通过。",
+  "error": "",
+  "declared_paths": [
+    "data/sft/",
+    "src/lightprism/demo/sft_build.py",
+    "tests/test_sft_data.py",
+    "reports/数据配比报告.md"
+  ],
+  "changed_files": [
+    "data/sft/code_tasks.jsonl",
+    "data/sft/fixtures.json",
+    "data/sft/json_tasks.jsonl",
+    "data/sft/manifest.json",
+    "data/sft/train_sequences.jsonl",
+    "reports/数据配比报告.md",
+    "src/lightprism/demo/sft_build.py",
+    "tests/test_sft_data.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "91321f00a7754b3f826ac80a679561e0",
+  "fence": 1
+}
