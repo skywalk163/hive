@@ -1,0 +1,57 @@
+{
+  "task": "T-0330",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0330",
+  "base": "main",
+  "head": "794d8b8804d0275276d3c40ce12ae139e97fa76e",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-11T23:26:52+08:00",
+  "finished_at": "2026-11-12T00:06:50+08:00",
+  "duration_s": 2398.1,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python -m pytest -q tests/test_demo_vocab.py",
+      "code": 0,
+      "tail": [
+        ".........                                                                [100%]"
+      ]
+    },
+    {
+      "cmd": "PYTHONPATH=src python -m lightprism.demo.vocab_build --check data/vocab_4096.json",
+      "code": 0,
+      "tail": [
+        "[ OK ] UNK 率 < 1% — 0.1997% (3814/1909931 字符，口径：513 个唯一 md5 语料文件的字符频次，保守单字覆盖上界)",
+        "[INFO] 语料：扫描 519 / 唯一 md5 513 / 保留 392 / 剔除 127",
+        "[INFO] 实时 kept 语料交叉参考：392 个 .txt，UNK 0.2872% (3770/1312606)",
+        "",
+        "结论：全绿"
+      ]
+    }
+  ],
+  "summary": "# T-0330 交付说明（语料清洗与 4096 词表构建）\n\n## 交付结果：全绿\n\n- `data/vocab_4096.json`：**2900 条**，余量 1196（29.20%，未塞满）。\n  分层 `l0=44 / syntax=1697 / stdlib=182 / ascii=945 / control=32`。\n- 语料：本机扫描 519 个 `.light` → md5 去重 513 → 保留 392 / 剔除 127；\n  `data/corpus/index.jsonl` 519 行（五行字段齐全），392 个 `.txt` 原始语料由\n  `data/corpus/.gitignore` 的 `*.txt` 挡住不入库（`git check-ignore` 实证）。\n- 判据：`check_l0_atomicity` 通过；控制 token 与 `TokenSpace` 逐条对齐，\n  id `[2868,2900)` 连续；无重复 token；**UNK 0.1997% < 1%**。\n- 两条 verify 实测：`9 passed`（pytest 9.1.1 / Python 3.14.7）、\n  `--check` 7 项 OK 退出码 0。完整输出见 `reports/词表报告.md` §六。\n- 未改 `src/lightprism/tokens.py`、`vocab.py::DEFAULT_BUDGET`、其它任务卡与 agents 配置。\n\n## 三点需要主控知道的口径差异\n\n1. **卡面写「8 个验证码 / control 31」，`VALIDATION_CODES` 实为 9 项。**\n   按「必须复用 TokenSpace / VALIDATION_CODES、不许自己造一套」的硬要求以代码为准，\n   实产 `4 结构 + 19 决策 + 9 验证 = 32` 条。少造一个验证码去凑 31 才是违约。\n2. **`tests/test_demo_vocab.py` 不在 `paths` 列表**，但「完成标准」要求它、\n   `verify[0]` 直接指向它 —— 卡面自身清单遗漏。为满足可执行判据仍新增，\n   `out_of_paths` 会有一条警告（非严格模式仅警告）。请 land 时确认。\n3. 卡面语料「514 / 去重 508」是另一台机器的工作区状态；本机 tracked 508 +\n   未跟踪 11（全在 `_scratch_r167t4/` 一次性草稿，全被剔除）= 519，\n   去重 513。去重口径一致，且多出的文件不进 kept 语料。\n\n## 领卡与环境处置（未改任何 agents 配置）\n\n- MCP `hive_claim(T-0330)` 报「store / 集群不可用（无主）」：本机\n  `~/.hive/cluster/config.json` 的 `claim_backend` 是 `store` 且集群无主，\n  MCP 进程环境固定、后端缓存不可热切。按项目既有验证过的做法，改用\n  **`HIVE_CLAIM_BACKEND=git` 的 CLI `take`**（与 MCP 同一套 `Worker.claim`），\n  卡片已正常 assigned 给 `workbuddyai-win`（`tasks/T-0330.md` 可查）。\n- `prepare` 缺 lightprism 本地路径映射（T-0329 只登记了 0.88 的 Linux agent）。\n  处理：从 gitea clone 到 `G:/dswork/lightprism`，手动建 worktree 到\n  `C:/Users/skywalk/.hive/wt/workbuddyai-win/T-0330`；submit 时用**运行时注入\n  `Hive.agent` 的 repos** 提供路径，**没有修改 `agents/*.json`**。\n- **Windows verify 平台适配**：hive 的 `run_verify` 走 `shell=True`（cmd.exe），\n  不认 `PYTHONPATH=src …` 这种 POSIX 前缀，原样执行实测 rc=1、报\n  「'PYTHONPATH' 不是内部或外部命令」（即任务书预警的假失败）。\n  submit 时把该前缀做**语义等价翻译**为 `set PYTHONPATH=src && …` 后真跑：\n  同一条判据、同一个 `python`（PATH 前置 `C:\\Python314`）、同一个 cwd，\n  实测两条均 rc=0（9 passed / --check 全绿）。这不是跳过校验或改判据。\n  Git Bash 下按原命令也独立跑过一次，结果一致（报告 §六）。\n\n## 产物路径\n\n`src/lightprism/demo/vocab_build.py`、`src/lightprism/demo/__init__.py`、\n`data/corpus/.gitignore`、`data/corpus/index.jsonl`、`data/vocab_4096.json`、\n`reports/词表报告.md`、`tests/test_demo_vocab.py`。\n\n原始语料 `data/corpus/*.txt`（392 个）只在本地，不入库；`--check` 自包含\n（字符频次固化在词表 `corpus_stats.char_freq`），交付环境没有原始语料也能全绿。\n\n## 后续\n\nsubmit 成功后 task 分支会推到 `origin`（本仓 origin 即本地 gitea\n`http://192.168.1.5:3000/skywalk/lightprism.git`）；按交付约定不推 gitcode/github。",
+  "error": "",
+  "declared_paths": [
+    "src/lightprism/demo/vocab_build.py",
+    "src/lightprism/demo/__init__.py",
+    "data/corpus/",
+    "data/vocab_4096.json",
+    "reports/词表报告.md"
+  ],
+  "changed_files": [
+    "data/corpus/.gitignore",
+    "data/corpus/index.jsonl",
+    "data/vocab_4096.json",
+    "reports/词表报告.md",
+    "src/lightprism/demo/__init__.py",
+    "src/lightprism/demo/vocab_build.py",
+    "tests/test_demo_vocab.py"
+  ],
+  "out_of_paths": [
+    "tests/test_demo_vocab.py"
+  ],
+  "lease_id": "2124742ea49d477dbc019378cf7dada0",
+  "fence": 1
+}
