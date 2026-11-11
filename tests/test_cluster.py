@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -1795,3 +1796,190 @@ def test_zombie_majority_does_not_wedge_election(cluster_factory):
         a._last_election = 0.0
     assert a._start_election() is True, "僵尸不该阻止本机当选"
     assert a.role == "leader"
+
+
+# --------------------------------------------------------------------------- #
+# 优雅下线必须能立刻回网（2026-11-11 现场：Mac 从 fb98 面板消失一小时）
+#
+# 现场时序（fb98 的 cluster.log / state.json）：
+#   13:59:56  Mac 优雅停机 → 给同伴发 resign + leave
+#  13:59:56  fb98 收到 leave，把 Mac 立墓碑（operator leave）
+#   13:59:59  Mac 换新 incarnation 重启，重新注册
+#   14:00:00  fb98 的 handle_register 收下了，但 _update_node_locked 因墓碑
+#            直接返回 False —— 注册接口仍回 200 ok，Mac 就是不进成员表
+#   14:59:56  墓碑 TTL（1h）到期，Mac 才突然出现在 fb98 面板
+#
+# 结论：墓碑本来只该防「运维显式剔除后被转述灌回」，不该被优雅下线触发。
+# --------------------------------------------------------------------------- #
+
+def test_graceful_leave_does_not_tombstone(cluster_factory):
+    """节点自己优雅退出（resign+leave）不能被立墓碑，否则重启后一小时进不来。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    rec = dict(a._self_node())
+    rec.update({"id": "peer-mac", "name": "peer-mac", "host": "10.0.0.8",
+                "url": "http://10.0.0.8:8788", "incarnation": 111})
+    with a.lock:
+        assert a._update_node_locked(rec, touch=True) is True
+
+    # _leave_peers() 发的 body：带自己的自述记录 + node_id（=本机）
+    body = {"node": dict(rec), "node_id": "peer-mac"}
+    code, resp = a.handle_leave(body, peer_ip="10.0.0.8")
+    assert code == 200 and resp["removed"] is True
+    with a.lock:
+        assert "peer-mac" not in a.nodes
+        assert not a._tombstoned_locked("peer-mac"), \
+            "优雅下线被误判成运维剔除：墓碑会挡掉重启后的合法回网"
+
+    # 重启（新 incarnation）后必须能立刻回到成员表
+    reborn = dict(rec, incarnation=222)
+    code, resp = a.handle_register({"node": reborn})
+    assert code == 200
+    with a.lock:
+        assert "peer-mac" in a.nodes, "重启后的合法注册被墓碑挡住了"
+        assert (a.nodes["peer-mac"] or {}).get("incarnation") == 222
+
+
+def test_operator_leave_still_tombstones(cluster_factory):
+    """运维显式剔除（没有自述、只有 node_id）仍然立墓碑 —— 这条防线不能松。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    rec = dict(a._self_node())
+    rec.update({"id": "zombie-1", "name": "zombie", "host": "10.0.0.7",
+                "url": "http://10.0.0.7:8788", "incarnation": 7})
+    with a.lock:
+        assert a._update_node_locked(rec, touch=True) is True
+
+    code, resp = a.handle_leave({"node_id": "zombie-1"})
+    assert code == 200 and resp["removed"] is True
+    with a.lock:
+        assert "zombie-1" not in a.nodes
+        assert a._tombstoned_locked("zombie-1"), "运维剔除必须立墓碑"
+
+
+def test_register_reports_rejection_instead_of_fake_ok(cluster_factory):
+    """注册被墓碑挡掉时不能回「已入网」——否则对端停止重试、面板上人间蒸发。
+
+    现场（2026-11-11）：Mac 被墓碑挡住后，`handle_register` 连续返回
+    200 {"ok": true}，注册方打印「已注册到主节点」，而主控节点表里没有它。
+    这类「200 但不生效」比直接报错难查一个数量级。
+    """
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    rec = dict(a._self_node())
+    rec.update({"id": "blocked-1", "name": "blocked", "host": "10.0.0.6",
+                "url": "http://10.0.0.6:8788", "incarnation": 5})
+    # 运维显式剔除 → 墓碑
+    with a.lock:
+        a._update_node_locked(rec, touch=True)
+    a.handle_leave({"node_id": "blocked-1"})
+
+    code, resp = a.handle_register({"node": dict(rec, incarnation=6)})
+    assert code == 200
+    assert resp.get("accepted") is False, resp
+    assert resp.get("reason") == "tombstoned", resp
+    with a.lock:
+        assert "blocked-1" not in a.nodes
+
+    # 正常节点仍回 accepted=True（别把这条防线做成一律拒绝）
+    ok = dict(rec, id="fresh-1", name="fresh", host="10.0.0.5",
+              url="http://10.0.0.5:8788", incarnation=9)
+    code, resp = a.handle_register({"node": ok})
+    assert code == 200 and resp.get("accepted") is True, resp
+    with a.lock:
+        assert "fresh-1" in a.nodes
+
+
+# --------------------------------------------------------------------------- #
+# 主控「一键节点升级」的下发落地端：只有主控能触发
+# --------------------------------------------------------------------------- #
+def test_upgrade_trigger_rejects_non_leader(cluster_factory):
+    """非主控不能远程触发升级 —— 否则任何成员都能改写别人的代码仓。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    with a.lock:
+        a.leader_id = "boss-1"
+        a.role = "follower"
+    code, resp = a.handle_upgrade_trigger({"requester": "stranger",
+                                           "version": "0.16.02"})
+    assert code == 403 and resp["ok"] is False
+    assert "只有主控" in resp["error"]
+
+
+def test_upgrade_trigger_accepts_leader_request(cluster_factory, monkeypatch):
+    """主控发起的请求被接纳，并把 target 原样记进事件。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+
+    called = {}
+
+    class FakeHive:
+        def __init__(self, *a, **kw):
+            pass
+
+        def cmd_upgrade(self, action, **kw):
+            called["action"] = action
+            called.update(kw)
+            return 0
+
+    monkeypatch.setattr(hive, "Hive", FakeHive)
+    with a.lock:
+        a.leader_id = a.node_id
+    code, resp = a.handle_upgrade_trigger(
+        {"requester": a.node_id, "version": "0.16.02", "yes": True})
+    assert code == 200 and resp["ok"] is True
+    assert called["action"] == "apply"
+    assert resp["target"] == "0.16.02"
+    with a.lock:
+        assert any(e.get("type") == "upgrade.applied" for e in a.events)
+
+
+def test_self_restart_helper_script_is_valid(cluster_factory):
+    """升级后自重启的 helper 必须：清 stopped 标记、SIGTERM 自身、无人托管才 start。
+
+    现场风险：生产机（fb98）的 hived 挂在 daemon(8) `-r` 下，进程一死它就拉起
+    新的。helper 若再无条件起一份，第二个进程抢不到端口还会打开同一个 sqlite。
+    另外 `cluster stop` 会写 stopped 标记，托管方拉起的新进程看到它会以为
+    「用户要停机」—— 所以 helper 只做 SIGTERM，并且先清掉标记。
+    """
+    a = cluster_factory("a")
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, argv, **kw):
+            captured["argv"] = argv
+            captured["kw"] = kw
+
+    monkeypatch_popen = hc.subprocess.Popen
+    hc.subprocess.Popen = FakePopen
+    try:
+        assert a._schedule_self_restart(delay=2.0) is True
+    finally:
+        hc.subprocess.Popen = monkeypatch_popen
+
+    script = captured["argv"][-1]
+    compile(script, "<self-restart>", "exec")   # 语法必须成立
+    assert "stopped" in script, "没清 stopped 标记，托管方拉起的进程会以为要停机"
+    assert f"os.kill({os.getpid()}, 15)" in script, "应当只 SIGTERM 自己"
+    assert "cluster', 'start'" in script or '"cluster", "start"' in script
+    assert "cluster', 'stop'" not in script, "不要用 cluster stop（会写 stopped 标记）"
+    # 必须脱离当前会话，否则父进程一死 helper 陪葬
+    assert captured["kw"].get("start_new_session") is True or \
+        "creationflags" in captured["kw"]
+
+
+def test_upgrade_trigger_rejects_arbitrary_requester_when_self_is_leader(
+        cluster_factory, monkeypatch):
+    """本机是主控时，也不能接受**任意** requester —— 否则默认无 token 的
+    局域网里，谁都能拿一个假 id 让主控改写自己的代码仓。"""
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    called = []
+    monkeypatch.setattr(hive, "Hive",
+                        lambda *x, **kw: type("H", (), {
+                            "cmd_upgrade": lambda self, *a, **kw:
+                                called.append(1) or 0})())
+    code, resp = a.handle_upgrade_trigger(
+        {"requester": "somebody-else", "version": "0.16.02"})
+    assert code == 403
+    assert not called, "非法 requester 竟然触发了升级"

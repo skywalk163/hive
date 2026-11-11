@@ -36,7 +36,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+import contextlib
 import hmac
+import io
 import json
 import os
 import random
@@ -3879,6 +3881,23 @@ class Cluster:
                                {"node": self._self_node()}, 1.2,
                                self.config.token)
         if code == 200 and isinstance(resp, dict) and resp.get("ok"):
+            # `accepted=False`：主控**收到了但不接纳**（最常见：本机 id 还在
+            # 墓碑保留期内）。旧代码无论收没收都回 200，注册方照样打印
+            # 「已注册到主节点」，人却在面板上找不到它。新版主控会明说，
+            # 这里就不要谎报成功，让上层继续重试并把原因带出去。
+            if resp.get("accepted") is False:
+                reason = str(resp.get("reason") or "rejected")
+                if _now() - self._last_forged_log > 30.0:
+                    self._last_forged_log = _now()
+                    _log(f"主节点 {base} 拒绝接纳本机入网（{reason}）；"
+                         f"若本机确实该在集群里，请确认它没被 `cluster leave` "
+                         f"剔除过（墓碑 1 小时）")
+                with self.lock:
+                    state = resp.get("state")
+                    if isinstance(state, dict):
+                        self._merge_snapshot_locked(state, from_leader=False)
+                    self._mark_dirty_locked()
+                return False
             with self.lock:
                 state = resp.get("state")
                 # 只有 role=leader 的实例才会给 register 返回 200；但一台机器
@@ -3977,12 +3996,23 @@ class Cluster:
                 return 409, {"ok": False, "leader": self._leader_public_locked(),
                              "term": self.term, "node": self._self_node()}
             known = self.nodes.get(str(node["id"]))
-            self._update_node_locked(node, touch=True, joined=known is None)
-            if known is None:
+            accepted = self._update_node_locked(node, touch=True,
+                                                joined=known is None)
+            if known is None and accepted:
                 self._emit_locked("node_registered",
                                   message=f"{node.get('name') or node['id']} 注册")
             self._persist_locked()
-            return 200, {"ok": True, "state": self._snapshot_locked()}
+            # 「回 200 但没进成员表」是最难查的一类故障：对端看到 ok 就停止
+            # 重试，人却在面板上找不到它（现场 2026-11-11：Mac 被墓碑挡住，
+            # 注册连续返回 200 ok，整整一小时不可见）。这里如实回执，
+            # 让对端知道「你还没进网」并继续重试/上报。
+            if not accepted:
+                reason = ("tombstoned" if self._tombstoned_locked(str(node["id"]))
+                          else "rejected")
+                return 200, {"ok": True, "accepted": False, "reason": reason,
+                             "state": self._snapshot_locked()}
+            return 200, {"ok": True, "accepted": True,
+                         "state": self._snapshot_locked()}
 
     def handle_heartbeat(self, body: dict,
                          peer_ip: str = "") -> tuple[int, dict]:
@@ -4260,16 +4290,68 @@ class Cluster:
                 "选举未获多数（peers 不在线，或有节点投了反对票）",
             }
 
-    def handle_leave(self, body: dict) -> tuple[int, dict]:
-        node_id = str(body.get("node_id") or (body.get("node") or {}).get("id") or "")
+    def handle_leave(self, body: dict,
+                     peer_ip: str = "") -> tuple[int, dict]:
+        """节点退出成员表。区分**优雅下线**与**运维剔除**，只对后者立墓碑。
+
+        这两件事在协议里长得几乎一样（都是 `POST /api/cluster/leave` 带
+        node_id），但语义完全相反：
+
+        * 优雅下线（`_leave_peers`，进程正常退出/重启）：对方**还会回来**，
+          它删记录只是为了别让大家等 membership_ttl。这里绝不能立墓碑 ——
+          墓碑的 TTL 是 1 小时，而重启只要 3 秒，于是该节点会在主控面板上
+          整整消失一小时。现场（2026-11-11 13:59:56）：Mac 优雅停机后立刻
+          用新 incarnation 重新注册，`handle_register` 回了 200 ok，但
+          `_update_node_locked` 撞上墓碑直接返回 False，Mac 直到 14:59:56
+          墓碑过期才重新出现在 fb98 的集群面板里。
+        * 运维剔除（人手工 `cluster leave --node X` / curl 调接口）：是真的
+          要把它赶走，必须立墓碑，否则下一跳就被同伴转述灌回成员表、继续
+          占票池抬 quorum（现场见 T-0327）。
+
+        判据（照 handle_heartbeat 的身份校验口径）：请求体里带**完整自述
+        记录**、且自述的 url 主机就是请求来源 IP —— 说明是那个进程自己在
+        说话，属于优雅下线。运维剔除只会带一个 node_id，没有 node 自述；
+        即使带了（脚本图省事抄了别人的记录），来源 IP 也对不上。
+        """
+        node = body.get("node") if isinstance(body, dict) else None
+        node = node if isinstance(node, dict) else {}
+        node_id = str(body.get("node_id") or node.get("id") or "")
+        # 「自报家门 + 来源 IP 对得上」才算进程本人的优雅退出。
+        graceful = bool(
+            node.get("id") and peer_ip
+            and str(node.get("id")) == node_id
+            and _node_url_host_matches(str(node.get("url") or ""), peer_ip))
         with self.lock:
-            # 「本机退出」是优雅下线，不该给自己立墓碑（否则本机再也回不来）。
-            # 其他节点被 leave = 运维显式剔除，必须立墓碑，否则下一跳就被
-            # 同伴的转述灌回成员表、继续占票池抬 quorum（现场见 T-0327）。
             if node_id and node_id != self.node_id and node_id in self.nodes:
+                if not graceful and node.get("id") and node_id:
+                    # 走到这里多半是「同一实例刚换过 IP，自述 url 还是旧地址」
+                    # （与 handle_heartbeat 的 relocated 同因）。判据同款、
+                    # 一样从严：册上那条的 incarnation 必须与自述**完全相等**。
+                    # incarnation 是启动时刻的毫秒时间戳，换实例必变，
+                    # 所以运维剔除（没有自述，或抄来的记录 incarnation 不符）
+                    # 不会误判成优雅下线。
+                    known = self.nodes.get(node_id) or {}
+                    graceful = bool(
+                        int(known.get("incarnation") or 0) > 0
+                        and int(node.get("incarnation") or 0)
+                        == int(known.get("incarnation") or 0))
+                if graceful:
+                    # 优雅下线：删记录让 quorum 立刻回落，但不立墓碑。
+                    rec = self.nodes.pop(node_id, None) or {}
+                    self._emit_locked(
+                        "node_leave", node_id=node_id,
+                        message=f"{rec.get('name') or node_id} 优雅下线"
+                                f"（重启后可立即回网）")
+                    if node_id == self.leader_id:
+                        self._clear_leader_locked("主节点退出")
+                    self._mark_dirty_locked()
+                    self._persist_locked()
+                    return 200, {"ok": True, "removed": True,
+                                 "graceful": True, "tombstoned": False}
                 self._tombstone_locked(node_id, "operator leave")
                 self._persist_locked()
-                return 200, {"ok": True, "removed": True}
+                return 200, {"ok": True, "removed": True,
+                             "graceful": False, "tombstoned": True}
             rec = self.nodes.pop(node_id, None) if node_id else None
             if rec is not None:
                 self._emit_locked("node_leave", node_id=node_id,
@@ -4279,6 +4361,152 @@ class Cluster:
                 self._mark_dirty_locked()
                 self._persist_locked()
             return 200, {"ok": True, "removed": bool(rec)}
+
+    def handle_upgrade_trigger(self, body: dict) -> tuple[int, dict]:
+        """让本进程执行一次集群升级（主控「一键节点升级」的落地端）。
+
+        为什么走集群内 HTTP 而不是 SSH：集群本来就有互相可达的地址与共享
+        token，再引一套免密登录只会多一个故障面。这条接口和 `hive upgrade
+        apply` 等价，闸门也完全一样（脏工作区 / 非快进 / policy 都在 CLI 里）。
+
+        **安全边界**：只有主控能触发（`leader_id == 请求来源节点`，
+        或本机就是主控）。否则任意集群成员都能远程改写别人的代码仓。
+        """
+        if not isinstance(body, dict):
+            return 400, {"ok": False, "error": "请求体必须是对象"}
+        requester = str(body.get("requester") or "")
+        if not requester:
+            return 400, {"ok": False, "error": "缺少 requester（发起方 node_id）"}
+        with self.lock:
+            leader = str(self.leader_id or "")
+            # 发起方只能是**主控本人**：
+            #   * 本机是主控 → requester 必须就是本机 id（主控给自己下令）；
+            #   * 本机是跟随者 → requester 必须等于本机认可的那个主控。
+            # 不能写成「本机是主控就一律放行」：集群默认不带 token（局域网信任
+            # 模型），那样任何能访问 8788 的人都能拿任意 requester 触发一次
+            # 代码仓改写。这条接口会动 git HEAD，闸门必须比读接口严。
+            if requester != self.node_id and not (leader and requester == leader):
+                return 403, {"ok": False,
+                             "error": f"只有主控能触发升级（发起方 {requester}，"
+                                      f"主控 {leader or '无'}，本机 {self.node_id}）"}
+            target = str(body.get("version") or "")
+        try:
+            import hive as _hive
+        except Exception as exc:  # noqa: BLE001
+            return 503, {"ok": False, "error": f"无法加载 hive 模块：{exc}"}
+        # CLI 的 apply 会往 stdout 打报告；服务进程里不能让它直接落到日志，
+        # 收进缓冲区当 detail 回给主控（主控面板要能看到失败原因）。
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = _hive.Hive(self.config.hive_dir).cmd_upgrade(
+                    "apply", yes=bool(body.get("yes")), as_json=True,
+                    dry_run=bool(body.get("dry_run")))
+        except Exception as exc:  # noqa: BLE001 —— 升级失败要如实回给主控
+            return 500, {"ok": False, "error": str(exc),
+                         "detail": buf.getvalue()[-2000:]}
+        detail = buf.getvalue().strip()
+        restarted = False
+        if rc == 0 and body.get("restart"):
+            # 升级只换代码，进程还跑着旧代码 —— 面板的版本列不会变，人会以为
+            # 「一键升级没生效」。这里可选地安排一次自重启：先让响应发出去，
+            # 再由一个**脱离本进程**的 helper 调 `cluster restart`（它会读
+            # pidfile 停掉当前 hived 再拉起新的）。刻意用延迟 + 独立会话，
+            # 否则我们会在自己还在写响应时把自己杀掉。
+            restarted = self._schedule_self_restart()
+        with self.lock:
+            self._emit_locked(
+                "upgrade.applied",
+                message=(f"本机按主控 {requester[:12]} 的指令升级到 {target or '最新'}"
+                         f"（rc={rc}" + ("，已安排重启" if restarted else "") + "）"))
+            self._persist_locked()
+        return 200, {"ok": rc == 0, "code": rc, "node_id": self.node_id,
+                     "node": self.config.name, "target": target,
+                     "restart_scheduled": restarted,
+                     "detail": detail[-2000:]}
+
+    def _schedule_self_restart(self, delay: float = 3.0) -> bool:
+        """安排一次「退出自己、由托管方/helper 拉起」，让新代码生效。失败返回 False。
+
+        用 `start_new_session=True`（POSIX）/ detached（Windows）把 helper
+        彻底脱离本进程：本进程随后会被 SIGTERM 掉，helper 必须活着才能收尾。
+
+        **必须兼顾 daemon 托管**：生产机（fb98）的 hived 挂在 daemon(8) 下
+        （`-r` 持续重启），本进程一死它就自动拉一个新的。helper 若再无条件
+        起一份，第二个进程抢不到端口（EADDRINUSE），还会打开同一个 sqlite
+        拖进 database is locked。所以 helper 的顺序是：
+
+          1. `cluster stop` —— 尽力优雅停机（落盘 state.json、通知同伴 leave）；
+          2. 等端口释放，再看**是否已经有人把它拉起来**（托管方会抢先）；
+          3. 只有确实没人拉起时，才自己 `cluster start`。
+        """
+        hive_py = Path(__file__).resolve().with_name("hive.py")
+        base = [sys.executable, str(hive_py), "--dir", str(self.config.hive_dir)]
+        start_argv = base + ["cluster", "start",
+                             "--port", str(self.config.port),
+                             "--host", str(self.config.bind_host),
+                             "--discovery-port", str(self.config.discovery_port),
+                             "--state-dir", str(self.config.state_dir),
+                             "--name", str(self.config.name)]
+        if self.config.mcp_enabled:
+            start_argv += ["--mcp", "--mcp-port", str(self.config.mcp_port)]
+        if self.config.store_enabled:
+            start_argv += ["--store", "--claim-backend",
+                           str(self.config.claim_backend)]
+        my_pid = os.getpid()
+        marker = self.config.state_dir / STOPPED_MARKER_NAME
+        health_url = f"http://127.0.0.1:{self.config.port}/api/cluster/health"
+        # 延迟交给 helper 自己 sleep：父进程随时可能被信号打断，把 sleep 放在
+        # 这里反而会缩短「先把 HTTP 响应发完」的窗口。
+        #
+        # 用列表拼行而不是 `%` 格式化：这段脚本里既有 repr 出来的路径，也有
+        # f-string 和字面量，混着写 `%` 很容易在「隐式字符串拼接 + 运算符优先级」
+        # 上出错，而且错了只在运行时才炸。
+        lines = [
+            "import os, subprocess, sys, time, urllib.request",
+            f"time.sleep({max(0.5, float(delay))!r})",
+            "DN = subprocess.DEVNULL",
+            # 先清 stopped 标记：托管方（daemon -r / systemd）拉起的新进程若看到
+            # 这个标记，会把「自动重启」误当成「用户要停机」。
+            f"try: os.unlink({str(marker)!r})",
+            "except OSError: pass",
+            # 只 SIGTERM 自己，**不要**调 `cluster stop`：那条命令会写 stopped
+            # 标记并删 pidfile，正是上面要避免的副作用。
+            f"os.kill({my_pid}, 15)",
+            "deadline = time.time() + 25",
+            "up = False",
+            "while time.time() < deadline:",
+            "    time.sleep(1)",
+            "    try:",
+            f"        urllib.request.urlopen({health_url!r}, timeout=1).read()",
+            "        up = True",
+            "        break",
+            "    except Exception:",
+            "        up = False",
+            "# 托管方通常先一步把进程拉起来；只有确实没人管（裸启动的机器）才自己起。",
+            "if not up:",
+            f"    subprocess.call({start_argv!r}, stdin=DN, stdout=DN, stderr=DN)",
+        ]
+        script = "\n".join(lines) + "\n"
+        kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                  "stderr": subprocess.DEVNULL, "close_fds": True}
+        # 刻意不走 no_window_kwargs()：它的注释写明与 DETACHED_PROCESS 互斥，
+        # 而后台常驻进程正是要用 detached。POSIX 用 start_new_session，
+        # Windows 用 DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP。
+        if os.name == "posix":
+            kwargs["start_new_session"] = True
+        else:  # pragma: no cover - Windows
+            kwargs["creationflags"] = (
+                getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+        try:
+            subprocess.Popen([sys.executable, "-c", script], **kwargs)
+            _log(f"已安排自重启（{delay:.0f}s 后 SIGTERM 自身，"
+                 f"由托管方拉起；无人托管则自行 start）")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            _log(f"安排自重启失败（忽略，需手工 hive cluster restart）：{exc!r}")
+            return False
 
     def handle_push(self, body: dict) -> tuple[int, dict]:
         if not isinstance(body, dict):
@@ -4893,7 +5121,12 @@ def build_handler(cluster: Cluster):
                 elif path == "/api/cluster/promote":
                     code, payload = cluster.handle_promote(body)
                 elif path == "/api/cluster/leave":
-                    code, payload = cluster.handle_leave(body)
+                    # 传来源 IP：handle_leave 靠它区分「节点自己优雅下线」
+                    # 与「运维从别处剔除」—— 只有后者才立墓碑（见其 docstring）。
+                    peer_ip = str((self.client_address or ("", 0))[0] or "")
+                    code, payload = cluster.handle_leave(body, peer_ip=peer_ip)
+                elif path == "/api/cluster/upgrade":
+                    code, payload = cluster.handle_upgrade_trigger(body)
                 elif path == "/api/cluster/push":
                     code, payload = cluster.handle_push(body)
                 elif path == "/api/cluster/lease":

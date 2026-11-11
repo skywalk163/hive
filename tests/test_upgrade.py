@@ -202,9 +202,86 @@ def test_dashboard_exposes_upgrade_endpoint():
     assert 'API_UPGRADE = "/api/upgrade"' in text
     assert "def serve_upgrade_get" in text
     assert "def serve_upgrade_post" in text
-    assert 'UPGRADE_POST_ACTIONS = ("check", "apply", "publish")' in text
+    # rollout（主控一键下发到各节点）是 0.16.02 新增的动作。
+    assert ('UPGRADE_POST_ACTIONS = ("check", "apply", "publish", "rollout")'
+            in text)
+    # rollout 会改写整个集群的代码仓，必须和 publish 同级只许 controller。
+    assert 'action in ("publish", "rollout") and not self.is_controller(who)' in text
 
     js = (Path(__file__).parents[1] / "dashboard" / "app.js").read_text(
         encoding="utf-8")
-    for key in ("upgrade-check", "upgrade-apply", "upgrade-publish"):
+    for key in ("upgrade-check", "upgrade-apply", "upgrade-publish",
+                "upgrade-rollout"):
         assert key in js, f"看板缺少 {key} 按钮接线"
+
+
+# --------------------------------------------------------------------------- #
+# 5. 主控一键节点升级（rollout）：权限闸门 + 只下发落后节点
+# --------------------------------------------------------------------------- #
+
+def _fake_state(monkeypatch, nodes, self_name="fb98", self_id="self-1"):
+    """把 hive.cluster_state() 换成一个固定节点表，不起真集群。"""
+    state = {
+        "node": self_id,
+        "self": {"id": self_id, "name": self_name, "version": "0.16.00"},
+        "nodes": nodes,
+    }
+    monkeypatch.setattr(hive, "cluster_state", lambda: state)
+    return state
+
+
+def _node(nid, name, version, status="alive", url="http://10.0.0.9:8788"):
+    return {"id": nid, "name": name, "version": version, "status": status,
+            "url": url}
+
+
+def test_rollout_requires_published_version(world, monkeypatch):
+    """没有 release.json 时不能「一键升级」——否则下发的是个空版本。"""
+    h = hive.Hive(world.hive1)
+    monkeypatch.setattr(h, "_upgrade_info",
+                        lambda: {"remote_version": "", "update_available": False})
+    with pytest.raises(hive.HiveError) as ei:
+        h._upgrade_rollout({"remote_version": ""})
+    assert "publish" in str(ei.value)
+
+
+def test_rollout_skips_up_to_date_and_offline(world, monkeypatch):
+    """只对「落后且在线」的节点下发；版本一致/离线的跳过且不算失败。"""
+    h = hive.Hive(world.hive1)
+    _fake_state(monkeypatch, [
+        _node("self-1", "fb98", "0.16.00"),
+        _node("n-old", "win-old", "0.15.00"),
+        _node("n-new", "win-new", "0.16.00"),
+        _node("n-dead", "win-dead", "0.15.00", status="dead"),
+    ])
+    sent = []
+
+    def fake_http(method, path, payload=None, timeout=1.0, url=""):
+        sent.append((path, url, payload))
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(hive, "_cluster_http", fake_http)
+    # 本机（主控）自己也要升：替换成本地快进成功。
+    monkeypatch.setattr(h, "cmd_upgrade", lambda *a, **kw: 0)
+
+    rc = h._upgrade_rollout({"remote_version": "0.16.00"}, as_json=True)
+    assert rc == 0
+    # 只有落后的那台被下发；本机走本地分支，不发 HTTP
+    assert [u for _p, u, _pl in sent] == ["http://10.0.0.9:8788"]
+    assert sent[0][2]["requester"] == "self-1"
+    assert sent[0][2]["version"] == "0.16.00"
+
+
+def test_rollout_reports_failure_and_returns_nonzero(world, monkeypatch):
+    """某台升级失败要如实报错并返回非 0，不能笼统说「完成」。"""
+    h = hive.Hive(world.hive1)
+    _fake_state(monkeypatch, [
+        _node("self-1", "fb98", "0.16.00"),
+        _node("n-old", "win-old", "0.15.00"),
+    ])
+    monkeypatch.setattr(hive, "_cluster_http",
+                        lambda *a, **kw: (500, {"ok": False,
+                                                "error": "脏工作区"}))
+    monkeypatch.setattr(h, "cmd_upgrade", lambda *a, **kw: 0)
+    rc = h._upgrade_rollout({"remote_version": "0.16.00"}, as_json=True)
+    assert rc == 1

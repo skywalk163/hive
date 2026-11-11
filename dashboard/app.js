@@ -334,6 +334,7 @@
     el.upgradeCheck = document.getElementById('upgrade-check');
     el.upgradeApply = document.getElementById('upgrade-apply');
     el.upgradePublish = document.getElementById('upgrade-publish');
+    el.upgradeRollout = document.getElementById('upgrade-rollout');
     el.banner = document.getElementById('banner');
 
     el.panel = document.getElementById('state-panel');
@@ -1821,6 +1822,18 @@
         runUpgrade('publish', { notes: notes }, '已发布给集群');
       });
     }
+    if (el.upgradeRollout) {
+      el.upgradeRollout.addEventListener('click', function () {
+        var info = upgradeInfo || {};
+        var q = '把集群里所有落后节点一键升级到 v' + (info.remote_version || '?') +
+                '？\n\n' +
+                '· 只对「版本落后且在线」的节点下发，已是最新的会跳过\n' +
+                '· 每台只做 git 快进；工作区有未提交改动会被该节点拒绝\n' +
+                '· 升级后各节点会自动重启 hived（约 3 秒后），重启时短暂离线';
+        if (!window.confirm(q)) return;
+        runUpgrade('rollout', {}, '已下发一键节点升级');
+      });
+    }
     refreshUpgrade();
 
     el.auto.addEventListener('change', function () {
@@ -2350,6 +2363,10 @@
       el.upgradeApply.title = '把本机快进到主控版本（协调仓有未提交改动会被拒绝）';
     }
     el.upgradePublish.hidden = !upgradeCanPublish;
+    if (el.upgradeRollout) {
+      // 一键节点升级是主控动作，且必须有已发布版本可下发。
+      el.upgradeRollout.hidden = !(upgradeCanPublish && upgradeInfo.remote_version);
+    }
     el.upgradePublish.title = '把本机版本发布给集群（' +
       (upgradeCanPublish ? '当前是 controller' : '需要 controller 角色') + '）';
   }
@@ -2367,7 +2384,8 @@
   }
 
   function runUpgrade(action, body, okMsg) {
-    var btns = [el.upgradeCheck, el.upgradeApply, el.upgradePublish];
+    var btns = [el.upgradeCheck, el.upgradeApply, el.upgradePublish,
+                el.upgradeRollout];
     btns.forEach(function (b) { if (b) b.disabled = true; });
     flash(action === 'apply' ? '正在升级…' : '正在处理…');
     return upgradeFetch('POST', Object.assign({ action: action }, body || {}))

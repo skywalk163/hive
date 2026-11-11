@@ -64,6 +64,9 @@ WHITELIST: dict[tuple[str, str, str], str] = {
         "DETACHED_PROCESS 会让 .cmd 里的 Start-Process 卡死在控制台分配上",
     ("hive_cluster.py", "_spawn_background", "Popen"):
         "集群 daemon 拉起：DETACHED_PROCESS，与 CREATE_NO_WINDOW 互斥",
+    ("hive_cluster.py", "Cluster._schedule_self_restart", "Popen"):
+        "升级后自重启的 helper：必须脱离当前进程（POSIX setsid / Windows "
+        "DETACHED_PROCESS），父进程随后会被 SIGTERM 掉；与 CREATE_NO_WINDOW 互斥",
     ("hive_pr.py", "git_remote", "run"):
         "`hive pr` 交互命令里的 git 调用：不在 30 秒刷新路径上；且本卡允许修改"
         "的路径不含 hive_pr.py —— 留待后续卡统一收口",

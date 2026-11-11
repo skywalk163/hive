@@ -32,7 +32,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import random
@@ -56,7 +58,7 @@ from pathlib import Path
 # 版本号：MAJOR.MINOR.PATCH，**PATCH 固定两位**（0.16.00 / 0.16.01 …）。
 # 集群升级要跨机器比较版本，字符串比较会在 "0.16.10" vs "0.16.9" 上出错，
 # 所以统一解析成整数三元组再比（parse_version / compare_versions）。
-VERSION = "0.16.01"
+VERSION = "0.16.02"
 VERSION_RE = re.compile(r"^(\d+)\.(\d{1,2})\.(\d{1,2})$")
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
@@ -480,6 +482,10 @@ UPGRADE_POLICIES = ("follow", "manual", "never")
 DEFAULT_UPGRADE_POLICY = "follow"
 UPGRADE_STATE_ENV = "HIVE_UPGRADE_STATE"
 UPGRADE_POLICY_ENV = "HIVE_UPGRADE_POLICY"
+# 主控「一键节点升级」向单台子节点下发的等待上限（秒）。一次 apply 就是一次
+# git fetch + ff 快进，正常几秒；给足 5 分钟，只是别让一台卡死的机器把整轮
+# 下发拖成无限等（其余节点在它之前已经完成，没必要陪等）。
+UPGRADE_ROLLOUT_TIMEOUT = 300.0
 
 
 def upgrade_state_dir() -> Path:
@@ -925,8 +931,12 @@ def cluster_url(path: str = "") -> str:
 
 
 def _cluster_http(method: str, path: str, payload=None,
-                  timeout: float = 1.0):
-    """访问本机集群；返回 (code, dict) 或 (None, None)。失败完全静默。"""
+                  timeout: float = 1.0, url: str = ""):
+    """访问集群；返回 (code, dict) 或 (None, None)。失败完全静默。
+
+    `url` 非空时访问那台**远端节点**（主控一键升级要用它逐个下发），
+    为空仍是本机集群 —— 老调用点的行为一点不变。
+    """
     # 测试进程默认不碰本机 8788：开发者一边跑测试、一边跑着真集群时，
     # 单测里的 claim 不该把租约/进度写进真实集群。专项测试显式放行。
     if (os.environ.get("PYTEST_CURRENT_TEST")
@@ -942,7 +952,9 @@ def _cluster_http(method: str, path: str, payload=None,
     token = cluster_token()
     if token:
         headers["X-Hive-Cluster-Token"] = token
-    req = _request.Request(cluster_url(path), data=data, headers=headers,
+    target = (str(url).rstrip("/") + "/api/cluster/" + str(path).lstrip("/")
+              if url else cluster_url(path))
+    req = _request.Request(target, data=data, headers=headers,
                            method=method)
     try:
         opener = _request.build_opener(_request.ProxyHandler({}))
@@ -4137,10 +4149,127 @@ class Hive:
               f"（git reset --hard {from_head[:8]} 可回退）")
         return 0
 
+    def _upgrade_rollout(self, info: dict, as_json: bool = False,
+                         nodes: list[str] | None = None,
+                         yes: bool = False, dry_run: bool = False,
+                         restart: bool = False) -> int:
+        """主控一键节点升级：把「快进到 origin/main」下发到集群里每台机器。
+
+        为什么由主控统一发起，而不是各节点自己轮询：子节点上的 `hived` 跑着
+        的进程不会自己重启，光有 `upgrade check` 永远只是「发现新版本」。
+        主控最清楚「谁落后了」，由它对着节点表逐个下发，人只需要点一次。
+
+        下发的是 `/api/cluster/upgrade`，落地端就是子节点的
+        `Cluster.handle_upgrade_trigger`，最终调用与 `hive upgrade apply`
+        完全相同的实现 —— 闸门（脏工作区 / 非快进 / policy）一个都不少，
+        主控只是按了那个按钮，不是绕过它。
+        """
+        remote_v = str(info.get("remote_version") or "")
+        if not remote_v:
+            raise HiveError("主控还没有发布升级（协调仓没有 release.json）；"
+                            "先 `hive upgrade publish`")
+        state = cluster_state() or {}
+        me = (state.get("self") or {}).get("id") or ""
+        my_node = state.get("node") or me
+        rows = []
+        # 只下发「这台机器确实落后」的节点：版本一致的不打扰（也避免把
+        # 正在跑任务的机器无谓地快进一次）。
+        for n in state.get("nodes") or []:
+            nid = str(n.get("id") or "")
+            if not nid:
+                continue
+            if nodes and not (nid in nodes or str(n.get("name")) in nodes):
+                continue
+            if str(n.get("status")) not in ("alive", "suspect"):
+                rows.append({"node": n.get("name") or nid, "id": nid,
+                             "skipped": True, "reason": "离线"})
+                continue
+            ver = str(n.get("version") or "")
+            try:
+                behind = bool(ver) and compare_versions(remote_v, ver) > 0
+            except HiveError:
+                behind = True          # 版本号不认识（老节点写死 1.0 之类）
+            if nid in (me, my_node):
+                # 本机（主控）：它在升级前一定「落后」——代码还没换、进程还跑着
+                # 旧版本，节点表里的 version 自然不是新版本。必须按 id 判定，
+                # 不能按名字：同名的机器/改名后会误判成别人，于是主控自己
+                # 被当成「已是最新」跳过，一键升级永远落不到主控身上。
+                behind = True
+            if not behind:
+                rows.append({"node": n.get("name") or nid, "id": nid,
+                             "skipped": True, "reason": f"已是 {ver or '?'}"})
+                continue
+            rows.append({"node": n.get("name") or nid, "id": nid,
+                         "url": n.get("url") or "", "from": ver})
+
+        results = []
+        for row in rows:
+            if row.get("skipped"):
+                results.append(dict(row, ok=True, skipped=True))
+                continue
+            if dry_run:
+                results.append(dict(row, ok=True, dry_run=True))
+                continue
+            if row["id"] in (me, my_node):
+                # 主控自己：直接本地快进，不用绕一圈 HTTP。
+                try:
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        rc = self.cmd_upgrade("apply", yes=yes, as_json=True)
+                    results.append(dict(row, ok=rc == 0, code=rc,
+                                        detail=buf.getvalue().strip()[-1500:]))
+                except HiveError as exc:
+                    results.append(dict(row, ok=False, error=str(exc)))
+                continue
+            url = str(row.get("url") or "").rstrip("/")
+            if not url:
+                results.append(dict(row, ok=False, error="节点没上报地址"))
+                continue
+            code, resp = _cluster_http(
+                "POST", "upgrade",
+                {"requester": my_node or me, "version": remote_v,
+                 "yes": True, "restart": bool(restart)}, 
+                timeout=UPGRADE_ROLLOUT_TIMEOUT, url=url)
+            resp = resp if isinstance(resp, dict) else {}
+            results.append(dict(row, ok=code == 200 and bool(resp.get("ok")),
+                                code=code,
+                                error=str(resp.get("error") or ""),
+                                detail=str(resp.get("detail") or "")[-1500:]))
+
+        if as_json:
+            print(json.dumps({"target": remote_v, "results": results},
+                             ensure_ascii=False, indent=2))
+            return 0 if all(r.get("ok") for r in results) else 1
+        print(f"一键节点升级 → v{remote_v}")
+        for r in results:
+            tag = ("跳过" if r.get("skipped") else ("预演" if r.get("dry_run")
+                                                   else ("✓" if r.get("ok") else "✗")))
+            line = f"  {tag} {r.get('node')}"
+            if r.get("reason"):
+                line += f"（{r['reason']}）"
+            if r.get("from"):
+                line += f"  {r['from']} → {remote_v}"
+            if r.get("error"):
+                line += f"  错误: {r['error']}"
+            print(line)
+        bad = [r for r in results if not r.get("ok") and not r.get("skipped")]
+        if bad:
+            print(f"\n{len(bad)} 台升级失败；其余已快进。"
+                  f"升级只换代码，节点重启 hived 后才生效。", file=sys.stderr)
+            return 1
+        if restart:
+            print("\n全部处理完成。已安排各节点自动重启 hived，重启后新版本才生效。")
+        else:
+            print("\n全部处理完成。升级只换代码，节点重启 hived 后才生效"
+                  "（下次加 --restart 可让它们自己重启）。")
+        return 0
+
     def cmd_upgrade(self, action: str = "status", yes: bool = False,
                     notes: str = "", as_json: bool = False,
-                    dry_run: bool = False) -> int:
-        """集群升级：publish（主控发布）/ check（检索）/ apply（升级）/ status。"""
+                    dry_run: bool = False,
+                    nodes: list[str] | None = None,
+                    restart: bool = False) -> int:
+        """集群升级：publish / check / apply / status / rollout（主控一键下发）。"""
         if action == "publish":
             return self._upgrade_publish(notes=notes, as_json=as_json)
         info = self._upgrade_info()
@@ -4150,8 +4279,13 @@ class Hive:
         if action == "apply":
             return self._upgrade_apply(info, yes=yes, as_json=as_json,
                                        dry_run=dry_run)
+        if action == "rollout":
+            return self._upgrade_rollout(info, as_json=as_json, nodes=nodes,
+                                         yes=yes, dry_run=dry_run,
+                                         restart=restart)
         raise HiveError(
-            f"未知的 upgrade 动作 {action!r}（status / check / apply / publish）")
+            f"未知的 upgrade 动作 {action!r}"
+            f"（status / check / apply / publish / rollout）")
 
     def retime_budgets(self, apply: bool = False) -> list[dict]:
         """把未关闭卡的时间预算调到复杂度建议值（只调大，不调小）。
@@ -7414,7 +7548,9 @@ def cmd_upgrade(args) -> int:
         yes=bool(getattr(args, "yes", False)),
         notes=getattr(args, "notes", "") or "",
         as_json=bool(getattr(args, "json", False)),
-        dry_run=bool(getattr(args, "dry_run", False)))
+        dry_run=bool(getattr(args, "dry_run", False)),
+        nodes=getattr(args, "node", None) or None,
+        restart=bool(getattr(args, "restart", False)))
 
 
 def cmd_digest(args) -> None:
@@ -8330,11 +8466,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_repair)
 
     s = sub.add_parser(
-        "upgrade", help="集群升级：主控发布 / 子节点检索 / 按策略升级")
+        "upgrade", help="集群升级：主控发布 / 一键节点升级 / 子节点检索与升级")
     s.add_argument("action", nargs="?", default="status",
-                   choices=["status", "check", "apply", "publish"],
+                   choices=["status", "check", "apply", "publish", "rollout"],
                    help="status=看本地/主控版本；check=检索可升级；"
-                        "apply=执行升级；publish=主控发布")
+                        "apply=执行本机升级；publish=主控发布；"
+                        "rollout=主控一键把升级下发到每台节点")
+    s.add_argument("--node", action="append", default=None,
+                   help="rollout 限定节点（名字或 id，可重复）；默认全部落后节点")
+    s.add_argument("--restart", action="store_true",
+                   help="rollout 时让各节点升级后自动重启 hived（否则要手工重启才生效）")
     s.add_argument("--yes", action="store_true",
                    help="manual 策略下确认升级")
     s.add_argument("--dry-run", dest="dry_run", action="store_true",

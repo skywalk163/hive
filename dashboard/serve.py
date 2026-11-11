@@ -113,8 +113,11 @@ HIVE_PY = HIVE_ROOT / "hive.py"
 HIVE_OP_TIMEOUT = 120  # 单条操作超时（秒）；hive 命令涉及 git push，给足余量
 # 集群升级要 fetch 整个协调仓再 ff 合并，给更长的超时。
 UPGRADE_TIMEOUT = 300
+# 主控一键下发要逐台等待；给一个更宽的总上限（秒）。
+UPGRADE_ROLLOUT_TOTAL_TIMEOUT = 1800
 # 看板能触发的升级动作（status 走 GET，不在这里）
-UPGRADE_POST_ACTIONS = ("check", "apply", "publish")
+# rollout = 主控一键把升级下发到每台落后节点（子节点没有这个动作）
+UPGRADE_POST_ACTIONS = ("check", "apply", "publish", "rollout")
 # 子进程一律走 UTF-8：Windows 下子进程 stdout 默认 cp936，`hive status --json` 碰到
 # ✓ / 全角符号会以 UnicodeEncodeError 退出（rc=1、stdout 空），状态文件于是一直写不出来，
 # 看板就永远停在旧快照或 503。三个平台用同一套环境变量最省事。
@@ -1664,12 +1667,12 @@ def build_handler(status_path, write_auth="off"):
                 return
             # 发布升级会改变整个集群的基线，只许 controller；
             # apply 是本机运维动作，有写权限即可（子节点不一定有 controller token）。
-            if action == "publish" and not self.is_controller(who):
+            if action in ("publish", "rollout") and not self.is_controller(who):
                 self._send_json(403, {
                     "ok": False,
-                    "error": "publish 需要 controller 角色（当前 %s）"
-                             % (who.get("agent") or "?")})
-                append_audit({"action": "upgrade:publish", "ok": False,
+                    "error": "%s 需要 controller 角色（当前 %s）"
+                             % (action, who.get("agent") or "?")})
+                append_audit({"action": "upgrade:" + action, "ok": False,
                               "agent": who.get("agent"),
                               "source": self.client_address[0],
                               "detail": "角色不足"})
@@ -1678,6 +1681,13 @@ def build_handler(status_path, write_auth="off"):
             argv = ["upgrade", action, "--json"]
             if action == "apply" and body.get("yes") is True:
                 argv.append("--yes")
+            if action == "rollout":
+                # 看板上的「一键节点升级」要真的让新版本生效：只换代码不重启，
+                # 集群面板的版本列不会变，看起来就像「点了没反应」。
+                if body.get("restart") is not False:
+                    argv.append("--restart")
+                if body.get("yes") is True:
+                    argv.append("--yes")
             if action == "publish":
                 notes = str(body.get("notes") or "").strip()
                 if notes:
@@ -1687,15 +1697,21 @@ def build_handler(status_path, write_auth="off"):
                             "error": "变更说明过长或含控制字符（上限 500 字）"})
                         return
                     argv += ["--notes", notes]
+            # rollout 要把每台节点都跑一遍 fetch+ff，300 秒只够两三台；
+            # 按节点数放宽，但仍然有上限（别让一个点了不返回的请求挂死线程）。
+            op_timeout = UPGRADE_TIMEOUT
+            if action == "rollout":
+                op_timeout = min(UPGRADE_ROLLOUT_TOTAL_TIMEOUT,
+                                 UPGRADE_TIMEOUT * 4)
             try:
-                rc, out, err = self._run_hive(argv, timeout=UPGRADE_TIMEOUT)
+                rc, out, err = self._run_hive(argv, timeout=op_timeout)
             except subprocess.TimeoutExpired:
                 append_audit({"action": "upgrade:" + action, "ok": False,
                               "agent": who.get("agent"),
                               "source": self.client_address[0], "detail": "超时"})
                 self._send_json(504, {"ok": False,
                                       "error": "升级操作超时（%d 秒）"
-                                               % UPGRADE_TIMEOUT})
+                                               % op_timeout})
                 return
             data = None
             if out.startswith("{"):
