@@ -1,7 +1,7 @@
 {
   "version": "0.16.01",
-  "commit": "4fc394104f877f339db45901cb40238c9199382a",
-  "published_at": "2026-11-11T05:50:00+00:00",
+  "commit": "4e64970406e73a746c4fc2026008fa8acb1813fb",
+  "published_at": "2026-11-11T06:15:33+00:00",
   "published_by": "controller",
-  "notes": "看板登录态保留 30 天 + 集群页版本跟随 hive 版本"
+  "notes": "看板登录态保留 30 天 + 集群页版本跟随 + 节点表优先级/IP 两列"
 }
