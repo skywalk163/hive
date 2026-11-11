@@ -1,7 +1,7 @@
 {
-  "version": "0.16.02",
-  "commit": "1103cdbd6c5a7568374f3b39f99f2109748e47f0",
-  "published_at": "2026-11-11T09:58:24+00:00",
+  "version": "0.16.03",
+  "commit": "5fae9481853ba3eb4f3a0084a9c66ee70220aa43",
+  "published_at": "2026-11-11T12:47:40+00:00",
   "published_by": "controller",
-  "notes": "发布"
+  "notes": "心跳降频+增量同步（消除空闲期 2-3Mbps 空转与 TIME_WAIT 堆积）；升级版本一致性闸门"
 }
