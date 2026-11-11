@@ -820,14 +820,131 @@ def cluster_available(timeout: float = 0.3) -> bool:
     return code == 200
 
 
+# --------------------------------------------------------------------------- #
+# 控制面（hive_control）本地 socket 上报（T-0313）
+#
+# 母文档 §2.3：Worker 不直接发网络包，只写本地 serve。三处集群上报钩子在原有
+# HTTP 上报之外，best-effort 把事件映射成 StateEntry 交给 WorkerClient.report()；
+# report() 只做内存入队（I6/G1），connect/send 在后台线程。任何异常（导入失败、
+# socket 不存在、队列满、卡面读不到）都静默，绝不影响原 HTTP 返回值。
+# --------------------------------------------------------------------------- #
+_CONTROL_REPORTER: object | None = None
+
+# 进度状态 → 控制面枚举。running/verifying 归 running；done 归 released；
+# 其余（failed/blocked/needs_review/conflict/closed…）归 steady（暂停等待）。
+_PROGRESS_STATE_MAP = {
+    "running": "running",
+    "verifying": "running",
+    "done": "released",
+}
+
+
+def _control_reporter():
+    """懒加载 WorkerClient 单例；构造失败/缺模块返回 None（调用方静默跳过）。"""
+    global _CONTROL_REPORTER
+    if _CONTROL_REPORTER is not None:
+        return _CONTROL_REPORTER
+    try:
+        from hive_control.worker_sock import WorkerClient
+        from hive_control.config import default_socket_path
+        agent = (os.environ.get("HIVE_AGENT") or "").strip() or "worker"
+        _CONTROL_REPORTER = WorkerClient(agent, default_socket_path())
+    except Exception:  # noqa: BLE001  缺模块/构造异常都不影响原逻辑
+        _CONTROL_REPORTER = None
+    return _CONTROL_REPORTER
+
+
+def _control_card(tid: str) -> dict:
+    """按当前协调仓目录读卡面；读不到返回空 dict（best-effort 兜底）。
+
+    控制面上报路径必须保持纯本地：不触发 Git fetch / 网络拉取，也不读本机
+    store 覆盖（测试与冷启动场景下都不该为一条进度上报去碰网络）。
+    """
+    try:
+        hive_dir = os.environ.get("HIVE_DIR", ".").strip() or "."
+        p = Path(hive_dir) / "tasks" / f"{tid}.md"
+        if not p.exists():
+            return {}
+        data, _ = parse_card(p)
+        return data or {}
+    except Exception:  # noqa: BLE001  卡面缺失/解析失败都不该打断上报
+        return {}
+
+
+def _control_owner(tid: str, payload: dict, card: dict) -> str:
+    owner = str(payload.get("agent") or "").strip()
+    if owner:
+        return owner
+    owner = str(card.get("owner") or "").strip()
+    return owner or "unknown"
+
+
+def _control_project(payload: dict, card: dict) -> str:
+    project = str(payload.get("repo") or "").strip()
+    if project:
+        return project
+    project = str(card.get("repo") or "").strip()
+    return project or "hive"
+
+
+def _control_entry(tid: str, state: str, payload: dict, card: dict) -> object | None:
+    """把钩子事件映射成 StateEntry；字段不全/构造失败返回 None。"""
+    try:
+        from hive_control.model import StateEntry
+        project = _control_project(payload, card)
+        owner = _control_owner(tid, payload, card)
+        if not tid or not project:
+            return None
+        return StateEntry(
+            project=project,
+            tid=str(tid),
+            version=0,
+            incarnation=0,
+            owner_agent=owner,
+            state=state,
+            dna=False,
+            updated_at=int(time.time() * 1000),
+        )
+    except Exception:  # noqa: BLE001  映射/构造异常静默跳过
+        return None
+
+
+def _control_report(tid: str, state: str, payload: dict) -> None:
+    """best-effort 入队一条控制面条目；任何失败都不抛、不阻塞。"""
+    try:
+        reporter = _control_reporter()
+        if reporter is None:
+            return
+        card = _control_card(str(tid))
+        entry = _control_entry(str(tid), state, payload or {}, card)
+        if entry is not None:
+            reporter.report(entry)
+    except Exception:  # noqa: BLE001  入队/队列满都不影响原返回值
+        pass
+
+
 def cluster_publish_progress(payload: dict) -> bool:
     code, _ = _cluster_http("POST", "push", payload, timeout=0.8)
-    return code == 200
+    ok = code == 200
+    try:
+        tid = str(payload.get("task") or "")
+        raw_state = str(payload.get("state") or "").strip()
+        state = _PROGRESS_STATE_MAP.get(raw_state, "steady")
+        _control_report(tid, state, payload)
+    except Exception:  # noqa: BLE001  控制面通道失败不影响原返回值
+        pass
+    return ok
 
 
 def cluster_publish_lease(payload: dict) -> bool:
     code, _ = _cluster_http("POST", "lease", payload, timeout=0.8)
-    return code == 200
+    ok = code == 200
+    try:
+        tid = str(payload.get("task") or "")
+        _control_report(tid, "claimed", payload)
+    except Exception:  # noqa: BLE001
+        pass
+    return ok
 
 
 def cluster_release_lease(tid: str) -> bool:
@@ -836,7 +953,12 @@ def cluster_release_lease(tid: str) -> bool:
     code, _ = _cluster_http("POST", "release", {"task": tid,
                                                 "reason": "worker-finished"},
                             timeout=0.5)
-    return code == 200
+    ok = code == 200
+    try:
+        _control_report(str(tid), "released", {"task": tid})
+    except Exception:  # noqa: BLE001
+        pass
+    return ok
 
 
 def cluster_publish_event(etype: str, task: str = "", data: dict | None = None) -> bool:
