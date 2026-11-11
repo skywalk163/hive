@@ -172,7 +172,83 @@ TASK_FIELDS = [
     # 搁置（shelved）：当前做不了、但不想删的卡。这三个字段把「什么时候、
     # 从什么状态、因为什么」钉在卡面上，日后翻出来才知道该放回还是废弃。
     "shelved_at", "shelved_from", "shelve_reason",
+    # 出题人显式声明的复杂度档位（low/medium/high/xl）。不写则自动按
+    # paths/verify/depends/needs/正文长度估算，见 task_budget()。
+    "complexity",
 ]
+
+# --------------------------------------------------------------------------- #
+# 任务时间预算（2026-11-11）：按复杂度给时间，别再一刀切
+#
+# 现场：近期多张卡给的窗口只有十来分钟，任务还在跑就被 watchdog / 看板判成
+# 异常。一刀切的固定 timeout 对「改 1 个文档」和「改 40 个文件 + 全量回归」
+# 显然不该是同一个数；租约还要覆盖「派单等待 + 执行 + 验收 + 写结果」，
+# 比纯执行超时长得多。
+# --------------------------------------------------------------------------- #
+
+# 值 = 该档位的分数下限（显式声明时把自动评分抬到这个下限）。
+COMPLEXITY_LEVELS = {"low": 0, "medium": 3, "high": 7, "xl": 18}
+# 有进度上报的卡视为「还在跑」的宽限期（分钟）：心跳晚一点不该立刻判异常。
+STALE_GRACE_MINUTES = 15
+# manual 这类靠人/定时任务来接单的 agent，10 分钟派单窗口太短。
+DEFAULT_MANUAL_OFFER_MINUTES = 60
+
+
+def task_complexity(card: dict, body: str = "") -> int:
+    """按卡面可观测信号估一个复杂度分。分数只用于分档，不是精确耗时预测。"""
+    score = 2 * len(card.get("paths") or [])
+    score += 3 * len(card.get("verify") or [])
+    score += 3 * len(card.get("depends_on") or [])
+    needs = [str(n).lower() for n in (card.get("needs") or [])]
+    if "code" in needs:
+        score += 3
+    if "verify" in needs:
+        score += 2
+    if "docs" in needs:
+        score += 1
+    n = len(body or "")
+    if n >= 4000:
+        score += 4
+    elif n >= 2000:
+        score += 3
+    elif n >= 1000:
+        score += 2
+    elif n >= 400:
+        score += 1
+    if str(card.get("priority") or "").upper() == "P0":
+        score += 1
+    level = str(card.get("complexity") or "").strip().lower()
+    if level in COMPLEXITY_LEVELS:
+        score = max(score, COMPLEXITY_LEVELS[level])
+    return score
+
+
+def task_budget(card: dict, body: str = "") -> dict:
+    """返回 {'score','level','timeout_minutes','lease_minutes','note'}。
+
+    分档刻意保守：宁可给宽裕，也不要让还在执行的任务被判异常。
+    lease 至少是 timeout 的 1.5 倍再留 30 分钟缓冲，因为租约覆盖的是
+    整条交付链路而不是单次命令。
+    """
+    score = task_complexity(card, body)
+    if score <= 2:
+        timeout, lease, level = 60, 180, "low"
+    elif score <= 6:
+        timeout, lease, level = 90, 180, "medium"
+    elif score <= 11:
+        timeout, lease, level = 120, 240, "high"
+    elif score <= 17:
+        timeout, lease, level = 180, 300, "high"
+    else:
+        timeout, lease, level = 240, 360, "xl"
+    lease = max(lease, int(timeout * 1.5) + 30)
+    return {
+        "score": score, "level": level,
+        "timeout_minutes": timeout, "lease_minutes": lease,
+        "note": (f"复杂度 {score} 分（{level}）：paths={len(card.get('paths') or [])}、"
+                 f"verify={len(card.get('verify') or [])}、"
+                 f"depends={len(card.get('depends_on') or [])}、正文={len(body or '')} 字"),
+    }
 
 # 文件级锁（任务卡 `locks` 字段）的判定在 conflict.py。放 try 里是因为 hive.py 允许被
 # 单独拷进协调仓（`init` 只拷 hive.py）：缺模块时不该连 `status` 都起不来，
@@ -3015,6 +3091,8 @@ class Hive:
         **accept 模式例外（2026-11-07）**：这类 agent 靠定时任务（默认每小时一轮）
         来接单，10 分钟窗口会在它醒来之前把单收走。所以按派单对象查 agent 配置的
         `accept_window_minutes`（缺省 180），并至少不小于全局 base。
+        **manual / verify（2026-11-11）**：同样不是常驻 worker，窗口至少放宽到
+        `DEFAULT_MANUAL_OFFER_MINUTES`（60 分钟），只有 exec 才用 10 分钟快速通道。
         可读 `HIVE_DISPATCH_UNCLAIMED_MINUTES` / `HIVE_ACCEPT_WINDOW_MINUTES`。
         写成方法是为了测试能钉住，不在模块层读一次。
         """
@@ -3025,9 +3103,15 @@ class Hive:
             base = 10
         if card is None:
             return base
-        if not self._is_accept_offer(card):
-            return base
         target = str(card.get("dispatched_to") or card.get("owner") or "").strip()
+        if not self._is_accept_offer(card):
+            # manual / verify 这类靠人 or 定时任务来接单的 agent，10 分钟
+            # 窗口同样太短；只有常驻 exec worker 才按快速通道回收。
+            cfg = (self.agents() or {}).get(target) or {}
+            mode = cfg.get("mode") or ("manual" if cfg.get("manual") else "exec")
+            if mode != "exec":
+                return max(base, DEFAULT_MANUAL_OFFER_MINUTES)
+            return base
         cfg = (self.agents() or {}).get(target) or {}
         win = cfg.get("accept_window_minutes")
         if win in (None, ""):
@@ -3583,6 +3667,7 @@ class Hive:
                     errors.append(f"{p.name}: 缺字段 {k}")
             if tid in cards:
                 errors.append(f"重复 id {tid}")
+            data["_body"] = _body   # 时间预算估算要用正文长度做复杂度信号
             cards[tid] = data
 
         agents = self.agents()
@@ -3692,6 +3777,14 @@ class Hive:
                     warns.append(f"{tid}: blocked（等资源/等外部条件）")
             # 看门狗视角：in-flight 卡的死活（与 hive watchdog 同源判定）
             if st in IN_FLIGHT_STATES:
+                b = task_budget(c, str(c.get("_body") or ""))
+                cur_t = int(c.get("timeout_minutes") or 0)
+                cur_l = int(c.get("lease_minutes") or 0)
+                if cur_t < b["timeout_minutes"] or cur_l < b["lease_minutes"]:
+                    warns.append(
+                        f"{tid}: 时间预算偏紧 timeout={cur_t}m / lease={cur_l}m，"
+                        f"复杂度建议 {b['timeout_minutes']}m / {b['lease_minutes']}m"
+                        f"（{b['note']}）；`hive task retime --apply` 可批量调大")
                 if self.result_info(tid) is not None:
                     warns.append(f"{tid}: 有结果却还停在 {st}（land_lag，该去 land 了）")
                 else:
@@ -3802,6 +3895,40 @@ class Hive:
             else:
                 log(f"repair: store {tid} 已对齐为 "
                     f"{'done' if done else 'closed'}")
+
+    def retime_budgets(self, apply: bool = False) -> list[dict]:
+        """把未关闭卡的时间预算调到复杂度建议值（只调大，不调小）。
+
+        出题时一刀切给 60 分钟，复杂卡跑到一半就被判异常。这里按当前卡面
+        重算一遍，已有更宽裕的显式设置保持不动，免得把人调过的值改回去。
+        """
+        self.fetch()
+        out: list[dict] = []
+        for tid, c in sorted(self.cards().items()):
+            if c.get("state") in ("done", "closed", "shelved"):
+                continue
+            body = str(c.get("_body") or "")
+            b = task_budget(c, body)
+            cur_t = int(c.get("timeout_minutes") or 0)
+            cur_l = int(c.get("lease_minutes") or 0)
+            new_t = max(cur_t, b["timeout_minutes"])
+            new_l = max(cur_l, b["lease_minutes"])
+            if new_t == cur_t and new_l == cur_l:
+                continue
+            out.append({
+                "id": tid, "state": c.get("state"),
+                "old_timeout": cur_t, "timeout": new_t,
+                "old_lease": cur_l, "lease": new_l, "note": b["note"],
+            })
+            if apply:
+                c["timeout_minutes"] = new_t
+                c["lease_minutes"] = new_l
+                self.save_card(c, body)
+        if apply and out:
+            self.commit_and_push(
+                f"retime: 按复杂度调大 {len(out)} 张卡的时间预算",
+                [f"tasks/{r['id']}.md" for r in out])
+        return out
 
     def cmd_stats(self, as_json: bool = False, days: int = 0) -> None:
         self.fetch()
@@ -4484,8 +4611,19 @@ class Hive:
             if claim and not res and state not in ("done", "blocked", SHELVED_STATE):
                 state = "running"  # 看板推导，不写回任务卡
             lease_until = claim.get("lease_until")
-            stale = bool(lease_until and not res and parse_iso(lease_until) < now())
             st = self.status_info(tid) or {}   # agent 主动上报的进度（status/<tid>）
+            stale = bool(lease_until and not res and parse_iso(lease_until) < now())
+            stale_suspected = stale
+            if stale and st:
+                # worker 刚上报过进度就说明还活着：心跳晚一点不该把正在跑的
+                # 任务丢进异常列，也不该让 watchdog 立刻回收。
+                try:
+                    pushed = parse_iso(st.get("updated_at") or "")
+                    if pushed > now() - timedelta(minutes=STALE_GRACE_MINUTES):
+                        stale = False
+                except (ValueError, TypeError):
+                    pass
+            budget = task_budget(c, str(c.get("_body") or ""))
             # 只有「有 done 结果、卡面还没关」的卡需要探一次真实可合入性，
             # 避免对 200 张历史卡逐个访问代码仓。
             land_ready = None
@@ -4522,6 +4660,19 @@ class Hive:
                 "result_fence": res.get("fence"),
                 "fenced": self.result_fenced(c, res),
                 "stale": stale,
+                "stale_suspected": stale_suspected,
+                # 异常定位：责任 agent 的汇总优先级 claim > owner > 派单 > 结果
+                "result_agent": res.get("agent") or "",
+                "abnormal_agent": (claim.get("agent") or c.get("owner")
+                                   or c.get("dispatched_to")
+                                   or res.get("agent") or ""),
+                # 时间预算：看板详情里能直接看到「给了多久 / 建议给多久」
+                "timeout_minutes": int(c.get("timeout_minutes") or 0),
+                "lease_minutes": int(c.get("lease_minutes") or 0),
+                "budget_score": budget["score"],
+                "budget_timeout": budget["timeout_minutes"],
+                "budget_lease": budget["lease_minutes"],
+                "budget_note": budget["note"],
                 # 看板靠这三个字段区分「结果交了」和「真的能合入」
                 "land_ready": land_ready,
                 "land_block": land_block,
@@ -5086,7 +5237,7 @@ class Hive:
         self.commit_and_push(f"watchdog dispatch-miss {tid}", self._card_paths(tid, old_owner))
         log(f"{tid} 派发 {wait_min} 分钟无人领取，退回 ready（dispatch_miss={miss}）")
 
-    def cmd_watchdog(self, minutes: int = 0, apply: bool = False,
+    def cmd_watchdog(self, minutes: int | None = None, apply: bool = False,
                      as_json: bool = False, orphan_grace: int = 30) -> int:
         """看门狗：找出死掉 / 孤儿 / 僵尸的 in-flight 卡。
 
@@ -5099,19 +5250,22 @@ class Hive:
           - orphan_assigned：state=assigned 但一直没 claim，且分派时间早于 now-orphan_grace
                              （worker 一直没来领；刚分派的卡在 grace 内不回收，留给它领）
           - zombie：claim 的 agent 没在 agents/ 登记
-          - stale：claim 的 lease_until 早于 now-minutes（心跳保证活着的 worker 不会过期）
+          - stale：claim 的 lease_until 早于 now-宽限（心跳保证活着的 worker 不会过期）
           - land_lag（只 warn 不回收）：已经有 res 结果却还停在 in-flight，那是 land 的活
-        `minutes` 只管 stale；`orphan_grace`（默认 30）只管 orphan_assigned；
-        `dispatch_unclaimed` 的阈值走环境变量，不新增必填参数（向后兼容）。
+        `minutes=None`（默认）时 stale 按卡的时间预算自动给宽限，避免心跳稍晚
+        就把还在跑的任务判死；显式传值（含 0=立刻回收）则严格按该值，兼容旧脚本。
+        `orphan_grace`（默认 30）只管 orphan_assigned；`dispatch_unclaimed`
+        的阈值走环境变量，不新增必填参数（向后兼容）。
         返回将被/已被回收的卡数量。
         """
         self.fetch()
         cards = self.cards()
         nowdt = now()
-        grace = timedelta(minutes=minutes)
+        # stale 的宽限逐卡计算（见下方 card_grace），不再一刀切 0 分钟。
         ograce = timedelta(minutes=orphan_grace)
         # 每张卡单独算窗口：accept 单用接单窗口（默认 180 分钟），
-        # 其它单仍走 10 分钟快速通道（见 _dispatch_unclaimed_minutes）。
+        # manual/verify 这类定时来接单的放宽到 60 分钟，只有常驻 exec
+        # worker 才走 10 分钟快速通道（见 _dispatch_unclaimed_minutes）。
         candidates: list[dict] = []
         for tid, c in cards.items():
             if c.get("state") not in IN_FLIGHT_STATES:
@@ -5151,10 +5305,27 @@ class Hive:
                 continue
             lease = claim.get("lease_until")
             if lease:
+                # 旧行为：--minutes 默认 0 = 租约刚过期立刻回收。心跳/续租
+                # 稍晚一点就把还在跑的任务判死（近期「还在跑就异常」的现场）。
+                # 改成按这张卡的时间预算给宽限，近期有进度上报的直接豁免。
+                b = task_budget(c)
+                extra = max(STALE_GRACE_MINUTES, b["timeout_minutes"] // 6)
+                # 不传 --minutes：按卡的时间预算自动给宽限，避免心跳稍晚就误杀；
+                # 显式传了（含 0）就严格按用户给的值，保留旧行为与既有脚本兼容。
+                card_grace = timedelta(
+                    minutes=extra if minutes is None else max(0, minutes))
                 try:
-                    expired = parse_iso(lease) < nowdt - grace
+                    expired = parse_iso(lease) < nowdt - card_grace
                 except ValueError:
                     expired = True
+                if expired:
+                    st = self.status_info(tid) or {}
+                    try:
+                        pushed = parse_iso(st.get("updated_at") or "")
+                        if pushed > nowdt - timedelta(minutes=STALE_GRACE_MINUTES):
+                            expired = False   # agent 还在上报进度，别回收
+                    except (ValueError, TypeError):
+                        pass
                 if expired:
                     candidates.append({"id": tid, "reason": "stale", "action": "reclaim"})
 
@@ -6616,6 +6787,29 @@ def cmd_task(args) -> None:
         for tid, c in h.cards().items():
             print(f"{tid} {c.get('state'):<10} {c.get('owner') or '-':<12} {c.get('title')}")
         return
+    if args.action == "retime":
+        rows = h.retime_budgets(apply=bool(getattr(args, "apply", False)))
+        for r in rows:
+            print(f"{r['id']}: timeout {r['old_timeout']}→{r['timeout']}m、"
+                  f"lease {r['old_lease']}→{r['lease']}m  [{r['note']}]")
+        if not rows:
+            print("没有需要调整时间预算的在飞卡")
+        elif getattr(args, "apply", False):
+            print(f"已按复杂度调整 {len(rows)} 张卡（只调大，不调小）")
+        else:
+            print(f"（dry-run：{len(rows)} 张卡待调整；加 --apply 生效）")
+        # 历史卡不改动，但把「当时给短了」的规模报出来，便于复盘出题口径
+        closed_short = 0
+        for _tid, c in h.cards().items():
+            if c.get("state") not in ("done", "closed", "shelved"):
+                continue
+            b = task_budget(c, str(c.get("_body") or ""))
+            if int(c.get("timeout_minutes") or 0) < b["timeout_minutes"]:
+                closed_short += 1
+        if closed_short:
+            print(f"（另有 {closed_short} 张已关闭卡当时预算低于复杂度建议，"
+                  f"历史卡不改动；新卡请用不传 --timeout 的自动估算）")
+        return
     if not args.title or not args.repo:
         raise HiveError("task new 需要 --title 和 --repo")
     ids = [int(p.stem.split("-")[1]) for p in (h.dir / "tasks").glob("T-*.md")
@@ -6628,17 +6822,30 @@ def cmd_task(args) -> None:
         body = Path(args.body_file).read_text(encoding="utf-8")
     elif args.body:
         body = args.body
+    # 没显式给时间就按复杂度估：改一个文档和「40 个文件 + 全量回归」
+    # 不该共用同一个 timeout；lease 还要覆盖派单等待、验收和写结果。
+    draft = {
+        "paths": args.paths or [], "verify": args.verify or [],
+        "needs": args.needs or [], "depends_on": args.depends or [],
+        "priority": args.priority, "complexity": args.complexity or "",
+    }
+    budget = task_budget(draft, body)
+    timeout = args.timeout if args.timeout is not None else budget["timeout_minutes"]
+    lease = args.lease if args.lease is not None else budget["lease_minutes"]
     card = {
         "id": tid, "title": args.title, "repo": args.repo, "base": args.base,
         "state": "ready", "owner": None, "agent": None, "priority": args.priority,
         "needs": args.needs or [], "paths": args.paths or [], "verify": args.verify or [],
-        "depends_on": args.depends or [], "fresh": False, "lease_minutes": args.lease,
-        "timeout_minutes": args.timeout, "created": iso(),
+        "depends_on": args.depends or [], "fresh": False, "lease_minutes": lease,
+        "timeout_minutes": timeout, "created": iso(),
         "max_retries": args.max_retries,
     }
+    if args.complexity:
+        card["complexity"] = args.complexity
     write_card(h.dir / "tasks" / f"{tid}.md", card, body or f"# {args.title}\n")
     h.commit_and_push(f"task: add {tid} {args.title}", [f"tasks/{tid}.md"])
-    log(f"已创建 {tid}")
+    log(f"已创建 {tid}；时间预算 timeout={timeout}m lease={lease}m "
+        f"（{budget['note']}）")
 
 
 DRAFT_TEMPLATE = """---
@@ -7764,7 +7971,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_draft)
 
     s = sub.add_parser("task", help="任务卡")
-    s.add_argument("action", choices=["new", "list"])
+    s.add_argument("action", choices=["new", "list", "retime"])
+    s.add_argument("--apply", action="store_true",
+                   help="retime 才用：真正写回卡面（默认只预演）")
     s.add_argument("--id")
     s.add_argument("--title")
     s.add_argument("--repo", required=False)
@@ -7774,8 +7983,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--paths", nargs="*")
     s.add_argument("--verify", action="append")
     s.add_argument("--depends", nargs="*")
-    s.add_argument("--lease", type=int, default=180)
-    s.add_argument("--timeout", type=int, default=60)
+    s.add_argument("--lease", type=int, default=None,
+                   help="租约分钟；不传按任务复杂度自动估算")
+    s.add_argument("--timeout", type=int, default=None,
+                   help="执行超时分钟；不传按任务复杂度自动估算")
+    s.add_argument("--complexity", choices=sorted(COMPLEXITY_LEVELS),
+                   help="显式声明复杂度档位（覆盖自动评分）")
     s.add_argument("--max-retries", dest="max_retries", type=int,
                    default=DEFAULT_MAX_RETRIES,
                    help="看门狗最多自动回收几次；用尽转 blocked 不再无限重派"
@@ -8069,8 +8282,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("watchdog",
                        help="看门狗：回收死掉/孤儿/僵尸的 in-flight 卡（默认 dry-run）")
-    s.add_argument("--minutes", type=int, default=0,
-                   help="租约过期超过这么久（分钟）才回收，默认 0（立刻）")
+    s.add_argument("--minutes", type=int, default=None,
+                   help="租约过期超过这么久（分钟）才回收；不传按任务复杂度自动给宽限，"
+                        "显式传 0 = 立刻回收（旧行为）")
     s.add_argument("--orphan-grace", dest="orphan_grace", type=int, default=30,
                    help="assigned 但一直没 claim 超过这么久（分钟）才回收，默认 30（刚分派的卡在 grace 内不回收）")
     s.add_argument("--apply", action="store_true", help="真回收；默认只报告")

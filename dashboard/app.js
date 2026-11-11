@@ -20,7 +20,7 @@
     { key: 'ready', title: '待领取', hint: 'state = ready 且无人抢锁' },
     { key: 'running', title: '进行中', hint: '已抢锁 / assigned / running，暂无结果' },
     { key: 'merging', title: '待合入', hint: '结果 done、代码分支已核验到位（land_ready），可跑 hive land；分支缺失的卡会进异常列' },
-    { key: 'abnormal', title: '异常', hint: 'failed / blocked / 租约过期' },
+    { key: 'abnormal', title: '异常', hint: 'failed / blocked / 租约过期 / 不可合入；卡片上带责任 agent 与时间预算' },
     { key: 'recent', title: '最近完成', hint: '已完成中按完成时间倒序的前 N 个（数量可在设置里改）' },
     { key: 'closed', title: '已关闭', hint: '其余已完成的任务（默认折叠）', collapsible: true }
   ];
@@ -234,7 +234,23 @@
       push_step: t.push_step || '',
       push_message: t.push_message || '',
       pushed_at: t.pushed_at || '',
-      push_source: t.push_source || ''
+      push_source: t.push_source || '',
+      // —— 状态一致性 / 异常定位 / 时间预算 ——
+      // normalize 是白名单：漏一个字段，前端就永远拿到 undefined。
+      // land_ready 必须保留三态（true/false/null），老后端没有该字段时按旧行为。
+      land_ready: (t.land_ready === false) ? false
+                  : (t.land_ready === true) ? true : null,
+      land_block: t.land_block || '',
+      local_stale: !!t.local_stale,
+      stale_suspected: !!t.stale_suspected,
+      result_agent: t.result_agent || '',
+      abnormal_agent: t.abnormal_agent || '',
+      timeout_minutes: Number(t.timeout_minutes) || 0,
+      lease_minutes: Number(t.lease_minutes) || 0,
+      budget_score: Number(t.budget_score) || 0,
+      budget_timeout: Number(t.budget_timeout) || 0,
+      budget_lease: Number(t.budget_lease) || 0,
+      budget_note: t.budget_note || ''
     };
   }
 
@@ -242,9 +258,15 @@
 
   /** 租约过期：服务端判定为 true，或租约已到点且任务还没有结果 */
   function isStale(t) {
-    if (t.stale) return true;
+    if (t.stale) return true;   // 服务端已按心跳豁免过，这里直接采信
     var lease = parseTime(t.lease_until);
     if (lease === null || t.result_status) return false;
+    // 前端兜底：worker 刚上报过进度就说明还在跑，租约刚过期也可能只是
+    // 心跳/续租晚了一点。给 15 分钟宽限，别把在跑的任务丢进异常列。
+    if (t.pushed_at) {
+      var pushed = parseTime(t.pushed_at);
+      if (pushed !== null && (Date.now() - pushed) < 15 * 60 * 1000) return false;
+    }
     return lease < Date.now();
   }
 
@@ -627,6 +649,19 @@
     // 免得人拿着「复制合入指令」去跑一条必然 blocked 的命令。
     if (t.land_ready === false && t.land_block) {
       h += '<div class="card-meta">合入受阻：' + esc(t.land_block) + '</div>';
+    }
+
+    // 异常卡必须一眼看到「找谁」：优先抢锁 agent，其次 owner / 派单对象 /
+    // 结果里记的交付 agent。没有就明说没登记，别让人对着空卡猜。
+    if (col === 'abnormal') {
+      var who = t.abnormal_agent || ownerOf(t) || t.result_agent || t.dispatched_to || '';
+      h += '<div class="card-meta">责任 agent：' +
+           (who ? esc(who) : '（未登记：卡面无 owner / claim / 派单对象）') +
+           '</div>';
+      if (t.timeout_minutes && t.budget_timeout > t.timeout_minutes) {
+        h += '<div class="card-meta">超时偏紧：' + t.timeout_minutes +
+             ' 分钟（复杂度建议 ' + t.budget_timeout + ' 分钟）</div>';
+      }
     }
 
     // —— agent 主动上报的进度：进度条 + 当前阶段 + 一句话状态 + 最后通信时间 ——
@@ -1482,9 +1517,20 @@
       ['仓库', t.repo],
       ['owner', ownerOf(t) || ''],
       ['抢锁 agent', t.claim_agent || ''],
+      ['结果 agent', t.result_agent || ''],
+      ['责任 agent', t.abnormal_agent || ownerOf(t) || t.result_agent || ''],
       ['commit', t.head, true],
       ['耗时', formatDuration(t.duration_s)],
       ['依赖', t.depends_on.length ? t.depends_on.join('、') : '']
+    ]);
+
+    h += kvBlock('时间预算', [
+      ['执行超时', t.timeout_minutes ? t.timeout_minutes + ' 分钟' : ''],
+      ['租约', t.lease_minutes ? t.lease_minutes + ' 分钟' : ''],
+      ['复杂度评分', String(t.budget_score || 0)],
+      ['按复杂度建议', t.budget_timeout
+        ? t.budget_timeout + ' / ' + t.budget_lease + ' 分钟（超时 / 租约）' : ''],
+      ['估算依据', t.budget_note || '']
     ]);
 
     // 搁置卡点开详情，第一眼就要看到「为什么停」和「以后怎么办」
