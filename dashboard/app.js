@@ -2351,11 +2351,27 @@
     if (!el.upgradeBar) return;
     if (!upgradeInfo) { el.upgradeBar.hidden = true; return; }
     el.upgradeBar.hidden = false;
-    el.upgradeVersion.textContent = 'v' + (upgradeInfo.local_version || '—');
+    // 本地版本与已发布版本不一致时，顶栏只写本地版本会误导：用户看到
+    // v0.16.03 以为集群也在这个版本，点一键升级却提示 0.16.02（真实现场）。
+    // 这里如实并列两者，并把「未发布」标出来。
+    var localV = upgradeInfo.local_version || '';
+    var remoteV = upgradeInfo.remote_version || '';
+    var skew = !!(localV && remoteV && localV !== remoteV);
+    el.upgradeVersion.textContent = 'v' + (localV || '—') +
+      (skew ? ' / 已发布 v' + remoteV : '');
     el.upgradeVersion.title =
-      '本地 ' + (upgradeInfo.local_version || '?') +
-      (upgradeInfo.remote_version ? '；主控 ' + upgradeInfo.remote_version : '；主控未发布') +
+      '本地 ' + (localV || '?') +
+      (remoteV ? '；已发布 ' + remoteV : '；未发布') +
+      (skew ? '（本地版本还没 publish，一键节点升级会拒绝执行）' : '') +
       '；策略 ' + (upgradeInfo.policy || '?');
+    if (skew && el.upgradePublish) {
+      // 错位时把「发布升级」标成主操作：下一步该做的是发布，不是升级节点。
+      el.upgradePublish.classList.add('primary');
+      el.upgradeVersion.classList.add('skew');
+    } else if (el.upgradePublish) {
+      el.upgradePublish.classList.remove('primary');
+      el.upgradeVersion.classList.remove('skew');
+    }
     var can = !!upgradeInfo.update_available;
     el.upgradeApply.hidden = !can;
     if (can) {
@@ -2365,10 +2381,20 @@
     el.upgradePublish.hidden = !upgradeCanPublish;
     if (el.upgradeRollout) {
       // 一键节点升级是主控动作，且必须有已发布版本可下发。
+      // 版本错位（本地 > 已发布 = 忘了 publish）时置灰，点之前就说清原因，
+      // 别让人点完才收到「先 publish」。
       el.upgradeRollout.hidden = !(upgradeCanPublish && upgradeInfo.remote_version);
+      el.upgradeRollout.disabled = skew;
+      el.upgradeRollout.title = skew
+        ? ('本地 v' + localV + ' 还没发布（已发布 v' + remoteV +
+           '）；先点「发布升级」')
+        : '把当前发布版本下发到每台落后节点（一键节点升级，需要 controller）';
     }
-    el.upgradePublish.title = '把本机版本发布给集群（' +
-      (upgradeCanPublish ? '当前是 controller' : '需要 controller 角色') + '）';
+    el.upgradePublish.title = skew
+      ? ('把本地 v' + localV + ' 发布给集群（当前已发布 v' + remoteV +
+         '）；发布后才能一键节点升级')
+      : ('把本机版本发布给集群（' +
+         (upgradeCanPublish ? '当前是 controller' : '需要 controller 角色') + '）');
   }
 
   function refreshUpgrade() {

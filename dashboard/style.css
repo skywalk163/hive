@@ -1306,3 +1306,10 @@ body.drawer-open .chat-fab { display: none; }
 @media (prefers-reduced-motion: reduce) {
   .plan-progress .bar i { transition: none; }
 }
+
+/* 升级版本条：本地版本与「已发布」不一致（改了版本号但没 publish）时，
+   顶栏并列显示两者并高亮，避免「顶栏 0.16.03、按钮提示 0.16.02」的困惑。 */
+#upgrade-version.skew {
+  color: #b45309;
+  font-weight: 600;
+}

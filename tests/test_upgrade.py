@@ -318,3 +318,44 @@ def test_rollout_without_restart_leaves_process_alone(world, monkeypatch):
                         lambda: scheduled.append(1) or True)
     assert h._upgrade_rollout({"remote_version": "0.16.00"}, as_json=True) == 0
     assert scheduled == [], "没要 --restart 却安排了重启"
+
+
+def test_rollout_refuses_when_local_version_not_published(world, monkeypatch):
+    """本地改了 VERSION 却没 publish：拒绝下发，并指明先 publish。
+
+    现场（2026-11-11）：顶栏显示 0.16.03，按「一键节点升级」却提示
+    「升级到 0.16.02」。根因是 rollout 取 release.json 的 remote_version，
+    而主控自己把 VERSION 提到 0.16.03 后没重新 publish。旧代码还会把主控
+    无条件标成「落后」，打出 `fb98 0.16.03 → 0.16.02` 这种像降级的行，
+    并真的跑一次 apply（只回「已是最新」）。
+    """
+    h = hive.Hive(world.hive1)
+    _fake_state(monkeypatch, [_node("self-1", "fb98", "0.16.03")],
+                self_name="fb98", self_id="self-1")
+    sent = []
+    monkeypatch.setattr(hive, "_cluster_http",
+                        lambda *a, **kw: sent.append(1) or (200, {"ok": True}))
+    monkeypatch.setattr(h, "cmd_upgrade", lambda *a, **kw: sent.append(1) or 0)
+
+    rc = h._upgrade_rollout({"local_version": "0.16.03",
+                             "remote_version": "0.16.02"}, as_json=True)
+    assert rc == 1, "版本错位时不该继续下发"
+    assert not sent, "版本错位时仍然下发了升级"
+
+
+def test_rollout_allows_when_versions_match(world, monkeypatch):
+    """版本一致时正常下发（别把上面那道闸做成一律拒绝）。"""
+    h = hive.Hive(world.hive1)
+    _fake_state(monkeypatch, [
+        _node("self-1", "fb98", "0.16.03"),
+        _node("n-old", "win-old", "0.16.02"),
+    ], self_name="fb98", self_id="self-1")
+    hits = []
+    monkeypatch.setattr(hive, "_cluster_http",
+                        lambda *a, **kw: hits.append(kw.get("url")) or
+                        (200, {"ok": True}))
+    monkeypatch.setattr(h, "cmd_upgrade", lambda *a, **kw: 0)
+    rc = h._upgrade_rollout({"local_version": "0.16.03",
+                             "remote_version": "0.16.03"}, as_json=True)
+    assert rc == 0
+    assert hits == ["http://10.0.0.9:8788"]

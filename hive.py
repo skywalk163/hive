@@ -4217,17 +4217,47 @@ class Hive:
             except HiveError:
                 behind = True          # 版本号不认识（老节点写死 1.0 之类）
             if nid in (me, my_node):
-                # 本机（主控）：它在升级前一定「落后」——代码还没换、进程还跑着
-                # 旧版本，节点表里的 version 自然不是新版本。必须按 id 判定，
-                # 不能按名字：同名的机器/改名后会误判成别人，于是主控自己
-                # 被当成「已是最新」跳过，一键升级永远落不到主控身上。
-                behind = True
+                # 本机（主控）按 id 判定，不能按名字：同名机器/改名后会误判成
+                # 别人。但**不能无条件当成落后** —— 本地版本若已高于发布版本
+                # （典型：改了 VERSION 却忘了 `upgrade publish`），那它不是
+                # 「落后」，而是「发布信息过期」。以前无条件置 True，会打出
+                # 「fb98 0.16.03 → 0.16.02」这种看着像降级的行，还会真的去
+                # 跑一次 apply（只会回「已是最新」，pure noise）。
+                # 这种情况留给下面的发布一致性检查统一处理。
+                try:
+                    local_ahead = compare_versions(ver, remote_v) > 0 if ver else False
+                except HiveError:
+                    local_ahead = False
+                behind = not local_ahead
             if not behind:
                 rows.append({"node": n.get("name") or nid, "id": nid,
                              "skipped": True, "reason": f"已是 {ver or '?'}"})
                 continue
             rows.append({"node": n.get("name") or nid, "id": nid,
                          "url": n.get("url") or "", "from": ver})
+
+        # 发布信息与本地代码不一致时，**先别下发**：这说明主控自己还没
+        # publish，集群里其它机器的 release.json 也还指着旧版本。此时强行
+        # rollout 只会让所有节点「升级到一个比主控还旧的版本」，而且面板上
+        # 顶栏写 0.16.03、按钮写 0.16.02，没人能判断哪个是真的。
+        local_v = str(info.get("local_version") or "")
+        try:
+            skewed = bool(local_v and remote_v
+                          and compare_versions(local_v, remote_v) != 0)
+        except HiveError:
+            skewed = False
+        if skewed:
+            msg = (f"本地版本 {local_v} 与已发布版本 {remote_v} 不一致："
+                   f"代码改了但没发布。先跑 `hive upgrade publish` "
+                   f"把 {local_v} 发布出去，再执行一键节点升级。")
+            if as_json:
+                print(json.dumps({"target": remote_v, "skew": True,
+                                  "local_version": local_v, "results": [],
+                                  "error": msg}, ensure_ascii=False, indent=2))
+                return 1
+            print(f"发布信息已过期：本地 {local_v}，已发布 {remote_v}")
+            print(msg, file=sys.stderr)
+            return 1
 
         results = []
         for row in rows:
