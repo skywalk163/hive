@@ -89,6 +89,7 @@ API_DISPATCH_PROMPT = "/api/dispatch-prompt"
 API_CHAT = "/api/chat"
 API_PLANS = "/api/plans"
 API_UPGRADE = "/api/upgrade"
+API_SESSION = "/api/session"
 
 # ---- 看板聊天框（跨机留言）----
 # 真身住在集群（每个节点 ~/.hive/cluster/chat.jsonl + 2 秒增量同步），
@@ -144,11 +145,35 @@ SHELF_ACTIONS = ("shelve", "unshelve", "respawn")
 #   * HIVE_DASH_AUTH=on     任何来源都要 token
 #   * HIVE_DASH_AUTH=auto   默认：非 loopback 绑定 → 要 token
 # token 来源（依次尝试）：Authorization: Bearer / X-Hive-Token / hive_token cookie。
-# cookie 由 POST /api/login 写入（HttpOnly；看板本身还要能读，所以不用 SameSite=None）。
+# cookie 由 POST /api/login 写入（HttpOnly，长效；SameSite=Lax 让「从别的页面点链接
+# 打开看板」也能带上，同时挡掉跨站 POST）。登录态由 GET /api/session 自检。
 AUTH_MODE_ENV = "HIVE_DASH_AUTH"
 COOKIE_NAME = "hive_token"
 LOGIN_PATH = "/api/login"
+LOGOUT_PATH = "/api/logout"
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+# 登录态保留多久（天）。默认 30 天：`hive agent enroll` 生成的 token 本身没有过期
+# 时间，除非人工轮换（轮换会吊销旧 token，此时 /api/session 会返回未登录）。
+# 设 0 表示「会话 cookie」——关掉浏览器就失效，适合共用机器。
+# 上限 365 天，避免写错一个 99999 让 cookie 变成永久凭证。
+SESSION_DAYS_ENV = "HIVE_DASH_SESSION_DAYS"
+SESSION_DAYS_DEFAULT = 30
+SESSION_DAYS_MAX = 365
+
+
+def _session_days() -> int:
+    """读 cookie 有效期（天）；非法值回落到默认。"""
+    raw = (os.environ.get(SESSION_DAYS_ENV) or "").strip()
+    if not raw:
+        return SESSION_DAYS_DEFAULT
+    try:
+        days = int(float(raw))
+    except ValueError:
+        return SESSION_DAYS_DEFAULT
+    if days < 0:
+        return SESSION_DAYS_DEFAULT
+    return min(days, SESSION_DAYS_MAX)
 
 
 def _auth_mode(bind_host: str) -> str:
@@ -606,6 +631,9 @@ def build_handler(status_path, write_auth="off"):
             if path == API_UPGRADE:
                 self.serve_upgrade_get()
                 return
+            if path == API_SESSION:
+                self.serve_session()
+                return
             entry = STATIC_FILES.get(path)
             if entry is None:
                 self._send_json(404, {"error": "未找到资源: %s" % path})
@@ -672,6 +700,9 @@ def build_handler(status_path, write_auth="off"):
             if path == API_UPGRADE:
                 self.serve_upgrade_post()
                 return
+            if path == LOGOUT_PATH:
+                self.serve_logout()
+                return
             self._send_json(404, {"error": "未找到资源: %s" % path})
 
         # ---- /api/login：写入 HttpOnly cookie，后续写操作凭它鉴权 ----
@@ -692,12 +723,57 @@ def build_handler(status_path, write_auth="off"):
                               "detail": "token 无效"})
                 self._send_json(401, {"ok": False, "error": "token 无效或已吊销"})
                 return
-            cookie = ("%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400"
-                      % (COOKIE_NAME, who.get("token") or str(body.get("token")).strip()))
+            cookie = ("%s=%s; Path=/; HttpOnly; SameSite=Lax%s"
+                      % (COOKIE_NAME, who.get("token") or str(body.get("token")).strip(),
+                         self._cookie_max_age()))
             append_audit({"action": "login", "ok": True, "agent": who.get("agent"),
                           "role": who.get("role"), "source": self.client_address[0]})
             self._send_json(200, {"ok": True, "agent": who.get("agent"),
-                                  "role": who.get("role")},
+                                  "role": who.get("role"),
+                                  "persistent": _session_days() > 0,
+                                  "expires_in": _session_days() * 86400},
+                            extra_headers={"Set-Cookie": cookie})
+
+        def _cookie_max_age(self) -> str:
+            """cookie 有效期后缀。0 天 = 会话 cookie（不带 Max-Age）。"""
+            days = _session_days()
+            return "" if days <= 0 else "; Max-Age=%d" % (days * 86400)
+
+        def serve_session(self):
+            """GET /api/session：前端自检「我现在算登录了吗」。
+
+            不返回 401——未登录也是一种正常状态，页面要据此把按钮显示成「登录」。
+            token 被轮换/吊销后这里立刻变成 authenticated=false，用户点一下重新登录即可。
+            """
+            if write_auth == "off":
+                self._send_json(200, {
+                    "ok": True, "authenticated": True, "mode": "off",
+                    "agent": "loopback", "role": "controller",
+                    "session_days": _session_days(),
+                })
+                return
+            who = _resolve_dashboard_token(self.client_token())
+            if not who:
+                self._send_json(200, {
+                    "ok": True, "authenticated": False, "mode": "on",
+                    "agent": "", "role": "",
+                    "session_days": _session_days(),
+                })
+                return
+            self._send_json(200, {
+                "ok": True, "authenticated": True, "mode": "on",
+                "agent": who.get("agent"), "role": who.get("role"),
+                "session_days": _session_days(),
+            })
+
+        def serve_logout(self):
+            """POST /api/logout：清掉 cookie（换身份 / 共用机器时用）。"""
+            who = _resolve_dashboard_token(self.client_token()) or {}
+            cookie = ("%s=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+                      % COOKIE_NAME)
+            append_audit({"action": "logout", "ok": True, "agent": who.get("agent"),
+                          "role": who.get("role"), "source": self.client_address[0]})
+            self._send_json(200, {"ok": True},
                             extra_headers={"Set-Cookie": cookie})
 
         def _read_length(self) -> int:

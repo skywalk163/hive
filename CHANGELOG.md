@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.16.01 — 2026-11-11
+
+### Added
+
+- **看板登录态可保留**：登录成功后 cookie 从 24 小时改为**默认 30 天**
+  （`HIVE_DASH_SESSION_DAYS` 可调，设 0 = 关浏览器就失效），刷新页面、第二天
+  打开都不必再粘 token。新增 `GET /api/session` 让前端启动时用 cookie 反查身份，
+  按钮直接显示「已登录：<agent>」；新增 `POST /api/logout` 与「退出登录」按钮，
+  换 token / 共用机器时一键清掉。token 轮换后 `/api/session` 会立刻返回未登录。
+- **看板「集群」页版本号跟随 hive 版本**：节点自述的 `version` 以前是写死的
+  `1.0`，现在进程启动时读 `hive.py` 的 `VERSION`。升级但未重启的节点仍显示旧
+  版本（事实如此），可据此判断「该重启了」。
+
+### Changed
+
+- 登录 cookie 的 `SameSite` 由 `Strict` 放宽为 `Lax`：从聊天/文档里点链接打开
+  看板时也能带上登录态；跨站 POST 依旧不带，写操作仍有 token 兜底。
+
 ## 0.16.00 — 2026-11-11
 
 ### Added

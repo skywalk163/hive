@@ -9,6 +9,9 @@
   var TICK_MS = 30000;      // 相对时间（已领取 / 租约剩余）的自行重算间隔
   var STORE_THEME = 'hive.theme';
   var STORE_AUTO = 'hive.autoRefresh';
+  // 登录态缓存：只存「上次登录的 agent 名」，用来首帧直接把按钮画成「已登录」。
+  // token 本身从不落 localStorage（它在 HttpOnly cookie 里），所以这里最多泄露一个名字。
+  var STORE_AUTH = 'hive.auth.agent';
   var MAX_RECENT = 50;                              // 「最近完成」硬上限，防止误设过大
   var DEFAULT_RECENT_COUNT = 8;                     // 「最近完成」默认展示条数
   var STORE_SETTINGS = 'hive.settings';             // 个人设置（稀疏对象，仅存用户改过的项）
@@ -332,6 +335,7 @@
     el.upgradeApply = document.getElementById('upgrade-apply');
     el.upgradePublish = document.getElementById('upgrade-publish');
     el.banner = document.getElementById('banner');
+
     el.panel = document.getElementById('state-panel');
     el.columns = document.getElementById('columns');
     // 搁置面板（独立于 .columns：不占列宽，也不参与列显隐设置）
@@ -367,7 +371,8 @@
     el.auto = document.getElementById('auto-refresh');
     el.refresh = document.getElementById('refresh-now');
     el.loadFile = document.getElementById('load-file');
-  el.login = document.getElementById('login-btn');
+    el.login = document.getElementById('login-btn');
+    el.logout = document.getElementById('logout-btn');
     el.fileInput = document.getElementById('file-input');
     el.theme = document.getElementById('theme-toggle');
     el.overlay = document.getElementById('overlay');
@@ -1764,6 +1769,7 @@
 
     // 登录：写操作需要 token 时，把 token 换成一个 HttpOnly cookie（不在页面里留明文）
     if (el.login) el.login.addEventListener('click', loginWithToken);
+    if (el.logout) el.logout.addEventListener('click', logoutSession);
 
     el.overlay.addEventListener('click', closeDrawer);
 
@@ -2319,11 +2325,79 @@
          respawn: '另立新卡' })[action] || action;
   }
 
+  // ---------- 登录态：HttpOnly cookie 长效保存 + 启动自检 ----------
+  // 以前登录成功后只改了按钮文字，刷新页面就退回「登录」——cookie 其实还在，
+  // 用户却以为没登录，又粘一遍 token。现在启动时用 GET /api/session 反查身份，
+  // 只要 cookie 没被清/没被轮换吊销，按钮直接显示「已登录：<agent>」。
+  var auth = { authenticated: false, agent: '', role: '', mode: 'on', checked: false };
+
+  function paintAuth() {
+    if (!el.login) return;
+    if (auth.authenticated) {
+      el.login.textContent = auth.mode === 'off'
+        ? '本机直连' : ('已登录：' + (auth.agent || '?'));
+      el.login.title = auth.mode === 'off'
+        ? '看板绑在回环地址，写操作免鉴权（登录态不适用）'
+        : ('角色：' + (auth.role || '?') +
+           (auth.session_days ? '；登录态保留 ' + auth.session_days + ' 天' : '') +
+           '（点一下可换 token）');
+      el.login.classList.add('logged-in');
+      if (el.logout) el.logout.hidden = auth.mode === 'off';
+    } else {
+      el.login.textContent = '登录';
+      el.login.title = '写操作需要 token 时在这里登录';
+      el.login.classList.remove('logged-in');
+      if (el.logout) el.logout.hidden = true;
+    }
+  }
+
+  function applyAuth(info) {
+    info = info || {};
+    if (info.mode) auth.mode = info.mode;
+    auth.authenticated = info.authenticated === undefined
+      ? !!info.ok : !!info.authenticated;
+    auth.agent = info.agent || '';
+    auth.role = info.role || '';
+    if (info.session_days !== undefined) auth.session_days = info.session_days;
+    auth.checked = true;
+    // token 不进 localStorage（在 HttpOnly cookie 里），这里只缓存名字做首帧渲染
+    storeSet(STORE_AUTH, auth.authenticated ? auth.agent : '');
+    paintAuth();
+  }
+
+  /** 用 cookie 反查当前身份；cookie 有效就不必再输 token。 */
+  function refreshSession() {
+    return fetch('/api/session', {
+      cache: 'no-store', headers: { Accept: 'application/json' }
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { if (j && j.ok) applyAuth(j); return j; })
+      .catch(function () { return null; });
+  }
+
+  /** 写操作遇到 401：cookie 没了或被吊销，别再假装已登录。 */
+  function noteAuthRequired() {
+    if (auth.mode === 'off' || !auth.authenticated) return;
+    auth.authenticated = false;
+    storeSet(STORE_AUTH, '');
+    paintAuth();
+  }
+
+  function logoutSession() {
+    if (!window.confirm('退出登录？退出后写操作需要重新填 token。')) return;
+    fetch('/api/logout', { method: 'POST', cache: 'no-store' })
+      .then(function () {
+        applyAuth({ authenticated: false, agent: '', role: '', mode: auth.mode });
+        flash('已退出登录');
+      })
+      .catch(function (e) { flash('退出失败：' + e.message, true); });
+  }
+
   /** 登录：token → POST /api/login → 服务端写 HttpOnly cookie，后续写操作自动带上。 */
   function loginWithToken() {
     var token = window.prompt(
       '写操作需要 token（hive agent enroll <controller> 生成，或用 hive_whoami 里那份）。\n' +
-      'token 只会换成 cookie，不在页面里存明文。\n\n粘贴 token：', '');
+      'token 只会换成 cookie（默认保留 ' + (auth.session_days || 30) + ' 天），不在页面里存明文。\n\n粘贴 token：', '');
     if (token === null) return;
     token = token.trim();
     if (!token) return;
@@ -2336,11 +2410,12 @@
       .then(function (r) { return r.json().then(function (j) { return { status: r.status, j: j }; }); })
       .then(function (res) {
         if (res.j && res.j.ok) {
-          flash('已登录：' + (res.j.agent || '') + '（' + (res.j.role || '') + '）', false);
-          if (el.login) {
-            el.login.textContent = '已登录：' + (res.j.agent || '');
-            el.login.title = '角色：' + (res.j.role || '') + '（换 token 再点一次）';
-          }
+          applyAuth({ authenticated: true, agent: res.j.agent, role: res.j.role,
+                      mode: 'on', session_days: res.j.expires_in
+                        ? Math.round(res.j.expires_in / 86400) : auth.session_days });
+          flash('已登录：' + (res.j.agent || '') + '（' + (res.j.role || '') + '）' +
+                (res.j.persistent === false ? '；本次为会话 cookie，关浏览器失效' : '；下次打开无需再输'),
+                false);
         } else {
           flash('登录失败：' + ((res.j && res.j.error) || ('HTTP ' + res.status)), true);
         }
@@ -2370,6 +2445,7 @@
           if (action === 'respawn') state.shelfOpen = true;
           loadStatus();
         } else {
+          if (res.status === 401) noteAuthRequired();
           flash('操作失败：' + ((res.j && res.j.error) || ('HTTP ' + res.status)), true);
         }
       })
@@ -2786,6 +2862,7 @@
       .then(function (res) {
         if (!res.ok) {
           if (res.status === 401) {
+            noteAuthRequired();
             flash('发送需要登录：点右上角「登录」填 token', true);
           } else if (res.data && res.data.usage &&
                      /^\s*(?:\/plan|@command:plan)\b/i.test(text)) {
@@ -3127,7 +3204,7 @@
       .then(function (res) {
         if (!res.data || !res.data.ok) {
           var msg = (res.data && res.data.error) || ('HTTP ' + res.status);
-          if (res.status === 401) msg = '需要登录：点右上角「登录」填 token';
+          if (res.status === 401) { noteAuthRequired(); msg = '需要登录：点右上角「登录」填 token'; }
           planFormError(msg);
           return;
         }
@@ -3162,7 +3239,7 @@
       .then(function (res) {
         if (!res.data || !res.data.ok) {
           var msg = (res.data && res.data.error) || ('HTTP ' + res.status);
-          if (res.status === 401) msg = '需要登录：点右上角「登录」填 token';
+          if (res.status === 401) { noteAuthRequired(); msg = '需要登录：点右上角「登录」填 token'; }
           else if (res.status === 403) msg = '权限不足：' + msg;
           flash(verb + '失败：' + msg, true);
           return;
@@ -3261,6 +3338,13 @@
     loadStatus();
     loadCI();
     loadCluster();
+    // 登录态自检：先按上次登录的 agent 名把按钮画好（首帧不闪「登录」），
+    // 再用 cookie 向服务端核对——cookie 有效就继续是「已登录」，无需再输 token。
+    var cachedAgent = storeGet(STORE_AUTH);
+    if (cachedAgent) {
+      applyAuth({ authenticated: true, agent: cachedAgent, mode: 'on' });
+    }
+    refreshSession();
     loadPlans({ quiet: true });   // 计划与任务解耦：任务快照失败也要能看计划
     setInterval(loadCluster, CLUSTER_MS);
     loadServerConfig();        // 拉取服务端共享默认与系统只读信息

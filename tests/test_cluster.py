@@ -771,6 +771,19 @@ def test_priority_is_broadcast_in_self_node(cluster_factory):
     assert a._self_node()["electable"] is True
 
 
+def test_self_node_reports_hive_version(cluster_factory):
+    """看板「集群」页的版本列来自节点自述，必须跟着 hive 版本走。
+
+    以前这里写死 "1.0"，集群页永远显示 1.0，跟 `hive --version` 脱节，
+    升级后也看不出谁还在跑旧代码。
+    """
+    a = cluster_factory("a")
+    version = a._self_node()["version"]
+    assert version == hc.CLUSTER_VERSION
+    assert version == hive.VERSION, (version, hive.VERSION)
+    assert version != "1.0"
+
+
 def test_higher_priority_gets_shorter_delay(cluster_factory):
     """优先级高的等得更短，于是先发起选举、先当选。"""
     a = cluster_factory("a", leader_priority=1)

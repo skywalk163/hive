@@ -158,6 +158,8 @@ body {
 .btn:hover { border-color: var(--border-strong); }
 .btn.icon { padding: 5px 7px; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* 已登录：给按钮一个「在线」的底色，一眼区分「要不要再填 token」 */
+.btn.logged-in { color: var(--ok); border-color: var(--ok); background: var(--ok-bg); }
 
 .meta { font-size: 12px; color: var(--muted); gap: 4px 14px; }
 .source { color: var(--muted); }

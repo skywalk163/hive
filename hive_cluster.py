@@ -63,7 +63,32 @@ from urllib.parse import parse_qs, urlparse
 # --------------------------------------------------------------------------- #
 
 PROTOCOL = 1
-CLUSTER_VERSION = "1.0"
+
+
+def _detect_hive_version() -> str:
+    """取「本进程正在跑的 hive 版本」，给节点自述和 User-Agent 用。
+
+    以前这里是写死的 ``"1.0"``，看板「集群」页每个节点都显示 1.0，跟
+    `hive --version` 完全脱节，升级后也看不出谁跑旧代码。现在改成进程启动时
+    读同目录 hive.py 的 ``VERSION`` 常量：
+
+    * 读的是**启动那一刻**的文件内容，所以升级但没重启的进程仍报旧版本——
+      这正好是事实（它跑的还是旧代码），看板据此能发现「该重启了」。
+    * 只读文件不做 import，避免 hive.py ↔ hive_cluster.py 循环导入（hive.py
+      是懒加载本模块的，反向在顶部 import 会炸）。
+    * 读不到就退回 ``"0.0.00"``，宁可显示未知，也不要谎报版本。
+    """
+    try:
+        path = Path(__file__).resolve().with_name("hive.py")
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    m = re.search(r'^VERSION\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return m.group(1).strip() if m else ""
+
+
+# 节点自述里的 version（看板「集群」页那一列）。取不到时用 0.0.00。
+CLUSTER_VERSION = _detect_hive_version() or "0.0.00"
 
 # 端口默认值只在 hive_ports.py 定义一次；缺模块时退回内置值。
 try:
