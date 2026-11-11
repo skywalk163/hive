@@ -2395,6 +2395,11 @@
 
   /** 登录：token → POST /api/login → 服务端写 HttpOnly cookie，后续写操作自动带上。 */
   function loginWithToken() {
+    // 回环绑定（auth off）时写操作本来就免鉴权，点「本机直连」不该再弹 token 输入框
+    if (auth.mode === 'off') {
+      flash('本机直连：写操作免鉴权，不需要 token');
+      return;
+    }
     var token = window.prompt(
       '写操作需要 token（hive agent enroll <controller> 生成，或用 hive_whoami 里那份）。\n' +
       'token 只会换成 cookie（默认保留 ' + (auth.session_days || 30) + ' 天），不在页面里存明文。\n\n粘贴 token：', '');
