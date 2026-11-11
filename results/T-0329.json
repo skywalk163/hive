@@ -1,0 +1,54 @@
+{
+  "task": "T-0329",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0329",
+  "base": "main",
+  "head": "7baa1c1f458e5c7f3e749bdfd57b72ab5ca9e0dc",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-11T22:15:53+08:00",
+  "finished_at": "2026-11-11T22:27:09+08:00",
+  "duration_s": 676.4,
+  "verify": [
+    {
+      "cmd": "python hive.py doctor",
+      "code": 0,
+      "tail": [
+        "[WARN] T-0332: blocked（等资源/等外部条件）",
+        "[WARN] T-0334: blocked（等资源/等外部条件）",
+        "[WARN] store 状态与 Git 卡面不一致（52 张）：T-0001(卡面done/storeclaimed), T-0196(卡面done/storeblocked), T-0201(卡面done/storeassigned), T-0202(卡面done/storeready), T-0203(卡面done/storeready), T-0204(卡面done/storeready) … —— hive repair --apply 可对齐",
+        "[WARN] Git 有归档结果但 store.results 缺记录（167 张）：T-0002, T-0003, T-0004, T-0005, T-0100, T-0101 … —— Git 侧归档完整，land 读 Git 不受影响；多为历史结果已归档或本机 store 尚未从 leader 追平，若看板/claim 视图缺结果再核对副本水位",
+        "[ OK ] 214 张任务，17 个 agent，0 个进行中租约，0 个待合入结果（另有 6 个残留 res 分支）"
+      ]
+    },
+    {
+      "cmd": "python hive.py agent list",
+      "code": 0,
+      "tail": [
+        "trae-mac         host=laiweilidemacbook-air.local abilities=['code', 'docs', 'verify'] caps=['macos', 'gui'] manual",
+        "trae-win         host=win10    abilities=['code', 'docs', 'verify'] caps=['gui', 'windows', 'linux']   [接单]",
+        "workbuddy-win11  host=desktop-ic6rtq4 abilities=['code', 'docs', 'verify'] caps=['windows', 'gui'] manual",
+        "workbuddy        host=fb98     abilities=['docs', 'review', 'gui', 'verify'] caps=['gui', 'chroot', 'linux'] manual",
+        "workbuddyai-win  host=win10    abilities=['code', 'docs', 'verify'] caps=['windows', 'gui', 'linux']   [接单]"
+      ]
+    }
+  ],
+  "summary": "# T-0329 工作说明：登记 lightprism 仓到 hive\n\n领卡：`hive_claim(T-0329)`，worktree `C:\\Users\\skywalk\\.hive\\wt\\workbuddyai-win\\T-0329`，基线 `bff14e3`。\n\n## 改动（只动 paths 内 3 个文件）\n\n给三份 `agents/*.json` 的 `repos` 各新增一个键，**值按卡面表格字面统一为 `/home/skywalk/dswork/lightprism`**：\n\n| 文件 | 新增 |\n|---|---|\n| `agents/fb88-dsh.json` | `\"lightprism\": \"/home/skywalk/dswork/lightprism\"` |\n| `agents/workbuddy.json` | 同上 |\n| `agents/raccoon-ic6.json` | 同上 |\n\n- `git diff --stat`：3 files changed, 6 insertions(+), 3 deletions(-)。除 `repos` 新增键外**无任何字段改动**；`mode` / `manual` / `dispatchable` / `abilities` / `capabilities` / `worktrees` 等全部原样保留（脚本用 `json.loads` 前后整体比对断言过）。\n- 三份文件原为 CRLF，逐字节改写保持了原缩进、key/value 间距与 CRLF 行尾（每份 CRLF 数恰好 +1）。\n- 未写任何 token/密钥；未新建 Gitea 仓；未动其它任务卡或其它 agent 配置。\n\n## 前置核实（卡面第 1 步）\n\n- `curl http://192.168.1.5:3000/api/v1/repos/skywalk/lightprism` → **HTTP 200**（仓已存在）。\n- `ssh workbuddy@192.168.0.88`（免密可用；目录属主不同，用只读 `git -c safe.directory=... -C ...` 查询，未改全局配置）：\n  - 远端三条齐全：`gitcode` / `github` / `origin`(gitea `http://192.168.1.5:3000/skywalk/lightprism.git`)；\n  - `main` HEAD = `bf9d948 docs(tasks): 收入 Demo 开发任务书（7 张卡全文）`（比卡面提到的 `90b3951` 更新，满足「或更新」）。\n- 六张后续卡 `tasks/T-0330.md` … `T-0335.md` 的 `repo` 均为 `lightprism`。\n\n## 验收结果（在 worktree 根目录，Windows / Python 3.13.14）\n\n| 判据 | 结果 |\n|---|---|\n| `python hive.py doctor` | **rc=0**，`[ OK ] 214 张任务，17 个 agent，0 个进行中租约，0 个待合入结果（另有 6 个残留 res 分支）` |\n| `python hive.py agent list` | **rc=0**，17 行，三台目标 agent 均在列（`fb88-dsh [可派]`、`raccoon-ic6`、`workbuddy`） |\n\n- 改动前后 doctor **都是 `[ERR] 0 条`**（before/after 逐行 grep 对比），`[OK]` 汇总行完全一致；本卡没有新增错误，也不存在原有「lightprism 未被登记」类错误需要消除（doctor 本身不对已转正任务卡跑 `draft_lint`）。\n- doctor 输出里新增 3 条 **WARN**：`agent <name>: 本机看不到 lightprism=/home/skywalk/dswork/lightprism（可能不在本机）`。这是 `hive.py:3788` 的 `Path(path).exists()` 路径可见性警告——本机是 Windows，所有 Linux 路径都会命中同类 WARN；属警告非错误，与基线上已有的几十条同型 WARN 同类。\n- 额外直接调用 `hive.draft_lint()` 对六张卡逐一判定（未改任何文件）：\n  ```\n  T-0330/0331/0332/0333/0334/0335：repo=lightprism，「没有任何 agent 登记」错误 = 0/0/0/0/0/0，合计 0\n  ```\n  即「永远派不出去」的根因已消除；登记 lightprism 的 agent 共 **3 台**，其中 `fb88-dsh` 为 **`dispatchable=True`**，满足「≥2 台且 ≥1 台 dispatchable」。\n- `draft_lint` 对 T-0332/0334/0335 仍有 1 条 `没有强验收：全是 grep/test -f …` 错误，是这三张卡自身的 verify 列表问题，**改动前后一致、与本卡无关**，且卡面禁止改其它任务卡，故未处理。\n\n## 需要主控留意的两处卡面事实偏差（未擅自改判据）\n\n1. **`raccoon-ic6` 并不是 Linux agent**：`capabilities=[\"windows\",\"gui\"]`、host `desktop-ic6rtq4`，其 `repos` 全是 `C:/dswork/...`，同主机的 `workbuddy-win11.json` 也是 `C:/dswork/...`；`git log` 显示 `e6a8f88 登记 agent raccoon-ic6 (接入本机 C:/dswork)`、`5629ace … 登记 light/lighthive/lightmem/lightharness`。卡面「本卡只处理三台 Linux/内网 agent」「raccoon-ic6 有 python，可接 01/02」与实测不符（其 abilities 为 `code/docs/verify`、caps 无 python）。\n   - 本卡**按第 2 步表格的字面值**统一写了 `/home/skywalk/dswork/lightprism`，因此该文件的 repos 里出现「Windows 路径 + 一个 Linux 路径」并存。登记/派发判定（`hive.py:7367`）只查键是否存在，功能不受影响；但该机真要跑 lightprism 卡时路径不可用。\n   - 若主控认定应优先执行卡面「禁止」条款（Windows agent 用 Windows 路径），建议后续卡把此项改为 `C:/dswork/lightprism`（或该机实际克隆位置），并由机主自行登记；本卡未越权臆造该路径，也未改 `workbuddyai-win` 等 Windows agent。\n2. **`python hive.py agent list` 不打印 repos**：`hive.py:7182-7191` 的 list 分支只输出 name/host/abilities/caps/mode 标记，所以「三台都能看到 lightprism」无法从该命令的字面输出观察到。本卡改用直接读三份 JSON + `Hive.agents()` 校验（结果见上），并保留 `agent list` rc=0 的原始输出作为判据证据；未改 `hive.py`（不在 paths 内）。\n\n## 平台说明\n\n卡面提示的「Windows 上 `head/grep/awk`、`!`、`$()` 导致 POSIX 判据 exit 255」在本卡未触发：两条 verify 都是纯 `python hive.py ...`，Windows 本机直接 rc=0，无需改用 192.168.0.88 跑验收（0.88 只用于只读核实仓状态）。",
+  "error": "",
+  "declared_paths": [
+    "agents/fb88-dsh.json",
+    "agents/workbuddy.json",
+    "agents/raccoon-ic6.json"
+  ],
+  "changed_files": [
+    "agents/fb88-dsh.json",
+    "agents/raccoon-ic6.json",
+    "agents/workbuddy.json"
+  ],
+  "out_of_paths": [],
+  "lease_id": "276bd1d2f81245aea87fde82078623db",
+  "store_write_repaired_at": "2026-11-11T22:31:49+08:00",
+  "store_write_repaired_note": "原租约过期导致 store_result lease lost；按 store_claim→store_result→store_release 配方补写，Git 侧 verify 结果未改动"
+}
