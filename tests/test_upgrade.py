@@ -359,3 +359,25 @@ def test_rollout_allows_when_versions_match(world, monkeypatch):
                              "remote_version": "0.16.03"}, as_json=True)
     assert rc == 0
     assert hits == ["http://10.0.0.9:8788"]
+
+
+def test_rollout_skips_master_when_already_on_target(world, monkeypatch):
+    """主控自身版本与发布版本相同就跳过 —— 不跑无意义的 apply，也不打
+    `fb98 0.16.03 → 0.16.03` 这种多余行。"""
+    h = hive.Hive(world.hive1)
+    _fake_state(monkeypatch, [
+        _node("self-1", "fb98", "0.16.03"),
+        _node("n-old", "win-old", "0.16.02"),
+    ], self_name="fb98", self_id="self-1")
+    applied = []
+    hits = []
+    monkeypatch.setattr(h, "cmd_upgrade",
+                        lambda *a, **kw: applied.append(1) or 0)
+    monkeypatch.setattr(hive, "_cluster_http",
+                        lambda *a, **kw: hits.append(kw.get("url")) or
+                        (200, {"ok": True}))
+    rc = h._upgrade_rollout({"local_version": "0.16.03",
+                             "remote_version": "0.16.03"}, as_json=True)
+    assert rc == 0
+    assert applied == [], "主控已是最新却仍跑了 apply"
+    assert hits == ["http://10.0.0.9:8788"], "只该下发真正落后的那台"

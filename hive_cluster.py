@@ -2337,8 +2337,26 @@ class Cluster:
         if not rec:
             return None
         out = self._public_node_locked(rec)
-        out["lease_until"] = _iso(self.leader_lease_until) if self.leader_lease_until else ""
-        out["lease_until_epoch"] = self.leader_lease_until
+        # 只有主控**本人**才有权对外声明「我的租约到 X」。
+        #
+        # follower 照着 `self.leader_lease_until` 转述，会让两个 follower
+        # 互相把对方的本地续期时间当成主控租约回灌：A 说「主控到 t+5」，
+        # B 收到后 `min(远端, now+lease)` 取到 t+5，下一拍 B 又把自己的
+        # t+5 说给 A…… 主控真的死掉时，这个值不再前进却也不后退，
+        # 于是 `now > leader_lease_until` 永远不成立，**集群永久无主**。
+        # 现场（2026-11-11，0.16.03 心跳降频后）：杀掉 3 节点里的主控，
+        # 剩下两台 10 秒后仍认为它活着，从不发起选举。
+        #
+        # 修法：follower 只转述「当初听主控说的那个绝对时间」，
+        # 不掺自己的续期；主控本人则照常下发自己的租约。
+        if str(self.leader_id) == str(self.node_id):
+            out["lease_until"] = (_iso(self.leader_lease_until)
+                                  if self.leader_lease_until else "")
+            out["lease_until_epoch"] = self.leader_lease_until
+        else:
+            # 保持节点记录里的原值（由 _adopt_leader_locked 写入的绝对时间）。
+            out["lease_until"] = str(rec.get("lease_until") or "")
+            out["lease_until_epoch"] = float(rec.get("lease_until_epoch") or 0.0)
         return out
 
     # -- 事件 -------------------------------------------------------------- #
@@ -3934,6 +3952,17 @@ class Cluster:
             if self.role == "leader":
                 self.leader_lease_until = now_epoch + self.config.leader_lease
             elif self.leader_id:
+                # 防御性收敛：本机记的租约绝不能晚于「节点表里主控记录」的
+                # 到期时间。本进程可能刚从 leader 退回 follower（3782 行那段
+                # 曾在还是 leader 时把租约续到 now+lease），也可能被转述路径
+                # 写大；一旦本机租约比记录更远，`now > leader_lease_until`
+                # 就永远不成立，主控死了也**永远不会触发选举**（现场：
+                # 3 节点杀掉主控，剩下两台 10 秒后仍认为它活着）。
+                rec_lease = float(
+                    (self.nodes.get(str(self.leader_id)) or {}
+                     ).get("lease_until_epoch") or 0.0)
+                if rec_lease and self.leader_lease_until > rec_lease:
+                    self.leader_lease_until = rec_lease
                 if self.leader_lease_until and now_epoch > self.leader_lease_until:
                     self._clear_leader_locked("主节点租约过期")
                 else:

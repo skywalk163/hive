@@ -58,7 +58,7 @@ from pathlib import Path
 # 版本号：MAJOR.MINOR.PATCH，**PATCH 固定两位**（0.16.00 / 0.16.01 …）。
 # 集群升级要跨机器比较版本，字符串比较会在 "0.16.10" vs "0.16.9" 上出错，
 # 所以统一解析成整数三元组再比（parse_version / compare_versions）。
-VERSION = "0.16.03"
+VERSION = "0.16.04"
 VERSION_RE = re.compile(r"^(\d+)\.(\d{1,2})\.(\d{1,2})$")
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
@@ -4217,18 +4217,20 @@ class Hive:
             except HiveError:
                 behind = True          # 版本号不认识（老节点写死 1.0 之类）
             if nid in (me, my_node):
-                # 本机（主控）按 id 判定，不能按名字：同名机器/改名后会误判成
-                # 别人。但**不能无条件当成落后** —— 本地版本若已高于发布版本
-                # （典型：改了 VERSION 却忘了 `upgrade publish`），那它不是
-                # 「落后」，而是「发布信息过期」。以前无条件置 True，会打出
-                # 「fb98 0.16.03 → 0.16.02」这种看着像降级的行，还会真的去
-                # 跑一次 apply（只会回「已是最新」，pure noise）。
-                # 这种情况留给下面的发布一致性检查统一处理。
+                # 本机（主控）：按 id 判定，不能按名字。
+                #
+                # 这里只处理「本地版本比发布版本旧/相同」的情况：
+                #   * 相同 → 已经是最新，跳过（别跑一次只会回「已是最新」的
+                #     apply，也别在预演里打 `fb98 0.16.03 → 0.16.03`）；
+                #   * 本地更新 → 属于「发布信息过期」，由上面的 skew 闸门
+                #     统一拦截，这里不参与。
+                # 早期版本无条件置 behind=True，导致主控永远出现在待升级
+                # 列表里（出现假降级行 / 无意义 apply）。
                 try:
-                    local_ahead = compare_versions(ver, remote_v) > 0 if ver else False
+                    local_cmp = compare_versions(ver, remote_v) if ver else 0
                 except HiveError:
-                    local_ahead = False
-                behind = not local_ahead
+                    local_cmp = 0
+                behind = local_cmp < 0
             if not behind:
                 rows.append({"node": n.get("name") or nid, "id": nid,
                              "skipped": True, "reason": f"已是 {ver or '?'}"})

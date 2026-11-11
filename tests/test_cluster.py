@@ -2006,3 +2006,29 @@ def test_upgrade_trigger_skip_apply_only_schedules_restart(cluster_factory,
     assert resp["skipped_apply"] is True
     assert resp["restart_scheduled"] is True
     assert not called, "skip_apply 仍然跑了 apply"
+
+
+def test_follower_lease_never_exceeds_record(cluster_factory):
+    """本机记的主控租约不得晚于节点表里那条记录的到期时间。
+
+    现场（0.16.03 心跳降频后）：3 节点杀掉主控，剩下两台 10 秒后仍认为它
+    活着，从不发起选举 —— 因为本进程曾在还是 leader 时把
+    `leader_lease_until` 续到 now+lease，退回 follower 后这个值留在原处，
+    `now > leader_lease_until` 永远不成立。维护循环里必须把它收敛到记录值。
+    """
+    a = cluster_factory("a")
+    assert wait_until(lambda: a.role == "leader")
+    rec = dict(a._self_node())
+    rec.update({"id": "ghost-leader", "name": "ghost", "host": "10.0.0.4",
+                "url": "http://10.0.0.4:8788", "incarnation": 3,
+                "lease_until_epoch": time.time() - 30})
+    with a.lock:
+        a._update_node_locked(rec, touch=True)
+        a.leader_id = "ghost-leader"
+        a.leader_url = "http://10.0.0.4:8788"
+        a.role = "follower"
+        # 模拟「曾为 leader」留下的、远在未来的租约
+        a.leader_lease_until = time.time() + 999
+    a._maintenance_once()
+    with a.lock:
+        assert a.leader_id != "ghost-leader", "过期的幽灵主控没被清掉"
