@@ -211,12 +211,18 @@ body {
   vertical-align: middle; overflow-wrap: anywhere;
 }
 .cluster-nodes th { color: var(--muted); font-size: 11.5px; font-weight: 600; }
-.cluster-nodes th:nth-child(1), .cluster-nodes td:nth-child(1) { width: 27%; }
-.cluster-nodes th:nth-child(2), .cluster-nodes td:nth-child(2) { width: 13%; }
-.cluster-nodes th:nth-child(3), .cluster-nodes td:nth-child(3) { width: 13%; }
-.cluster-nodes th:nth-child(4), .cluster-nodes td:nth-child(4) { width: 13%; }
-.cluster-nodes th:nth-child(5), .cluster-nodes td:nth-child(5) { width: 12%; }
-.cluster-nodes th:nth-child(6), .cluster-nodes td:nth-child(6) { width: 22%; }
+/* 八列：节点 / 角色 / 状态 / 优先级 / IP / 心跳 / 任务 / 版本 */
+.cluster-nodes th:nth-child(1), .cluster-nodes td:nth-child(1) { width: 24%; }
+.cluster-nodes th:nth-child(2), .cluster-nodes td:nth-child(2) { width: 10%; }
+.cluster-nodes th:nth-child(3), .cluster-nodes td:nth-child(3) { width: 11%; }
+.cluster-nodes th:nth-child(4), .cluster-nodes td:nth-child(4) { width: 9%; }
+.cluster-nodes th:nth-child(5), .cluster-nodes td:nth-child(5) { width: 17%; }
+.cluster-nodes th:nth-child(6), .cluster-nodes td:nth-child(6) { width: 11%; }
+.cluster-nodes th:nth-child(7), .cluster-nodes td:nth-child(7) { width: 8%; }
+.cluster-nodes th:nth-child(8), .cluster-nodes td:nth-child(8) { width: 10%; }
+.cluster-prio { font-weight: 600; }
+.cluster-prio.zero { color: var(--warn); }
+.cluster-ip { font-size: 12px; }
 .cluster-node:hover td { background: var(--panel-alt); }
 .cluster-name b { font-weight: 600; }
 .cluster-self {
@@ -716,15 +722,18 @@ body.dropping .drop-hint { opacity: 1; visibility: visible; }
   .field.grow { flex: 1 1 100%; }
   .stats { width: 100%; }
   .drawer { width: 100%; border-left: none; }
-  /* T-0217：集群面板窄屏只留「名称 + 状态灯」两列，其余列隐藏，避免横向滚动 */
+  /* 集群面板窄屏只留「名称 + 状态 + 优先级 + IP」四列（这两列是排障要看的），
+     角色 / 心跳 / 任务 / 版本隐藏，避免横向滚动 */
   .cluster-panel { padding: 10px 11px; }
   .cluster-head { flex-direction: column; }
   .cluster-nodes th:nth-child(2), .cluster-nodes td:nth-child(2),
-  .cluster-nodes th:nth-child(4), .cluster-nodes td:nth-child(4),
-  .cluster-nodes th:nth-child(5), .cluster-nodes td:nth-child(5),
-  .cluster-nodes th:nth-child(6), .cluster-nodes td:nth-child(6) { display: none; }
-  .cluster-nodes th:nth-child(1), .cluster-nodes td:nth-child(1) { width: 65%; }
-  .cluster-nodes th:nth-child(3), .cluster-nodes td:nth-child(3) { width: 35%; }
+  .cluster-nodes th:nth-child(6), .cluster-nodes td:nth-child(6),
+  .cluster-nodes th:nth-child(7), .cluster-nodes td:nth-child(7),
+  .cluster-nodes th:nth-child(8), .cluster-nodes td:nth-child(8) { display: none; }
+  .cluster-nodes th:nth-child(1), .cluster-nodes td:nth-child(1) { width: 40%; }
+  .cluster-nodes th:nth-child(3), .cluster-nodes td:nth-child(3) { width: 18%; }
+  .cluster-nodes th:nth-child(4), .cluster-nodes td:nth-child(4) { width: 12%; }
+  .cluster-nodes th:nth-child(5), .cluster-nodes td:nth-child(5) { width: 30%; }
 }
 
 /* ---------------- 减少动效 ---------------- */

@@ -1288,6 +1288,58 @@
     return '';
   }
 
+  /** leader_priority 是 8bit（0..255），缺省按后端 normalize_leader_priority 的默认 1。
+   *  老版本节点不自述优先级（priority 为 null），返回 reported=false 好让表格注明。 */
+  function clusterPriority(node) {
+    var raw = node && node.priority;
+    if (raw === null || raw === undefined || raw === '') {
+      return { value: 1, reported: false };
+    }
+    var num = Number(raw);
+    if (!isFinite(num)) return { value: 1, reported: false };
+    return {
+      value: Math.min(255, Math.max(0, Math.round(num))),
+      reported: true
+    };
+  }
+
+  /** 节点自述里的 IP：优先 host。只有 0.0.0.0 / :: / 回环这类「通配侦听地址」
+   *  时按需求不展示（返回 ''），必要时退回 url，但要求 url 端口与自述 port 一致，
+   *  免得把伪造/残留记录的指向当成这台机器的地址。 */
+  function clusterNodeIp(node) {
+    var n = node || {};
+    function usable(raw) {
+      var s = String(raw == null ? '' : raw).trim();
+      if (s.charAt(0) === '[' && s.charAt(s.length - 1) === ']') {
+        s = s.slice(1, -1);
+      }
+      var low = s.toLowerCase();
+      if (!low || low === '0.0.0.0' || low === '::' || low === '*' ||
+          low === 'localhost' || low === '::1' ||
+          low.indexOf('127.') === 0 || low === '0:0:0:0:0:0:0:0') return '';
+      return s;
+    }
+    // 自述了 host 就以它为准：只有 0.0.0.0 这类通配侦听地址时按需求不展示，
+    // 也不拿 url 去猜（url 是对外地址，未必等于侦听地址）。
+    if (n.host !== undefined && n.host !== null && String(n.host).trim() !== '') {
+      return usable(n.host);
+    }
+    // 老记录可能只带 url：端口必须与自述 port 一致才认，免得把残留/伪造
+    // 记录的指向当成这台机器的地址。
+    var m = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(String(n.url || ''));
+    if (!m) return '';
+    var authority = m[1].split('@').pop();
+    var declared = Number(n.port) || 0;
+    var pm = /:(\d+)$/.exec(authority);
+    var urlPort = pm ? Number(pm[1]) : 0;
+    if (!declared || !urlPort || declared !== urlPort) return '';
+    if (authority.charAt(0) === '[') {
+      var close = authority.indexOf(']');
+      return close > 0 ? usable(authority.slice(0, close + 1)) : '';
+    }
+    return usable(authority.replace(/:\d+$/, ''));
+  }
+
   /** 在飞卡 = owner 对得上，且还没 done / closed / blocked / failed。 */
   function clusterTaskCount(tasks, name) {
     if (!name || !Array.isArray(tasks)) return 0;
@@ -1344,11 +1396,14 @@
       '</dl></div>';
 
     html += '<table class="cluster-nodes"><thead><tr>' +
-      '<th>节点</th><th>角色</th><th>状态</th><th>心跳</th><th>任务</th><th>版本</th>' +
+      '<th>节点</th><th>角色</th><th>状态</th>' +
+      '<th title="leader_priority：值大者优先，默认 1，0 = 不参选主控">优先级</th>' +
+      '<th title="节点自述的侦听 IP；只有 0.0.0.0 这类通配地址时不显示">IP</th>' +
+      '<th>心跳</th><th>任务</th><th>版本</th>' +
       '</tr></thead><tbody>';
     var nodes = Array.isArray(snap.nodes) ? snap.nodes : [];
     if (!nodes.length) {
-      html += '<tr><td colspan="6" class="cluster-empty">快照里没有节点</td></tr>';
+      html += '<tr><td colspan="8" class="cluster-empty">快照里没有节点</td></tr>';
     } else {
       nodes.forEach(function (n) {
         n = n || {};
@@ -1357,12 +1412,22 @@
         var role = n.role || (leader.id && n.id === leader.id ? 'leader' : 'follower');
         var isSelf = !!(self.id && n.id === self.id);
         var age = clusterAge(n.last_seen_epoch, now);
+        var prio = clusterPriority(n);
+        var ip = clusterNodeIp(n);
+        var prioTitle = 'leader_priority：值大者优先，0 = 不参选主控' +
+          (prio.reported ? '' : '；该节点未上报，按默认 1 显示');
         html += '<tr class="cluster-node">' +
           '<td class="cluster-name"><b>' + esc(n.name || n.id || '?') + '</b>' +
           (isSelf ? '<span class="cluster-self">本机</span>' : '') + '</td>' +
           '<td class="cluster-role">' + esc(role) + '</td>' +
           '<td><span class="cluster-status ' + view.cls + '"><span class="cluster-lamp"></span>' +
           view.label + '</span></td>' +
+          '<td class="cluster-prio mono' + (prio.value === 0 ? ' zero' : '') +
+          '" title="' + esc(prioTitle) + '">' + esc(prio.value) + '</td>' +
+          '<td class="cluster-ip mono">' +
+          (ip ? '<span title="' + esc(n.url || ip) + '">' + esc(ip) + '</span>'
+              : '<span class="muted" title="没有可用 IP：节点只上报 0.0.0.0 这类通配侦听地址，或地址缺失/端口不一致">—</span>') +
+          '</td>' +
           '<td><span class="cluster-age mono" title="最后心跳 ' + esc(age) + ' 前">' +
           esc(age) + '</span></td>' +
           '<td><span class="cluster-tasks">' +
@@ -1377,7 +1442,9 @@
     } else {
       html += '状态灯按后端下发的 peer_timeout / dead_timeout 分档。';
     }
-    html += '数据源 /api/cluster，任务数来自 /api/status。</p></div>';
+    html += '优先级是 leader_priority（值大者优先，默认 1，0 = 不参选主控）；' +
+      'IP 取自节点自述，只拿到 0.0.0.0 这类通配地址时不显示。' +
+      '数据源 /api/cluster，任务数来自 /api/status。</p></div>';
     return html;
   }
 

@@ -114,7 +114,8 @@ NOW = 1_800_000_000.0
 CLUSTER_JS_NAMES = [
     "esc", "clusterAgeSeconds", "clusterAge", "clusterThresholds",
     "clusterNodeStatus", "clusterStatusView", "clusterEndpoint",
-    "clusterTaskCount", "renderClusterSummary", "renderClusterPanel",
+    "clusterPriority", "clusterNodeIp", "clusterTaskCount",
+    "renderClusterSummary", "renderClusterPanel",
 ]
 CLUSTER_JS_CONSTS = ["CLUSTER_EST_PEER_S", "CLUSTER_EST_DEAD_S"]
 
@@ -245,6 +246,46 @@ def test_cluster_panel_renders_three_nodes_and_ages():
     assert 'aria-expanded="true"' in opened["summary"]
 
 
+def test_cluster_panel_shows_leader_priority_and_ip():
+    """节点表新增「优先级 / IP」两列：读自述 priority 与 host，不新增接口。"""
+    snap = _snapshot()
+    snap["nodes"][0].update({"priority": 2, "host": "10.0.0.11"})
+    snap["nodes"][1].update({"priority": 0, "host": "0.0.0.0"})
+    snap["nodes"][2].update({"priority": None})   # 老版本节点没上报优先级
+    snap["nodes"][2].pop("host", None)            # 只带 url + port，走兜底
+
+    html = _render_cluster(snap, TASKS)["html"]
+    assert '>优先级</th>' in html and '>IP</th>' in html
+    rows = html.split('<tr class="cluster-node">')[1:]
+    assert len(rows) == 3
+
+    # 值大者优先：2 原样显示，IP 来自 host
+    assert 'class="cluster-prio mono"' in rows[0] and '>2</td>' in rows[0]
+    assert 'title="http://10.0.0.11:8788">10.0.0.11</span>' in rows[0]
+
+    # 0 = 不参选主控，单独标色；只拿到 0.0.0.0 时不展示 IP（"那就算了"）
+    assert 'cluster-prio mono zero' in rows[1] and '>0</td>' in rows[1]
+    assert '<span class="muted"' in rows[1] and '>0.0.0.0</span>' not in rows[1]
+
+    # 没上报优先级按默认 1；host 缺失但 url 端口与自述 port 一致时兜底出 IP
+    assert '该节点未上报，按默认 1 显示' in rows[2] and '>1</td>' in rows[2]
+    assert '>10.0.0.13</span>' in rows[2]
+
+    assert html.count('class="cluster-prio') == 3
+    assert html.count('class="cluster-ip mono"') == 3
+
+
+def test_cluster_panel_ip_fallback_rejects_mismatched_port():
+    """残留/伪造记录只有 url 时，端口对不上自述 port 就不拿它的 IP 冒充。"""
+    snap = _snapshot()
+    snap["nodes"][0].pop("host", None)
+    snap["nodes"][0]["port"] = 8788
+    snap["nodes"][0]["url"] = "http://10.0.0.99:9999"
+    html = _render_cluster(snap)["html"]
+    assert "10.0.0.99" not in html
+    assert "没有可用 IP" in html
+
+
 def test_cluster_status_falls_back_to_age_with_backend_timeouts():
     """旧快照缺 status 时，用后端下发的 peer_timeout/dead_timeout 按 age 分档。"""
     snap = _snapshot()
@@ -274,16 +315,31 @@ def test_cluster_status_estimates_15s_60s_when_timeouts_missing():
     assert "按 15s / 60s 估" in html
 
 
-def test_cluster_panel_css_is_wired_and_mobile_is_two_columns():
+def test_cluster_panel_css_is_wired_and_mobile_keeps_priority_and_ip():
     css = STYLE_CSS.read_text(encoding="utf-8")
     assert ".cluster-panel" in css
     assert ".cluster-status.alive" in css and ".cluster-status.dead" in css
     assert ".cluster-lamp" in css
     assert "@media (max-width: 768px)" in css
-    # ≤768px 隐藏角色/心跳/任务/版本，只留名称 + 状态两列
-    for idx in ("2", "4", "5", "6"):
+    # 八列都有宽度规则
+    for idx in ("1", "2", "3", "4", "5", "6", "7", "8"):
         assert ".cluster-nodes th:nth-child(%s)" % idx in css
         assert ".cluster-nodes td:nth-child(%s)" % idx in css
+    # ≤768px 隐藏角色/心跳/任务/版本，保留名称 + 状态 + 优先级 + IP
+    mobile = css.split("@media (max-width: 768px) {")[1].split("@media")[0]
+    hidden = ""
+    for line in mobile.splitlines():
+        if line.strip().startswith(".cluster-nodes"):
+            hidden += line
+        if "display: none" in line:
+            break
+    for idx in ("2", "6", "7", "8"):
+        assert "nth-child(%s)" % idx in hidden
+    for idx in ("4", "5"):
+        assert "nth-child(%s)" % idx not in hidden
+    assert ".cluster-nodes th:nth-child(4), .cluster-nodes td:nth-child(4) { width: 12%; }" in mobile
+    assert ".cluster-nodes th:nth-child(5), .cluster-nodes td:nth-child(5) { width: 30%; }" in mobile
+    assert ".cluster-prio.zero" in css and ".cluster-ip" in css
     assert "overflow-x: hidden" in css
 
 
@@ -292,6 +348,6 @@ def test_cluster_panel_reuses_existing_api_and_fields():
     src = APP_JS.read_text(encoding="utf-8")
     assert "fetch('/api/cluster'" in src
     for field in ("last_seen_epoch", "peer_timeout", "dead_timeout",
-                  "cluster_id", "quorum", "status"):
+                  "cluster_id", "quorum", "status", "priority", "host", "url"):
         assert field in src
     assert "/api/cluster/nodes" not in src, "不许新增后端接口"
