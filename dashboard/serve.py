@@ -88,6 +88,7 @@ API_CLUSTER = "/api/cluster"
 API_DISPATCH_PROMPT = "/api/dispatch-prompt"
 API_CHAT = "/api/chat"
 API_PLANS = "/api/plans"
+API_UPGRADE = "/api/upgrade"
 
 # ---- 看板聊天框（跨机留言）----
 # 真身住在集群（每个节点 ~/.hive/cluster/chat.jsonl + 2 秒增量同步），
@@ -109,6 +110,10 @@ NO_STORE = "no-store, no-cache, must-revalidate, max-age=0"
 # 任务操作代理：后端调用 hive CLI 真正执行（前端按钮 -> 这里 -> python3 hive.py）
 HIVE_PY = HIVE_ROOT / "hive.py"
 HIVE_OP_TIMEOUT = 120  # 单条操作超时（秒）；hive 命令涉及 git push，给足余量
+# 集群升级要 fetch 整个协调仓再 ff 合并，给更长的超时。
+UPGRADE_TIMEOUT = 300
+# 看板能触发的升级动作（status 走 GET，不在这里）
+UPGRADE_POST_ACTIONS = ("check", "apply", "publish")
 # 子进程一律走 UTF-8：Windows 下子进程 stdout 默认 cp936，`hive status --json` 碰到
 # ✓ / 全角符号会以 UnicodeEncodeError 退出（rc=1、stdout 空），状态文件于是一直写不出来，
 # 看板就永远停在旧快照或 503。三个平台用同一套环境变量最省事。
@@ -598,6 +603,9 @@ def build_handler(status_path, write_auth="off"):
             if path == API_PLANS:
                 self.serve_plans_get()
                 return
+            if path == API_UPGRADE:
+                self.serve_upgrade_get()
+                return
             entry = STATIC_FILES.get(path)
             if entry is None:
                 self._send_json(404, {"error": "未找到资源: %s" % path})
@@ -660,6 +668,9 @@ def build_handler(status_path, write_auth="off"):
                 return
             if path == API_PLANS:
                 self.serve_plans_post()
+                return
+            if path == API_UPGRADE:
+                self.serve_upgrade_post()
                 return
             self._send_json(404, {"error": "未找到资源: %s" % path})
 
@@ -1508,6 +1519,125 @@ def build_handler(status_path, write_auth="off"):
             if m:
                 resp["new_task"] = m.group(1)
             self._send_json(200, resp)
+
+        # ---- /api/upgrade：集群升级（主控发布 / 子节点检索与升级）----
+        def _run_hive(self, args, timeout=HIVE_OP_TIMEOUT):
+            """跑一条 hive CLI，返回 (rc, stdout, stderr)。"""
+            proc = subprocess.run(hive_argv(*args), capture_output=True,
+                                  text=True, encoding="utf-8",
+                                  env=PYTHON_ENV, timeout=timeout,
+                                  **no_window_kwargs())
+            return (proc.returncode, (proc.stdout or "").strip(),
+                    (proc.stderr or "").strip())
+
+        def serve_upgrade_get(self):
+            """只读：本地版本、主控发布版本、是否可升级（与 /api/status 同口径免鉴权）。"""
+            try:
+                rc, out, err = self._run_hive(
+                    ["upgrade", "status", "--json"], timeout=60)
+            except subprocess.TimeoutExpired:
+                self._send_json(200, {"ok": False, "error": "查询升级信息超时"})
+                return
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(200, {"ok": False, "error": "查询失败: %s" % exc})
+                return
+            if rc != 0 or not out:
+                self._send_json(200, {"ok": False,
+                                      "error": (err or out or "查询失败")[-600:]})
+                return
+            try:
+                data = json.loads(out)
+            except ValueError:
+                self._send_json(200, {"ok": False, "error": "hive 返回非 JSON"})
+                return
+            # 只有 controller（或回环免鉴权）才显示「发布升级」按钮，
+            # 免得子节点看板上挂一个点了就 403 的按钮。
+            can_publish = False
+            try:
+                if write_auth == "off":
+                    can_publish = True
+                else:
+                    who = _resolve_dashboard_token(self.client_token())
+                    can_publish = bool(who) and self.is_controller(who)
+            except Exception:  # noqa: BLE001
+                can_publish = False
+            self._send_json(200, {"ok": True, "upgrade": data,
+                                  "can_publish": can_publish})
+
+        def serve_upgrade_post(self):
+            length = self._read_length()
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except ValueError as exc:
+                self._send_json(400, {"ok": False,
+                                      "error": "请求体不是合法 JSON: %s" % exc})
+                return
+            if not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "error": "顶层必须是对象"})
+                return
+            action = str(body.get("action") or "").strip()
+            if action not in UPGRADE_POST_ACTIONS:
+                self._send_json(400, {"ok": False,
+                                      "error": "不支持的操作: %s" % action})
+                return
+            who = self.require_write_auth()
+            if who is None:
+                append_audit({"action": "upgrade:" + action, "ok": False,
+                              "source": self.client_address[0], "detail": "未鉴权"})
+                return
+            # 发布升级会改变整个集群的基线，只许 controller；
+            # apply 是本机运维动作，有写权限即可（子节点不一定有 controller token）。
+            if action == "publish" and not self.is_controller(who):
+                self._send_json(403, {
+                    "ok": False,
+                    "error": "publish 需要 controller 角色（当前 %s）"
+                             % (who.get("agent") or "?")})
+                append_audit({"action": "upgrade:publish", "ok": False,
+                              "agent": who.get("agent"),
+                              "source": self.client_address[0],
+                              "detail": "角色不足"})
+                return
+
+            argv = ["upgrade", action, "--json"]
+            if action == "apply" and body.get("yes") is True:
+                argv.append("--yes")
+            if action == "publish":
+                notes = str(body.get("notes") or "").strip()
+                if notes:
+                    if len(notes) > 500 or any(ord(c) < 9 for c in notes):
+                        self._send_json(400, {
+                            "ok": False,
+                            "error": "变更说明过长或含控制字符（上限 500 字）"})
+                        return
+                    argv += ["--notes", notes]
+            try:
+                rc, out, err = self._run_hive(argv, timeout=UPGRADE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                append_audit({"action": "upgrade:" + action, "ok": False,
+                              "agent": who.get("agent"),
+                              "source": self.client_address[0], "detail": "超时"})
+                self._send_json(504, {"ok": False,
+                                      "error": "升级操作超时（%d 秒）"
+                                               % UPGRADE_TIMEOUT})
+                return
+            data = None
+            if out.startswith("{"):
+                try:
+                    data = json.loads(out)
+                except ValueError:
+                    data = None
+            append_audit({"action": "upgrade:" + action, "ok": rc == 0,
+                          "agent": who.get("agent"), "role": who.get("role"),
+                          "code": rc, "detail": (err or out or "")[-300:],
+                          "source": self.client_address[0]})
+            if rc == 0:
+                try:
+                    self._refresh_status()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._send_json(200, {"ok": rc == 0, "code": rc, "data": data,
+                                  "output": out[-800:], "error": err[-600:]})
 
         def _refresh_status(self):
             """操作成功后重跑 `hive status --json` 覆盖状态文件，使看板即时更新。"""

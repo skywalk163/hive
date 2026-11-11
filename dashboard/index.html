@@ -83,6 +83,17 @@
     <!-- 派发分组摘要（待分配 / 已推送 / 在跑…）：旧快照没有 stage/board 时整条隐藏 -->
     <span class="board" id="board" title="派发分组" hidden></span>
     <span class="cluster off" id="cluster" title="hive 常驻集群状态">集群：—</span>
+    <!-- 集群升级：本地版本 + 检索 / 升级 / 发布。
+         「发布升级」是否出现由后端按 controller 角色给 can_publish。 -->
+    <span class="upgrade" id="upgrade-bar" hidden
+          style="display:inline-flex;gap:6px;align-items:center">
+      <span id="upgrade-version" title="本地版本">v—</span>
+      <button type="button" class="btn mini" id="upgrade-check"
+              title="向主控检索是否有新版本">检查升级</button>
+      <button type="button" class="btn mini primary" id="upgrade-apply" hidden></button>
+      <button type="button" class="btn mini" id="upgrade-publish" hidden
+              title="把这个版本发布给集群（需要 controller）">发布升级</button>
+    </span>
   </div>
 
   <div class="banner" id="banner" hidden></div>

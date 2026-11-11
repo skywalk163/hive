@@ -45,7 +45,7 @@ assignees: ''
 
 - 操作系统： [例如 FreeBSD 15.1 / Ubuntu 24.04 / macOS 14 / Windows 11]
 - Python 版本： [运行 `python3 --version` 的输出，例如 Python 3.12.0]
-- hive 版本： [运行 `python3 hive/hive.py --version` 的输出，例如 0.15.2]
+- hive 版本： [运行 `python3 hive/hive.py --version` 的输出，例如 0.16.00（修订段两位）]
 - Git 版本： [运行 `git --version` 的输出]
 - 部署形态： [单机 / 多机（几台）；有没有跑 `hive cluster start`；claim 后端是 Git 还是 `--store`]
 - agent 模式： [exec / verify / manual / accept；常驻 worker / MCP 自助 / 定时 accept]

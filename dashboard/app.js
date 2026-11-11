@@ -326,6 +326,11 @@
     el.source = document.getElementById('source');
     el.cluster = document.getElementById('cluster');
     el.board = document.getElementById('board');
+    el.upgradeBar = document.getElementById('upgrade-bar');
+    el.upgradeVersion = document.getElementById('upgrade-version');
+    el.upgradeCheck = document.getElementById('upgrade-check');
+    el.upgradeApply = document.getElementById('upgrade-apply');
+    el.upgradePublish = document.getElementById('upgrade-publish');
     el.banner = document.getElementById('banner');
     el.panel = document.getElementById('state-panel');
     el.columns = document.getElementById('columns');
@@ -1046,6 +1051,7 @@
   }
 
   function renderMeta() {
+    renderUpgrade();   // 版本条随状态刷新一起重绘，不额外发请求
     if (!state.lastUpdated) { el.meta.textContent = '最后更新：—'; return; }
     el.meta.textContent = '最后更新 ' + relTime(state.lastUpdated) + '（' + dtf.format(state.lastUpdated) + '）';
     el.source.textContent = '数据源：' + sourceLabel();
@@ -1714,6 +1720,37 @@
     el.search.addEventListener('input', function () { state.query = el.search.value; render(); });
     el.refresh.addEventListener('click', function () { loadStatus(); });
 
+    // 集群升级三键：检查（只读）/ 升级（本机快进）/ 发布（主控）
+    if (el.upgradeCheck) {
+      el.upgradeCheck.addEventListener('click', function () {
+        refreshUpgrade().then(function () {
+          if (!upgradeInfo) { flash('没拿到升级信息', true); return; }
+          flash(upgradeInfo.update_available
+            ? ('发现新版本 v' + upgradeInfo.remote_version)
+            : '已是最新版本');
+        });
+      });
+    }
+    if (el.upgradeApply) {
+      el.upgradeApply.addEventListener('click', function () {
+        var info = upgradeInfo || {};
+        var q = '把本机从 v' + (info.local_version || '?') + ' 升级到 v' +
+                (info.remote_version || '?') + '？\n\n' +
+                '只做 git 快进；协调仓有未提交改动会被拒绝。\n' +
+                '升级完成后需要重启 hived / 看板进程才会用上新代码。';
+        if (!window.confirm(q)) return;
+        runUpgrade('apply', { yes: true }, '升级完成');
+      });
+    }
+    if (el.upgradePublish) {
+      el.upgradePublish.addEventListener('click', function () {
+        var notes = window.prompt('发布当前版本给集群？可填变更说明（留空也行）：', '');
+        if (notes === null) return;
+        runUpgrade('publish', { notes: notes }, '已发布给集群');
+      });
+    }
+    refreshUpgrade();
+
     el.auto.addEventListener('change', function () {
       state.autoRefresh = el.auto.checked;
       storeSet(STORE_AUTO, state.autoRefresh ? 'on' : 'off');
@@ -2209,6 +2246,70 @@
     t.hidden = false;
     if (TOAST_TIMER) clearTimeout(TOAST_TIMER);
     TOAST_TIMER = setTimeout(function () { t.hidden = true; }, isError ? 5000 : 2500);
+  }
+
+  // ---------- 集群升级（本地版本 / 检索 / 升级 / 发布）----------
+  var upgradeInfo = null;
+  var upgradeCanPublish = false;
+
+  function upgradeFetch(method, body) {
+    var opts = { method: method, headers: { 'Accept': 'application/json' } };
+    if (body) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    return fetch('/api/upgrade', opts).then(function (r) { return r.json(); });
+  }
+
+  function renderUpgrade() {
+    if (!el.upgradeBar) return;
+    if (!upgradeInfo) { el.upgradeBar.hidden = true; return; }
+    el.upgradeBar.hidden = false;
+    el.upgradeVersion.textContent = 'v' + (upgradeInfo.local_version || '—');
+    el.upgradeVersion.title =
+      '本地 ' + (upgradeInfo.local_version || '?') +
+      (upgradeInfo.remote_version ? '；主控 ' + upgradeInfo.remote_version : '；主控未发布') +
+      '；策略 ' + (upgradeInfo.policy || '?');
+    var can = !!upgradeInfo.update_available;
+    el.upgradeApply.hidden = !can;
+    if (can) {
+      el.upgradeApply.textContent = '升级到 v' + upgradeInfo.remote_version;
+      el.upgradeApply.title = '把本机快进到主控版本（协调仓有未提交改动会被拒绝）';
+    }
+    el.upgradePublish.hidden = !upgradeCanPublish;
+    el.upgradePublish.title = '把本机版本发布给集群（' +
+      (upgradeCanPublish ? '当前是 controller' : '需要 controller 角色') + '）';
+  }
+
+  function refreshUpgrade() {
+    return upgradeFetch('GET').then(function (res) {
+      if (!res || !res.ok) throw new Error((res && res.error) || '查询失败');
+      upgradeInfo = res.upgrade || null;
+      upgradeCanPublish = !!res.can_publish;
+      renderUpgrade();
+    }).catch(function (err) {
+      // 升级信息拿不到不影响看板主流程，留个 console 痕迹即可
+      if (window.console) console.warn('upgrade: ' + err);
+    });
+  }
+
+  function runUpgrade(action, body, okMsg) {
+    var btns = [el.upgradeCheck, el.upgradeApply, el.upgradePublish];
+    btns.forEach(function (b) { if (b) b.disabled = true; });
+    flash(action === 'apply' ? '正在升级…' : '正在处理…');
+    return upgradeFetch('POST', Object.assign({ action: action }, body || {}))
+      .then(function (res) {
+        if (res && res.ok) {
+          flash(okMsg || '完成');
+        } else {
+          flash((res && (res.error || res.output)) || (action + ' 失败'), true);
+        }
+      })
+      .catch(function (err) { flash(String(err), true); })
+      .then(function () {
+        btns.forEach(function (b) { if (b) b.disabled = false; });
+        return refreshUpgrade();
+      });
   }
 
   function _verb(action, override) {

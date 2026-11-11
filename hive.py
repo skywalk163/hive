@@ -53,7 +53,11 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-VERSION = "0.15.2"
+# 版本号：MAJOR.MINOR.PATCH，**PATCH 固定两位**（0.16.00 / 0.16.01 …）。
+# 集群升级要跨机器比较版本，字符串比较会在 "0.16.10" vs "0.16.9" 上出错，
+# 所以统一解析成整数三元组再比（parse_version / compare_versions）。
+VERSION = "0.16.00"
+VERSION_RE = re.compile(r"^(\d+)\.(\d{1,2})\.(\d{1,2})$")
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
 
@@ -422,6 +426,91 @@ class StoreCallError(HiveError):
             return (f"{tid} 领取失败：对端节点版本较旧、不支持本次操作；"
                     f"已尝试兼容回退。原始错误：{self}")
         return f"{tid} 领取失败：{self}"
+
+
+# --------------------------------------------------------------------------- #
+# 版本号：X.Y.Z，PATCH 段固定两位
+# --------------------------------------------------------------------------- #
+
+def parse_version(text: str) -> tuple[int, int, int]:
+    """把 "0.16.00" / "0.16.1" 解析成 (0, 16, 0) / (0, 16, 1)，用于数值比较。"""
+    m = VERSION_RE.match(str(text or "").strip())
+    if not m:
+        raise HiveError(
+            f"版本号格式非法：{text!r}；应为 MAJOR.MINOR.PATCH，"
+            f"且修订段两位（例 0.16.00）")
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def format_version(parts) -> str:
+    """三元组 → 规范字符串（修订段补零到两位）。"""
+    major, minor, patch = parts
+    return f"{int(major)}.{int(minor):02d}.{int(patch):02d}"
+
+
+def compare_versions(a: str, b: str) -> int:
+    """a>b 返回 1、a<b 返回 -1、相等 0。绝不按字符串比。"""
+    pa, pb = parse_version(a), parse_version(b)
+    return (pa > pb) - (pa < pb)
+
+
+def version_from_file(path: Path) -> str:
+    """从 hive.py 文件读 VERSION 常量。
+
+    升级刚完成时**当前进程的 VERSION 还是旧值**，必须读盘才知道新版本。
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    m = re.search(r'^VERSION\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return m.group(1) if m else ""
+
+
+# --------------------------------------------------------------------------- #
+# 集群升级：主控发布 → 子节点检索 → 按策略升级
+#
+# 发布信息走协调仓 main 根目录的 release.json（git 即通道，不新增服务）：
+#   {version, commit, published_at, published_by, notes}
+# 子节点 fetch 后对比本地 VERSION；apply 只做 ff-only 快进，脏工作区一律拒绝。
+# --------------------------------------------------------------------------- #
+
+RELEASE_FILE = "release.json"
+UPGRADE_POLICIES = ("follow", "manual", "never")
+DEFAULT_UPGRADE_POLICY = "follow"
+UPGRADE_STATE_ENV = "HIVE_UPGRADE_STATE"
+UPGRADE_POLICY_ENV = "HIVE_UPGRADE_POLICY"
+
+
+def upgrade_state_dir() -> Path:
+    """升级回滚点目录；HIVE_UPGRADE_STATE 可覆盖（测试 / 多实例隔离）。"""
+    return Path(os.environ.get(UPGRADE_STATE_ENV)
+                or (DEFAULT_STATE / "upgrade")).expanduser()
+
+
+def release_info(hive_dir: Path, ref: str = "origin/main") -> dict | None:
+    """读协调仓某个 ref 上的 release.json；不存在/坏 JSON 返回 None。"""
+    p = git(["show", f"{ref}:{RELEASE_FILE}"], hive_dir, check=False)
+    if p.returncode != 0 or not (p.stdout or "").strip():
+        return None
+    try:
+        data = json.loads(p.stdout)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def upgrade_policy() -> str:
+    """本机升级策略：follow（默认，听从主控）/ manual（要 --yes 确认）/ never。
+
+    环境变量 `HIVE_UPGRADE_POLICY` 优先，其次 `~/.hive/cluster/config.json`
+    的 `upgrade_policy`，都没有就 follow —— 「默认听从主控的指令」。
+    """
+    raw = (os.environ.get(UPGRADE_POLICY_ENV) or "").strip().lower()
+    if raw in UPGRADE_POLICIES:
+        return raw
+    val = str(_cluster_saved_config().get("upgrade_policy") or "").strip().lower()
+    return val if val in UPGRADE_POLICIES else DEFAULT_UPGRADE_POLICY
 
 
 class ResultWriteError(StoreCallError):
@@ -3896,6 +3985,174 @@ class Hive:
                 log(f"repair: store {tid} 已对齐为 "
                     f"{'done' if done else 'closed'}")
 
+    # -- 集群升级 ---------------------------------------------------------- #
+    def _upgrade_info(self) -> dict:
+        """本地版本 vs 主控发布版本。`check` / `status` / `apply` 共用。"""
+        self.fetch()
+        local_v = version_from_file(self.dir / "hive.py") or VERSION
+        rel = release_info(self.dir) or {}
+        head = rev_parse(self.dir, "HEAD") or ""
+        origin = rev_parse(self.dir, "origin/main") or ""
+        behind = bool(
+            head and origin and head != origin
+            and git(["merge-base", "--is-ancestor", "origin/main", "HEAD"],
+                    self.dir, check=False).returncode != 0)
+        remote_v = str(rel.get("version") or "")
+        newer = False
+        if remote_v:
+            try:
+                cmp = compare_versions(remote_v, local_v)
+                # 版本更高，或版本相同但本地落后（同版本的热修复）
+                newer = cmp > 0 or (cmp == 0 and behind)
+            except HiveError:
+                newer = behind
+        return {
+            "local_version": local_v,
+            "remote_version": remote_v,
+            "remote_commit": str(rel.get("commit") or ""),
+            "published_at": str(rel.get("published_at") or ""),
+            "published_by": str(rel.get("published_by") or ""),
+            "notes": str(rel.get("notes") or ""),
+            "policy": upgrade_policy(),
+            "head": head, "origin_main": origin,
+            "behind": behind,
+            "update_available": bool(remote_v) and newer,
+        }
+
+    def _print_upgrade(self, info: dict, as_json: bool = False,
+                       verbose: bool = True) -> None:
+        if as_json:
+            print(json.dumps(info, ensure_ascii=False, indent=2))
+            return
+        print(f"本地版本: {info['local_version']}"
+              + (f"  (HEAD {info['head'][:8]})" if info["head"] else ""))
+        if not info["remote_version"]:
+            print("主控版本: 未发布（协调仓没有 release.json）")
+        else:
+            print(f"主控版本: {info['remote_version']}"
+                  f"  ({info['published_at']} by {info['published_by']})")
+            if info["notes"]:
+                print(f"变更说明: {info['notes']}")
+        print(f"升级策略: {info['policy']}")
+        if info["update_available"]:
+            print(f"可升级: {info['local_version']} → {info['remote_version']}；"
+                  f"跑 `hive upgrade apply`"
+                  + ("（manual 策略需加 --yes）" if info["policy"] == "manual" else ""))
+        elif info["remote_version"]:
+            print("已是最新版本")
+        if verbose and info["behind"]:
+            print(f"提示: 本地 HEAD 落后 origin/main（{info['head'][:8]} → "
+                  f"{info['origin_main'][:8]}）")
+
+    def _upgrade_publish(self, notes: str = "", as_json: bool = False) -> int:
+        """主控发布：把当前代码版本写进协调仓 release.json 并广播。"""
+        self.fetch()
+        head = rev_parse(self.dir, "HEAD") or ""
+        origin = rev_parse(self.dir, "origin/main") or ""
+        if not head:
+            raise HiveError("协调仓还没有任何提交")
+        if head != origin:
+            raise HiveError(
+                f"本地 HEAD {head[:8]} 与 origin/main "
+                f"{origin[:8] or '无'} 不一致：先把代码推到 origin 再发布"
+                f"（发布的是 origin/main 上那份代码）")
+        ver = version_from_file(self.dir / "hive.py")
+        parse_version(ver)   # 格式不合法直接抛
+        payload = {
+            "version": ver,
+            "commit": head,
+            "published_at": iso(),
+            "published_by": (os.environ.get("HIVE_AGENT")
+                             or os.environ.get("COMPUTERNAME")
+                             or os.environ.get("HOSTNAME") or "controller"),
+            "notes": notes or "",
+        }
+        (self.dir / RELEASE_FILE).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+        self.commit_and_push(f"release: v{ver}", [RELEASE_FILE])
+        published = cluster_publish_event(
+            "upgrade.published", data={"version": ver, "commit": head})
+        if as_json:
+            print(json.dumps({**payload, "cluster_notified": published},
+                             ensure_ascii=False, indent=2))
+            return 0
+        print(f"已发布 v{ver}（{head[:8]}）到协调仓 main")
+        print("集群通知: " + ("已广播" if published
+                              else "集群不可用，子节点下次 fetch 也能看到"))
+        return 0
+
+    def _upgrade_apply(self, info: dict, yes: bool = False,
+                       as_json: bool = False, dry_run: bool = False) -> int:
+        """子节点升级：只做 ff-only 快进；脏工作区 / 非快进一律拒绝。"""
+        if not info["remote_version"]:
+            raise HiveError("主控还没有发布升级（协调仓没有 release.json）")
+        if not info["update_available"]:
+            print(f"已是最新版本 {info['local_version']}，无需升级")
+            return 0
+        policy = info["policy"]
+        if policy == "never":
+            raise HiveError(
+                "本机升级策略为 never，拒绝升级；改 "
+                "~/.hive/cluster/config.json 的 upgrade_policy，"
+                "或设 HIVE_UPGRADE_POLICY=follow")
+        if policy == "manual" and not yes:
+            raise HiveError(
+                f"可升级 {info['local_version']} → {info['remote_version']}，"
+                f"但本机策略是 manual；确认后加 --yes")
+        dirty = git(["status", "--porcelain", "--untracked-files=no"],
+                    self.dir, check=False).stdout.strip()
+        if dirty:
+            raise HiveError(
+                "协调仓有未提交改动，拒绝升级（避免覆盖）："
+                + dirty.replace("\n", " ")[:200])
+        if dry_run:
+            print(f"预演：协调仓将快进到 origin/main "
+                  f"{info['origin_main'][:8]}，"
+                  f"{info['local_version']} → {info['remote_version']}")
+            return 0
+        from_head = rev_parse(self.dir, "HEAD") or ""
+        git(["merge", "--ff-only", "origin/main"], self.dir)
+        to_head = rev_parse(self.dir, "HEAD") or ""
+        new_v = version_from_file(self.dir / "hive.py") or info["remote_version"]
+        state_dir = upgrade_state_dir()
+        state_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "from_version": info["local_version"], "to_version": new_v,
+            "from_commit": from_head, "to_commit": to_head,
+            "at": iso(), "policy": policy,
+        }
+        (state_dir / "last.json").write_text(
+            json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+        if as_json:
+            print(json.dumps({**info, "upgraded": True, "to_version": new_v,
+                              "to_commit": to_head,
+                              "rollback": str(state_dir / "last.json")},
+                             ensure_ascii=False, indent=2))
+            return 0
+        print(f"已升级 {info['local_version']} → {new_v}（{to_head[:8]}）")
+        print("提示：hived / 看板进程仍跑着旧代码，重启后生效。")
+        print(f"回滚点: {state_dir / 'last.json'}"
+              f"（git reset --hard {from_head[:8]} 可回退）")
+        return 0
+
+    def cmd_upgrade(self, action: str = "status", yes: bool = False,
+                    notes: str = "", as_json: bool = False,
+                    dry_run: bool = False) -> int:
+        """集群升级：publish（主控发布）/ check（检索）/ apply（升级）/ status。"""
+        if action == "publish":
+            return self._upgrade_publish(notes=notes, as_json=as_json)
+        info = self._upgrade_info()
+        if action in ("status", "check"):
+            self._print_upgrade(info, as_json=as_json, verbose=(action == "check"))
+            return 0
+        if action == "apply":
+            return self._upgrade_apply(info, yes=yes, as_json=as_json,
+                                       dry_run=dry_run)
+        raise HiveError(
+            f"未知的 upgrade 动作 {action!r}（status / check / apply / publish）")
+
     def retime_budgets(self, apply: bool = False) -> list[dict]:
         """把未关闭卡的时间预算调到复杂度建议值（只调大，不调小）。
 
@@ -7151,6 +7408,15 @@ def cmd_repair(args) -> None:
     Hive(args.dir).cmd_repair(apply=bool(getattr(args, "apply", False)))
 
 
+def cmd_upgrade(args) -> int:
+    return Hive(args.dir).cmd_upgrade(
+        action=getattr(args, "action", "status") or "status",
+        yes=bool(getattr(args, "yes", False)),
+        notes=getattr(args, "notes", "") or "",
+        as_json=bool(getattr(args, "json", False)),
+        dry_run=bool(getattr(args, "dry_run", False)))
+
+
 def cmd_digest(args) -> None:
     Hive(args.dir).cmd_digest(days=args.days, out=args.out or "",
                               as_json=args.json)
@@ -8062,6 +8328,20 @@ def build_parser() -> argparse.ArgumentParser:
         "repair", help="修 doctor 检出的残留 res 分支 / store 状态分叉（默认 dry-run）")
     s.add_argument("--apply", action="store_true", help="真正执行修复（默认只预演）")
     s.set_defaults(func=cmd_repair)
+
+    s = sub.add_parser(
+        "upgrade", help="集群升级：主控发布 / 子节点检索 / 按策略升级")
+    s.add_argument("action", nargs="?", default="status",
+                   choices=["status", "check", "apply", "publish"],
+                   help="status=看本地/主控版本；check=检索可升级；"
+                        "apply=执行升级；publish=主控发布")
+    s.add_argument("--yes", action="store_true",
+                   help="manual 策略下确认升级")
+    s.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="apply 只预演，不真的快进")
+    s.add_argument("--notes", default="", help="publish 时附带的变更说明")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_upgrade)
 
     s = sub.add_parser("digest", help="复盘摘要：失败归因 + 慢卡 + 反复重跑的卡（只读）")
     s.add_argument("--days", type=int, default=7, help="只看最近 N 天（默认 7，0=全部）")

@@ -1,8 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.16.00 — 2026-11-11
 
 ### Added
+
+- **集群升级（本版核心）**：主控 `hive upgrade publish` 把当前版本写进协调仓
+  `release.json` 并广播；子节点 `upgrade check` 检索、`upgrade apply` 一键升级。
+  只做 `git merge --ff-only`，脏工作区拒绝，回滚点写 `~/.hive/upgrade/last.json`。
+  策略 `follow`（默认，听从主控）/ `manual`（需 --yes）/ `never`（拒绝）。
+  看板顶栏新增「检查升级 / 升级 / 发布升级」，发布仅 controller 可见。
+  见 [`docs/集群升级.md`](docs/集群升级.md)、`tests/test_upgrade.py`。
+- **版本号改为两位小数**：`MAJOR.MINOR.PATCH` 且 PATCH 固定两位（0.15.2 → 0.16.00），
+  比较按数值三元组（`compare_versions`），0.16.10 > 0.16.9 不再判错。
+- **任务时间预算按复杂度自适应**：`task new` 不传 `--timeout/--lease` 时按
+  paths / verify / depends / needs / 正文长度估算；新增 `hive task retime`
+  （只调大不调小）；`watchdog` 不传 `--minutes` 时按预算给宽限，近期有进度上报
+  的卡不回收；看板详情显示时间预算。
+- **异常卡带责任 agent**：`status` 新增 `result_agent` / `abnormal_agent`，
+  看板异常列直接显示「责任 agent」；顺带修掉 `normalize()` 白名单漏字段导致
+  `land_ready` 等看板修复未生效的问题。
+- **状态一致性修复**：`cmd_close` 终态幂等（重复 close 不再把 done 改判 closed）、
+  `land` 接入结果自洽校验并拦 closed、交付侧把 `task/<tid>` 推到所有网络远端并回读、
+  新增 `doctor` 四类一致性检查与 `hive repair`（清残留 res 分支 / 对齐 store 状态）。
 
 - **T-0314：新增控制面运维手册**。`docs/控制面v0.5-运维.md` 面向要上线控制面的人，
   覆盖：双面并存与 D1/D14 边界、端口表（HTTP 8788、上行/拉取 TCP 8789、组播
