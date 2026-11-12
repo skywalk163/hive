@@ -1,0 +1,53 @@
+{
+  "task": "T-0337",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0337",
+  "base": "main",
+  "head": "087e315eb6d1dfeab51d67ba8417fc92862a3dcd",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-12T18:30:00+08:00",
+  "finished_at": "2026-11-12T19:15:00+08:00",
+  "duration_s": 2700.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_err_samples.py",
+      "code": 0,
+      "tail": [
+        "11 passed"
+      ]
+    },
+    {
+      "cmd": "python train_openi.py --self-check",
+      "code": 0,
+      "tail": [
+        "\"validation_codes_seen\": [\"ERR=RUNTIME\", \"PASS\"]",
+        "\"has_err_validation\": true",
+        "== self-check PASS =="
+      ]
+    }
+  ],
+  "summary": "T-0337 ERR 类验证样本交付说明（manual submit，Win10 本机）。\n\n## 产物\n- scripts/gen_err_samples.py：诊断码可达性矩阵 + 真实样本生成器（--check / 默认模式）\n- scripts/embed_payload.py：重建 train_openi.py 内嵌 _PAYLOAD_B64（zlib+base64）\n- data/sft/err_tasks.jsonl：8 条 L3001（列表索引越界）→ ERR=RUNTIME 样本\n- reports/ERR样本覆盖.md：诚实覆盖报告（仅 L3001 可达，其余码未覆盖）\n- tests/test_err_samples.py：11 个回归测试（JSONL 读回、查表一致、无重复、每码≥5条、--check 退出码、embed_payload --check）\n- train_openi.py：_load_payload() 与 load_samples() 支持 err_tasks\n\n## 实测口径（不硬凑）\n- validation_codes_seen 从 [PASS] 变为 [ERR=RUNTIME, PASS]，has_err_validation=true，门禁通过。\n- 仅 L3001 能稳定触发（列表索引越界），其余 7 个验证码在当前 light 版本下都回落到 L0000，记为未覆盖，不拿 L0000 冒充。\n- Windows 上 light ai check 不支持 --json/--no-corpus 参数（与 FreeBSD 版本不同），故样本基于任务卡已知事实生成。\n\n## 验证\n- pytest tests/test_err_samples.py: 11 passed\n- python train_openi.py --self-check: PASS，has_err_validation=true\n\n## 备注\n- 代码已 push 到 origin/task/T-0337\n- 因 agent 配置缺少 lightprism 仓库路径映射，hive take/submit 自动流程报「没有配置仓库」，改为手动提交 result。",
+  "error": "",
+  "declared_paths": [
+    "scripts/gen_err_samples.py",
+    "scripts/embed_payload.py",
+    "data/sft/err_tasks.jsonl",
+    "reports/ERR样本覆盖.md",
+    "tests/test_err_samples.py",
+    "train_openi.py"
+  ],
+  "changed_files": [
+    "scripts/gen_err_samples.py",
+    "scripts/embed_payload.py",
+    "data/sft/err_tasks.jsonl",
+    "reports/ERR样本覆盖.md",
+    "tests/test_err_samples.py",
+    "train_openi.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "69b43671",
+  "fence": 1
+}
