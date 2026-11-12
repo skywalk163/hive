@@ -1,0 +1,37 @@
+{
+  "task": "T-0334",
+  "agent": "fb88-verify",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0334",
+  "base": "main",
+  "head": "bd683c3c1d6f44d91e14ec288915c75a395bdb5a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-12T20:58:33+08:00",
+  "finished_at": "2026-11-12T21:00:05+08:00",
+  "duration_s": 92.5,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_acceptance.py",
+      "code": 0,
+      "tail": [
+        ".......................s.....                                            [100%]"
+      ]
+    }
+  ],
+  "summary": "# T-0334 验收结果收下（A 方案）\n\n## 结论\n\n采纳 `docs/Demo验收报告.md` 的验收结论：**七条标准 1 通过 / 5 未通过 / 1 blocked**。\n本卡交付物是「报告 + 自动验收脚本 + 脚本回归」三件；「demo 七条全绿」不再是本卡门禁\n（原 verify 的语义是「任一标准不达标即 exit 1」，与「如实报告未通过」直接冲突）。\n\n| 项 | 结论 | 去向 |\n|---|---|---|\n| V1/V3 入口不存在 | fail | T-0338 补 `lightprism chat` / `--format json` |\n| V2 合法率 0/20 | fail | T-0339 训练质量（50 步 checkpoint 未收敛） |\n| V4 70.6–90.5 tok/s | fail | T-0340 提速到 ≥200（差 2.2–2.8×） |\n| V7 main 无 Makefile | fail | T-0341 合入 T-0335 后复验 |\n| V6 无 5 代酷睿 | blocked | T-0342 目标机实测（等真机） |\n\n## 复核（fb88-verify，未参与 LightPrism 实现）\n\n- 环境：FreeBSD 15.1 / Python 3.12.13，独立重跑，不复用提交侧 Windows 口径。\n- 交付分支 `task/T-0334` @ `bd683c3c`：相对 `origin/main` 恰好 3 个文件 / 1893 行，\n  `out_of_paths` 为空，未改 `src/`、`configs/`、`scripts/bench.py`。\n- 新 verify：`python3 -m pytest -q tests/test_acceptance.py` → **29 passed, 1 skipped，8.3s**\n  （`pyproject.toml` 已配 `pythonpath=[\"src\"]`，不依赖 `PYTHONPATH` 前缀）。\n- 抽查与实现侧一致：`smoke` 输出 32 个空格（V2 退化的直接证据）；同一 worktree 上\n  `bench.py --tokens 200` 在本机当前负载下 40.3–40.8 tok/s，方向与报告一致（差距 2.5× 以上）。\n- 报告 §9.1 的 `hive_compat` 细节与部署版不完全一致（见 T-0343 正文），但不影响七条结论。\n\n## 卡面变更\n\n- verify：`PYTHONPATH=src python scripts/acceptance.py --all` →\n  `python3 -m pytest -q tests/test_acceptance.py`（环境无关，Windows/FreeBSD 都不假失败）。\n- 正文补「A 方案处置」段与整改卡编号；修掉正文里过期的「等 T-0332」提示。\n- 本卡由 deepseek-win 于 2026-11-12T17:00 提交失败（Windows cmd.exe 假失败），\n  `hive retry --agent fb88-verify` 后由独立验收机复跑并提交。",
+  "error": "",
+  "declared_paths": [
+    "docs/Demo验收报告.md",
+    "scripts/acceptance.py",
+    "tests/test_acceptance.py"
+  ],
+  "changed_files": [
+    "docs/Demo验收报告.md",
+    "scripts/acceptance.py",
+    "tests/test_acceptance.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "1df419f0e49f4937be65b6d3d4a22377"
+}
