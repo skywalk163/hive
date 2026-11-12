@@ -7,6 +7,10 @@ Windows 的 cmd.exe 没有，于是同一张卡在验收机上**必然**红灯�
 T-0292 追加 `bash <script>` / `python3 <args>`：Windows 上分别探测
 Git for Windows 的 bash.exe 与 `sys.executable`，真起子进程、退出码原样透传。
 测试不要求 CI 装 Git Bash：识别/失败路径用 mock，执行路径用 `sys.executable`。
+
+T-0343 追加三条口径：`python` 与 `python3` 同义；`VAR=value ...` 赋值前缀解析成
+子进程 env（POSIX 上一个字节都不改写）；`make` 能力过滤（verify 含 make 的卡只派给
+声明了 make 的 agent）。未知写法仍必须明确失败，绝不猜成功。
 """
 from __future__ import annotations
 
@@ -130,10 +134,15 @@ def test_hive_verify_command_respects_kill_switch(monkeypatch):
 
 
 def test_hive_verify_command_untouched_on_posix(monkeypatch):
+    """T-0343 红线：POSIX 上一个字节都不改写（含 python / 赋值前缀 / make）。"""
     monkeypatch.setattr(hive_compat.os, "name", "posix")
     monkeypatch.delenv("HIVE_COMPAT", raising=False)
-    for cmd in ("true", "test -f x", "pytest -q tests"):
+    for cmd in ("true", "test -f x", "pytest -q tests", "python -V",
+                "python3 -V",
+                "PYTHONPATH=src python scripts/acceptance.py --all",
+                "A=1 B=2 python -c 'print(1)'", "make demo"):
         assert hive.verify_command(cmd) == cmd
+        assert hive_compat.should_wrap(cmd) is False
 
 
 # --------------------------------------------------------------------------- #
@@ -156,7 +165,19 @@ def test_hive_verify_command_untouched_on_posix(monkeypatch):
     ("python3 -V", True),
     ("python3 tests/x.py --flag 1", True),
     ("python3", False),
-    ("python -V", False),               # `python` 不是 `python3`，口径不混
+    ("python -V", True),                # T-0343：`python` 与 `python3` 同义
+    ("python tests/x.py --flag 1", True),
+    ("python", False),
+    ("python3.12 -V", False),           # 带版本号不认，别静默跑错解释器
+    ("pythonic -V", False),             # 前缀必须整词
+    ("echo python -V", False),
+    # T-0343：赋值前缀（一条或多条）+ 解释器前缀
+    ("PYTHONPATH=src python scripts/acceptance.py --all", True),
+    ("A=1 B=2 python3 -V", True),
+    ('A=1 B="two words" python -c "print(1)"', True),
+    ("A=1 make demo", False),           # make 不是解释器 → 未知写法，不猜成功
+    ("A=1", False),
+    ("1BAD=x python -V", False),        # 不是合法的变量名
     ("echo python3 -V", False),
 ])
 def test_should_wrap_recognises_interpreter_prefix(cmd, want, monkeypatch):
@@ -169,6 +190,9 @@ def test_interpreter_prefix_is_not_wrapped_on_posix(monkeypatch):
     monkeypatch.setattr(hive_compat.os, "name", "posix")
     assert hive_compat.should_wrap("bash tests/x.sh") is False
     assert hive_compat.should_wrap("python3 -V") is False
+    assert hive_compat.should_wrap("python -V") is False
+    assert hive_compat.should_wrap(
+        "PYTHONPATH=src python scripts/acceptance.py --all") is False
 
 
 def test_interpreter_command_parses_prefix():
@@ -176,14 +200,19 @@ def test_interpreter_command_parses_prefix():
         "bash tests/run_pytest.sh tests/test_run_stdin.py") == (
             "bash", "tests/run_pytest.sh tests/test_run_stdin.py")
     assert hive_compat.interpreter_command("python3 -V") == ("python3", "-V")
+    assert hive_compat.interpreter_command("python -V") == ("python", "-V")
+    assert hive_compat.interpreter_command(
+        "PYTHONPATH=src python scripts/acceptance.py --all") == (
+            "python", "scripts/acceptance.py --all")
     assert hive_compat.interpreter_command("bash") is None
     assert hive_compat.interpreter_command("pytest -q") is None
 
 
 def test_bare_interpreter_is_not_executed():
-    """`bash` / `python3` 单独一条：不执行、判未知（绝不冒充成功）。"""
+    """`bash` / `python3` / `python` 单独一条：不执行、判未知（绝不冒充成功）。"""
     assert hive_compat.evaluate("bash") == 2
     assert hive_compat.evaluate("python3") == 2
+    assert hive_compat.evaluate("python") == 2
 
 
 # -- 解释器定位 ------------------------------------------------------------- #
@@ -314,10 +343,13 @@ def test_bash_handles_quoted_script_path(tmp_path, capsys):
 def test_verify_command_wraps_interpreter_prefix(monkeypatch):
     monkeypatch.setattr(hive_compat.os, "name", "nt")
     monkeypatch.delenv("HIVE_COMPAT", raising=False)
-    for cmd in ("bash tests/run_pytest.sh tests/test_run_stdin.py", "python3 -V"):
+    for cmd in ("bash tests/run_pytest.sh tests/test_run_stdin.py", "python3 -V",
+                "python -V",
+                "PYTHONPATH=src python scripts/acceptance.py --all"):
         out = hive.verify_command(cmd)
         assert "hive_compat.py" in out and " run " in out, cmd
-        assert hive_compat.should_wrap(out) is False      # 幂等，不套娃
+        assert cmd in out, cmd                          # 原文原样带给垫片
+        assert hive_compat.should_wrap(out) is False     # 幂等，不套娃
 
 
 def test_legacy_idioms_unchanged(monkeypatch):
@@ -342,6 +374,255 @@ def test_rewrite_quoting_for_interpreter_prefix():
     assert "hive_compat.py" in out and " run " in out
     assert text in out
     assert hive_compat.should_wrap(out) is False
+
+
+# --------------------------------------------------------------------------- #
+# T-0343：`python` 前缀 / `VAR=value` 赋值前缀 / `make` 能力过滤
+#
+# 事故复盘：T-0334 的 verify 是 `PYTHONPATH=src python scripts/acceptance.py --all`，
+# Windows 上 should_wrap 不认 → 原样交 cmd.exe → "'PYTHONPATH' 不是内部或外部命令"；
+# 就算包进垫片，interpreter_command 也只认 bash/python3 → rc=2。
+# T-0335 的 `make demo` 则是 Windows 根本没装 make —— 那类卡不该派给无 make 的机器。
+# --------------------------------------------------------------------------- #
+
+T0334_VERIFY = "PYTHONPATH=src python scripts/acceptance.py --all"
+
+
+# -- 1. `python` 前缀 -------------------------------------------------------- #
+
+def test_python_prefix_maps_to_sys_executable(capsys):
+    """`python` 与 `python3` 同义：都映射到当前解释器，不去 PATH 里碰运气。"""
+    assert hive_compat.resolve_python() == sys.executable
+    assert hive_compat.resolve_python() == hive_compat.resolve_python3()
+    assert hive_compat.evaluate("python -V") == 0
+    out = capsys.readouterr()
+    assert "Python" in (out.out + out.err)
+
+
+def test_python_prefix_passes_through_nonzero_exit_code():
+    assert hive_compat.evaluate('python -c "import sys; sys.exit(7)"') == 7
+
+
+def test_python_and_python3_share_interpreter(monkeypatch):
+    seen = []
+
+    def fake_run(argv, cwd=None, env=None):
+        seen.append((argv, cwd, env))
+        return 0
+
+    monkeypatch.setattr(hive_compat, "_run_argv", fake_run)
+    for cmd in ("python3 -V", "python -V"):
+        assert hive_compat.evaluate(cmd) == 0
+    assert seen[0][0] == [sys.executable, "-V"], seen
+    assert seen[1][0] == [sys.executable, "-V"], seen
+    # 没有赋值前缀时保持 T-0292 的调用形态，别多传 env
+    assert seen[0][2] is None and seen[1][2] is None
+
+
+def test_versioned_python_is_unknown_not_guessed():
+    """认不出的解释器写法返回 2，绝不「猜一个成功」。"""
+    assert hive_compat.interpreter_command("python3.12 -V") is None
+    assert hive_compat.evaluate("python3.12 -V") == 2
+
+
+# -- 2. `VAR=value` 赋值前缀 ------------------------------------------------- #
+
+def test_env_prefix_command_parses_single_and_multiple():
+    assert hive_compat.env_prefix_command("python -V") is None
+    assert hive_compat.env_prefix_command("") is None
+    assert hive_compat.env_prefix_command(T0334_VERIFY) == (
+        {"PYTHONPATH": "src"}, "python scripts/acceptance.py --all")
+    assert hive_compat.env_prefix_command(
+        'A=1 B="two words" C=\'x y\' python -V') == (
+            {"A": "1", "B": "two words", "C": "x y"}, "python -V")
+    assert hive_compat.env_prefix_command("VAR= python -V") == (
+        {"VAR": ""}, "python -V")
+    # 变量名不合法 / 引号不成对 → 不认，交回「未知写法」
+    assert hive_compat.env_prefix_command("1BAD=x python -V") is None
+    assert hive_compat.env_prefix_command('A="oops python -V') is None
+
+
+def test_parse_command_returns_env_kind_and_args():
+    assert hive_compat.parse_command(T0334_VERIFY) == (
+        {"PYTHONPATH": "src"}, "python", "scripts/acceptance.py --all")
+    assert hive_compat.parse_command("python3 -V") == ({}, "python3", "-V")
+    assert hive_compat.parse_command("A=1 make demo") is None
+    assert hive_compat.parse_command("pytest -q tests") is None
+
+
+def test_evaluate_env_prefix_reaches_child_only(monkeypatch):
+    """env 真的传给子进程，且不污染 hive 自己的 os.environ。"""
+    monkeypatch.delenv("HIVE_T0343_VAR", raising=False)
+    cmd = ("HIVE_T0343_VAR=src python -c "
+           "\"import os,sys; sys.exit(0 if os.environ.get('HIVE_T0343_VAR')=='src' else 9)\"")
+    assert hive_compat.evaluate(cmd) == 0
+    assert "HIVE_T0343_VAR" not in os.environ
+
+
+def test_evaluate_multiple_assignments_argv_and_env(monkeypatch):
+    """多赋值 + 带空格的引号值：argv 按 POSIX shlex 拆，env 原样解析。"""
+    seen = {}
+
+    def fake_run(argv, cwd=None, env=None):
+        seen.update(argv=argv, cwd=cwd, env=env)
+        return 0
+
+    monkeypatch.setattr(hive_compat, "_run_argv", fake_run)
+    cmd = 'A=1 B="x y" C=\'z w\' python -c "print(1)" --flag "a b"'
+    assert hive_compat.evaluate(cmd) == 0
+    assert seen["env"] == {"A": "1", "B": "x y", "C": "z w"}, seen
+    assert seen["argv"] == [sys.executable, "-c", "print(1)", "--flag", "a b"], seen
+
+
+def test_evaluate_env_prefix_exit_code_passthrough():
+    assert hive_compat.evaluate('A=1 python -c "import sys; sys.exit(7)"') == 7
+
+
+@pytest.mark.parametrize("cmd", [
+    "make demo",                       # Windows 没 make：这是未知写法，明确失败
+    "A=1 make demo",
+    "A=1",                             # 只有赋值、没有命令
+    "1BAD=x python -V",                # 非法变量名
+    "PYTHONPATH=src python",           # 有解释器没参数
+    "pytest -q tests",
+    "",
+])
+def test_unknown_forms_still_fail_explicitly(cmd):
+    """红线：未知写法仍要明确失败，不许猜成功。"""
+    assert hive_compat.evaluate(cmd) == 2, cmd
+    assert hive_compat.parse_command(cmd) is None, cmd
+
+
+def test_posix_never_rewrites_a_single_byte(monkeypatch):
+    """红线：POSIX 上 verify_command 原样返回（一个字节都不动）。"""
+    monkeypatch.setattr(hive_compat.os, "name", "posix")
+    monkeypatch.delenv("HIVE_COMPAT", raising=False)
+    for cmd in ("true", "test -f x", "python3 -V", "python -V", T0334_VERIFY,
+                "A=1 B=2 python -c 'print(1)'", "make demo", "pytest -q tests"):
+        assert hive_compat.should_wrap(cmd) is False, cmd
+        assert hive.verify_command(cmd) == cmd, cmd
+
+
+def test_windows_assignment_prefix_does_not_false_fail(monkeypatch, capsys):
+    """回归 T-0334：monkeypatch os.name 成 nt，赋值前缀必须走垫片而不是 cmd.exe。"""
+    cmd = "PYTHONPATH=src python -c 'print(1)'"
+    with monkeypatch.context() as m:
+        m.setattr(hive_compat.os, "name", "nt")
+        m.delenv("HIVE_COMPAT", raising=False)
+        assert hive_compat.should_wrap(cmd) is True
+        assert hive_compat.should_wrap(T0334_VERIFY) is True
+        wrapped = hive.verify_command(T0334_VERIFY)
+        assert "hive_compat.py" in wrapped and " run " in wrapped
+        assert T0334_VERIFY in wrapped
+        assert hive_compat.should_wrap(wrapped) is False     # 不套娃
+        # make 仍不认识：不包、不猜成功
+        assert hive_compat.should_wrap("make demo") is False
+    # 垫片自己求值（等价于 cmd.exe 起的子进程），平台名已还原
+    assert hive_compat.evaluate(cmd) == 0
+    assert "1" in capsys.readouterr().out
+
+
+def test_cli_run_assignment_prefix_exits_zero():
+    """卡面验收：python3 hive_compat.py run "PYTHONPATH=src python -c 'print(1)'"。"""
+    cmd = "PYTHONPATH=src python -c 'print(1)'"
+    p = subprocess.run(
+        [sys.executable, str(ROOT / "hive_compat.py"), "run", cmd],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **hive_compat.no_window_kwargs())
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "1" in p.stdout
+
+
+def test_cli_run_unknown_form_exits_nonzero():
+    p = subprocess.run(
+        [sys.executable, str(ROOT / "hive_compat.py"), "run", "make demo"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **hive_compat.no_window_kwargs())
+    assert p.returncode != 0
+    assert "不支持" in p.stderr
+
+
+# -- 3. make 能力过滤 -------------------------------------------------------- #
+
+@pytest.mark.parametrize("cmd,want", [
+    ("make demo", True),
+    ("make bench", True),
+    ("gmake check", True),
+    ("cd src && make check", True),
+    ("PYTHONPATH=src make demo", True),
+    ("bash -c 'make check'", True),
+    ("echo make", False),                 # 只是个参数，不是命令
+    ("grep -q make README.md", False),
+    ("cmake .", False),
+    ("test -f Makefile", False),
+    ("python3 -m pytest -q tests/test_compat.py", False),
+])
+def test_command_requires_make(cmd, want):
+    assert hive_compat.command_requires_make(cmd) is want, cmd
+
+
+def test_required_capabilities_infers_make_from_verify():
+    assert hive_compat.required_capabilities(
+        {"needs": ["make"], "verify": ["make demo"]}) == {"make"}
+    # 卡面漏标 needs、但 verify 里有 make —— 照样算需要 make
+    assert hive_compat.required_capabilities(
+        {"needs": [], "verify": ["make demo"]}) == {"make"}
+    assert hive_compat.required_capabilities(
+        {"needs": ["python"], "verify": ["python3 -m pytest -q"]}) == {"python"}
+    assert hive_compat.card_needs_make({"needs": [], "verify": ["make bench"]})
+
+
+@pytest.mark.parametrize("agent", [
+    {"capabilities": ["windows"]},                       # 压根没声明 make
+    {"capabilities": ["windows", "make"], "no_capabilities": ["make"]},
+    {"capabilities": ["windows", "make"], "missing_capabilities": ["make"]},
+    {"capabilities": ["windows", "make"], "no_make": True},
+    {"capabilities": ["windows", "make"], "has_make": False},
+    {"capabilities": ["windows", "no-make"]},
+    {"capabilities": ["windows", "!make"]},
+])
+def test_agent_can_explicitly_declare_no_make(agent):
+    assert hive_compat.agent_has_make(agent) is False, agent
+
+
+@pytest.mark.parametrize("agent", [
+    {"capabilities": ["windows", "make"]},
+    {"abilities": ["code"], "capabilities": ["make"]},
+    {"capabilities": ["make"], "no_make": False},
+])
+def test_agent_with_make(agent):
+    assert hive_compat.agent_has_make(agent) is True, agent
+
+
+def test_filter_agents_for_card_returns_only_make_agents():
+    card = {"needs": [], "verify": ["make demo"]}
+    agents = {
+        "win11": {"capabilities": ["windows", "python"], "no_make": True},
+        "fb88": {"capabilities": ["freebsd", "make"]},
+        "win10": {"capabilities": ["windows", "python"]},
+    }
+    assert hive_compat.filter_agents_for_card(card, agents) == ["fb88"]
+    # 不需要 make 的卡：能力过滤不该把普通 agent 误杀
+    assert hive_compat.filter_agents_for_card(
+        {"needs": ["python"], "verify": ["python3 -V"]}, agents) == ["win10", "win11"]
+
+
+def test_dispatch_routes_make_cards_to_make_agents(world, fake_cmd):
+    """真派发层回归：needs: make 的卡只给声明了 make 的 agent（hive.py 原有判据）。"""
+    world.add_agent("win", "exec", caps=["windows", "python"], command=fake_cmd,
+                    repos={"hive": world.code_clone("win")})
+    world.add_task("T-0001", repo="hive", needs=["make"], verify=["make demo"])
+
+    out = world.hive_json("dispatch")
+    assert out["plan"] == [], out
+    reasons = {s["task"]: s["reason"] for s in out["skipped"]}
+    assert "能力缺失" in reasons["T-0001"], out
+
+    world.add_agent("fb", "exec", caps=["freebsd", "make"], command=fake_cmd,
+                    repos={"hive": world.code_clone("fb")})
+    out = world.hive_json("dispatch")
+    plan = {p["task"]: p["agent"] for p in out["plan"]}
+    assert plan == {"T-0001": "fb"}, out
 
 
 # --------------------------------------------------------------------------- #
