@@ -1,0 +1,60 @@
+{
+  "task": "T-0332",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0332",
+  "base": "main",
+  "head": "ff8109031565d8d98e36fb7fc4f4297efeb4d437",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-12T13:47:49+08:00",
+  "finished_at": "2026-11-12T14:03:05+08:00",
+  "duration_s": 916.3,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python -m lightprism.demo.train_demo --config configs/demo-3m.json --steps 50",
+      "code": 0,
+      "tail": [
+        "      \"split_seed\": 20261112",
+        "    }",
+        "  },",
+        "  \"checkpoint\": \"/home/skywalk/.hive/wt/T-0332/checkpoints/demo-3m/model.pt\"",
+        "}"
+      ]
+    },
+    {
+      "cmd": "PYTHONPATH=src python -m lightprism.demo.smoke --ckpt checkpoints/demo-3m/model.pt",
+      "code": 0,
+      "tail": [
+        "  \"truncated\": true,",
+        "  \"vocab_size\": 4096,",
+        "  \"params\": 3443520,",
+        "  \"ok\": true",
+        "}"
+      ]
+    }
+  ],
+  "summary": "T-0332 demo checkpoint 交付说明（manual submit，fb98/192.168.0.88 实测）。\n\n## 产物\n- checkpoints/demo-3m/model.pt（13,836,671 字节）+ train_log.json，3,443,520 参数（非嵌入 2,657,088），vocab 4096。\n- src/lightprism/demo/train_demo.py：DemoVocab 最长匹配分词、语料/SFT 装配、按文件 5% 切分、定长打包、DemoTrainer、持久化。\n- src/lightprism/demo/smoke.py：DemoGenerator 贪心 argmax + KV cache，load_demo_generator / run_smoke。\n- tests/test_train_demo.py：8 项；远端 pytest 8 passed。\n- reports/训练报告.md：语料统计、loss 曲线、过拟合起始步结论、失败样例、合法率实测。\n\n## 实测口径（不硬凑）\n- 50 步：train loss 8.02 → 6.05；val 步25=6.0699、步50=5.72384（窗口内两次均下降，未观察到过拟合起点）。\n- 数据：392 语料文件 / 363 SFT；train 1983 块 1,015,296 token，val 129 块 66,048 token；控制占比 0.18%、UNK 0.37%。\n- 生成质量：smoke 32 token 退出码 0、id 全在 [0,4096)、不崩；但 8 条 SFT prompt × 64 token 全程退化为空格重复，无 <TASK>/<CODE>/<V:> 结构标记，结构合法率 0/8。原因：50 步小模型只学到最高频边缘分布（空格占比 30.69%），loss 仍 5.5–6.0 远未收敛。卡面「语法合法率 ≥ 80%」未达到，属如实记录。\n\n## 验证\n- 两条 verify 在 fb98（FreeBSD 15.1，Python 3.12.13，torch 2.12.1a0）实测退出码 0：\n  PYTHONPATH=src python3 -m lightprism.demo.train_demo --config configs/demo-3m.json --steps 50\n  PYTHONPATH=src python3 -m lightprism.demo.smoke --ckpt checkpoints/demo-3m/model.pt\n- 本机 Win10 无 torch，且 `PYTHONPATH=src` 前缀在 cmd.exe 下非法，故 verify 在远端执行。\n\n## 备注\n- data/corpus/flat/ 为 392 个 .light 快照（gitignored 本地产物，不入库）；data/corpus/.gitignore 新增 `flat/` 挡库。\n- checkpoint 不入库（checkpoints/ 已在 .gitignore）。",
+  "error": "",
+  "declared_paths": [
+    "src/lightprism/train.py",
+    "src/lightprism/demo/train_demo.py",
+    "checkpoints/demo-3m/",
+    "reports/训练报告.md",
+    "tests/test_train_demo.py"
+  ],
+  "changed_files": [
+    "data/corpus/.gitignore",
+    "reports/训练报告.md",
+    "src/lightprism/demo/smoke.py",
+    "src/lightprism/demo/train_demo.py",
+    "tests/test_train_demo.py"
+  ],
+  "out_of_paths": [
+    "data/corpus/.gitignore",
+    "src/lightprism/demo/smoke.py"
+  ],
+  "lease_id": "e376c56e83df4310a2ebb2caf4ec84c0",
+  "fence": 10
+}
