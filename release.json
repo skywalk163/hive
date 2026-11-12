@@ -1,7 +1,7 @@
 {
-  "version": "0.16.04",
-  "commit": "b684d79c31233c9c168284d40097598ae6928907",
-  "published_at": "2026-11-11T13:40:31+00:00",
+  "version": "0.16.05",
+  "commit": "a4ab41b3f30d4b6bde0bd39a113fe4ffe87d20af",
+  "published_at": "2026-11-12T10:26:06+00:00",
   "published_by": "controller",
-  "notes": "修复主控宕机后集群永久无主（0.16.03 回归）；版本一致性闸门"
+  "notes": ""
 }
