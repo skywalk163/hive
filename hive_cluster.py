@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import copy
 import contextlib
+import hashlib
 import hmac
 import io
 import json
@@ -149,6 +150,44 @@ FULL_BROADCAST_S = 30.0
 PERSIST_INTERVAL_S = 5.0
 # 心跳响应最多回多少条增量事件（events 本身是 deque(EVENT_LIMIT)）。
 EVENT_PUSH_LIMIT = 120
+# 0.16.05：心跳是「轻量 ping」，只在内容真的变了时才搬大块状态。
+#
+# 之前用 generation 当同步水位，但 generation 是**每个节点本地自增**的计数器
+# （现场四台：607万 / 300万 / 1056万 / 42万），跨节点永远不相等，于是
+# `changed = req_gen != self.generation` 恒为 True —— 每次心跳请求和响应都带上
+# 全量 progress+leases（约 50KB），而实测四台机器的内容哈希完全一致。再加上
+# 每拍都回整份 nodes（每条含 1.6KB agents）和最多 120 条 events（~32KB），
+# 空闲期实测稳定在 ~600KB/s。
+#
+# 现在改用「内容摘要」：请求方带上自己 progress+leases 的摘要，应答方只在
+# 摘要不同时才回全量；旧节点不带摘要 → 仍走全量，滚动升级期间保持兼容。
+HEARTBEAT_EVENT_LIMIT = 32
+# 心跳事件只回「最近这么久」的（事件自带 _now() 墙钟时间戳，各机时钟实测
+# 误差 <1s）。请求方每拍发 `events_since = now - EVENT_WINDOW_S`，应答方只回
+# epoch 比它新的事件，重复按 id 去重。
+#
+# 关键是**窗口跟着墙钟走**：空闲期没有新事件，窗口内就是空的，响应里
+# `events` 恒为 [] —— 不会像旧的 seq 机制那样常年重发 120 条（~32KB），
+# 也不会像「水位只跟收到的事件走」那样把已有事件永远重发一遍。
+# 10s 大于空闲心跳间隔（5s）的 2 倍：每个事件至少能被下一拍、下下拍看到，
+# 降频后不漏事件；也盖住常见的时钟偏斜。事件只是通知（node_up /
+# task_progress / leader_elected），权威状态是 progress/leases/nodes，靠摘要
+# 同步；`repo.updated` 另有 RepoSyncAgent 每 5 分钟直接比远端 HEAD 的补偿
+# 通道（_reconcile），不依赖通知长期留存。长时间离线漏几条通知可以接受。
+EVENT_WINDOW_S = 10.0
+# 心跳响应里的节点记录不下发这些「展示用/大块静态」字段。agents 单节点就有
+# ~1.6KB（agent 列表），7 个节点 ~11KB，而它只在看板配置里用，心跳路径没人读。
+HEARTBEAT_NODE_SKIP_KEYS = ("agents", "capabilities", "hive_dir",
+                            "hostname", "pid", "started_at", "joined_at",
+                            "cluster_id", "protocol")
+# 「在跑的活儿」的最长有效期：租约/进度超过这么久没更新就不算活跃，避免一条
+# 远期租约（现场 T-0332 的 lease_until 比当前时间晚 6 小时、两小时没续过）
+# 把心跳永久钉在 1s，空闲降频永远失效。
+ACTIVE_WORK_WINDOW_S = 600.0
+# 留言增量拉取：活跃期 2s，空闲退避到 5s；收到/发出新留言后回到活跃期。
+CHAT_SYNC_FAST_S = 2.0
+CHAT_SYNC_IDLE_S = 5.0
+CHAT_SYNC_ACTIVE_WINDOW_S = 30.0
 # 节点记录里「只表示它还活着/租约刚续」的字段：只有这些变化时不算状态
 # 变更，不能推进 generation。lease_until* 每跳都会被主控刷新，若算变化，
 # follower 每次心跳都会把 generation 推一格，全量广播永远停不下来。
@@ -251,6 +290,20 @@ def _chat_id() -> str:
     """消息 id 必须全网唯一：节点 + 微秒 + 随机后缀，重复投递靠它去重。"""
     return "%s-%d-%s" % (socket.gethostname().split(".")[0], int(_now() * 1e6),
                          uuid.uuid4().hex[:6])
+
+
+def _state_digest(progress: dict, leases: dict) -> str:
+    """progress+leases 的内容摘要：跨节点可比、内容不变则不变。
+
+    generation 是节点本地计数器，不能跨机比较（0.16.05 修的正是这个坑）。
+    摘要用 sha256 取前 16 位：心跳每拍都要算，18 张进度 + 95 条租约约 50KB，
+    C 实现的 json.dumps + hashlib 一次不到 1ms，比把 50KB 发上网络便宜几个
+    数量级。排序 + 紧凑分隔符保证「字典顺序不同但内容相同」也一致。
+    """
+    payload = {"progress": progress, "leases": leases}
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                     separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
 
 
 def _norm_scope(value) -> str:
@@ -1390,14 +1443,16 @@ class Cluster:
         self.chat: deque = deque(maxlen=CHAT_LIMIT)
         self._chat_ids: set[str] = set()
         self._chat_last_epoch = 0.0
+        # 留言同步的活跃期：有新留言（本地发出 / 从主节点拉到）就刷新，
+        # 空闲时把 2s 一拍降频到 5s。聊天是低频人类文本，没必要常年 2s 轮询。
+        self._chat_active_until = 0.0
         self.generation = 0
         self.updated_at = _iso()
 
         self._dirty = False
         self._last_persist = 0.0
-        # 上次向同伴广播全量 progress/leases 时的 generation 与时刻。
-        # 0 表示「还没广播过」，第一次心跳必定带全量。
-        self._broadcast_gen = 0
+        # 上次兜底全量重传 progress/leases 的时刻（见 _heartbeat_once）。
+        # 0 表示「还没重传过」，第一次心跳必定带全量，新节点能立刻收敛。
         self._broadcast_at = 0.0
         self._last_election = 0.0
         # 只有「主控本人发来的 leader 心跳」才刷新这个时间戳。跟随者之间转述
@@ -2327,6 +2382,23 @@ class Cluster:
         out["term"] = self.term if rec.get("id") == self.node_id else int(rec.get("term") or 0)
         return out
 
+    def _heartbeat_nodes_locked(self) -> list[dict]:
+        """心跳响应的节点表：去掉展示用的大块静态字段。
+
+        现场单节点 `agents` 就有 ~1.6KB（agent 列表），7 个节点 ~11KB；连
+        `hive_dir`/`hostname`/`pid`/时间戳一起，整份 nodes 常年 12KB+，而
+        心跳路径没有任何消费者读这些字段（看板走 `/api/cluster/state` 的
+        `_snapshot_locked`，仍是完整记录）。合并方 `_update_node_locked`
+        用 `dict.update` 语义，缺字段会保留本地已有值，不会抹掉数据。
+        """
+        out = []
+        for n in self.nodes.values():
+            rec = self._public_node_locked(n)
+            for key in HEARTBEAT_NODE_SKIP_KEYS:
+                rec.pop(key, None)
+            out.append(rec)
+        return out
+
     def _leader_record_locked(self) -> dict | None:
         if not self.leader_id:
             return None
@@ -2549,6 +2621,7 @@ class Cluster:
         with self.lock:
             self._chat_append_locked(msg)
             self._persist()
+            self._chat_active_until = _now() + CHAT_SYNC_ACTIVE_WINDOW_S
         return 200, {"ok": True, "message": msg, "forwarded": False}
 
     def _chat_pull_once(self) -> None:
@@ -2573,6 +2646,9 @@ class Cluster:
                     n += 1
             if n:
                 self._persist()
+                # 刚拉到新留言：进入活跃期，接下来 30s 维持 2s 一拍，
+                # 让「有人回话」时秒级可见；之后自动退回 5s 空闲档。
+                self._chat_active_until = _now() + CHAT_SYNC_ACTIVE_WINDOW_S
         if n:
             _log(f"chat: 从主节点同步 {n} 条")
         # 反方向：主节点没有、我这儿有的（通常是我这边短暂失去主节点时发的）。
@@ -2591,9 +2667,20 @@ class Cluster:
             http_json(base.rstrip("/") + "/api/cluster/chat", "POST", payload,
                       3.0, self.config.token)
 
+    def _chat_sync_interval(self) -> float:
+        with self.lock:
+            return (CHAT_SYNC_FAST_S if _now() < self._chat_active_until
+                    else CHAT_SYNC_IDLE_S)
+
     def _loop_chat_sync(self) -> None:
-        """留言不要等 git fetch：每 2 秒向主节点要一次增量。"""
-        while not self._stop.wait(2.0):
+        """留言不要等 git fetch：活跃期 2s 增量拉一次，空闲退避到 5s。
+
+        留言是低频人类文本，常驻集群却 7×24 小时 2s 一拍（`since` 请求 +
+        空 `messages` 响应 ≈ 几百字节/次 × 3 台 follower）也是一笔常年的
+        固定开销。有新留言时自动回到 2s，不牺牲「秒级可见」的体验。
+        测试用 `heartbeat_interval=0.08` 不影响这里，如需覆盖请直接改常量。
+        """
+        while not self._stop.wait(self._chat_sync_interval()):
             try:
                 self._chat_pull_once()
             except Exception as exc:  # noqa: BLE001  网络抖一下不算故障
@@ -3722,22 +3809,27 @@ class Cluster:
         self._mark_dirty_locked()
 
     # -- 心跳 / 维护循环 ---------------------------------------------------- #
-    def _state_stale_for_peers_locked(self) -> bool:
-        """上次全量广播之后 generation 动过，或兜底重传窗口到了？
-
-        调用方必须已持锁。FULL_BROADCAST_S 的兜底很关键：某一拍的全量包
-        丢了、对端又恰好不在线，没有它就会永远停在旧视图上。
-        """
-        return (self.generation != self._broadcast_gen
-                or _now() - self._broadcast_at >= FULL_BROADCAST_S)
-
     def _has_active_work_locked(self) -> bool:
-        """有在跑的活儿吗？判定只看内存里已有的租约/进度，不打任何 IO。"""
+        """有在跑的活儿吗？判定只看内存里已有的租约/进度，不打任何 IO。
+
+        0.16.05 修复：租约不能只看「到期时间在未来」。现场一条 T-0332 租约
+        `lease_until_epoch` 比当前时间晚 6 小时（`claim` 一次给了 8 小时），
+        `updated_epoch` 却是两小时前 —— 它让本函数恒为 True，0.16.03 的
+        「空闲 5s 降频」永远不生效，心跳整年按 1s 跑。
+
+        判据改成「还在续租/推进」：租约与进度都必须满足
+        `updated_epoch >= now - ACTIVE_WORK_WINDOW_S` 才算活跃。真在干活时
+        agent 会持续 `publish_progress` / `renew`，时间戳一直新鲜；没人续的
+        远期租约不该把全网心跳钉死。
+        """
         now_epoch = _now()
+        horizon = now_epoch - ACTIVE_WORK_WINDOW_S
         for lease in self.leases.values():
             if lease.get("released"):
                 continue
-            if float(lease.get("lease_until_epoch") or 0.0) > now_epoch:
+            if float(lease.get("lease_until_epoch") or 0.0) <= now_epoch:
+                continue
+            if float(lease.get("updated_epoch") or 0.0) >= horizon:
                 return True
         settled = ("done", "completed", "finished", "failed", "cancelled",
                    "canceled", "blocked", "released")
@@ -3745,7 +3837,7 @@ class Cluster:
             state = str(item.get("state") or "").strip().lower()
             if state and state not in settled:
                 # 十分钟没推进的老进度不算「在跑」，否则会永远把心跳钉在 1s。
-                if float(item.get("updated_epoch") or 0.0) >= now_epoch - 600:
+                if float(item.get("updated_epoch") or 0.0) >= horizon:
                     return True
         return False
 
@@ -3778,25 +3870,33 @@ class Cluster:
                      and self._node_status_locked(rec) in statuses]
             leader_url = self.leader_url
             leader_id = self.leader_id
+            # 轻量心跳主干：不带大块状态。请求方用 `sd`（state digest）告诉
+            # 应答方「我手上这份 progress+leases 是什么内容」，应答方只在两边
+            # 摘要不同时才回全量。generation 是各节点本地计数器（现场四台
+            # 607万/300万/1056万/42万），绝不能当跨机水位用。
+            #
+            # 事件只问「最近 EVENT_WINDOW_S 秒」的：各机 event_seq 是本地
+            # 计数器、切主还会重置，根本对不上，不能用它。窗口跟着墙钟走，
+            # 空闲期没有新事件时响应里 events 恒为空。
+            sd = _state_digest(self.progress, self.leases)
+            events_since = max(0.0, _now() - EVENT_WINDOW_S)
             if role == "leader":
                 self.leader_lease_until = _now() + self.config.leader_lease
                 body = {"node": self._self_node(), "term": self.term,
                         "leader": True, "leader_url": self.url,
                         "lease_until": _iso(self.leader_lease_until),
-                        "gen": self.generation, "event_seq": self.event_seq}
+                        "sd": sd, "events_since": events_since}
                 # 心跳更新 leader_lease_until 但不推进 generation：长轮询等的是
                 # 真实状态变化，不是「主节点还活着」这件事。
             else:
                 body = {"node": self._self_node(), "term": self.term,
-                        "leader": False,
-                        "gen": self.generation, "event_seq": self.event_seq}
-            # 全量 progress+leases 是 40-50KB；空闲期每秒搬一遍就是这次
-            # 2-3 Mbps 的来源。只在「自上次广播后 generation 真的动过」或
-            # 超过 FULL_BROADCAST_S 兜底重传时才附带，其余每拍只发主干。
-            if self._state_stale_for_peers_locked():
+                        "leader": False, "sd": sd,
+                        "events_since": events_since}
+            # 兜底：某一拍的全量包丢了、对端又恰好不在线时，每
+            # FULL_BROADCAST_S 主动重传一次，避免永远停在旧视图上。
+            if _now() - self._broadcast_at >= FULL_BROADCAST_S:
                 body["progress"] = copy.deepcopy(self.progress)
                 body["leases"] = copy.deepcopy(self.leases)
-                self._broadcast_gen = self.generation
                 self._broadcast_at = _now()
         if role == "leader":
             self._leader_heartbeat(peers, body)
@@ -4322,22 +4422,45 @@ class Cluster:
                 self._adopt_leader_locked(node, max(term, self.term),
                                           refresh_lease=True)
             self._merge_body_state_locked(body)
-            # 对端自报的视图版本：gen 一致说明它已经有这份 progress/leases，
-            # 再塞 40-50KB 纯属浪费带宽（这就是空闲期 2-3 Mbps 的主因）。
-            # 旧版本不带 gen（视为 0）→ 永远拿到全量，保持向后兼容。
-            req_gen = int(body.get("gen") or 0) if isinstance(body, dict) else 0
-            req_event_seq = (int(body.get("event_seq") or 0)
-                             if isinstance(body, dict) else 0)
-            same_term = (int(body.get("term") or 0) == self.term
-                         if isinstance(body, dict) else False)
-            changed = req_gen != self.generation
-            # 事件按 seq 增量下发；任期变了 seq 会重置，此时整段重发。
-            if same_term:
+            # 0.16.05：心跳响应不再无条件搬 40-50KB 全量状态。
+            #
+            # 旧实现用 `changed = req_gen != self.generation` 判断要不要回全量。
+            # 但 generation 是**每个节点本地自增**的计数器（现场四台分别
+            # 607万/300万/1056万/42万），跨节点永远不相等 —— 于是每次心跳
+            # 都回全量 progress+leases，而实测四台内容哈希完全一致。改用内容
+            # 摘要：请求方带 `sd`，两边摘要相等就只回主干。
+            req_sd = str(body.get("sd") or "") if isinstance(body, dict) else ""
+            my_sd = _state_digest(self.progress, self.leases)
+            # 老版本不带 sd：仍按旧语义回全量，滚动升级期间不丢状态。
+            changed = (not req_sd) or (req_sd != my_sd)
+            # 事件：老实现用 `event_seq` 增量，但 seq 是各节点各自的计数器、
+            # 切主还会重置，合并进来的事件 seq 来自四面八方（现场本机
+            # event_seq=664，deque 里却有 seq=17162 的事件），于是
+            # `ev.seq > req_event_seq` 恒真，每拍重发 120 条 ~32KB。
+            # 新节点改发 `events_since = now - EVENT_WINDOW_S`，只回这个时间
+            # 窗口内的事件；窗口跟着墙钟走，空闲期没有新事件就恒为空。
+            # 重复事件按 id 去重，重发几条无害。
+            events_since = float(body.get("events_since") or 0) \
+                if isinstance(body, dict) else 0.0
+            if events_since > 0:
                 events = [copy.deepcopy(ev) for ev in self.events
-                          if int(ev.get("seq") or 0) > req_event_seq]
-                events = events[-EVENT_PUSH_LIMIT:]
+                          if float(ev.get("epoch") or 0) > events_since]
+                # 按时间排序后取**最早**的一批：突发一堆事件时先把老的送出去，
+                # 窗口滑过之后它们自然不再进入响应；取最新会永远丢掉最老那几条。
+                events.sort(key=lambda e: float(e.get("epoch") or 0))
+                events = events[:HEARTBEAT_EVENT_LIMIT]
             else:
-                events = copy.deepcopy(list(self.events))[-EVENT_PUSH_LIMIT:]
+                # 向后兼容：旧节点（不带 events_since）仍按 seq 增量。
+                req_event_seq = (int(body.get("event_seq") or 0)
+                                 if isinstance(body, dict) else 0)
+                same_term = (int(body.get("term") or 0) == self.term
+                             if isinstance(body, dict) else False)
+                if same_term:
+                    events = [copy.deepcopy(ev) for ev in self.events
+                              if int(ev.get("seq") or 0) > req_event_seq]
+                    events = events[-EVENT_PUSH_LIMIT:]
+                else:
+                    events = copy.deepcopy(list(self.events))[-EVENT_PUSH_LIMIT:]
             return 200, {
                 "ok": True,
                 "term": self.term,
@@ -4349,10 +4472,12 @@ class Cluster:
                 "leader": self._leader_public_locked(),
                 "leader_lease_until": _iso(self.leader_lease_until)
                 if self.leader_lease_until else "",
-                "nodes": [self._public_node_locked(n) for n in self.nodes.values()],
+                "nodes": self._heartbeat_nodes_locked(),
                 "events": events,
                 "progress": copy.deepcopy(self.progress) if changed else {},
                 "leases": copy.deepcopy(self.leases) if changed else {},
+                # 供新节点确认摘要是否收敛（老版本忽略）。
+                "sd": my_sd,
                 "generation": self.generation,
                 "event_seq": self.event_seq,
                 "store_commit_seq": self._store_seq(),

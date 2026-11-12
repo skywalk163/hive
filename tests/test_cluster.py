@@ -2032,3 +2032,131 @@ def test_follower_lease_never_exceeds_record(cluster_factory):
     a._maintenance_once()
     with a.lock:
         assert a.leader_id != "ghost-leader", "过期的幽灵主控没被清掉"
+
+
+# --------------------------------------------------------------------------- #
+# 0.16.05：空闲期流量（心跳不再搬全量状态）
+# --------------------------------------------------------------------------- #
+
+def _hb_peer(c, nid="p1"):
+    return {"id": nid, "name": nid, "url": "http://127.0.0.1:9999",
+            "incarnation": 1}
+
+
+def test_state_digest_is_content_based_and_stable():
+    """摘要只看内容，与字典插入顺序无关；内容一变摘要就变。"""
+    p = {"T-1": {"state": "running", "gen": 3}}
+    l = {"T-1": {"gen": 2, "agent": "a"}}
+    d1 = hc._state_digest(p, l)
+    d2 = hc._state_digest({"T-1": {"gen": 3, "state": "running"}},
+                          {"T-1": {"agent": "a", "gen": 2}})
+    assert d1 == d2, "同样内容（键序不同）必须得到同一摘要"
+    assert d1 != hc._state_digest({"T-1": {"state": "done", "gen": 3}}, l)
+
+
+def test_heartbeat_matching_digest_skips_full_state(cluster_factory):
+    """核心回归：请求方摘要与本机一致时，心跳响应不带 progress/leases。
+
+    0.16.04 之前用 `changed = req_gen != self.generation`，而 generation 是
+    各节点本地自增计数器（现场四台 607万/300万/1056万/42万），跨节点恒不
+    相等 → 每次心跳都回 40-50KB 全量状态，空闲期稳定吃 ~600KB/s。
+    """
+    c = cluster_factory("a")
+    with c.lock:
+        c.progress["T-1"] = {"task": "T-1", "state": "running", "gen": 2,
+                             "updated_epoch": time.time()}
+        c.leases["T-1"] = {"task": "T-1", "gen": 1,
+                           "lease_until_epoch": time.time() + 60,
+                           "updated_epoch": time.time()}
+        sd = hc._state_digest(c.progress, c.leases)
+    body = {"node": _hb_peer(c), "term": c.term, "leader": False,
+            "sd": sd, "events_since": time.time() - hc.EVENT_WINDOW_S}
+    code, resp = c.handle_heartbeat(body, peer_ip="127.0.0.1")
+    assert code == 200 and resp["ok"]
+    assert resp["progress"] == {} and resp["leases"] == {}
+    # 摘要不同 / 旧节点不带 sd：仍回全量，滚动升级不丢状态。
+    body["sd"] = "stale-digest"
+    _, resp2 = c.handle_heartbeat(body, peer_ip="127.0.0.1")
+    assert resp2["progress"] and resp2["leases"]
+    _, resp3 = c.handle_heartbeat(
+        {"node": _hb_peer(c, "p2"), "term": c.term, "leader": False,
+         "event_seq": 0}, peer_ip="127.0.0.1")
+    assert resp3["progress"] and resp3["leases"], "旧节点必须仍拿到全量"
+
+
+def test_heartbeat_events_are_windowed(cluster_factory):
+    """事件只回最近窗口内的；空闲期（无新事件）响应里 events 恒为空。
+
+    旧实现按 event_seq 增量，但 seq 是各机本地计数器、切主还会重置，合并
+    进来的事件 seq 来自四面八方，于是 `ev.seq > req_seq` 恒真，每拍重发
+    120 条 ~32KB。
+    """
+    c = cluster_factory("a")
+    with c.lock:
+        sd = hc._state_digest(c.progress, c.leases)
+        c._emit_locked("task_progress", message="刚发生")
+    body = {"node": _hb_peer(c), "term": c.term, "leader": False,
+            "sd": sd, "events_since": time.time() - hc.EVENT_WINDOW_S}
+    _, fresh = c.handle_heartbeat(body, peer_ip="127.0.0.1")
+    assert any(e["message"] == "刚发生" for e in fresh["events"])
+    # 把事件时间戳推到窗口外 = 长时间没有新事件
+    with c.lock:
+        for ev in c.events:
+            ev["epoch"] = time.time() - hc.EVENT_WINDOW_S - 1
+    body["events_since"] = time.time() - hc.EVENT_WINDOW_S
+    _, idle = c.handle_heartbeat(body, peer_ip="127.0.0.1")
+    assert idle["events"] == [], "空闲期不应重复下发历史事件"
+
+
+def test_heartbeat_nodes_are_slim(cluster_factory):
+    """心跳响应里的节点记录不带展示用的大块静态字段（尤其 agents）。"""
+    c = cluster_factory("a")
+    with c.lock:
+        c.nodes["big"] = {"id": "big", "name": "big",
+                          "url": "http://127.0.0.1:9998", "incarnation": 2,
+                          "agents": [{"name": "x"}] * 40,
+                          "hive_dir": "/somewhere", "hostname": "h",
+                          "pid": 123, "started_at": "t", "joined_at": "t",
+                          "capabilities": ["a"], "cluster_id": "hive",
+                          "protocol": 1, "last_seen_epoch": time.time()}
+        sd = hc._state_digest(c.progress, c.leases)
+    _, resp = c.handle_heartbeat(
+        {"node": _hb_peer(c), "term": c.term, "leader": False,
+         "sd": sd, "events_since": time.time() - hc.EVENT_WINDOW_S},
+        peer_ip="127.0.0.1")
+    big = next(n for n in resp["nodes"] if n["id"] == "big")
+    for key in hc.HEARTBEAT_NODE_SKIP_KEYS:
+        assert key not in big, f"心跳不该下发 {key}"
+    # /api/cluster/state 的完整快照仍保留这些字段（看板要用）。
+    assert c.snapshot()["nodes"]
+    assert any(n.get("agents") for n in c.snapshot()["nodes"] if n["id"] == "big")
+
+
+def test_far_future_lease_does_not_pin_heartbeats(cluster_factory):
+    """一条远期租约若长时间没续，不该把心跳永久钉在 1s。
+
+    现场 T-0332 的 lease_until 比当前时间晚 6 小时、updated_epoch 却是两
+    小时前，旧 _has_active_work_locked 只看 `lease_until > now` → 恒为 True，
+    0.16.03 的空闲降频永远不生效。
+    """
+    c = cluster_factory("a")
+    with c.lock:
+        c.leases["T-0332"] = {
+            "task": "T-0332", "released": False,
+            "lease_until_epoch": time.time() + 6 * 3600,
+            "updated_epoch": time.time() - 2 * 3600,
+        }
+        assert c._has_active_work_locked() is False
+        assert c._heartbeat_interval_now() == c.config.idle_heartbeat_interval
+        # 正在续租的活儿仍走活跃档
+        c.leases["T-0332"]["updated_epoch"] = time.time()
+        assert c._has_active_work_locked() is True
+        assert c._heartbeat_interval_now() == c.config.heartbeat_interval
+
+
+def test_chat_sync_backs_off_when_idle(cluster_factory):
+    """留言同步空闲退避到 5s，有新留言回到 2s。"""
+    c = cluster_factory("a")
+    assert c._chat_sync_interval() == hc.CHAT_SYNC_IDLE_S
+    c.handle_chat_post({"text": "有人在说话", "from": "human"})
+    assert c._chat_sync_interval() == hc.CHAT_SYNC_FAST_S

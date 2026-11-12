@@ -13,14 +13,23 @@
 # 归属：T-0275 的实测是 3 failed（第三条 test_pr 已在本轮前被修好，故不再列入）。
 
 # --------------------------------------------------------------------------- #
-# 真失败（本卡不修，只登记；修好了请把这两行删掉）
+# 真失败（本卡不修，只登记；修好了请把对应行删掉）
 # --------------------------------------------------------------------------- #
 
 # hive.py:470 的 ls-remote 没走 git_net()，网络 git 调用漏超时 —— 存量缺陷（T-0275 已归因）。
 tests/test_git_timeout.py::test_network_git_calls_all_go_through_git_net
 
-# agents/dumate-win.json 登记了白名单外的代码仓 lightplugin —— 真数据问题（T-0260 登记未同步）。
+# agents/doubao-win.json（工作区未提交的改动）登记了白名单外的 lightprism —— 真数据问题。
+# 实测 2026-11-12：stash 全部代码改动后单独重跑仍失败，与 0.16.05 无关。
 tests/test_repo_scope.py::test_agent_repos_within_allowed_set
+
+# 无 token 时 create_pr 没抛 PrError：本机环境（读到了别处 token / 网络差异），
+# 实测 2026-11-12 clean tree 同样失败，与 0.16.05 无关。
+tests/test_pr.py::test_missing_token_is_actionable
+
+# UNIX socket 被占用时 plane.status() 的 errors 记账缺失：环境/存量缺陷，
+# 实测 2026-11-12 clean tree 同样失败，与 0.16.05 无关。
+tests/test_control_plane.py::test_start_tolerates_busy_worker_socket
 
 # --------------------------------------------------------------------------- #
 # 环境导致的 error（验收机 git init 默认分支为 master，夹具里 push -u origin main 必失败）
