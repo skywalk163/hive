@@ -18,7 +18,8 @@
     "hive": "G:/dswork/duan-light-merge/hive",
     "light": "G:/dswork/duan-light-merge/light-merge",
     "lightharness": "G:/dswork/duan-light-merge/lightharness",
-    "lightmem": "G:/dswork/duan-light-merge/lightmem"
+    "lightmem": "G:/dswork/duan-light-merge/lightmem",
+    "lightprism": "G:/dswork/lightprism"
   },
   "launch": "",
   "worktrees": "C:/Users/skywalk/.hive/wt/deepseek-win",
