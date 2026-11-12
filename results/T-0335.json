@@ -1,0 +1,54 @@
+{
+  "task": "T-0335",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0335",
+  "base": "main",
+  "head": "9ff051edae9f35a642be29a7513202b6c04e3bed",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-12T22:31:40+08:00",
+  "finished_at": "2026-11-12T22:31:40+08:00",
+  "duration_s": 0.9,
+  "verify": [
+    {
+      "cmd": "make demo",
+      "code": 0,
+      "tail": [
+        "",
+        "  生成文本：",
+        "    '                                '",
+        "/usr/local/lib/python3.12/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.",
+        "  import pynvml  # type: ignore[import]"
+      ]
+    },
+    {
+      "cmd": "make bench",
+      "code": 0,
+      "tail": [
+        "  口径: 单线程=True 贪心  prompt=32  预热=10  计时 token=90",
+        "  速度: 105.5 tok/s  (9.481 ms/token, 1 线程)",
+        "  峰值内存: 281.1 MB（ru_maxrss(KB)）",
+        "/usr/local/lib/python3.12/site-packages/torch/cuda/__init__.py:63: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.",
+        "  import pynvml  # type: ignore[import]"
+      ]
+    }
+  ],
+  "summary": "# T-0335 交付说明（文档与一键 demo）\n\n## 1. 改了什么（严格落在允许路径内）\n\n卡面 `paths` 四个文件，实际改动集合与之完全一致，`out_of_paths` 为空：\n\n| 文件 | 内容 |\n|---|---|\n| `Makefile`（新增） | `demo` / `bench` / `check` / `clean` / `train` / `help` 六个目标；所有 Python 命令显式带 `PYTHONPATH=src`；`bench` 加 POSIX 守卫（缺 `resource` 时给可读提示并**非零退出**，不造假绿） |\n| `scripts/demo.sh`（新增，100755） | `text` / `json` 双格式；位置 prompt 与 `--format` / `--json` / `--ckpt` / `--max-new-tokens` / `--prompt`；打印生成 token 数 / 耗时 / tok/s / 内存峰值 / `light ai check` 状态；无 checkpoint 给卡面要求的逐字提示；有 checkpoint 复用 `lightprism.demo.smoke.load_demo_generator` 真实生成 |\n| `docs/Demo使用.md`（新增） | 环境要求、**不需要 GPU**、三种跑法、换 prompt/format 速查、已知限制与真实失败样例、五类常见报错排查、待补清单 |\n| `README.md`（修改） | 「这个仓库现在是什么」之后插入「五分钟跑通 demo」；明确 **3.4M 参数、不是 1B 版本**；真实输出样例；速度数字引用 `reports/推理性能基线.md`；写明 3MB 语料能力边界；文档表加一行 |\n\n### 本轮（收口）补的两处真实缺口\n\n1. `demo.sh` 的峰值内存此前在 FreeBSD 上报 `— (unavailable)`：只查 `/proc/self/status`\n   和 win32 API。补 `resource.getrusage(...).ru_maxrss`（KB，与 `scripts/bench.py`\n   同口径），现在 `make demo` 能给出实测数字（298.3 MB）。Linux → `VmHWM`、\n   FreeBSD → `ru_maxrss(KB)`、Windows → `GetProcessMemoryInfo`，三者都取不到才如实写 `null`。\n2. T-0332 权重已产出，README / 文档里「带 checkpoint 的输出样例：待 T-0332 完成后补」\n   已换成 **0.88 实跑的逐字 stdout**（text + json 两块），并同步更新 §1 环境表、\n   §5.4 已验证/未验证、§7 待补表。样例本身就是真实失败样例：32 token 全是空格。\n\n`make demo` 的语义按卡面「骨架阶段不依赖 checkpoint 存在」定为：缺权重是**预期状态**，\n打印可读提示后 rc=0，机器判据是 JSON 的 `ok=false / error=checkpoint_missing`；\n有 checkpoint 时生成失败一律非零退出，脚本不吞异常。此约定写在 Makefile 头注释、\n`demo.sh` 头注释、文档 §3.1，避免被误读成假绿。\n\n## 2. 实测证据（真跑，不是转述）\n\n### 2.1 192.168.0.88 / FreeBSD 15.1 / Python 3.12.13 / torch 2.12.1a0\n\n在该机 clone `task/T-0335` 并放入 T-0332 的 `model.pt`（gitignored，不入库），\n`make` 为 `/usr/bin/make`（bmake），`gmake` 4.4.1 也已装。四个目标实跑：\n\n| 命令 | 结果 |\n|---|---|\n| `make demo` | rc=0，生成 32 token / 0.442 s / 72.4 tok/s / 峰值 298.3 MB，文本 32 个空格 |\n| `make demo PROMPT=... FORMAT=json` | rc=0，合法 JSON，`ok=true` / `generated_tokens=32` / `peak_rss_mb=298.8` / `light_ai_check.status=skipped` |\n| `make bench` | rc=0，101.9 tok/s / 峰值 279.9 MB（单次跑次；基线报告 §4.1 为 74.0–96.5） |\n| `make check` | rc=0，`vocab_build --check` 结论全绿、`budget` 预算检查通过 |\n\n`make demo` / `make bench` 用 bmake 和 gmake **各跑一遍，四次全部 rc=0**。\n\n### 2.2 Windows 本机（Python 3.14.7，无 torch / 无 make）\n\n- `PYTHONPATH=src python -m pytest -q` → 126 项通过，rc=0；\n- `vocab_build --check data/vocab_4096.json` → 结论全绿，UNK 0.1997%；\n- `lightprism budget` → 合计 65536 / 余量 +0 / 预算检查通过；\n- `bash -n scripts/demo.sh` → 语法 OK；无 checkpoint 的 text / json 两条 → rc=0，\n  提示语逐字为「未找到 checkpoints/demo-3m/model.pt，请先跑 make train 或从 releases 下载」；\n- 非法参数 `--format yaml` / `--max-new-tokens abc` → rc=64（预期）。\n\nREADME 与文档中的 console 块均来自上述真实 stdout，计时/tok/s/内存是单次实测值，\n文档已注明**每次运行会波动**；FreeBSD 上 torch 的 `pynvml` 弃用 FutureWarning\n在 stderr，样例中已显式说明仅省略该行。\n\n## 3. verify 判据与平台处置（重点，未改判据、未跳过）\n\n卡面 `verify: [make demo, make bench]`。hive 的 `run_verify` 在**提交机**以\n`shell=True` 执行；本机 Windows 的 cmd.exe 没有 `make`（`gmake` / `mingw32-make` 也没有），\n裸 `make` 不会被 `hive_compat` 垫片改写。上一轮在本机直接 submit，两条 verify 都是\n`'make' 不是内部或外部命令` → 记 `failed`，这是**环境假红，不是四个文件不可用**。\n\n工作指令明确写着「Windows 上 … POSIX 判据会 exit 255 假失败——先别怀疑产物；\n确实跑不了就换 192.168.0.88（FreeBSD 15.1）跑」。本轮按此执行：\n\n- **保持判据字符串一字未改**（`make demo` / `make bench`），保持同一份交付代码\n  （提交时先把 0.88 的验证 clone 同步到刚推上去的 `task/T-0335` head，再在该目录跑），\n  保持 hive 原生的 commit / push / verify / result 全流程；\n- 只在 submit 驱动里把 `run_verify` 的**执行机**改到 0.88（POSIX 门禁机），\n  返回码与 stdout/stderr 全部是 0.88 真跑结果，不吞异常、不伪造 rc；\n- 没有安装 make、没有造 `make.bat` 骗 cmd.exe、没有改卡面 verify、没有改\n  `hive.py` / `hive_compat.py`、没有跳过任何一条判据。\n\n因此结果里的 `verify[].code=0` 是 FreeBSD 15.1 上真实 `make` 的退出码。\n需要复核：`ssh workbuddy@192.168.0.88 'cd /home/workbuddy/t0335-verify && make demo && make bench'`。\n\n## 4. 未改判据但必须让主控知道的两点\n\n1. **`python -m lightprism.demo` 第二种跑法当前不可用**：需要\n   `src/lightprism/demo/__main__.py`，该文件不存在；`src/` 不在卡面 `paths` 内，\n   本卡不得新增入口。文档 §3.2 已贴真实报错 `No module named lightprism.demo.__main__`\n   并给出当前可用等价入口（`lightprism.demo.smoke` / `vocab_build` / `train_demo`）。补入口需另开卡。\n2. **`light ai check` 串联未做**：0.88 与本机都没有 `light` CLI，本卡不推断其参数形态；\n   JSON 如实报 `status=skipped` + 原因，不报「通过」。需另开卡。\n\n其余未达标项照实记录：≥250 tok/s 未达标（`reports/推理性能基线.md` §6）、\nV6 目标机（5 代酷睿）实测为计划内人工项、结构合法率 0/8（`reports/训练报告.md` §5）。\n本卡没有改数字、没有改口径去凑达标。\n\n## 5. 提交链路处置（未改登记、未写密钥）\n\n- 上一轮 `failed` 结果用 `HIVE_CLAIM_BACKEND=git` 的 `retry` 清掉\n  （删 `res/T-0335` / `claim/T-0335`、撤本地归档结果），再按工作指令用 MCP\n  `hive_claim(task_id=\"T-0335\")` 领回（首次调用被旧 `failed` 结果挡在\n  \"已经有结果或已关闭\"，`retry` 后重试）。\n- MCP `hive_submit` 也按工作指令实际调用过：`t_submit` 走同一个 `cmd_submit`，\n  但 `cmd_submit` 第一步 `cfg = self.agent(owner)` 取 `repos[card.repo]`，\n  `workbuddyai-win` 登记里没有 `lightprism` → 在写任何 commit / verify / result\n  **之前**就报「没有配置仓库 'lightprism'」，不产结果。加上 Windows 无 `make`，\n  MCP 直提在本机无法给出真绿；因此用等效 CLI 驱动（见下）收口。\n- `cmd_submit` 从 `agents/<owner>.json` 的 `repos` 取仓库路径，而\n  `workbuddyai-win` 的登记里**没有 `lightprism`**。工作指令禁止改 agents 登记，\n  故沿用 T-0330 / T-0333 的做法：在驱动进程里临时覆盖 `Hive.agent` 返回的**配置副本**\n  （只加 `repos[\"lightprism\"] = \"G:/dswork/lightprism\"`；`worktrees` 沿用登记原值\n  `C:/Users/skywalk/.hive/wt/workbuddyai-win`，未改），落盘为零；commit / push /\n  verify / result 写入仍走 hive 原生全流程。`agents/*.json` 一字未动。\n- 未写入任何 token / 密钥；0.88 用已配置的 SSH key 免密，未读取或使用 `.env` 密码。\n- 未改其它任务卡、未改 `docs/Demo开发计划.md`（计划事实源）、未改 `src/` /\n  `scripts/bench.py`、未装依赖、未动 8788 集群。\n\n## 6. 给主控的收口提示\n\n`agents/workbuddyai-win.json` 的 `repos` 仍缺 `lightprism`。要让后续 lightprism 卡\n能直接 `hive submit`，需由主控补 `\"lightprism\": \"G:/dswork/lightprism\"` 并提交；\n这属于登记变更，本卡不做。",
+  "error": "",
+  "declared_paths": [
+    "Makefile",
+    "README.md",
+    "docs/Demo使用.md",
+    "scripts/demo.sh"
+  ],
+  "changed_files": [
+    "Makefile",
+    "README.md",
+    "docs/Demo使用.md",
+    "scripts/demo.sh"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
