@@ -1,0 +1,44 @@
+{
+  "task": "T-0336",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0336",
+  "base": "main",
+  "head": "aeecee5cd6161c7e965f884280f0baed5898088f",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-12T17:50:21+08:00",
+  "finished_at": "2026-11-12T21:07:00+08:00",
+  "duration_s": 11799.8,
+  "verify": [
+    {
+      "cmd": "python scripts/编辑日志.py --self-test && python -m pytest -q tests/test_编辑日志.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "..............................................                           [100%]",
+        "46 passed in 8.37s"
+      ]
+    }
+  ],
+  "summary": "# T-0336 工作说明：定义并落盘「编辑前后」日志格式\n\n## 交付物（只动了 paths 内 4 个文件）\n\n| 文件 | 内容 |\n|---|---|\n| `docs/编辑日志格式.md` | schema v1 正式定义：17 个必填字段、outcome 判定表、hash 口径、edit_kind 语义、diff 截断与路径打码、check 来源、CLI、禁止事项、实测证据 |\n| `scripts/编辑日志.py` | 纯标准库单文件：build_record / validate_record / derive_outcome / record(append-only 去重) / validate(报行号) / dump(过滤回放) / parse_check_json / --self-test(28 项) |\n| `scripts/安全替换.py` | 只加钩子（git diff 161 行纯新增、0 删除）：`--edit-log`(默认开) / `--no-edit-log` / `--check` / `--edit-kind` / `--light-cli` 等；既有替换语义与 `_self_test()` 一字未改 |\n| `tests/test_编辑日志.py` | 46 个用例：必填字段、outcome 四态、去重、相对路径、edit_kind 白名单，外加行号、dump、checker 解析、钩子「不猜」行为与自测不回归 |\n\n## 验收结果（Windows 本机，Python 3.13.14 / pytest 9.2.0）\n\n```sh\n$ python scripts/编辑日志.py --self-test && python -m pytest -q tests/test_编辑日志.py\n自测结果: 全部通过（28 项）\n..............................................   [100%]\n46 passed in 23.54s\nVERIFY_EXIT=0\n\n$ python scripts/安全替换.py --self-test\n自测结果: 全部通过（5 项）\n```\n\n不需要 `head/grep/awk`/`!`/`$()` 等 POSIX 判据，判据是纯 Python + pytest，\nWindows 上直接跑通，**没有触发 exit 255 假失败，也没必要切到 192.168.0.88**。\n\n## 端到端证据（真实 checker，不伪造）\n\n```sh\n$ printf '设 甲 为 [1, 2]\\n打印(甲[9])\\n' > /tmp/bad.light\n$ python scripts/安全替换.py /tmp/bad.light '甲[9]' '甲[0]' --out /tmp/fixed.light --check\n编辑日志: ~/.lightharness/edits/2026-11.jsonl  ← edit_kind=PATCH outcome=fixed\n安全替换 统计: 命中替换 1 处 / 受影响行 1 行\n    - 打印(甲[9])\n    + 打印(甲[0])\n\n$ python scripts/编辑日志.py dump --json | tail -1\n{\"agent\": null, \"backend\": \"\", \"check_after\": {\"code\": null, \"message\": null, \"ok\": true, \"severity\": null, \"stage\": null}, \"check_before\": {\"code\": \"L3001\", \"message\": \"索引错误 列表索引越界（bad:2）\", \"ok\": false, \"severity\": \"error\", \"stage\": \"运行\"}, \"diff\": {\"after\": \"设 甲 为 [1, 2]\\n打印(甲[0])\\n\", \"before\": \"设 甲 为 [1, 2]\\n打印(甲[9])\\n\", \"truncated\": false}, \"edit_kind\": \"PATCH\", \"event_id\": \"DESKTOP-IC6RTQ4-...\", \"file\": \"fixed.light\", \"file_hash_after\": \"1284d1e5c731b464\", \"file_hash_before\": \"3f8e1a3acc644768\", \"light_version\": \"光明编译器 v0.4.1\", \"outcome\": \"fixed\", \"replaced\": 1, \"repo\": \"lightharness\", \"schema_version\": 1, \"session_id\": null, \"target\": \"甲[9]\", \"task_id\": null, \"ts\": \"2026-11-12T21:01:34+08:00\"}\n\n$ python scripts/编辑日志.py validate ~/.lightharness/edits/2026-11.jsonl\n校验完成: 1 条合法，0 条非法\n```\n\n- `check_before.ok=false`（L3001，`stage=运行`）→ `check_after.ok=true` → `outcome=fixed`，由两次真实 `light ai check --run --json --no-corpus` 推导，没有手填。\n- hash `3f8e1a3acc644768` → `1284d1e5c731b464` 与 `lightprism/docs/样本导出.md` §2.2 的实测数字完全一致，证明与 light 归档同口径。\n- 对照实测：不传 `--check` 时 `check_before/check_after = null`、`outcome=unknown`；`--dry-run` / `--no-edit-log` / 输出到 stdout 都不写日志。\n\n## 设计要点 / 边界\n\n- `outcome` 是 `check_before.ok` / `check_after.ok` 的纯函数；`true→true` 与任一缺失都归 `unknown`（既没坏也没修，不算修复样本）。`validate` 会比对声明值与推导值，手填会被拒绝并报行号。\n- 去重键 `(file_hash_before, file_hash_after, ts)`；`event_id` 供多节点合流再去重。历史行有空行/非法 JSON 时拒绝追加，不静默跳过。\n- `file` 只落 repo 相对路径（拒绝 `/` 开头、盘符、UNC、`..` 穿越；repo 外只留文件名）；`diff`/消息里的本机绝对路径打码成 `<PATH>`。\n- `edit_kind` 按实际行为判定：整串替换 `PATCH`、单个标识符替换 `FR`、整份文件被换掉 `RW`，支持 `--edit-kind` 显式声明。\n- checker 退出码 2 / 超时 / 找不到 CLI / JSON 解析失败 → 该次 check 记 `null`，绝不外推。`--no-corpus` 保证不污染 `~/.light/error_corpus`。\n- 本仓只负责定义与写入；LightPrism 侧解析器/导出器按要求留给另一张卡，未改 lightprism 仓。\n\n## 领取阶段的两个平台问题（已解决，非产物问题）\n\n1. `hive_claim` 首次报「没有配置仓库 lightharness 的本地路径」：按 `hive/docs/多机并行开发.md` §6 排障表的「补 `--repo name=path`」，在 MCP 独占 clone 的 skip-worktree 本地 agent 登记里加了一条 `lightharness=C:/dswork/lightharness`。**没有改任何任务卡，没有改 agent 的能力/模式/并发配置，没有提交进 git**（该文件已被 skip-worktree 保护，之前的 lightprism 登记也是同样做法）。抢锁其实在第一次调用时已成功，补登记后重跑 claim 即备好 worktree。\n2. 第二次 claim 报中心仓 `192.168.1.5:3000` 连接失败：手动 fetch 复测即恢复（瞬时不可达），重试一次成功；未改 remote、未切备用机。\n\n未写入任何 token 或密钥；四个交付文件已扫描确认无密钥字样、无硬编码本机绝对路径。",
+  "error": "",
+  "declared_paths": [
+    "docs/编辑日志格式.md",
+    "scripts/编辑日志.py",
+    "scripts/安全替换.py",
+    "tests/test_编辑日志.py"
+  ],
+  "changed_files": [
+    "scripts/安全替换.py",
+    "docs/编辑日志格式.md",
+    "scripts/编辑日志.py",
+    "tests/test_编辑日志.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "2b41312f697346be8240be47f6036542",
+  "fence": 1
+}
