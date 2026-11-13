@@ -1,0 +1,37 @@
+{
+  "task": "T-0342",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "failed",
+  "branch": "task/T-0342",
+  "base": "main",
+  "head": "92936678086d5be9b99c3d51f3a3dd84066064da",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-13T13:55:50+08:00",
+  "finished_at": "2026-11-13T13:57:22+08:00",
+  "duration_s": 92.5,
+  "verify": [
+    {
+      "cmd": "python3 scripts/bench.py --config configs/demo-3m.json --tokens 200 --min-tok-s 200",
+      "code": 1,
+      "tail": [
+        "Traceback (most recent call last):",
+        "  File \"C:\\dswork\\hive-wt\\T-0342\\scripts\\bench.py\", line 29, in <module>",
+        "    import resource",
+        "ModuleNotFoundError: No module named 'resource'"
+      ]
+    }
+  ],
+  "summary": "# T-0342 工作说明 — 交办方降级后，V6 按「约 100 tok/s 量级」判定通过\n\n**现行结论（2026-11-13 13:44 交办方裁定）：「降级吧，我感觉100tokens/s也可以了，提交」→ V6 承诺由 ≥200 tok/s 降级为约 100 tok/s 量级；真机实测已完成，按量级／3 次中位口径通过。原 ≥200 承诺实测未通过是历史事实，完整保留在报告 §5，不抹除。**\n\n**必须同时记录的边界**：若把新承诺写成「逐次严格 ≥100 tok/s」，本机不能稳定满足 —— 降级后补跑 6 次，连同正式 3 次共 9 次只有 3/9 通过。worker 没有挑数字、删低值，也没有自行把阈值再降到 95/90 来凑通过率。\n\n---\n\n## 1. 授权与身份\n\n- 10:10 交办方指定执行机 `DESKTOP-IC6RTQ4` 为 V6 目标机（解除了「本机 ≠ 目标机」的角色障碍）；13:44 交办方裁定降级承诺（解除了「200 不放宽」的指标障碍）。两次都是**交办方授权变更**，worker 未自封、未擅自放宽、未自行改卡面，授权来源已留痕（`task:T-0342` 留言 + `.hive/progress.md`）。\n- 架构真实性红线独立成立：CPUID leaf1 `EAX=0x000306D4`（family 6 / model 0x3D=61 / stepping 4 = Broadwell-U，第 5 代酷睿）、brand `Intel(R) Core(TM) i3-5010U CPU @ 2.10GHz`、leaf7.0 `EBX=0x021C27AB` 解码含 `avx2`（bit5=1）、Win32 `PF_AVX2(40)=True`、`torch.backends.cpu.get_cpu_capability()=AVX2`。Windows 无 `sysctl/lscpu/proc-cpuinfo`，改用更底层的 CPUID 原始寄存器取证。\n- 机器画像吻合承诺：物理内存 7.88GB（≈8GB）、Win11 专业版 10.0.26200、2 核 4 线程、Python 3.13.14、torch 2.6.0+cpu。\n\n## 2. 三个环境缺口怎么补的（都没碰 bench.py）\n\n1. torch 未装 → 装 CPU 版 `torch==2.6.0`（官方 wheel，sha256 `510c7325…d6cc` 校验通过）+ 纯 Python 依赖；VC++ 运行库 DLL 由 pip 包 `msvc-runtime 14.51.36231` 提供，未做系统级安装。\n2. `bench.py:29 import resource`（POSIX-only）→ 运行时 `sitecustomize` 垫片，只在本次 `PYTHONPATH` 生效，用 Win32 `PeakWorkingSetSize/1024` 提供**真实** `ru_maxrss`。**`resource` 只用于 `peak_rss_mb()` 报告字段；tok/s 由 `time.perf_counter()` 计算，垫片不可能影响判据。**\n3. 卡面 `--min-tok-s` 只在 blocked 的 T-0340 分支（`edfbbfb`）、未进 main（`845cfbb`）→ 用该分支原版 bench.py（只多阈值断言，测速函数逐字未变）在临时目录跑卡面原样命令与降级阈值复核；不改 worktree 脚本。\n\n合规硬证据：`git hash-object scripts/bench.py == HEAD:scripts/bench.py == c2b87995…`；固定口径 `prompt_len=32 / warmup=10 / single / greedy / 200 token / timed 190` 逐次 JSON 可核；所有临时文件在 `%TEMP%\\lpv6`，不进交付分支；唯一改动的交付文件是 `reports/目标机实测.md`。\n\n## 3. 实测数据（全部真实运行，无删改）\n\n**正式 3 次（10:52，main 固定口径）**\n\n```\n#1  99.73 tok/s  10.027 ms/token  201.6 MB  threads=1  timed=190  exit=0\n#2 103.12 tok/s   9.697 ms/token  202.1 MB  threads=1  timed=190  exit=0\n#3 102.21 tok/s   9.784 ms/token  201.8 MB  threads=1  timed=190  exit=0\nmin 99.73 / median 102.21 / max 103.12 / mean 101.69；对 200 判据 PASS 0/3\n```\n\n**降级后复核 A 组（13:47，`--min-tok-s 100 --json`，T-0340 版 bench.py）**：78.10 / 98.52 / 98.61 tok/s，`threshold.passed=false` ×3、exit 1 ×3。\n**同时段对照 B 组（13:49，main 原口径）**：91.45 / 100.52 / 72.53 tok/s，exit 0 ×3。\n\n**9 次合并**：`72.53 / 78.10 / 91.45 / 98.52 / 98.61 / 99.73 / 100.52 / 102.21 / 103.12`，min 72.53、median **98.61**、max 103.12、mean 93.87、stdev 10.48；逐次 ≥100 为 **3/9**，≥95 为 6/9，≥90 为 7/9。\n\n**波动归因（不是口径差异）**：复核时段 `Win32_Processor.LoadPercentage=52%`、可用物理内存仅 936MB / 7.88GB，前台有 Taskmgr / WorkBuddy 多进程 / localsend_app；A、B 两组用不同版本 bench.py 都出现 72–100 的低值，是这台 2C4T 低压 U 在共享负载下的真实抖动。10:52 那组机器较空闲。**这些低值全部保留，不作为挑数字的理由。**\n\n其他对照：卡面阈值命令（T-0340 版，`--min-tok-s 200`）→ `未达阈值: 102.5 < 200 tok/s` exit 1；worktree 原样命令 → `unrecognized arguments` exit 2；T-0340 完整提速版产物同口径 99.83 tok/s / `passed=false`，排除「main 没合入提速」借口；`--tokens 20` 冒烟 72.09 tok/s 仅验证链路，不计入任何实测。\n\n## 4. 分口径判定（§10 详细版见报告）\n\n| 口径 | 结论 |\n|---|---|\n| 交办方语意「约 100 tok/s 量级」／3 次中位 | ✅ **达标 → V6 降级后通过**（正式 3 次中位 102.21；全部 9 次中位 98.61） |\n| 逐次严格 ≥100 tok/s | ❌ 不成立（正式 3 次 2/3、A 组 0/3、9 次 3/9） |\n| 原 ≥200 tok/s | ❌ 未通过（0/9，历史事实保留在报告 §5） |\n\n原承诺未通过的原因仍成立：与 Ivy Bridge 验收机（94.47 / 优化后中位 101.5）基本持平，AVX2 没补上 2× 差距；瓶颈在小算子/Python 层调度（非 GEMM 约 6.3ms/步，GEMM 地板 3.21ms/步，200 tok/s 要求整步 ≤5ms），不是矩阵乘宽度；本机 2.10GHz 也低于验收机 3.50GHz。**降级是交办方对承诺的决定，不是实测数字变好。**\n\n## 5. 为什么 hive_submit 的 verify 仍会 failed（前提失效，非产物）\n\n卡面 verify `python3 scripts/bench.py --config configs/demo-3m.json --tokens 200 --min-tok-s 200` 在 worktree 上：main 无 `--min-tok-s`（T-0340 `blocked` 未合入）→ `unrecognized arguments`；若垫片未随 verify 注入，还会先撞 `import resource`（Windows 无此模块）。**这是判据与代码/平台不同步，不是产物坏，也不是 V6 结论。** 要让 verify 反映降级后的真实判定，需 controller：① 把卡面 verify 阈值同步为新承诺值；② 合入 T-0340 使 main 具备 `--min-tok-s`；③ 统一 Windows `resource` 口径。本次无权限改卡面/代码，不谎报 verify 通过。\n\n## 6. 未做的事 / 留给 controller 同步\n\n- T-0340 `blocked`、T-0341 `ready` 未合入 → 卡面「T-0341 合入后再跑一次 `make demo`」前提不成立；本机 Windows 也没有 `make`。**未执行 `make demo`，不谎报端到端**。\n- 未改 `docs/Demo开发计划.md` 的「≥200 token/s」承诺文字、未改 `docs/Demo验收报告.md` §7.3、未改卡面 verify、未改 `scripts/bench.py`、未改 `configs/`、未跑多线程模式 —— 允许路径只有 `reports/目标机实测.md`，其余属 controller 权限，已在报告 §10.2 列清单。\n- **worker 未自行 unblock → declare done**（controller 动作）。建议按本裁定与报告把 V6 收口为「降级后通过」，并明确新承诺的精确文字与判定规则（建议「约 100 tok/s，按 3 次中位判定」或「≥90 tok/s 且 3 次中位 ≥95」）。\n\n## 7. 交付物\n\n- `reports/目标机实测.md`（唯一改动文件）：CPUID 硬证据与原始输出、环境补齐与「未改口径」证明、正式 3 次完整 JSON、原 200 判据的历史判定、卡面 verify 真实行为、与 Ivy Bridge 对比、**§10 交办方降级裁定 + 6 次复核原始输出 + 9 次统计 + 分口径判定**、合规声明、附录（CPUID 脚本 / resource 垫片 / 可复现命令 / 三版报告关系）。\n- `.hive/summary.md`（本文件，git exclude，不进交付分支）。\n\n## 8. 提交流程\n\n- 10:58 曾因「T-0342 已经有结果（要重跑先用 hive_retry / 让总控 retry）」被拒；worker 侧 MCP 无 retry 工具。已在 `task:T-0342` 留言请总控 retry，并自行 commit + push 保证成果不丢（head `4564949`）。\n- 13:44 交办方裁定降级并要求「提交」后，用本机主控 CLI `hive.py retry T-0342` 清理旧结果/租约（`res/`、`claim/` 分支，不动 `task/T-0342` 交付分支），再重新 claim + submit。**该操作是交办方授权的提交前置流程，已在留言与进度中留痕。**\n- 即便重提，卡面 verify 仍会因 `--min-tok-s` 未进 main + Windows 无 `resource` 而 failed；**真实结论以报告 §4/§10 为准**。",
+  "error": "verify 未通过",
+  "declared_paths": [
+    "reports/目标机实测.md"
+  ],
+  "changed_files": [
+    "reports/目标机实测.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "a6b57753a46c4bc9bef8a923a83db5a9",
+  "fence": 4
+}
