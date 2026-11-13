@@ -1,0 +1,60 @@
+{
+  "task": "T-0340",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0340",
+  "base": "main",
+  "head": "edfbbfbb526245f321232297c7091b78e643f420",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-12T22:37:53+08:00",
+  "finished_at": "2026-11-12T23:22:38+08:00",
+  "duration_s": 2685.1,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_bench_threshold.py",
+      "code": 0,
+      "tail": [
+        "ssss.                                                                    [100%]"
+      ]
+    }
+  ],
+  "summary": "# T-0340 交付说明（doubao-win，Win10 领取；实测机 FreeBSD 192.168.0.88）\n\n## 做了什么\n- 复盘计划书 §1.1「283 tok/s」与实测中位 77.8 的 3.6× 差异：前者是逐 token GEMM 规模\n  估算（12 线程、不含归一化/RoPE/激活/调度开销），后者是真实 decode 端到端；拆解与\n  证据写进 `reports/提速方案与实测.md`。\n- 落地一条提速路径：RoPE 余弦/正弦表按 max_seq 惰性预计算并缓存，decode 每步只切片，\n  去掉每步重建 inv_freq/outer/cos/sin 的小张量分配（`src/lightprism/model.py`）。\n- `scripts/bench.py` 新增 `--min-tok-s N`（默认 0，行为不变）：低于阈值 exit 1，达到 exit 0，\n  JSON 输出带 `threshold` 字段；补齐此前 bench 无阈值断言、低速也被判 done 的缺口。\n- 新增 `tests/test_bench_threshold.py` 5 项：默认不校验、低于阈值 exit 1、达标 exit 0、\n  边界相等达标、CLI 默认值为 0；用 monkeypatch 固定合成吞吐，不绑本机硬件。\n\n## 实测（demo-3m，200 token，单线程验收口径）\n- 优化后 5 次：102.0 / 96.9 / 102.3 / 72.8 / 101.5 tok/s，中位 101.5，区间 72.8–102.3；\n  纯 GEMM 地板实测 3.213 ms/步（理论天花板约 311 tok/s），非 GEMM 开销约 6.3 ms/步。\n- 多线程 12 线程 77.1 tok/s，反慢于单线程；INT8 动态量化在本构建无引擎\n  （`NoQEngine`）；本机 Ivy Bridge 无 AVX2，torch 走 OpenBLAS、无 MKL/oneDNN 向量化。\n\n## 验证\n- `python3 -m pytest -q tests/test_bench_threshold.py`：.88 上 5 项通过；本机无 torch 时\n  用例函数内 skip，退出码 0。\n- 回归：`test_model.py` 28 项 + `test_kv_cache.py` 4 项通过（增量与全量 logits 1e-4 一致）。\n\n## 结论与遗留风险\n- **V4 ≥200 tok/s 在本机（.88）物理不可达**：GEMM 地板已 3.21 ms，200 tok/s 要求整步\n  ≤5.0 ms，非 GEMM 预算仅 1.79 ms，纯 torch 无法把现有 6.3 ms 小算子/调度开销压到该线；\n  按卡面规则转 blocked，不放宽判据、不拿多线程或合成基准数字冒充验收口径。\n- 未改 `PROMPT_LEN` / `WARMUP_TOKENS` / 单线程口径；未改 `configs/` 与 `infer.py`。\n- 目标机（Broadwell AVX2）实测留待 T-0342；后续可选 KV 缓存预分配、w1/w3 单 GEMM 打包，\n  预计个位数百分比收益，不改变本机不达标的定性。\n- 既有失败 `test_openi_v3_judge.py::test_label_coverage_surfaces_partial_coverage` 已在\n  pristine main 复现，与本卡改动无关。",
+  "error": "",
+  "declared_paths": [
+    "scripts/bench.py",
+    "src/lightprism/model.py",
+    "src/lightprism/infer.py",
+    "tests/test_bench_threshold.py",
+    "reports/提速方案与实测.md"
+  ],
+  "changed_files": [
+    "data/sft/err_tasks.jsonl",
+    "docs/Demo验收报告.md",
+    "reports/ERR样本覆盖.md",
+    "scripts/acceptance.py",
+    "scripts/embed_payload.py",
+    "scripts/gen_err_samples.py",
+    "tests/test_acceptance.py",
+    "tests/test_err_samples.py",
+    "train_openi.py",
+    "scripts/bench.py",
+    "src/lightprism/model.py",
+    "reports/提速方案与实测.md",
+    "tests/test_bench_threshold.py"
+  ],
+  "out_of_paths": [
+    "data/sft/err_tasks.jsonl",
+    "docs/Demo验收报告.md",
+    "reports/ERR样本覆盖.md",
+    "scripts/acceptance.py",
+    "scripts/embed_payload.py",
+    "scripts/gen_err_samples.py",
+    "tests/test_acceptance.py",
+    "tests/test_err_samples.py",
+    "train_openi.py"
+  ],
+  "lease_id": "57c7481df5fc44ae9b83e13ca35a67e8",
+  "store_write_error": "T-0340 结果写入 leader store 失败（已尝试 4 次）：T-0340 的租约已过期，结果被拒（lease lost）"
+}
