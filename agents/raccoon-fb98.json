@@ -1,0 +1,26 @@
+{
+  "name": "raccoon-fb98",
+  "host": "fb98",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify",
+    "python",
+    "pytest"
+  ],
+  "capabilities": [
+    "freebsd",
+    "python",
+    "pytest"
+  ],
+  "repos": {
+    "lightprism": "/home/skywalk/dswork/lightprism"
+  },
+  "launch": "",
+  "worktrees": "",
+  "max_concurrency": 1,
+  "created": "2026-11-13T13:34:33+00:00"
+}
