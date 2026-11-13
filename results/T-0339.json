@@ -1,0 +1,39 @@
+{
+  "task": "T-0339",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0339",
+  "base": "main",
+  "head": "a91851635d1f57477c965d8e3fa9be8c6f38d487",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-13T14:45:57+08:00",
+  "finished_at": "2026-11-13T14:45:57+08:00",
+  "duration_s": 0.5,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_train_quality.py",
+      "code": 0,
+      "tail": [
+        ".....................                                                    [100%]"
+      ]
+    }
+  ],
+  "summary": "## T-0339 执行小结（V2 判据未达成，如实提交）\n\n**结论**：20 条固定抽样合法率 **template 3/20 = 15%**、**raw 2/20 = 10%**，未达 80%。\n追加的 SFT 整条装箱实验 **2/20**，证明瓶颈是 3.4M 容量墙，不是训练步数或打包方式。\n\n**做了什么**\n1. `train_demo.py`：新增 `--save-every`、`--sft-repeat`、`--init-from`、`--sft-intact`；\n   新增 `pack_samples()` 做「SFT 序列整条装箱、pad 权重 0」，默认关闭以保持原口径。\n2. `scripts/eval_quality.py`：V2 判据唯一实现，固定前 20 条、训练同款模板 prompt、\n   真 `light ai check`、4 分片并行；对空/纯注释/有效字符<3 判退化，避免 checker 假绿\n   （不加防护会虚报 9/20=45%），同时单独记录原始 `checker_ok`。\n3. `tests/test_train_quality.py`：17 → 21 项，全部通过。\n4. 1600 步正式训练（157 万 token，SFT 占 39.3%）：loss 5.14→2.04，val 4.21→3.04。\n   追加 intact 实验：续训 1200 步，train loss→0.50，val 2.96，合法率 2/20。\n5. `reports/训练报告-v2.md`：曲线、20 条逐条判定、A/B 对照、归因、复现命令。\n\n**决定性证据**\n- 20 条评测任务 **100% 在训练集内**，目标代码 154–820 字符（中位 322）。\n  模型 train loss 0.50（已背下 SFT 序列）仍只能复现 2/20 → 容量墙，不是泛化问题。\n- checker 未改、阈值未改、抽样未挑；`<V:` 终止标记 0/20。\n\n**遗留**\n- 达标需改契约：升容量（如 d=384/l=12）或扩 SFT 数据并留出评测集，均超出本卡允许路径。\n- 训练产物在 0.88 的 `/tmp/lp-final1600`、`/tmp/lp-intact`，未入库；需要可回收\n  `step-01600.pt`（13.8 MB）。",
+  "error": "",
+  "declared_paths": [
+    "src/lightprism/demo/train_demo.py",
+    "scripts/eval_quality.py",
+    "tests/test_train_quality.py",
+    "reports/训练报告-v2.md"
+  ],
+  "changed_files": [
+    "reports/训练报告-v2.md",
+    "scripts/eval_quality.py",
+    "src/lightprism/demo/train_demo.py",
+    "tests/test_train_quality.py"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
