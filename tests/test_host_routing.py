@@ -5,16 +5,16 @@
 /home/... 与 Windows 的 G:/...），于是需要：
 
 1. `host` 字段标明 agent 归属哪台机器（默认取 hostname）；
-2. `repos()` 解析时优先本机 agent 声明的、真实存在的路径；
+2. `repos()` 优先本机 agent 声明、且**确实是 git 仓**的路径；
+   别的机器登记的路径不再兜底（0.16.06 起由 hive_repos 统一解析）；
 3. `dispatch --host <机器>` 只把卡派给指定机器上的 agent。
 
-没有 host 时全部退化为旧行为（路径存在优先），所以这里既测新字段，也
-保证老配置不炸。
+没有 host 时 agent 归到空 host 组，不会再被当成"本机"；老配置仍能登记，
+只是解析不到本机路径时会明确报 missing，而不是拿别人的路径凑数。
 """
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 
@@ -26,7 +26,7 @@ def _git_init(directory: Path) -> None:
 
 
 def _write_agent(directory: Path, name: str, host: str, repo_path: str,
-                 mode: str = "exec") -> None:
+                 mode: str = "exec", repo_name: str = "hive") -> None:
     (directory / "agents").mkdir(parents=True, exist_ok=True)
     cfg = {
         "name": name,
@@ -35,7 +35,7 @@ def _write_agent(directory: Path, name: str, host: str, repo_path: str,
         "manual": mode == "manual",
         "abilities": ["code"],
         "capabilities": [],
-        "repos": {"hive": repo_path},
+        "repos": {repo_name: repo_path},
     }
     (directory / "agents" / f"{name}.json").write_text(
         json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
@@ -59,6 +59,7 @@ def test_repos_prefers_local_host(tmp_path):
     _git_init(tmp_path)
     real = tmp_path / "real-hive"
     real.mkdir()
+    _git_init(real)
     # 故意先写"别的机器"的路径，且它不存在
     _write_agent(tmp_path, "zzz-remote", "another-machine", "/no/such/hive")
     _write_agent(tmp_path, "aaa-local", H.current_host(), str(real))
@@ -67,16 +68,22 @@ def test_repos_prefers_local_host(tmp_path):
     assert repos["hive"] == real
 
 
-def test_repos_falls_back_when_no_path_exists(tmp_path):
-    """本机路径都不存在时，退回首个声明，至少报错信息能带出路径。"""
+def test_repos_does_not_fall_back_to_foreign_paths(tmp_path):
+    """本机路径都不存在时**不许**拿别的机器的登记凑数（旧的 fallback 行为）。
+
+    这正是「sync-repos 收到错误包信息」的来源：退回首个声明会让一台新机器
+    看到满屏别的机器的路径，甚至快进到碰巧同名的目录。
+    """
     _git_init(tmp_path)
-    _write_agent(tmp_path, "a", "another-machine", "/no/such/hive")
-    _write_agent(tmp_path, "b", H.current_host(), "/also/missing")
-    repos = H.Hive(str(tmp_path)).repos()
-    # hive 会把登记路径规整成 Path：Windows 上 "/also/missing" 会变成
-    # "\also\missing"。按规范化后比较，别把平台差异当成逻辑回归。
-    assert os.fspath(repos["hive"]) in {os.fspath(Path("/no/such/hive")),
-                                        os.fspath(Path("/also/missing"))}
+    _write_agent(tmp_path, "a", "another-machine", "/no/such/light",
+                 repo_name="light")
+    _write_agent(tmp_path, "b", H.current_host(), "/also/missing",
+                 repo_name="light")
+    h = H.Hive(str(tmp_path))
+    assert "light" not in h.repos()
+    item = h.resolve_repos()["light"]
+    assert item["status"] == "missing"
+    assert not item["path"]
 
 
 def test_dispatch_only_host(world):

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.16.06 — 2026-11-13
+
+### Fixed
+
+- **`hive sync-repos` 会拿到错误的包信息（别的机器 / 无关目录的路径）**：
+  旧解析只在 `agents/*.json` 里按 host 找「路径存在」的条目，机器名一变
+  （新 jail / 新主机）、换挂载点，或本机压根没登记 agent，就退回「首个声明」——
+  一台新机器上会报满屏别的机器的 `G:/...`、`/home/...` 路径，极端情况下还会
+  对着碰巧存在的同名目录做 fetch / ff，出来的自然不是本机真正在用的仓。
+
+  新增 `hive_repos.py`，解析顺序改成：`HIVE_REPO_<NAME>` 环境变量 > 本机记忆
+  （`~/.hive/repo-bindings.json`，按 host 分桶）> 本机 agent（**必须是 git 仓**，
+  目录存在不算）> 协调仓自身 > 工作区扫描（按 **git remote** 认仓，目录名可以
+  不等于仓名，同一工作区优先浅层）> 主控记忆（`repo-paths.json` 的 host 段）。
+  还得不出唯一答案时**不猜**：`sync-repos` 返回 `needs-confirm` / `missing`
+  并列出候选 + 下一步命令；交互式终端下直接问用哪个，选择写进本机记忆。
+  `--json` 与非 TTY（agent / orchestrate）不提问，只返回结构化结果。
+
+  配套新增 `hive repo list / scan / bind / unbind / remember`：
+  本机没有 agent 节点时，主控用 `hive repo remember --host <机器> --repo name=path`
+  替它记忆（写协调仓 `repo-paths.json` 并提交）。工作区约定（`HIVE_WORKSPACE`
+  或 `config.json` 的 `workspace`，默认 `~/dswork`）与完整优先级见
+  `docs/多机并行开发.md`。旧部署只拷了 `hive.py` 时仍退回原逻辑，不会起不来。
+
 ## 0.16.05 — 2026-11-12
 
 ### Fixed

@@ -58,7 +58,7 @@ from pathlib import Path
 # 版本号：MAJOR.MINOR.PATCH，**PATCH 固定两位**（0.16.00 / 0.16.01 …）。
 # 集群升级要跨机器比较版本，字符串比较会在 "0.16.10" vs "0.16.9" 上出错，
 # 所以统一解析成整数三元组再比（parse_version / compare_versions）。
-VERSION = "0.16.05"
+VERSION = "0.16.06"
 VERSION_RE = re.compile(r"^(\d+)\.(\d{1,2})\.(\d{1,2})$")
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
@@ -90,6 +90,14 @@ try:
 except ImportError:  # pragma: no cover - 只在残缺部署上走到
     def no_window_kwargs() -> dict:
         return {}
+
+# 本机代码仓路径解析（本机记忆 > 本机 agent > 协调仓 > 工作区扫描 > 主控记忆，
+# 见 hive_repos.py 顶部）。残缺部署（只拷了 hive.py）时退回旧的
+# 「host 匹配 + 路径存在」逻辑，保证命令仍能跑。
+try:
+    import hive_repos
+except ImportError:  # pragma: no cover - 只在残缺部署上走到
+    hive_repos = None  # type: ignore[assignment]
 
 DEFAULT_MAX_PER_REPO = 1
 # 一张卡最多被看门狗**自动**回收几次；超了就转 blocked 退出流水线，不再无限重派。
@@ -2662,12 +2670,20 @@ class Hive:
 
     # -- 合入 / land ------------------------------------------------------- #
     def code_repo(self, repo_name: str) -> Path:
-        """找代码仓的本地路径：任意 agent 登记过就行（同名的都指向同一份内容）。"""
-        path = self.repos().get(repo_name)
+        """找本机代码仓路径（解析优先级与来源见 `resolve_repos`）。"""
+        item = self.resolve_repos().get(repo_name) or {}
+        path = (Path(str(item["path"]))
+                if item.get("status") == "ok" and item.get("path") else None)
         if not path:
-            raise HiveError(f"没有 agent 登记代码仓 {repo_name!r} 的本地路径")
-        if not path.is_dir() or not (path / ".git").exists():
-            raise HiveError(f"本地代码仓不可用: {path}")
+            detail = "；".join(item.get("notes") or [])
+            raise HiveError(
+                f"本机找不到代码仓 {repo_name!r} 的可用路径"
+                + (f"（{detail}）" if detail else "")
+                + f"；用 hive repo scan 看候选，或 hive repo bind {repo_name} <path> 指定")
+        ok = (hive_repos.is_git_repo(path) if hive_repos is not None
+              else bool(path.is_dir() and (path / ".git").exists()))
+        if not ok:
+            raise HiveError(f"本地代码仓不可用（不是 git 仓）: {path}")
         return path
 
     @staticmethod
@@ -3070,15 +3086,109 @@ class Hive:
             out[cfg.get("name") or p.stem] = cfg
         return out
 
-    def repos(self) -> dict[str, Path]:
-        """从 agent 配置收集代码仓 {名字: 路径}。
+    def _repo_inputs(self) -> tuple[dict[str, Path], set[str]]:
+        """所有 agent 声明的仓名；本机 agent（host 匹配）的路径单独一份。
 
-        多机协作：不同机器的 agent 会把各自的本地路径登记成同一个仓名
-        （FreeBSD 的 /home/... 与 Windows 的 G:/... 都叫 "hive"）。解析优先级：
-        1) 本机 agent（host 匹配）声明且路径存在；
-        2) 任意 agent 声明且路径存在；
-        3) 都没有 → 退回首个声明，让报错信息能带出路径。
+        注意这里**只收本机 agent 的路径**：别的机器声明的路径不能当本机的
+        候选，否则会重演「sync 到别的机器的目录」那类错误。
         """
+        here = current_host()
+        agents = self.agents()
+        ordered = sorted(agents.items(),
+                         key=lambda kv: 0 if agent_host(kv[1]) == here else 1)
+        local: dict[str, Path] = {}
+        names: set[str] = set()
+        for _name, cfg in ordered:
+            for name, path in (cfg.get("repos") or {}).items():
+                names.add(name)
+                if agent_host(cfg) == here and name not in local:
+                    local[name] = Path(str(path)).expanduser()
+        return local, names
+
+    def _controller_repo_paths(self) -> dict[str, Path]:
+        """主控替本机记的路径（协调仓 repo-paths.json 的 host 段）。
+
+        本机没有 agent 节点（或本机 agent 没登记这个仓）时，主控可以在任意
+        一台机器上 `hive repo remember --host <本机> --repo name=path` 替它记住。
+        只读当前 host 那一段：其它机器的路径与本机无关。
+        """
+        p = self.dir / "repo-paths.json"
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        hosts = data.get("hosts") if isinstance(data, dict) else None
+        if not isinstance(hosts, dict):
+            return {}
+        sec = hosts.get(current_host())
+        if not isinstance(sec, dict):
+            return {}
+        out: dict[str, Path] = {}
+        for name, val in sec.items():
+            if isinstance(val, dict):
+                val = val.get("path")
+            if val:
+                out[str(name)] = Path(str(val)).expanduser()
+        return out
+
+    def _repo_extra_roots(self) -> list[Path]:
+        """协调仓 config.json 里声明的额外工作区（可选）。"""
+        try:
+            cfg = json.loads((self.dir / "config.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(cfg, dict):
+            return []
+        ws = cfg.get("workspace") or cfg.get("workspaces") or ""
+        if isinstance(ws, str):
+            ws = [x for x in re.split(r"[;,]", ws) if x.strip()]
+        return [Path(str(x)).expanduser() for x in ws]
+
+    def resolve_repos(self) -> dict[str, dict]:
+        """解析本机每个逻辑仓：可用路径、来源、是否强匹配、候选、备注。
+
+        优先级（先本地后共享，详见 hive_repos.py）：
+        环境变量 > 本机记忆 > 本机 agent > 协调仓自身 > 工作区扫描
+        > 主控记忆。得不出唯一答案时 **不猜**，返回 ambiguous/missing，
+        由调用方问用户或提示 `hive repo bind`。
+        """
+        cached = getattr(self, "_repo_resolution", None)
+        if cached is not None:
+            return cached
+
+        if hive_repos is None:              # 残缺部署：老逻辑兜底
+            out = self._legacy_repos()
+            res = {n: {"name": n, "path": str(p), "source": "legacy",
+                       "verified": False, "status": "ok",
+                       "candidates": [], "notes": []}
+                   for n, p in out.items()}
+            self._repo_resolution = res
+            return res
+
+        local, names = self._repo_inputs()
+        store = hive_repos.BindingStore(host=current_host())
+        names |= set(store.all())           # 记忆里有、agent 已删的仓也要解析
+        controller = self._controller_repo_paths()
+        names |= set(controller)            # 主控替本机记的仓（本机没有 agent）
+        res = hive_repos.resolve_all(
+            names, hive_dir=self.dir, local_paths=local,
+            controller=controller, bindings=store,
+            extra_roots=self._repo_extra_roots())
+
+        # 扫描确认的路径写进本机记忆：下次不用再扫，也不再依赖扫描顺序。
+        for name, item in res.items():
+            if item.get("status") == "ok" and item.get("source") == "workspace-scan":
+                try:
+                    store.set(name, item["path"],
+                              remote=hive_repos.remote_url(item["path"]),
+                              source="scan")
+                except OSError as e:
+                    item["notes"].append(f"未能写入本机记忆：{e}")
+        self._repo_resolution = res
+        return res
+
+    def _legacy_repos(self) -> dict[str, Path]:
+        """没有 hive_repos.py 时的旧解析（host 优先 + 存在即用）。"""
         here = current_host()
         agents = self.agents()
         ordered = sorted(agents.items(),
@@ -3093,8 +3203,21 @@ class Hive:
                 fallback.setdefault(name, p)
                 if p.exists():
                     out[name] = p
-        for name, p in fallback.items():      # 本机都没有的仓：退回首个声明
+        for name, p in fallback.items():
             out.setdefault(name, p)
+        return out
+
+    def repos(self) -> dict[str, Path]:
+        """{仓名: 本机可用路径}。
+
+        解析不出来的仓不会出现在这里（旧逻辑会硬塞别的机器的路径，正是
+        「错误的包信息」的来源）。调用方需要区分「没登记」和「本机找不到」
+        时用 `resolve_repos()` 拿来源与候选。
+        """
+        out: dict[str, Path] = {}
+        for name, item in self.resolve_repos().items():
+            if item.get("status") == "ok" and item.get("path"):
+                out[name] = Path(str(item["path"]))
         return out
 
     def _load_counts(self, cards: dict) -> dict[str, int]:
@@ -3611,27 +3734,83 @@ class Hive:
         return out
 
     def cmd_sync_repos(self, repo: str | None = None, as_json: bool = False,
-                       quiet: bool = False) -> dict:
-        """同步主控本机登记的所有代码仓到 origin 主线（只快进）。
+                       quiet: bool = False, prompt: bool = True) -> dict:
+        """同步本机登记的代码仓到 origin 主线（只快进）。
 
-        `hive sync-repos`：对 `Hive.repos()` 的每个本机路径执行
+        `hive sync-repos`：对 `resolve_repos()` 解析成功的每个本机路径执行
         fetch + merge --ff-only origin（网络操作带 HIVE_NET_TIMEOUT）。
         `--repo <name>` 只同步指定仓；`--json` 输出结构化结果。
 
-        quiet=True 时不打印（orchestrate 复用，只返回结构）。
+        **解析不出唯一路径时不再猜**：不拿别的机器登记的路径凑数，也不在
+        多个同名目录里随手挑一个。结果是 needs-confirm / missing，并带候选
+        与下一步命令；交互式终端下会直接问用户，选择写进本机记忆。
+
+        quiet=True 时不打印也不问（orchestrate 复用，只返回结构）。
         本命令是只读同步，不做任何卡片写操作。
         """
-        repos = self.repos()
+        resolved = self.resolve_repos()
         if repo:
-            if repo not in repos:
+            if repo not in resolved:
                 raise HiveError(f"没有登记代码仓 {repo}")
-            targets = {repo: repos[repo]}
+            targets = [repo]
         else:
-            targets = dict(repos)
+            targets = sorted(resolved)
+
+        # 交互式问路：终端 + 非 JSON + 非 quiet。只在有候选时问，避免为
+        # 一台机器上压根没 clone 的仓逐个弹问题。
+        if prompt and not as_json and not quiet and hive_repos is not None:
+            store = hive_repos.BindingStore(host=current_host())
+            changed = False
+            for name in targets:
+                item = resolved.get(name) or {}
+                if item.get("status") not in ("ambiguous", "missing"):
+                    continue
+                if not item.get("candidates"):
+                    continue
+                chosen = hive_repos.ask_path(name, item)
+                if not chosen:
+                    continue
+                p = Path(chosen).expanduser()
+                if not hive_repos.is_git_repo(p):
+                    print(f"[hive] {name}: {p} 不是 git 仓，跳过", file=sys.stderr)
+                    continue
+                try:
+                    store.set(name, p, remote=hive_repos.remote_url(p),
+                              source="user")
+                except OSError as e:
+                    print(f"[hive] {name}: {e}", file=sys.stderr)
+                    continue
+                print(f"[hive] {name}: 已记住本机路径 {p}（下次不再问）",
+                      file=sys.stderr)
+                changed = True
+            if changed:
+                self._repo_resolution = None
+                resolved = self.resolve_repos()
 
         results = []
-        for name in sorted(targets):
-            results.append(self._sync_one_repo(name, targets[name]))
+        for name in targets:
+            item = resolved.get(name) or {}
+            if item.get("status") == "ok" and item.get("path"):
+                one = self._sync_one_repo(name, Path(item["path"]))
+                one["source"] = item.get("source") or ""
+                one["verified"] = bool(item.get("verified"))
+                one["notes"] = item.get("notes") or []
+                results.append(one)
+                continue
+            if item.get("status") == "ambiguous":
+                results.append({
+                    "repo": name, "path": "", "status": "needs-confirm",
+                    "reason": "本机有多个同名候选，未同步（不猜）",
+                    "candidates": item.get("candidates") or [],
+                    "notes": item.get("notes") or [],
+                })
+                continue
+            results.append({
+                "repo": name, "path": "", "status": "missing",
+                "reason": "本机找不到可用路径（不再回退到别的机器的登记）",
+                "candidates": item.get("candidates") or [],
+                "notes": item.get("notes") or [],
+            })
 
         if not quiet:
             if as_json:
@@ -3639,18 +3818,30 @@ class Hive:
             else:
                 for r in results:
                     status = r["status"]
-                    if status == "up-to-date":
-                        print(f"{r['repo']}: 已最新")
-                    elif status == "fast-forwarded":
-                        print(f"{r['repo']}: 快进到 {r.get('sha', '')[:12]}")
-                    elif status == "diverged":
-                        print(f"{r['repo']}: 落后但无法快进（{r.get('reason', '')}）")
+                    if status in ("up-to-date", "fast-forwarded", "diverged"):
+                        if status == "up-to-date":
+                            print(f"{r['repo']}: 已最新")
+                        elif status == "fast-forwarded":
+                            print(f"{r['repo']}: 快进到 {r.get('sha', '')[:12]}")
+                        else:
+                            print(f"{r['repo']}: 落后但无法快进（{r.get('reason', '')}）")
+                        for n in (r.get("notes") or [])[:3]:
+                            print(f"    注意: {n}")
                     elif status == "unreachable":
                         print(f"{r['repo']}: 远端不可达（{r.get('reason', '')}）")
-                    elif status == "missing":
-                        print(f"{r['repo']}: 本机路径不存在（{r.get('path', '')}）")
                     elif status == "no-remote":
                         print(f"{r['repo']}: 找不到远端主线（{r.get('reason', '')}）")
+                    elif status == "missing":
+                        print(f"{r['repo']}: {r.get('reason', '本机路径不存在')}")
+                        for c in r.get("candidates") or []:
+                            print(f"    候选: {c['path']}")
+                        print(f"    提示: hive repo bind {r['repo']} <path>"
+                              "（或 hive repo scan 看全量）")
+                    elif status == "needs-confirm":
+                        print(f"{r['repo']}: 本机有多个候选，未同步（不猜）")
+                        for c in r.get("candidates") or []:
+                            print(f"    候选: {c['path']}（{c.get('kind')} 匹配）")
+                        print(f"    提示: hive repo bind {r['repo']} <path> 指定")
                     else:
                         print(f"{r['repo']}: {status}")
         return {"results": results}
@@ -7248,6 +7439,136 @@ def cmd_agent(args) -> None:
     log(f"已登记 {args.name}")
 
 
+def cmd_repo(args) -> None:
+    """本机代码仓路径：查看、扫描、记忆，以及主控替别的机器代记。"""
+    h = Hive(args.dir)
+    if hive_repos is None:
+        raise HiveError("缺少 hive_repos.py：把它拷到 hive.py 同目录再试")
+    store = hive_repos.BindingStore(host=current_host())
+    action = args.action
+
+    if action == "list":
+        res = h.resolve_repos()
+        roots = hive_repos.default_roots(h.dir, h._repo_extra_roots())
+        if args.json:
+            print(json.dumps({
+                "host": current_host(),
+                "workspace": [str(p) for p in roots],
+                "repos": res,
+            }, ensure_ascii=False, indent=2))
+            return
+        print(f"本机 {current_host()}，工作区："
+              f"{'，'.join(str(p) for p in roots) or '（无）'}")
+        if not res:
+            print("  （没有任何登记/记忆的代码仓）")
+        for name in sorted(res):
+            r = res[name]
+            if r.get("status") == "ok":
+                mark = "✓" if r.get("verified") else "?"
+                print(f"  {mark} {name:<14} {r['path']}  [{r.get('source')}]")
+            else:
+                print(f"  ✗ {name:<14} {r.get('status')}"
+                      f"（{len(r.get('candidates') or [])} 个候选）")
+            for n in r.get("notes") or []:
+                print(f"      - {n}")
+            if r.get("status") != "ok":
+                cands = r.get("candidates") or []
+                for c in cands[:8]:
+                    print(f"      候选: {c['path']} [{c.get('kind')}]")
+                if len(cands) > 8:
+                    print(f"      … 另有 {len(cands) - 8} 个候选")
+        print("✓ = remote 强匹配；? = 目录名/显式指定（没 remote 佐证）")
+        return
+
+    if action == "scan":
+        roots = hive_repos.default_roots(h.dir, h._repo_extra_roots())
+        index = hive_repos.scan_repos(roots)
+        if getattr(args, "name", None):
+            index = [c for c in index
+                     if hive_repos.matches_name(args.name, c["path"], c["remote"])]
+        if args.json:
+            print(json.dumps({
+                "workspace": [str(p) for p in roots],
+                "repos": [{"path": str(c["path"]), "remote": c.get("remote") or "",
+                           "depth": c.get("depth", 0)} for c in index],
+            }, ensure_ascii=False, indent=2))
+            return
+        print("工作区：" + ("，".join(str(p) for p in roots) or "（无）"))
+        for c in sorted(index, key=lambda x: (x["root"], x["depth"], str(x["path"]))):
+            print(f"  {c['path']}  remote={c.get('remote') or '-'}")
+        if not index:
+            print("  （没发现 git 仓；用 HIVE_WORKSPACE 指到你的工作目录再试）")
+        return
+
+    if action == "bind":
+        name, raw = getattr(args, "name", None), getattr(args, "path", None)
+        if not name or not raw:
+            raise HiveError("hive repo bind 需要 <name> <path>")
+        p = Path(raw).expanduser()
+        if not p.exists():
+            raise HiveError(f"路径不存在: {p}")
+        if not hive_repos.is_git_repo(p):
+            raise HiveError(f"不是 git 仓（目录里没有 .git）: {p}")
+        remote = hive_repos.remote_url(p)
+        kind = hive_repos.matches_name(name, p, remote)
+        entry = store.set(name, p, remote=remote, source="user")
+        h._repo_resolution = None
+        print(f"已记住：{name} -> {entry['path']}（host={store.host}）")
+        if kind != "remote":
+            print(f"注意：remote={remote or '无'} 与仓名 {name} 对不上，"
+                  "仍按你给的路径使用；确认没选错仓。", file=sys.stderr)
+        return
+
+    if action == "unbind":
+        name = getattr(args, "name", None)
+        if not name:
+            raise HiveError("hive repo unbind 需要 <name>")
+        ok = store.remove(name)
+        h._repo_resolution = None
+        print(f"已删除本机记忆：{name}" if ok else f"本机记忆里没有 {name}")
+        return
+
+    if action == "remember":
+        host = (getattr(args, "host", None) or "").strip().lower()
+        if not host:
+            raise HiveError("hive repo remember 需要 --host <机器名>")
+        pairs = getattr(args, "repo", None) or []
+        if not pairs:
+            raise HiveError("hive repo remember 需要至少一个 --repo name=path")
+        p = h.dir / "repo-paths.json"
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        hosts = data.setdefault("hosts", {})
+        if not isinstance(hosts, dict):
+            hosts = {}
+            data["hosts"] = hosts
+        sec = hosts.setdefault(host, {})
+        if not isinstance(sec, dict):
+            sec = {}
+            hosts[host] = sec
+        for item in pairs:
+            if "=" not in item:
+                raise HiveError(f"--repo 需要 name=path 形式: {item}")
+            name, val = item.split("=", 1)
+            name, val = name.strip(), val.strip()
+            if not name or not val:
+                raise HiveError(f"--repo 需要 name=path 形式: {item}")
+            sec[name] = {"path": val, "updated": iso(),
+                         "by": "controller"}
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                     encoding="utf-8")
+        h.commit_and_push(f"repo: remember {host} paths", ["repo-paths.json"])
+        print(f"已写入 repo-paths.json：{host} → "
+              + ", ".join(f"{k}={v['path']}" for k, v in sorted(sec.items())))
+        return
+
+    raise HiveError(f"未知 repo 动作: {action}")
+
+
 def cmd_task(args) -> None:
     h = Hive(args.dir)
     if args.action == "list":
@@ -7929,7 +8250,8 @@ def cmd_orchestrate(args) -> None:
 
 
 def cmd_sync_repos(args) -> None:
-    Hive(args.dir).cmd_sync_repos(repo=args.repo, as_json=args.json)
+    Hive(args.dir).cmd_sync_repos(repo=args.repo, as_json=args.json,
+                                  prompt=not getattr(args, "no_prompt", False))
 
 
 def cmd_llm(args) -> None:
@@ -8441,6 +8763,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="agent 所在机器名（多机协作用来路由；默认取当前 hostname）")
     s.set_defaults(func=cmd_agent)
 
+    s = sub.add_parser("repo", help="本机代码仓路径：查看/扫描/记忆/主控代记")
+    s.add_argument("action", choices=["list", "scan", "bind", "unbind", "remember"])
+    s.add_argument("name", nargs="?", help="仓名（bind/unbind/list/scan 过滤用）")
+    s.add_argument("path", nargs="?", help="本机绝对路径（bind 用）")
+    s.add_argument("--json", action="store_true", help="list/scan 输出 JSON")
+    s.add_argument("--host", help="remember 用：替哪台机器记（机器名）")
+    s.add_argument("--repo", action="append", metavar="NAME=PATH",
+                   help="remember 用：可重复，如 --repo hive=/home/x/hive")
+    s.set_defaults(func=cmd_repo)
+
     s = sub.add_parser("draft", help="任务卡草稿：agent 出题、人确认后转正")
     s.add_argument("action", choices=["new", "list", "lint", "adopt"])
     s.add_argument("file", nargs="?", help="草稿文件名（drafts/<file>）")
@@ -8833,9 +9165,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_prune)
 
     s = sub.add_parser("sync-repos",
-                       help="把主控本机登记的代码仓同步到 origin 主线（只快进，不强制）")
-    s.add_argument("--repo", help="只同步这一个代码仓（默认：agent 登记的所有）")
+                       help="把本机代码仓同步到 origin 主线（只快进；路径不猜，歧义会问）")
+    s.add_argument("--repo", help="只同步这一个代码仓（默认：本机解析到的所有）")
     s.add_argument("--json", action="store_true", help="输出结构化 JSON")
+    s.add_argument("--no-prompt", action="store_true",
+                   help="即使终端也不问路径（脚本/定时任务用）")
     s.set_defaults(func=cmd_sync_repos)
 
     s = sub.add_parser("claim", help="手工领取")

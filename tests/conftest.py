@@ -191,13 +191,20 @@ class World:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_live_hive_config(monkeypatch):
+def _isolate_live_hive_config(monkeypatch, tmp_path):
     """测试不读开发机 ~/.hive 的运行时配置（否则本机跑 store 会把测试带偏）。"""
     monkeypatch.setenv("HIVE_CLAIM_BACKEND", "git")
     monkeypatch.delenv("HIVE_STORE_PATH", raising=False)
     # 本机租约留底也隔离：worker 测试会写 ~/.hive/leases/<tid>.json，
     # 不隔离就会把测试卡（T-9xxx）留在开发机的真实租约目录里。
     monkeypatch.setenv("HIVE_LEASE_DIR", str(_tmp_home() / "leases"))
+    # 本机代码仓解析也会读 ~/.hive 并扫描工作区；测试必须钉死在临时目录，
+    # 否则开发机上的 /workspace、~/dswork 会把断言带偏，甚至写入真实记忆。
+    monkeypatch.setenv("HIVE_REPO_BINDINGS", str(tmp_path / "repo-bindings.json"))
+    ws = tmp_path / "workspace"
+    ws.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HIVE_WORKSPACE", str(ws))
+    monkeypatch.setenv("HIVE_NO_PROMPT", "1")
 
 
 @pytest.fixture()

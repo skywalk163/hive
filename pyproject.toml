@@ -7,7 +7,7 @@ name = "hive-cli"
 # 版本号真源：hive.py 的 VERSION 常量（hive --version 读它）。
 # 本字段必须跟它一致，由 tests/test_version_consistency.py 守着（T-0272）。
 # 格式固定 MAJOR.MINOR.PATCH，PATCH 两位（0.16.00）——集群升级按数值比较版本。
-version = "0.16.05"
+version = "0.16.06"
 description = "多机 AI Agent 协同任务总线 CLI（git 即队列）"
 readme = "README.md"
 requires-python = ">=3.9"
