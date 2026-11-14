@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import socket
 import struct
@@ -24,7 +26,8 @@ import threading
 import time
 from typing import Any, Callable
 
-from .config import MULTICAST_GROUP, MULTICAST_PORT, Limits
+from .config import (LSA_SUPPRESS_HELLO_MULTIPLIER, Limits, MULTICAST_GROUP,
+                     MULTICAST_PORT)
 from .model import StateEntry
 from .wire import dumps
 
@@ -34,6 +37,12 @@ __all__ = [
     "pack",
     "DownlinkSender",
     "DownlinkReceiver",
+    "LsaDigestSender",
+    "LsaDigestReceiver",
+    "LSA_DIGEST_TYPE",
+    "LSA_FIELDS",
+    "lsa_digest_message",
+    "encode_lsa_digest",
 ]
 
 
@@ -68,6 +77,245 @@ def pack(entries: list[StateEntry], max_bytes: int = 1400
     if current:
         packets.append(bytes(current))
     return packets, oversize
+
+
+# --------------------------------------------------------------------------- #
+# H-LSA 摘要报文（T-0351 / H-LSA §2 T1）
+# --------------------------------------------------------------------------- #
+
+LSA_DIGEST_TYPE = "lsa_digest"
+# 设计文档要求的字段。**任何状态体字段（entries/progress/leases…）都不在这里。**
+LSA_FIELDS = (
+    "leader_epoch", "seq", "digest", "head_sha", "n_changes", "area",
+    "project_tag", "cluster_id", "sent_at",
+)
+
+
+def _lsa_signature(message: dict, key: str) -> str:
+    """对除 ``hmac`` 外的全部字段做规范化 HMAC-SHA256。"""
+    body = dumps({k: v for k, v in message.items() if k != "hmac"})
+    return hmac.new(key.encode("utf-8"), body.encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def lsa_digest_message(*, leader_epoch: int, seq: int, digest: str = "",
+                       head_sha: str = "", n_changes: int = 0, area: str = "",
+                       project_tag: str = "", cluster_id: str = "",
+                       sent_at: float | None = None,
+                       hmac_key: str = "") -> dict:
+    """构造一条 T1 摘要报文；只带摘要字段，不含任何卡面/租约状态体。"""
+    message: dict = {
+        "type": LSA_DIGEST_TYPE,
+        "leader_epoch": int(leader_epoch),
+        "seq": int(seq),
+        "digest": str(digest or ""),
+        "head_sha": str(head_sha or ""),
+        "n_changes": int(n_changes or 0),
+        "area": str(area or ""),
+        "project_tag": str(project_tag or ""),
+        "cluster_id": str(cluster_id or ""),
+        "sent_at": int(sent_at if sent_at is not None else time.time()),
+    }
+    if hmac_key:
+        message["hmac"] = _lsa_signature(message, hmac_key)
+    return message
+
+
+def encode_lsa_digest(message: dict, max_bytes: int = 1400) -> bytes:
+    """序列化一条摘要报文；超过 ``max_bytes`` 直接拒绝（绝不切断 JSON）。"""
+    data = dumps(message).encode("utf-8") + b"\n"
+    if len(data) > max_bytes:
+        raise ValueError(
+            f"lsa_digest {len(data)}B 超过单包上限 {max_bytes}B（不允许塞状态体）")
+    return data
+
+
+class LsaDigestSender:
+    """T1 摘要发送器：只有 Leader 发，60s 一拍，切主后先静默一个抑制窗口。
+
+    - 与 ``DownlinkSender`` 的动态实时周期（0.5/1.0/2.0s）**分层并存**；
+    - 发送走 ``DownlinkSender.send_raw``，因此 fallback 逐节点单播语义不变；
+    - 摘要由注入的 ``digest_provider``（生产上是 ``hive_lsa.build_digest``）
+      生成，未安装 H-LSA 模块时静默不发，不影响控制面本身。
+    """
+
+    def __init__(self, sender: "DownlinkSender | None", *, limits: Limits,
+                 config, clock: Callable[[], float] = time.monotonic,
+                 digest_provider: Callable[[], dict | None] | None = None,
+                 suppress_window: float | None = None):
+        self._sender = sender
+        self._limits = limits
+        self._config = config
+        self._clock = clock
+        self._provider = digest_provider
+        self._suppress_window = (float(suppress_window)
+                                 if suppress_window is not None
+                                 else self.default_suppress_window(limits))
+        self._last_epoch: int | None = None
+        self._suppress_until = 0.0
+        self._last_sent_at: float | None = None
+        self._seq = 0
+        self._counters = {
+            "sent": 0,
+            "packets": 0,
+            "bytes": 0,
+            "suppressed": 0,
+            "provider_errors": 0,
+            "oversize": 0,
+        }
+
+    @staticmethod
+    def default_suppress_window(limits: Limits) -> float:
+        """切主抑制窗口：≥ 2 × hello_interval（T-0351 第 4 条）。"""
+        return max(LSA_SUPPRESS_HELLO_MULTIPLIER * float(limits.hello_interval),
+                   float(limits.hello_interval))
+
+    @property
+    def suppress_window(self) -> float:
+        return self._suppress_window
+
+    @property
+    def interval(self) -> float:
+        return float(self._config.lsa_interval)
+
+    def tick(self, *, is_leader: bool, epoch: int,
+             now: float | None = None) -> int:
+        """推进一拍。返回本次实际发出的包数（0；fallback 时按节点数）。"""
+        current = self._clock() if now is None else float(now)
+        epoch = int(epoch or 0)
+        if not is_leader:
+            # follower 只听不发；记下 epoch，等自己当选时按“新主”处理。
+            self._last_epoch = epoch
+            return 0
+        if self._last_epoch is None or epoch != self._last_epoch:
+            # 新 Leader / 切主：先静默一个窗口，避免旧主与新主重复泛洪。
+            self._last_epoch = epoch
+            self._suppress_until = current + self._suppress_window
+            self._counters["suppressed"] += 1
+            return 0
+        if current < self._suppress_until:
+            self._counters["suppressed"] += 1
+            return 0
+        if (self._last_sent_at is not None
+                and current - self._last_sent_at < self.interval):
+            return 0
+        if self._provider is None:
+            return 0
+        try:
+            digest = self._provider()
+        except Exception:  # noqa: BLE001  H-LSA 故障不能拖垮控制面
+            self._counters["provider_errors"] += 1
+            return 0
+        if not isinstance(digest, dict):
+            return 0
+        self._seq += 1
+        message = lsa_digest_message(
+            leader_epoch=epoch,
+            seq=self._seq,
+            digest=digest.get("digest", ""),
+            head_sha=digest.get("head_sha", ""),
+            n_changes=digest.get("n_changes", 0),
+            area=digest.get("area", ""),
+            project_tag=self._config.project_tag,
+            cluster_id=self._config.cluster_id,
+            sent_at=current,
+            hmac_key=self._config.hmac_key,
+        )
+        try:
+            data = encode_lsa_digest(message, self._limits.max_packet_bytes)
+        except ValueError:
+            self._counters["oversize"] += 1
+            return 0
+        if self._sender is None:
+            return 0
+        sent = self._sender.send_raw(data)
+        self._last_sent_at = current
+        self._counters["sent"] += 1
+        self._counters["packets"] += sent
+        self._counters["bytes"] += len(data)
+        return sent
+
+    def status(self) -> dict:
+        return {**self._counters, "interval": self.interval,
+                "suppress_window": self._suppress_window,
+                "last_epoch": self._last_epoch}
+
+
+class LsaDigestReceiver:
+    """T1 摘要接收器：校验 cluster_id / project_tag / HMAC / epoch 单调性。
+
+    旧主、幽灵 Leader、开发实例误入的包一律丢弃并计入 ``status()`` 指标，
+    绝不落到状态视图里。
+    """
+
+    def __init__(self, *, project_tag: str = "", cluster_id: str = "",
+                 hmac_key: str = "",
+                 on_digest: Callable[[dict], None] | None = None):
+        self._project_tag = str(project_tag or "")
+        self._cluster_id = str(cluster_id or "")
+        self._hmac_key = str(hmac_key or "")
+        self._on_digest = on_digest
+        self._last_epoch = -1
+        self._last_seq = -1
+        self._counters = {
+            "received": 0,
+            "accepted": 0,
+            "malformed": 0,
+            "bad_project": 0,
+            "bad_cluster": 0,
+            "bad_hmac": 0,
+            "stale_epoch": 0,
+            "duplicate": 0,
+        }
+
+    def set_on_digest(self, callback: Callable[[dict], None] | None) -> None:
+        self._on_digest = callback
+
+    def handle(self, message: dict) -> bool:
+        """返回 True 表示摘要合法且已被接收；False 表示被丢弃。"""
+        self._counters["received"] += 1
+        if not isinstance(message, dict) or message.get("type") != LSA_DIGEST_TYPE:
+            self._counters["malformed"] += 1
+            return False
+        if any(field not in message for field in LSA_FIELDS):
+            self._counters["malformed"] += 1
+            return False
+        if (self._cluster_id
+                and str(message.get("cluster_id") or "") != self._cluster_id):
+            self._counters["bad_cluster"] += 1
+            return False
+        if (self._project_tag
+                and str(message.get("project_tag") or "") != self._project_tag):
+            self._counters["bad_project"] += 1
+            return False
+        if self._hmac_key:
+            expected = _lsa_signature(message, self._hmac_key)
+            if not hmac.compare_digest(str(message.get("hmac") or ""), expected):
+                self._counters["bad_hmac"] += 1
+                return False
+        try:
+            epoch = int(message.get("leader_epoch"))
+            seq = int(message.get("seq"))
+        except (TypeError, ValueError):
+            self._counters["malformed"] += 1
+            return False
+        if epoch < self._last_epoch:
+            # 旧主 / 幽灵 Leader：epoch 回退，直接丢。
+            self._counters["stale_epoch"] += 1
+            return False
+        if epoch == self._last_epoch and seq <= self._last_seq:
+            self._counters["duplicate"] += 1
+            return False
+        self._last_epoch = epoch
+        self._last_seq = seq
+        self._counters["accepted"] += 1
+        if self._on_digest is not None:
+            self._on_digest(message)
+        return True
+
+    def status(self) -> dict:
+        return {**self._counters, "last_epoch": self._last_epoch,
+                "last_seq": self._last_seq}
 
 
 # --------------------------------------------------------------------------- #
@@ -247,6 +495,10 @@ class DownlinkSender:
         self._send_packets(packets)
         self._heartbeats_sent += 1
 
+    def send_raw(self, data: bytes) -> int:
+        """发一条已编码的独立报文（H-LSA 摘要等），沿用组播/回退语义。"""
+        return self._send_packets([data])
+
     # -- 内部 ---------------------------------------------------------- #
     def _send_packets(self, packets: list[bytes]) -> int:
         n = 0
@@ -298,6 +550,7 @@ class DownlinkReceiver:
     - ``entry`` → ``on_entry(StateEntry)``
     - ``heartbeat`` → ``on_heartbeat(dict)``
     - ``expiring`` → ``on_expiring(dict)``
+    - ``lsa_digest`` → ``on_lsa_digest(dict)``（T1 摘要，见 T-0351）
     - TTL≠1 丢弃并记 ``ttl_violation``（I4）。
     """
 
@@ -306,10 +559,12 @@ class DownlinkReceiver:
                  on_heartbeat: Callable[[dict], None],
                  on_expiring: Callable[[dict], None],
                  limits: Limits,
-                 transport: Transport | None = None):
+                 transport: Transport | None = None,
+                 on_lsa_digest: Callable[[dict], None] | None = None):
         self._on_entry = on_entry
         self._on_heartbeat = on_heartbeat
         self._on_expiring = on_expiring
+        self._on_lsa_digest = on_lsa_digest
         self._limits = limits
         self._transport = transport or SocketTransport(
             group=limits.multicast_group, port=limits.multicast_port)
@@ -318,9 +573,14 @@ class DownlinkReceiver:
         self._entries_installed = 0
         self._heartbeats = 0
         self._expirings = 0
+        self._lsa_digests = 0
         self._ttl_violations = 0
         self._parse_errors = 0
         self._last_from: tuple[str, int] | None = None
+
+    def set_lsa_handler(self, callback: Callable[[dict], None] | None) -> None:
+        """装配 H-LSA 摘要处理器（``plane`` 不感知具体校验器）。"""
+        self._on_lsa_digest = callback
 
     def start(self) -> None:
         self._transport.start_receiver(self._on_packet)
@@ -356,6 +616,11 @@ class DownlinkReceiver:
             elif msg_type == "expiring":
                 self._on_expiring(msg)
                 self._expirings += 1
+            elif msg_type == LSA_DIGEST_TYPE:
+                # 摘要只做提示：具体校验/丢弃由装配方注入的接收器负责。
+                self._lsa_digests += 1
+                if self._on_lsa_digest is not None:
+                    self._on_lsa_digest(msg)
             elif msg_type == "entry" or msg_type is None:
                 # 包裹条目 {"type":"entry","entry":{...}} 或裸条目
                 body = msg.get("entry") if msg_type == "entry" else msg
@@ -379,6 +644,7 @@ class DownlinkReceiver:
             "entries_installed": self._entries_installed,
             "heartbeats": self._heartbeats,
             "expirings": self._expirings,
+            "lsa_digests": self._lsa_digests,
             "ttl_violations": self._ttl_violations,
             "parse_errors": self._parse_errors,
             "last_from": self._last_from,

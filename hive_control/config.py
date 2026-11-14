@@ -14,7 +14,38 @@ from pathlib import Path
 
 MULTICAST_GROUP = "239.255.42.1"
 MULTICAST_PORT = 47899
+# 开发/隔离实例的默认组播组：与生产错开，避免 dev 实例误入生产组播域（T-0351 L3）。
+DEV_MULTICAST_GROUP = "239.255.42.2"
+DEV_MULTICAST_PORT = 47900
+PRODUCTION_CLUSTER_ID = "hive"
+# T1 摘要节奏（H-LSA §2）：默认 60s，与 dynamic_multicast_interval() 的高频
+# 实时提示（0.5/1.0/2.0s）分层并存。
+LSA_INTERVAL = 60.0
+# 切主后抑制窗口 = 该系数 × limits.hello_interval（≥2，见 T-0351 第 4 条）。
+LSA_SUPPRESS_HELLO_MULTIPLIER = 2.0
 UPLINK_PORT_OFFSET = 1
+
+
+def resolve_multicast(cluster_id: str = "", group: str = "",
+                      port: int = 0) -> tuple[str, int]:
+    """解析本实例应使用的组播地址。
+
+    优先级：显式参数 > 环境变量 > 按 cluster_id 选择默认值。
+    ``cluster_id`` 非空且不是生产 ``"hive"`` 时默认走开发组
+    ``239.255.42.2:47900``，保证 dev 实例不会向生产组播组发包。
+    """
+    env_group = (os.environ.get("HIVE_CONTROL_MULTICAST_GROUP") or "").strip()
+    env_port = (os.environ.get("HIVE_CONTROL_MULTICAST_PORT") or "").strip()
+    dev = bool(cluster_id) and cluster_id != PRODUCTION_CLUSTER_ID
+    final_group = str(group or env_group
+                      or (DEV_MULTICAST_GROUP if dev else MULTICAST_GROUP))
+    raw_port: object = port or env_port or (
+        DEV_MULTICAST_PORT if dev else MULTICAST_PORT)
+    try:
+        final_port = int(raw_port)
+    except (TypeError, ValueError):
+        final_port = DEV_MULTICAST_PORT if dev else MULTICAST_PORT
+    return final_group, final_port
 
 
 def default_socket_path() -> str:
@@ -57,6 +88,12 @@ class ControlConfig:
     rxmt_interval: float = 2.0
     pull_page_size: int = 100
     project_tag: str = ""
+    # -- T-0351：网络隔离与 H-LSA 摘要（默认值即可跑通，dev 实例会自动错开） -- #
+    cluster_id: str = ""
+    multicast_group: str = ""       # "" = 按 cluster_id 自动选择
+    multicast_port: int = 0         # 0  = 按 cluster_id 自动选择
+    lsa_interval: float = LSA_INTERVAL
+    hmac_key: str = ""              # "" = 按 cluster_id 派生（无 cluster_id 时关闭）
 
     def __post_init__(self) -> None:
         self.leader_priority = int(self.leader_priority)
@@ -77,6 +114,25 @@ class ControlConfig:
         if self.pull_page_size <= 0:
             raise ValueError("pull_page_size 必须为正数")
         self.project_tag = str(self.project_tag or "")
+        self.cluster_id = str(self.cluster_id or "")
+        self.multicast_group = str(self.multicast_group or "")
+        self.multicast_port = int(self.multicast_port or 0)
+        if not 0 <= self.multicast_port <= 65535:
+            raise ValueError("multicast_port 必须在 0..65535")
+        self.lsa_interval = float(self.lsa_interval)
+        if self.lsa_interval <= 0:
+            raise ValueError("lsa_interval 必须为正数")
+        # HMAC 不是安全边界（密钥随集群公开），只用于挡住跨实例/幽灵节点的
+        # 误入报文；有 cluster_id 时默认派生一个，保证 dev 与生产互不串包。
+        self.hmac_key = str(self.hmac_key or (
+            f"hive-control:{self.cluster_id}" if self.cluster_id else ""))
+
+    def limits_with_multicast(self, base: "Limits | None" = None) -> "Limits":
+        """把可配置的组播组/端口落进 ``Limits``，其余常量保持不变。"""
+        group, port = resolve_multicast(
+            self.cluster_id, self.multicast_group, self.multicast_port)
+        return (base or Limits()).overridden(
+            multicast_group=group, multicast_port=port)
 
 
 @dataclass(frozen=True)
