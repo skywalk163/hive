@@ -1,0 +1,36 @@
+{
+  "task": "T-0352",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0352",
+  "base": "main",
+  "head": "1211cff1353c639ac967b57a5ff524afd866908c",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-14T21:26:43+08:00",
+  "finished_at": "2026-11-14T21:27:23+08:00",
+  "duration_s": 40.9,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_cluster_lsa_uplink.py",
+      "code": 0,
+      "tail": [
+        "..........                                                               [100%]",
+        "10 passed in 0.86s"
+      ]
+    }
+  ],
+  "summary": "# T-0352 旧 HTTP 心跳面增量 LSA 上行 — 交付小结\n\n## 改动范围（仅卡面两条路径）\n\n- `hive_cluster.py`：在既有 HTTP 心跳面上接入 T-0350 产出的 `hive_lsa` 协议核心。\n- `tests/test_cluster_lsa_uplink.py`：新增 10 条回归用例。\n- 未改 `hive.py`、`hive_control/*`、`dashboard/*`；未新增常驻线程 / 定时循环；未连 Gitea、未发组播、未碰生产 8788。\n\n## 实现要点\n\n1. **变更识别（只挂本地写漏斗）**：`_apply_progress_locked` / `_apply_lease_locked` 在新旧裁决接受后才 `note_change`；远端合并漏斗 `_merge_progress/_merge_lease_locked` 不重复登记，避免回声泛洪。\n2. **字段级 diff**：剔除 `gen/term/leader_id/updated_at/updated_epoch/origin/node_id` 等记账元数据；租约纯续签（仅 `lease_until/lease_until_epoch` 推进，agent/host/claimed_at/released 未变）判为 touch，不产生 LSA；`last_seen` 触碰只走 `_mark_touch_locked`，不登记。\n3. **摘要水位**：心跳请求体带 `lsa` 摘要块 `(seq, digest, epoch, area, head_sha)`，由 `build_digest(DIGEST)` 产出，不含任何状态体；既有 `sd` 内容摘要保留不动。\n4. **响应分流**：带 `lsa` 块且本机有 core → LSA 分支：`on_hello` 判 NO_OP 则空载荷，不一致只回增量 `lsa_diffs`，`progress/leases` 恒为空；无 `sd/lsa` 的旧节点走 legacy 分支保留全量兼容（滚动升级不丢状态）。\n5. **入站安装**：心跳响应与快照两条通道的 `lsa_diffs` 经 `_apply_lsa_diffs_locked` 安装——先 `merge_incoming` 去重判新旧，再按字段级 diff 落到本地 progress/leases。\n6. **节拍复用**：`_heartbeat_once` 每拍 `_lsa_tick_locked()` 推进状态机；聚合窗口 200ms、MinLSInterval 5s、jitter、300s SLA 全部由 `hive_lsa` 决定，本卡不自写定时器。\n7. **退化兼容**：`hive_lsa` 导入失败时 `hive_lsa=None`，整层退化为 0.16.05 既有行为。\n\n## 测试结果（本机 Windows，Python 3.13.16）\n\n- `python3 -m pytest -q tests/test_cluster_lsa_uplink.py`：**10 passed**。\n- 既有心跳/摘要/事件窗口/节点瘦身/远期租约/留言退避回归子集（test_cluster.py 8 条）：**8 passed**。\n- 全量 `test_cluster.py + test_hive_lsa.py + test_cluster_lsa_uplink.py`：155 passed，1 failed。\n  - 唯一失败 `test_stronger_reachable_peer_blocks_self_election`：已在 stash 掉本卡全部改动后的干净代码上复现，属**本卡之前就存在的选举时序/环境问题**，与 LSA 上行无关；该文件不在本卡允许修改路径内，未顺手改动。\n\n## 保留未动的既有优化/常量\n\n`DEFAULT_IDLE_HEARTBEAT_S=5.0`、`EVENT_WINDOW_S=10.0`、事件上限 32、`ACTIVE_WORK_WINDOW_S=600.0`、`DEFAULT_MEMBERSHIP_TTL_S=300.0`、state.json 5s 落盘节流、keep-alive 连接池、心跳不推进 generation，均原样保留；generation 未被重新当作跨机水位。\n\n## 已知边界（留给后续卡）\n\n- 入站 LSA 字段安装为 best-effort：去重/判新旧在 core LSDB 内完成，本地 progress/leases 字典未再做逐字段新旧比对；Git 仍是事实账，全量对账由后续同步卡负责。",
+  "error": "",
+  "declared_paths": [
+    "hive_cluster.py",
+    "tests/test_cluster_lsa_uplink.py"
+  ],
+  "changed_files": [
+    "hive_cluster.py",
+    "tests/test_cluster_lsa_uplink.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "3344493495944856a0d517cd6ed1a239"
+}
