@@ -1,0 +1,37 @@
+{
+  "task": "T-0350",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0350",
+  "base": "main",
+  "head": "f535108e9ab0e6338e4a373ce1854b01e8ff729e",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-14T13:58:27+08:00",
+  "finished_at": "2026-11-14T18:32:18+08:00",
+  "duration_s": 16431.5,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_hive_lsa.py",
+      "code": 0,
+      "tail": [
+        "...........................................                              [100%]",
+        "43 passed in 2.22s"
+      ]
+    }
+  ],
+  "summary": "# T-0350 H-LSA 协议核心模块 — 工作说明\n\n## 交付物（只新建两个文件，既有文件零改动）\n\n- `hive_lsa.py`：纯标准库、零 I/O 的协议核心。\n- `tests/test_hive_lsa.py`：43 个用例（37 个 test 函数 + 参数化）。\n\n`git status --porcelain` 仅显示这两个 `??` 新文件，未碰 `hive.py` /\n`hive_cluster.py` / `hive_control/*` / `dashboard/*` / `tasks/*` 等任何既有文件。\n\n## 实现要点\n\n1. **数据结构**：`LSA`（originator / area / leader_epoch / seq / kind /\n   key=(repo,tid) / 字段级 diff / sha256 digest / ts / age / ttl / head_sha）、\n   `LSDB`（`(area,key) -> (seq, epoch, digest, head_sha)`，`is_newer()` 幂等\n   去重、MaxAge 3600s 老化、per-key 序列号用于缺口检测）、`SyncConfig`\n   （frozen dataclass，23 项常量集中，可 `overridden()` 注入；大写别名 +\n   模块级 `CONSTANTS` 常量表供 T-0355 直接引用）。\n2. **三档节奏**：`classify_tier()` / `jittered()` / `next_deadline()` /\n   `backoff_interval()` / `min_ls_interval_ok()` / `min_ls_arrival_ok()` 均为\n   纯函数；clock 与 rng 全部可注入。T0 合并窗口 0.200s；T1 60s 起步的\n   2^n 退避（60→120→240→480→960→1800 封顶），`note_change()` 一有变更\n   立即把 idle_rounds 归零、回弹 60s；T2 1800s ±20% jitter，只发\n   digest/CSNP，永不全量状态。**所有周期定时器都经 `jittered()`**，\n   且用绝对截止时刻 `last_at + interval` 比较，避免大 fake clock 时间戳上\n   减法丢精度导致「恰好到期」误判（阈值未放宽）。\n3. **四道闸**：合并窗口（N 次同 key 变更合成 1 条，字段级 diff 覆盖）；\n   令牌桶（32 条 / 65536B 每周期，超限排队合并、不丢状态）；\n   Flap Damping（连续泛洪惩罚指数上升、超阈值只发汇总并拉长间隔、\n   半衰衰减解除、抑制期 diff 累积后补发）；去重 / 分片（`pack_lsas`\n   按 LSA 边界分片 ≤1400B，单条超限整条进 `oversize` 不切半条）。\n   Flap 记账点刻意放在「合并窗口到期准备发 LSA」时，避免窗口内 N 次\n   变更被误判成 N 次震荡。\n4. **摘要与按需补拉**：`build_digest()` 产出 T-0351 的 8 字段短摘要头\n   （`with_entries=True` 可附 CSNP 清单）；`build_csnp()` 产出完整\n   IS-IS CSNP 式清单并分片；`on_hello()` digest 一致 -> `no-op`（零 Git\n   流量）、digest 不同 / seq 缺口 -> `pull_incremental`（带 missing 清单）、\n   旧节点无 digest 或缺口过大 -> `pull_full`；`should_pull()` 空闲恒 False，\n   由 head_sha / digest 决定要不要问 Gitea。所有摘要报文经\n   `_assert_digest_packet()` 硬校验，禁止 `diff/progress/leases/nodes/\n   agents/tasks/full_state` 等状态体字段。\n5. **公开 API**：`note_change / tick / on_hello / build_digest / build_csnp /\n   merge_incoming / should_pull / sync_health / status` 既有 `LSACore`\n   实例方法，也有委托懒加载默认 core 的模块级便捷函数。\n   `sync_health()` 同时给 `lsdb_seq`（T-0353）与 `seq`（T-0354）别名。\n   模块内不产生任何 I/O、不发包（待发包由 `tick()` 返回值交给\n   T-0351/0352/0353）。\n\n## 验收结果\n\n- `python3 -m pytest -q tests/test_hive_lsa.py` → **43 passed in 4.55s**\n  （Windows / Python 3.13.14 / pytest 9.2.0，无需切 FreeBSD）。\n- `python3 -c \"import hive_lsa; print(hive_lsa.SyncConfig())\"` → 正常打印常量表；\n  独立干净进程 `import hive_lsa` 成功，不启动任何服务。\n- 30 分钟空闲 fake clock 仿真：**0 次全量状态传输、0 次 Git 拉取指令、\n  0 条 change LSA、恰好 1 次 T2 对账且触发在 1512.0s（非整 1800.0s，\n  落在 1800×[0.8,1.2]）**；全部待发包类型为\n  `lsa_digest / lsa_refresh / lsa_csnp`，单包最大 347B ≤1400B。\n- 覆盖用例：合并窗口、MinLSInterval、MinLSArrival、令牌桶条数/字节削峰、\n  flap 抑制/汇总/半衰恢复且最终状态不丢、2^n 退避与变更回弹、jitter\n  ±20% 且必存在（含 7 组边界 rng）、多节点不整点对齐、摘要一致 no-op、\n  seq 缺口增量补拉、旧/重复/MaxAge LSA 丢弃、1400B 分片不切半条、\n  T2 只发 digest、30 分钟空闲仿真、模块级 API、AST 级纯标准库/零 I/O 校验。\n\n## 说明\n\n- 设计文档 `H-LSA-协议设计-借鉴OSPF.md` 未随仓库提供，常量与字段按卡面\n  §2/§5 及兄弟卡 T-0351/0352/0353/0354/0355 的约定逐项实现。\n- Flap 相关数值（卡面未指定）取 BGP 经典量级并按 §5 的 300s 可见性 SLA\n  校准：半衰期 60s、最长抑制 300s，保证抑制能被半衰衰减真正解除；\n  卡面明确规定的阈值一个都没改。",
+  "error": "",
+  "declared_paths": [
+    "hive_lsa.py",
+    "tests/test_hive_lsa.py"
+  ],
+  "changed_files": [
+    "hive_lsa.py",
+    "tests/test_hive_lsa.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "f1011064610f4a39997faa5a83aad175",
+  "fence": 1
+}
