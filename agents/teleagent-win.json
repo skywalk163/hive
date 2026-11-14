@@ -1,0 +1,32 @@
+{
+  "name": "teleagent-win",
+  "host": "win10",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify",
+    "python",
+    "pytest"
+  ],
+  "capabilities": [
+    "windows",
+    "gui",
+    "powershell",
+    "python"
+  ],
+  "repos": {
+    "hive": "G:/dswork/duan-light-merge/hive",
+    "light": "G:/dswork/duan-light-merge/light-merge",
+    "lightharness": "G:/dswork/duan-light-merge/lightharness",
+    "lightmem": "G:/dswork/duan-light-merge/lightmem",
+    "lightplugin": "G:/dswork/duan-light-merge/lightplugin",
+    "lightprism": "G:/dswork/lightprism"
+  },
+  "launch": "",
+  "worktrees": "C:/Users/skywalk/.hive/wt/teleagent-win",
+  "max_concurrency": 1,
+  "created": "2026-11-14T23:02:12+08:00"
+}
