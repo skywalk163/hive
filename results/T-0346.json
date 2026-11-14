@@ -1,0 +1,60 @@
+{
+  "task": "T-0346",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0346",
+  "base": "main",
+  "head": "34af6d69890808b2736afb6495a7797858c4aad6",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-14T09:33:52+08:00",
+  "finished_at": "2026-11-14T10:28:16+08:00",
+  "duration_s": 3264.2,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_runtime_system.py",
+      "code": 0,
+      "tail": [
+        "...........................s                                             [100%]"
+      ]
+    },
+    {
+      "cmd": "python3 scripts/runtime_eval.py --tasks data/runtime/tasks.jsonl",
+      "code": 0,
+      "tail": [
+        "          stdout=''  原因=checker 返回 ERR=CHECKER_FAIL",
+        "      attempt 2: 模板=NO_TEMPLATE 编辑=RW 验证=ERR=CHECKER_FAIL 诊断码=['L0000']",
+        "          stdout=''  原因=checker 返回 ERR=CHECKER_FAIL",
+        "========================================================================",
+        "决策日志 -> C:\\dswork\\hive-wt\\T-0346\\data\\runtime\\decisions.jsonl（29 条）"
+      ]
+    }
+  ],
+  "summary": "# T-0346 工作说明：阶段 0 零模型确定性系统 + 决策/验证日志采集\n\n## 结论\n\n完成，两条验收命令在本机 Windows 跑通（无需切 FreeBSD）。\n\n- `python3 -m pytest -q tests/test_runtime_system.py` → **27 passed, 1 skipped**\n  （跳过项是需显式 `LIGHT_RUNTIME_INTEGRATION=1` 才跑的真 CLI 单测，默认关闭以免拖慢验收）\n- `python3 scripts/runtime_eval.py --tasks data/runtime/tasks.jsonl` → exit 0，\n  **闭环可用率 25/26 = 96.15%**（全分母，失败 1 条计入）\n- 连跑两次真实评估，结果完全复现（29 条日志 / 25 条 PASS / 1 条 RUNTIME / 3 条 CHECKER_FAIL）。\n\n## 关键产物\n\n| 路径 | 内容 |\n|---|---|\n| `src/lightprism/runtime/` | 新模块 6 文件：`templates.py`（17 个占位符模板 + 独立 Python 预期语义）、`retrieval.py`（中文 bigram BM25 + trigger 规则 + 正则抽槽）、`checker.py`（真实 light CLI 封装）、`decisions.py`（日志 schema / 确定性映射 / 线程安全写入）、`engine.py`（闭环编排）、`__init__.py` |\n| `scripts/runtime_eval.py` | 验收入口；`--make-tasks` 重建任务集、`--report-out` 按真实运行生成报告、`--json-out` 机器可读摘要 |\n| `data/runtime/tasks.jsonl` | 26 条窄任务，7 个模板簇，每条带预期执行结果；**不含** template_id / slots / source，系统只能从任务文本检索与抽槽 |\n| `data/runtime/decisions.jsonl` | 29 条决策日志（真实运行产出，非空） |\n| `data/runtime/summary.json` | 机器可读统计摘要 |\n| `tests/test_runtime_system.py` | 28 项测试 |\n| `reports/零模型系统报告.md` | 闭环可用率、每簇条数、失败样例逐条全贴、修复闭环样例、决策点/验证码分布及未观测项 |\n\n## 实现要点与纪律\n\n- **`<V>` 一律取自** `light ai check --json --no-corpus --run` 的真实 payload。\n  顺带确认了一个坑：`ai check --json` 的 payload **不含程序 stdout**（`cli/light.py::_ai_check_json` 只把 ran.stdout 拼进诊断文本），\n  所以「真跑比对预期」必须另跑 `light run`，不能拿 checker 的 `ok` 顶替。\n- 只保留可观测 3 类：`PASS` / `ERR=RUNTIME`(L3001) / `ERR=CHECKER_FAIL`(L0000 等)。\n  **L0000 不冒充** SYNTAX / TYPE_MISMATCH 等具体码，原始诊断码完整保留在\n  `checker_diagnostics` / `checker_error_codes`；日志里带 `checker_cmd/cwd/rc/payload/stdout`\n  与 `source_sha256`，每条 validation 都可回溯到那一次真实 checker 调用。\n- `<D>` 全部从**实际动作**映射：首次模板展开 `EDIT=RW`，诊断驱动 find-replace `EDIT=FR`，\n  换候选 `CTX=FETCH`，是否还有下一次 `RETRY=YES/NO`，用尽则 `NEXT=ASK`。\n  7/7 决策点、12 个选项、3 类验证码全部观测到；7 个未观测选项在报告里逐条说明原因，不补造。\n- 判据：`check` 通过 **且** `light run` 输出与预期一致；空输出 / 截断 / checker 自身失败全按失败计入分母\n  （针对 `docs/Demo验收报告.md` §3.4「空文件也判 ok」的假绿，有专门单测）。\n- 预期执行结果由**独立于 .light 代码的 Python 语义**离线算出，运行时不参与代码生成。\n- 真实失败样例 E02（音频转乐谱，模板库无此能力 → 检索未命中 → L0000 → CHECKER_FAIL，重试 2 次仍失败）\n  逐条全贴，不剔除、不挑成功样例。\n- 修复闭环样例 E01：首次 `甲[5]` 越界得到 L3001，依据诊断做 find-replace 改成\n  `甲[列表长度(甲) 减 1]`，第二次 check PASS 且真跑输出 `30` 与预期一致，报告里贴了两次源码与全部决策 token。\n\n## 平台说明\n\n任务卡提醒的 Windows POSIX 判据问题在本实现里不成立：所有检索、比对、统计、报告生成都是\nPython 标准库，不依赖 `head/grep/awk`、`!` 或 `$()`；light CLI 通过 `subprocess` 直接调用\n`sys.executable -X utf8 -m cli.light`，`find_light_root()` 自动向上探测到 `C:\\dswork\\light`。\n本机一次完整评估约 5.8–6.5 分钟（4 并发）。未使用 192.168.0.88。\n\n## 边界（如实标注）\n\n- 检索是**零模型** BM25 + 关键词规则，报告已标注；系统诊断类任务的输入内嵌在任务文本里\n  （不读真实机器状态），保证输出可复现，不代表已具备真实系统工具调用能力。\n- 这批 29 条日志是**监督信号源**，不是最终训练序列；决策密度 / 配比仍需在后续导出阶段按\n  方案 §8 的 1–2% 上限核算，本卡不宣称已达成训练指标，也未训练任何模型。\n\n## 改动范围\n\n只改了允许路径：`src/lightprism/runtime/`、`scripts/runtime_eval.py`、`data/runtime/`、\n`tests/test_runtime_system.py`、`reports/零模型系统报告.md`。\n未动其它任务卡、agents 配置、`train_openi.py`、docs；未写入任何 token 或密钥。",
+  "error": "",
+  "declared_paths": [
+    "src/lightprism/runtime/",
+    "scripts/runtime_eval.py",
+    "data/runtime/",
+    "tests/test_runtime_system.py",
+    "reports/零模型系统报告.md"
+  ],
+  "changed_files": [
+    "data/runtime/decisions.jsonl",
+    "data/runtime/summary.json",
+    "data/runtime/tasks.jsonl",
+    "reports/零模型系统报告.md",
+    "scripts/runtime_eval.py",
+    "src/lightprism/runtime/__init__.py",
+    "src/lightprism/runtime/checker.py",
+    "src/lightprism/runtime/decisions.py",
+    "src/lightprism/runtime/engine.py",
+    "src/lightprism/runtime/retrieval.py",
+    "src/lightprism/runtime/templates.py",
+    "tests/test_runtime_system.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "1c642640d6d94ee1875240d282da6175",
+  "fence": 1
+}
