@@ -142,6 +142,11 @@
     lastUpdated: null,
     source: '/api/status',
     snapshotAt: null,   // 快照生成时刻（毫秒），来自 X-Snapshot-Mtime；null = 服务端没给
+    refreshAt: null,    // 刷新循环心跳时刻（毫秒），来自 X-Refresh-Mtime；null = 旧服务端
+    // —— 同步健康度（H-LSA §6，T-0354）——
+    // syncHealth 来自 /api/status 的 sync_health（新后端）；null = 旧后端 → 降级到 local_stale
+    syncHealth: null,
+    cursor: null,        // 增量订阅游标：服务端给的不透明令牌（X-Hive-LSDB-Seq）
     cluster: null,      // /api/cluster 的集群视图（leader/term/在线节点）
     clusterOpen: false, // 集群面板是否展开（默认折叠）
     board: null,        // /api/status 附带的 board 摘要（stage 分桶）；旧快照里没有 → null
@@ -327,6 +332,9 @@
     el.stats = document.getElementById('stats');
     el.meta = document.getElementById('meta');
     el.source = document.getElementById('source');
+    // 同步健康度指示（T-0354）：index.html 不在本卡 paths 里，所以这个 span 由
+    // ensureSyncChip() 按需插进 .topbar-row.meta（已存在就直接接管，幂等）。
+    el.syncChip = document.getElementById('sync-health');
     el.cluster = document.getElementById('cluster');
     el.board = document.getElementById('board');
     el.upgradeBar = document.getElementById('upgrade-bar');
@@ -1027,10 +1035,10 @@
     if (onShelf && state.shelfOpen) syncList(c);
   }
 
-  /** 读服务端给的快照时刻（秒 → 毫秒）。拿不到返回 null，不影响主流程。 */
-  function headerTime(r) {
+  /** 读服务端给的毫秒级响应头（秒 → 毫秒）。拿不到返回 null，不影响主流程。 */
+  function headerNum(r, name) {
     try {
-      var v = r && r.headers && r.headers.get('X-Snapshot-Mtime');
+      var v = r && r.headers && r.headers.get(name);
       if (!v) return null;
       var sec = Number(v);
       return (isFinite(sec) && sec > 0) ? sec * 1000 : null;
@@ -1039,25 +1047,39 @@
     }
   }
 
+  /** 读服务端给的快照时刻（秒 → 毫秒）。拿不到返回 null，不影响主流程。 */
+  function headerTime(r) {
+    return headerNum(r, 'X-Snapshot-Mtime');
+  }
+
   /**
    * 数据源文案 = 来源 + 快照有多旧。
    *
    * 刷新循环停摆时 /api/status 依旧 200，页面会安安静静地渲染一份几小时前的数据，
    * 看的人却以为它是实时的（2026-10-28 就因为一份 2h43m 的旧快照误判"退回没生效"）。
    * 所以这里把快照时刻显式摆出来，超过 10 分钟再给个警示。
+   *
+   * T-0354：落盘节流后「序号没变就不重写 status.json」，快照 mtime 可以很久不动，
+   * 所以「停摆」判定优先看刷新循环的心跳（X-Refresh-Mtime）：心跳新 = 循环活着，
+   * 只是没有变化要写。旧服务端没有心跳头时，退回只看快照 mtime（原行为不变）。
    */
   function sourceLabel() {
     var s = state.source;
-    if (!state.snapshotAt) return s;
-    var ageMin = (Date.now() - state.snapshotAt) / 60000;
-    var txt = relTime(state.snapshotAt);
-    if (txt) s += '（快照 ' + txt + '）';
-    if (ageMin >= 10) s = '⚠ ' + s + ' —— 快照可能已停更，检查看板服务';
+    var aliveAt = state.refreshAt || state.snapshotAt;
+    if (state.snapshotAt) {
+      var txt = relTime(state.snapshotAt);
+      if (txt) s += '（快照 ' + txt + '）';
+    }
+    if (aliveAt) {
+      var ageMin = (Date.now() - aliveAt) / 60000;
+      if (ageMin >= 10) s = '⚠ ' + s + ' —— 快照可能已停更，检查看板服务';
+    }
     return s;
   }
 
   function renderMeta() {
     renderUpgrade();   // 版本条随状态刷新一起重绘，不额外发请求
+    renderSyncChip();  // 同步健康度指示（LSDB seq / 最后同步 / 档位）
     if (!state.lastUpdated) { el.meta.textContent = '最后更新：—'; return; }
     el.meta.textContent = '最后更新 ' + relTime(state.lastUpdated) + '（' + dtf.format(state.lastUpdated) + '）';
     el.source.textContent = '数据源：' + sourceLabel();
@@ -1082,6 +1104,160 @@
     if (sel.dataset.sig !== html) { sel.innerHTML = html; sel.dataset.sig = html; }
     sel.value = current;
   }
+
+  // ---------- 同步健康度（H-LSA §6）----------
+  // 「本地协调仓落后 origin/main」以前只配一句无差别的「去把协调仓拉一下」，把三种
+  // 完全不同的处境混成一句话：同步只是慢了几百毫秒、本地真的有未提交改动、
+  // 还是真的和 origin 分叉了。现在后端给出 sync_health（T-0353），前端按四档
+  // 分开讲：ok / behind / dirty / diverged，旧后端没有该字段时才降级回 local_stale。
+  //
+  // === SYNC HEALTH PURE BEGIN ===
+  // 这一段是**纯函数**（不碰 DOM、不碰网络、不读闭包外状态），
+  // tests/test_dashboard_hlsa.py 与 dashboard/dev/hlsa_banner_test.js 会把这段
+  // 原样抠出来单独求值——所以这里只许用参数和 JS 内建对象。
+  var SYNC_MODES = { ok: 'ok', behind: 'behind', dirty: 'dirty',
+                     diverged: 'diverged', legacy: 'legacy' };
+
+  function syncHasMode(name) {
+    return Object.prototype.hasOwnProperty.call(SYNC_MODES, name);
+  }
+
+  /** 快照里可信的 LSDB 序号；旧后端 / 无序号返回 null（= 不做增量订阅）。 */
+  function syncSeqOf(h) {
+    if (!h || typeof h !== 'object' || h.degraded) return null;
+    if (h.seq_known === false) return null;
+    var raw = (h.lsdb_seq !== undefined && h.lsdb_seq !== null) ? h.lsdb_seq : h.seq;
+    var n = Number(raw);
+    if (!isFinite(n) || n < 0) return null;
+    return Math.round(n);
+  }
+
+  /** 已经落后多少条（后端没给就是 0，不编数字）。 */
+  function syncBehind(h) {
+    var n = Number(h && h.behind);
+    return (isFinite(n) && n > 0) ? Math.round(n) : 0;
+  }
+
+  /** ISO 时刻 → 「3 分钟前」；nowMs 可注入，测试不必依赖真实时钟。 */
+  function syncAgo(iso, nowMs) {
+    if (!iso) return '';
+    var t = Date.parse(String(iso));
+    if (isNaN(t)) return '';
+    var now = Number(nowMs);
+    if (!isFinite(now)) now = Date.now();
+    var sec = Math.max(0, now - t) / 1000;
+    if (sec < 60) return Math.round(sec) + ' 秒前';
+    if (sec < 3600) return Math.round(sec / 60) + ' 分钟前';
+    if (sec < 86400) return Math.round(sec / 3600) + ' 小时前';
+    return Math.round(sec / 86400) + ' 天前';
+  }
+
+  /** sha 只显示前 7 位（和 git 的习惯一致），空值给破折号而不是 undefined。 */
+  function syncSha(sha) {
+    var s = String(sha == null ? '' : sha).trim();
+    return s ? s.slice(0, 7) : '—';
+  }
+
+  /**
+   * 四档判定：ok / behind / dirty / diverged，旧后端 → legacy。
+   * 优先级：后端显式声明的 status/state > 分叉 > 本地脏 > 落后 > 默认 ok。
+   * 「本地脏」绝不能判成分叉或故障——它只是「自动同步跳过了」，没有坏事发生。
+   */
+  function syncHealthMode(h) {
+    if (!h || typeof h !== 'object' || h.degraded) return 'legacy';
+    var explicit = String(h.status || h.state || '').trim().toLowerCase();
+    if (explicit && syncHasMode(explicit)) return SYNC_MODES[explicit];
+    var why = String(h.reason || '').toLowerCase();
+    if (h.diverged === true || why.indexOf('diverg') !== -1 || why.indexOf('分叉') !== -1) {
+      return 'diverged';
+    }
+    if (h.local_dirty === true || why.indexOf('dirty') !== -1
+        || why.indexOf('未提交') !== -1 || why.indexOf('脏') !== -1) {
+      return 'dirty';
+    }
+    if (syncBehind(h) > 0) return 'behind';
+    if (why.indexOf('behind') !== -1 || why.indexOf('落后') !== -1
+        || why.indexOf('syncing') !== -1 || why.indexOf('pending') !== -1) {
+      return 'behind';
+    }
+    return 'ok';
+  }
+
+  /**
+   * 自动重试倒计时的说法：seconds>0 = 还有 N 秒；0 = 说不准就"稍后"；
+   * 负数 = 自动刷新被关掉了（这时别承诺自动重试，否则用户会干等）。
+   */
+  function syncRetryText(seconds) {
+    var s = Number(seconds);
+    if (!isFinite(s)) return '稍后自动重试';
+    if (s < 0) return '自动刷新已暂停，点「刷新」即可重试';
+    if (s <= 0) return '稍后自动重试';
+    return '约 ' + Math.max(1, Math.round(s)) + ' 秒后自动重试';
+  }
+
+  /**
+   * 横幅内容：ok 返回 null（横幅隐藏），其余三档各自一条文案。
+   * 一律**不给**「到协调仓执行拉取 / 跑仓库同步命令」这种无差别操作指令：
+   * 同步慢和本地脏都不是用户该动手的事，分叉才需要人工裁决（由人来决定怎么合）。
+   */
+  function syncHealthBanner(h, opts) {
+    opts = opts || {};
+    var mode = syncHealthMode(h);
+    if (mode === 'ok') return null;
+    if (mode === 'legacy') {
+      // 滚动升级期间（旧后端只有 local_stale）：落后才提示，且只说事实。
+      if (!opts.legacyLocalStale) return null;
+      return {
+        mode: 'legacy', level: 'warn',
+        text: '同步健康度不可用（旧版后端）：本地协调仓落后 origin/main，卡面可能不是最新',
+        mono: []
+      };
+    }
+    if (mode === 'behind') {
+      var n = syncBehind(h);
+      var tail = syncRetryText(opts.retryInSeconds);
+      return {
+        mode: 'behind', level: 'warn',
+        text: '状态同步中' + (n > 0 ? '，已落后 ' + n + ' 条' : '') + (tail ? '；' + tail : ''),
+        mono: []
+      };
+    }
+    if (mode === 'dirty') {
+      return {
+        mode: 'dirty', level: 'warn',
+        text: '本地有未提交改动，自动同步已跳过；请先让改动的主人提交或保存，看板不会替你动工作区',
+        mono: []
+      };
+    }
+    return {
+      mode: 'diverged', level: 'danger',
+      text: '本地与 origin 分叉，需人工裁决（看板不会自动 merge / reset）',
+      mono: ['head ' + syncSha(h.head_sha), 'origin ' + syncSha(h.remote_sha)]
+    };
+  }
+
+  /** 顶栏那颗「同步健康度」指示：LSDB seq / 最后同步 / 档位。 */
+  function syncHealthChip(h, opts) {
+    opts = opts || {};
+    var mode = syncHealthMode(h);
+    if (mode === 'legacy') {
+      return {
+        mode: mode, text: '同步：旧版后端',
+        title: '后端还没给出 sync_health（滚动升级期间）：只能退回 local_stale 判定'
+      };
+    }
+    var parts = [];
+    var seq = syncSeqOf(h);
+    parts.push('LSDB seq ' + (seq === null ? '—' : seq));
+    var ago = syncAgo(h.last_sync_at, opts.nowMs);
+    if (ago) parts.push('最后同步 ' + ago);
+    if (h.tier) parts.push('档位 ' + String(h.tier));
+    if (mode === 'behind') parts.push('落后 ' + syncBehind(h) + ' 条');
+    else if (mode === 'dirty') parts.push('本地未提交');
+    else if (mode === 'diverged') parts.push('分叉待裁决');
+    return { mode: mode, text: parts.join(' · '), title: '同步健康度：' + parts.join(' · ') };
+  }
+  // === SYNC HEALTH PURE END ===
 
   // ---------- 状态面板 / 横幅 ----------
   function showPanel(kind, msg) {
@@ -1108,6 +1284,37 @@
     el.columns.hidden = false;
   }
 
+  /** 有没有任何一行还带着旧后端的 local_stale（滚动升级期间的降级依据）。 */
+  function localStaleAny() {
+    for (var i = 0; i < state.tasks.length; i++) if (state.tasks[i].local_stale) return true;
+    return false;
+  }
+
+  /** 下一次自动刷新还剩多少秒（负 = 自动刷新被关掉了）。 */
+  function retryInSeconds() {
+    if (!state.autoRefresh) return -1;
+    var base = Number(settings.refreshMs) || REFRESH_MS;
+    var last = state.lastUpdated ? state.lastUpdated.getTime() : 0;
+    if (!last) return Math.round(base / 1000);
+    return Math.max(0, Math.round((last + base - Date.now()) / 1000));
+  }
+
+  /**
+   * 横幅配色。style.css 只给了「危险」一档样式，而同步滞后 / 本地脏都不是故障，
+   * 用同一口红条会把「小延迟」放大成「出事」。这里按档位就地改色（不新增 CSS）。
+   */
+  var BANNER_PAINT = {
+    danger: ['var(--danger-bg)', 'var(--danger)'],
+    warn: ['var(--warn-bg)', 'var(--warn)']
+  };
+
+  function paintBanner(level) {
+    var pair = BANNER_PAINT[level] || BANNER_PAINT.warn;
+    el.banner.style.background = pair[0];
+    el.banner.style.borderColor = pair[1];
+    el.banner.style.color = pair[1];
+  }
+
   function renderBanner() {
     if (state.error && state.tasks.length) {
       el.banner.innerHTML = '<span>刷新失败：' + esc(state.error) + '（展示的是上一次成功的数据）</span>';
@@ -1117,17 +1324,62 @@
       btn.textContent = '重试';
       btn.addEventListener('click', function () { loadStatus(); });
       el.banner.appendChild(btn);
+      paintBanner('danger');
       el.banner.hidden = false;
-    } else if (state.tasks.some(function (t) { return t.local_stale; })) {
-      // status 读的是本地工作区卡面；本机落后 origin/main 时，看板会把旧的
-      // done / closed 当成真相，多机显示互相打架（T-0324）。
-      el.banner.innerHTML = '<span>本地协调仓落后 origin/main，卡面状态可能不是最新；'
-        + '在协调仓执行 git pull（或 hive sync-repos）后刷新看板</span>';
-      el.banner.hidden = false;
-    } else {
+      return;
+    }
+    // 同步健康度四档：ok 隐藏横幅，其余各说各的（旧后端退回 local_stale 降级）。
+    var view = syncHealthBanner(state.syncHealth, {
+      // 旧后端可能只在行上给 local_stale，也可能由服务端把各行的 local_stale
+      // 收进 sync_health.legacy_local_stale（增量订阅的轻量响应里没有任务行）——
+      // 两条路都认，滚动升级期间才不会漏掉「落后」这件事。
+      legacyLocalStale: localStaleAny()
+        || !!(state.syncHealth && state.syncHealth.legacy_local_stale),
+      retryInSeconds: retryInSeconds()
+    });
+    if (!view) {
       el.banner.hidden = true;
       el.banner.innerHTML = '';
+      return;
     }
+    var html = '<span>' + esc(view.text) + '</span>';
+    if (view.mono && view.mono.length) {
+      html += '<span class="mono">' + view.mono.map(function (s) { return esc(s); }).join(' / ') + '</span>';
+    }
+    el.banner.innerHTML = html;
+    paintBanner(view.level);
+    el.banner.hidden = false;
+  }
+
+  /** 顶栏同步健康度指示：没有就现插一个 span（index.html 不在本卡 paths 里）。 */
+  function ensureSyncChip() {
+    if (el.syncChip) return el.syncChip;
+    var row = document.querySelector('.topbar-row.meta');
+    if (!row) return null;
+    var span = document.createElement('span');
+    span.id = 'sync-health';
+    span.className = 'source';
+    row.appendChild(span);
+    el.syncChip = span;
+    return span;
+  }
+
+  function renderSyncChip() {
+    var node = ensureSyncChip();
+    if (!node) return;
+    // 首帧还没拿到任何快照：显示占位，别急着把「未知」说成「旧版后端」。
+    if (!state.lastUpdated) {
+      node.textContent = '同步：—';
+      node.title = '等待第一份快照';
+      node.style.color = '';
+      return;
+    }
+    var view = syncHealthChip(state.syncHealth, { nowMs: Date.now() });
+    node.textContent = view.text;
+    node.title = view.title;
+    // 只有真慢 / 真分叉才染色；ok 与旧后端保持 muted（不制造焦虑）。
+    node.style.color = view.mode === 'diverged' ? 'var(--danger)'
+      : ((view.mode === 'behind' || view.mode === 'dirty') ? 'var(--warn)' : '');
   }
 
   // ---------- 主渲染 ----------
@@ -1480,16 +1732,34 @@
     } catch (e) { /* 集群是可选件，失败静默 */ }
   }
 
+  /**
+   * 增量订阅的 URL：有游标带 `?since=<token>`，没游标（首轮 / 旧服务端 / 本地文件）
+   * 就走全量。游标是服务端给的不透明令牌，前端不解析、不递增，只原样回传。
+   * 服务端在内容没变时只回 {"unchanged":true}，避免每 15s 重传整份快照。
+   */
+  function statusUrl(since) {
+    return (since === null || since === undefined)
+      ? '/api/status'
+      : '/api/status?since=' + encodeURIComponent(since);
+  }
+
   function loadStatus() {
     if (state.inflight) return;
     state.inflight = true;
     state.loading = !state.tasks.length;   // 只有一条数据都没有时才显示整屏 loading
     render();
 
-    fetch('/api/status', { cache: 'no-store', headers: { Accept: 'application/json' } })
+    fetch(statusUrl(state.cursor), { cache: 'no-store', headers: { Accept: 'application/json' } })
       .then(function (r) {
-        // 快照时刻（服务端文件 mtime）。拿不到就保持 null，只影响标签文案。
+        // 快照时刻（服务端文件 mtime）+ 刷新循环心跳（节流后判"停摆"靠它）。
+        // 拿不到就保持 null，只影响标签文案。
         state.snapshotAt = headerTime(r);
+        state.refreshAt = headerNum(r, 'X-Refresh-Mtime');
+        // 增量游标是服务端给的**不透明令牌**（快照序号 + /api/push 叠加层指纹），
+        // 前端原样回传即可。放在响应头而不是 body，是因为 unchanged 响应没有
+        // tasks，旧服务端也没有这个头：拿不到就退回全量刷新，绝不锁死不刷新。
+        var cursor = headerNum(r, 'X-Hive-LSDB-Seq');
+        state.cursor = (cursor === null || cursor === 0) ? null : cursor;
         if (!r.ok) {
           return r.json().catch(function () { return null; }).then(function (body) {
             throw new Error((body && body.error) ? body.error : ('HTTP ' + r.status));
@@ -1498,11 +1768,22 @@
         return r.json();
       })
       .then(function (data) {
-        // 两种形态都吃：裸数组（旧快照）与 {tasks, board}（hive status --json --board）
+        // 增量订阅的空响应：内容没变，只更新时刻与健康度，不重建任何卡片。
+        if (data && data.unchanged === true) {
+          if (data.sync_health) state.syncHealth = data.sync_health;
+          state.error = '';
+          state.lastUpdated = new Date();
+          renderMeta();
+          renderBanner();   // 上一轮可能是刷新失败横幅：现在成功了要撤掉
+          return;
+        }
+        // 两种形态都吃：裸数组（旧快照）与 {tasks, board, sync_health}（新后端）。
         var list = Array.isArray(data) ? data
           : (data && Array.isArray(data.tasks) ? data.tasks : null);
         if (!list) throw new Error('状态文件既不是数组，也没有 tasks 数组');
         state.board = (!Array.isArray(data) && data && data.board) || null;
+        // 旧后端没有 sync_health → null：横幅退回 local_stale 降级路径，不白屏。
+        state.syncHealth = (!Array.isArray(data) && data && data.sync_health) || null;
         setTasks(list, '/api/status');
       })
       .catch(function (e) {
@@ -1528,6 +1809,9 @@
         el.auto.checked = false;
         storeSet(STORE_AUTO, 'off');
         state.snapshotAt = null;        // 本地文件没有"快照时刻"，别拿上次 HTTP 的冒充
+        state.refreshAt = null;
+        state.syncHealth = null;        // 本地文件不保证有 sync_health：清掉旧游标
+        state.cursor = null;
         setTasks(list, file.name);
       } catch (e) {
         state.error = '本地文件解析失败：' + ((e && e.message) ? e.message : e);

@@ -9,6 +9,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -439,12 +440,209 @@ def write_status_atomic(status_path, text):
     os.replace(tmp, status_path)
 
 
+# ---- 同步健康度 + 增量订阅（T-0354）----------------------------------- #
+# 后端（hive.py，T-0353）在 `status --json` 顶层给出结构化对象：
+#   {"lsdb_seq", "last_sync_at", "head_sha", "remote_sha", "behind", "tier", "reason"}
+# 服务端这边只做三件事：**透传**（不重新判定 Git 状态，Git 仍是事实账）、
+# 归一化类型、以及「旧后端没有该字段时按行上的 local_stale 降级合成一份」。
+# 四档语义（ok / behind / dirty / diverged）与文案由前端 app.js 的纯函数决定，
+# 服务端不替前端猜文案，只保证字段齐全、类型稳定。
+SYNC_SEQ_HEADER = "X-Hive-LSDB-Seq"        # 快照的 LSDB 序号（增量订阅游标）
+SYNC_REFRESH_HEADER = "X-Refresh-Mtime"    # 刷新循环还活着（落盘节流后快照 mtime 不再等于它）
+SYNC_HEALTH_INT_KEYS = ("lsdb_seq", "behind", "fence", "term")
+SYNC_HEALTH_STR_KEYS = ("last_sync_at", "head_sha", "remote_sha", "tier", "reason",
+                        "status", "state")
+SYNC_HEALTH_BOOL_KEYS = ("degraded", "local_dirty", "diverged", "legacy_local_stale")
+
+
+def refresh_stamp_path(status_path):
+    """刷新循环的心跳文件：每拍只 touch 它，不重写快照（节流后 mtime 不再代表活着）。
+
+    名字带 `.tmp` 是为了命中 .gitignore 里已有的 `dashboard/status.json.tmp*` 规则
+    （.gitignore 不在本卡 paths 里，不能去加新规则），不给协调仓留未跟踪垃圾。
+    """
+    return Path(str(status_path) + ".tmp.refresh")
+
+
+def touch_refresh_stamp(status_path):
+    """更新心跳文件。失败只影响「快照停更」告警的精度，不影响主流程。"""
+    try:
+        refresh_stamp_path(status_path).write_text(_iso_now(), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _as_int(value, default=0):
+    """宽松转 int：None / 空串 / 脏值都退回 default（不抛）。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def snapshot_rows(data):
+    """快照根节点 → 任务行数组（裸数组与 {tasks: [...]} 两种形态都认）。"""
+    rows = data.get("tasks") if isinstance(data, dict) else data
+    return rows if isinstance(rows, list) else []
+
+
+def sync_health_of(data):
+    """快照 → 归一化的 sync_health 字典（永远返回 dict，前端可无条件读）。
+
+    - 新后端：透传顶层 `sync_health`，只做类型归一（数字 / 字符串 / 布尔）；
+    - 旧后端（滚动升级期间）：没有该字段 → 合成 `degraded=True` 的记录，把行上的
+      `local_stale` 收成 `legacy_local_stale`，前端据此退回旧提示而不是白屏。
+
+    `seq_known=False` 表示「这份快照没有可信的 LSDB 序号」——此时不能做增量订阅
+    （否则会把一份永远取不到变化的旧后端当成「内容没变」而永不刷新）。
+    """
+    raw = data.get("sync_health") if isinstance(data, dict) else None
+    degraded = not isinstance(raw, dict)
+    src = {} if degraded else dict(raw)
+
+    seq_raw = src.get("lsdb_seq", src.get("seq"))
+    seq_known = False
+    if not degraded and seq_raw not in (None, ""):
+        try:
+            seq_known = int(seq_raw) >= 0
+        except (TypeError, ValueError):
+            seq_known = False
+    seq = max(0, _as_int(seq_raw, 0)) if seq_known else 0
+
+    health = {}
+    for key in SYNC_HEALTH_INT_KEYS:
+        health[key] = _as_int(src.get(key), 0)
+    for key in SYNC_HEALTH_STR_KEYS:
+        value = src.get(key)
+        health[key] = str(value).strip() if value not in (None, "") else ""
+    for key in SYNC_HEALTH_BOOL_KEYS:
+        health[key] = bool(src.get(key))
+
+    health["lsdb_seq"] = seq
+    health["seq"] = seq
+    health["seq_known"] = bool(seq_known)
+    health["degraded"] = bool(degraded or health["degraded"])
+    if degraded:
+        health["reason"] = health["reason"] or "legacy"
+        health["legacy_local_stale"] = any(
+            bool(row.get("local_stale")) for row in snapshot_rows(data)
+            if isinstance(row, dict))
+    return health
+
+
+def lsdb_seq_of(data):
+    """快照的 LSDB 序号；旧后端 / 字段缺失返回 None（= 不做增量订阅）。"""
+    health = sync_health_of(data)
+    return health["lsdb_seq"] if health["seq_known"] else None
+
+
+def since_arg(query):
+    """`?since=N` → 非负整数；缺省 / 非法一律 None（= 回全量，不猜）。"""
+    raw = (query.get("since") or [""])[0]
+    raw = str(raw or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def cluster_progress_epoch():
+    """集群实时进度的内容指纹（`_merge_cluster` 会把它并进任务行）。
+
+    **不能**用 state.json 的文件 mtime：集群每次心跳都重写它，指纹就会一直变，
+    `unchanged` 永远不触发，增量订阅就退化成全量了。只取 `progress` 这一段
+    （真正会盖到任务行上的内容）做稳定序列化 + 哈希，心跳 / term / leader 变化
+    不影响它；真有 agent 上报新进度才变。
+
+    只读本地快照文件、不发 HTTP：这个函数在每次 /api/status 的热路径上跑，
+    不能像 `load_cluster_state()` 那样带 0.6s 的集群探活超时。
+    """
+    try:
+        raw = json.loads((cluster_state_dir() / "state.json").read_text(
+            encoding="utf-8-sig"))
+        if not isinstance(raw, dict):
+            return "bad"
+        snap = raw.get("snapshot")
+        node = snap if isinstance(snap, dict) else raw
+        progress = node.get("progress") or {}
+        if not isinstance(progress, dict):
+            return "bad"
+        packed = json.dumps(progress, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(packed.encode("utf-8")).hexdigest()[:12]
+    except (OSError, ValueError, TypeError):
+        return "missing"
+
+
+def overlay_epoch():
+    """`/api/push` + 集群实时进度这两个"叠加层"的版本指纹（T-0354）。
+
+    它们**不在 status.json 里**，是请求时由 `_merge_pushed` / `_merge_cluster`
+    现场合并进任务行的。只看 `sync_health.lsdb_seq` 判 unchanged 会把一条刚推上来的
+    progress 吞掉——agent 主动上报的加速通道（卡面明确要求保留）就白做了。
+
+    所以增量游标是二维的：`lsdb_seq + overlay_epoch`。这里只做一次 stat +
+    一次小文件解析，不读整份状态、不发网络请求，正好配得上 unchanged 这条热路径。
+    """
+    try:
+        st = PUSHED_STATUS_PATH.stat()
+        pushed = "%d:%d" % (st.st_mtime_ns, st.st_size)
+    except OSError:
+        pushed = "missing"
+    digest = hashlib.sha256(("%s|%s" % (pushed, cluster_progress_epoch()))
+                            .encode("utf-8")).hexdigest()
+    return digest[:12]
+
+
+def combined_cursor(seq, overlay):
+    """把「快照序号 + 叠加层指纹」折成一个前端可用的整数游标。
+
+    前端只需要把上次的值原样回传（不解析、不递增），所以这里取稳定哈希即可，
+    不需要全局单调递增。同一份内容必须得到同一个值；任一维变了值就得变。
+    """
+    digest = hashlib.sha256(("%d|%s" % (int(seq), str(overlay)))
+                            .encode("utf-8")).hexdigest()
+    return int(digest[:8], 16)
+
+
+def seq_of_status_text(text):
+    """一段状态 JSON 文本 → LSDB 序号；解析失败或旧后端没有 sync_health → None。"""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("sync_health"), dict):
+        return None
+    return lsdb_seq_of(data)
+
+
+def status_needs_rewrite(status_path, new_text):
+    """落盘节流（T-0354 §3）：seq 没变就不重写 status.json。
+
+    True  —— 需要重写（首次 / 没有旧文件 / 序号变了 / 旧后端没有可信序号）；
+    False —— 内容等价，跳过整份序列化落盘，只 touch 心跳文件。
+    """
+    new_seq = seq_of_status_text(new_text)
+    if new_seq is None:
+        return True                      # 旧后端：宁可多写，也不能漏掉卡面变化
+    try:
+        old_text = Path(status_path).read_text(encoding="utf-8-sig")
+    except OSError:
+        return True
+    return seq_of_status_text(old_text) != new_seq
+
+
 def refresh_loop(status_path, interval):
     """「辅」通道：定期跑 `hive status --json` 重生成状态文件。
 
     agent 主动推送是主通道，但只有 git 通道的 agent 推送要等 hive 重新拉一次
     才会出现在快照里；这个循环就是兜底——长时间没推送的卡也由它刷新出真实状态
     （租约过期 → stale，交给 watchdog 回收）。
+
+    T-0354：落盘节流——`sync_health.lsdb_seq` 没变就不重写整份快照（20~30s 一次的
+    全量序列化在多机看板上会同时落盘），只 touch 心跳文件供 /api/status 判活。
     """
     argv = hive_argv("status", "--json")
     while True:
@@ -453,7 +651,9 @@ def refresh_loop(status_path, interval):
                                   encoding="utf-8", env=PYTHON_ENV,
                                   timeout=HIVE_OP_TIMEOUT, **no_window_kwargs())
             if proc.returncode == 0 and proc.stdout.strip():
-                write_status_atomic(status_path, proc.stdout)
+                if status_needs_rewrite(status_path, proc.stdout):
+                    write_status_atomic(status_path, proc.stdout)
+                touch_refresh_stamp(status_path)
             else:
                 # 不能全静默：Windows 上 cp936 曾让这里连续失败而没人发现，
                 # 表现就是「看板一直不刷新」。留一行证据，保留上一份状态。
@@ -1016,6 +1216,8 @@ def build_handler(status_path, write_auth="off"):
 
         # ---- /api/status：每次请求都重新读盘 ----
         def serve_status(self):
+            query = parse_qs(urlparse(self.path).query)
+            since = since_arg(query)
             try:
                 raw = Path(status_path).read_text(encoding="utf-8-sig")
             except FileNotFoundError:
@@ -1032,35 +1234,70 @@ def build_handler(status_path, write_auth="off"):
             if not isinstance(data, (list, dict)):
                 self._send_json(500, {"error": "状态文件根节点应为数组"})
                 return
+
+            health = sync_health_of(data)
+            seq = health["lsdb_seq"] if health["seq_known"] else None
+            # 游标 = 快照序号 + 叠加层指纹。只有后端给了可信序号时游标才有效；
+            # 旧后端 seq=None，整段增量逻辑直接放行到全量响应。
+            cursor = combined_cursor(seq, overlay_epoch()) if seq is not None else None
+            headers = self._snapshot_headers(cursor)
+
+            # 增量订阅（T-0354 §2）：序号没变就只回一个轻量确认，避免 15s 一次
+            # 全量重传（快照几百 KB ~ 几十 MB）。这里用 200 + {"unchanged": true}
+            # 而不是 304：浏览器 fetch() 把 304 当非 2xx、body 为空，前端反而要
+            # 额外判空；JSON 确认同样只有几百字节，且能带上下一次的健康度。
+            # 只有「后端确实给了可信序号」时才敢判 unchanged —— 旧后端 seq=None，
+            # 这里直接放行到全量，绝不能把滚动升级中的旧后端锁死成永不刷新。
+            if since is not None and seq is not None and since == cursor:
+                self._send_json(200, {"unchanged": True, "lsdb_seq": seq,
+                                      "sync_health": health},
+                                extra_headers=headers)
+                return
+
             if isinstance(data, dict):
-                # `hive status --json --board` 的形态：{"tasks": [...], "board": {...}}。
-                # 只透传这两个键，其余键不猜也不编。
+                # `hive status --json --board` / 新后端的形态：
+                # {"tasks": [...], "board": {...}, "sync_health": {...}}。
+                # 只透传这三类键，其余键不猜也不编。
                 tasks = data.get("tasks")
                 if not isinstance(tasks, list):
                     self._send_json(500, {"error": "状态文件对象缺少 tasks 数组"})
                     return
                 self._merge_pushed(tasks)
                 self._merge_cluster(tasks)
-                payload = {"tasks": tasks}
+                payload = {"tasks": tasks, "sync_health": health}
                 if isinstance(data.get("board"), dict):
                     payload["board"] = data["board"]
-                self._send_json(200, payload, extra_headers=self._snapshot_headers())
+                self._send_json(200, payload, extra_headers=headers)
                 return
+            # 裸数组（旧后端 / 手工导出的快照）：**响应体结构保持不变**，
+            # 这是既有契约（T-0191：元信息走响应头，不改数组结构）。
+            # 同步健康度走响应头 + 前端 local_stale 降级路径。
             self._merge_pushed(data)
             self._merge_cluster(data)
-            self._send_json(200, data, extra_headers=self._snapshot_headers())
+            self._send_json(200, data, extra_headers=headers)
 
-        def _snapshot_headers(self):
-            """快照生成时刻（文件 mtime，epoch 秒）。
+        def _snapshot_headers(self, cursor=None):
+            """快照时刻 + 增量游标 + 刷新心跳。
 
-            为什么需要它：刷新循环一旦停摆，/api/status 仍然 200，页面照旧渲染一份
-            几小时前的数据，人却以为它是实时的（2026-10-28 就因此误判「退回没生效」）。
-            把 mtime 交给前端，页面才能自己说「这份数据是几分钟前的」。
+            - `X-Snapshot-Mtime`：状态文件 mtime（内容生成时刻），语义与 T-0191 一致；
+            - `X-Hive-LSDB-Seq`：增量订阅游标（`lsdb_seq` 与 `/api/push` 叠加层的
+              合成指纹）。前端 `?since=` 带回这个值；旧后端没有可信序号时给 "0"
+              （**不能**拿它当游标，见 serve_status）；
+            - `X-Refresh-Mtime`：刷新循环心跳文件 mtime。落盘节流后「序号没变」就不重写
+              status.json，mtime 会长时间不动，只看它会把「集群安静」误判成「刷新停摆」。
             """
+            headers = {}
             try:
-                return {"X-Snapshot-Mtime": "%d" % int(os.stat(status_path).st_mtime)}
+                headers["X-Snapshot-Mtime"] = "%d" % int(os.stat(status_path).st_mtime)
             except OSError:
-                return {}
+                pass
+            headers[SYNC_SEQ_HEADER] = "%d" % int(cursor if cursor is not None else 0)
+            try:
+                headers[SYNC_REFRESH_HEADER] = "%d" % int(
+                    os.stat(refresh_stamp_path(status_path)).st_mtime)
+            except OSError:
+                pass
+            return headers
 
         def _merge_pushed(self, rows):
             """把 agent HTTP 直推的进度覆盖到快照行上（HTTP 比 git 通道更快）。
