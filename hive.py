@@ -3682,7 +3682,8 @@ class Hive:
                 "dispatched_at": card["dispatched_at"]}
 
     # -- 代码仓同步（T-0193） --------------------------------------------- #
-    def _sync_one_repo(self, name: str, path: Path) -> dict:
+    def _sync_one_repo(self, name: str, path: Path,
+                       *, allow_remote: bool = True) -> dict:
         """把单个代码仓对齐到 origin 主线，**只快进、绝不强制**。
 
         与 `_sync_for_commit` 同一套安全边界：网络类 git 操作走 `git_net`（带
@@ -3702,20 +3703,36 @@ class Hive:
         # T-0216：先 ls-remote 比对远端 SHA，没变就不白跑 git fetch --prune。
         # fetch_if_changed 返回 True 的三种情况：HIVE_FETCH_ALWAYS=1、ls-remote
         # 失败（网络抖动回落）、远端 SHA 确实变了。返回 False = 远端没动。
-        if fetch_if_changed(path):
+        # T-0353：节流器判定本轮零 Gitea 流量时，连 ls-remote 都不发，只按
+        # 本地已有的 origin/* ref 做本地判定 / 快进。
+        if allow_remote and fetch_if_changed(path):
             try:
                 git_net(["fetch", "--prune", "origin"], path)
             except HiveError as e:
                 return {"repo": name, "path": str(path), "status": "unreachable",
                         "reason": str(e).splitlines()[0] if str(e).strip() else "fetch 失败"}
 
-        remote = rev_parse(path, "origin/main") or rev_parse(path, "origin/master")
+        # 0.16.06 修好的主线解析顺序原样保留：origin/main 优先，其次 master。
+        remote_ref = ("origin/main" if rev_parse(path, "origin/main")
+                      else "origin/master")
+        remote = rev_parse(path, remote_ref) or ""
         head = rev_parse(path, "HEAD")
         if not remote:
             return {"repo": name, "path": str(path), "status": "no-remote",
                     "reason": "origin/main（或 origin/master）不存在"}
         if not head or head == remote:
             return {"repo": name, "path": str(path), "status": "up-to-date"}
+
+        # T-0353：复用 status 的同一个三态判定（hive_repos.assess_sync_state）。
+        # 干净分叉 → 连 merge 都不试，直接交人工裁决；脏工作区是**代码仓**，
+        # 沿用 T-0193 契约：只试 ff-only，git 自己保护未提交改动（不重叠时
+        # 照样快进），绝不 reset --hard / checkout / stash / clean。
+        if hive_repos is not None:
+            assess = hive_repos.assess_sync_state(path, remote_ref=remote_ref)
+            if assess["state"] == hive_repos.CLEAN_DIVERGED:
+                return {"repo": name, "path": str(path), "status": "diverged",
+                        "reason": "本地与 %s 分叉，需人工裁决；已跳过自动合并"
+                                  % remote_ref}
 
         p = git(["merge", "--ff-only", remote], path, check=False)
         if p.returncode == 0:
@@ -3747,7 +3764,21 @@ class Hive:
 
         quiet=True 时不打印也不问（orchestrate 复用，只返回结构）。
         本命令是只读同步，不做任何卡片写操作。
+
+        T-0353：orchestrate 通过 `self._sync_repos_throttled=True` 标记自己，
+        于是复用与 status 同一个 `hive_repos.SyncThrottle`（T2 1800s ±20%
+        jitter + T0/T1 提前触发），60s 一个 tick 不再每次都 ls-remote 打
+        Gitea。显式 CLI 调用 force 一次对账，旧语义完全不变。
         """
+        throttled = bool(getattr(self, "_sync_repos_throttled", False))
+        gate = self._sync_gate("sync-repos", force=not throttled)
+        decision = gate["decision"]
+        if throttled and not decision["due"]:
+            # 窗口内：连 resolve_repos / ls-remote 都不做。needs-confirm /
+            # missing 的判定根本没被触发，自然不存在「替用户猜路径」。
+            return {"results": [], "skipped": decision["reason"]}
+        allow_remote = bool(decision["ask_remote"])
+
         resolved = self.resolve_repos()
         if repo:
             if repo not in resolved:
@@ -3791,7 +3822,8 @@ class Hive:
         for name in targets:
             item = resolved.get(name) or {}
             if item.get("status") == "ok" and item.get("path"):
-                one = self._sync_one_repo(name, Path(item["path"]))
+                one = self._sync_one_repo(name, Path(item["path"]),
+                                          allow_remote=allow_remote)
                 one["source"] = item.get("source") or ""
                 one["verified"] = bool(item.get("verified"))
                 one["notes"] = item.get("notes") or []
@@ -3844,7 +3876,13 @@ class Hive:
                         print(f"    提示: hive repo bind {r['repo']} <path> 指定")
                     else:
                         print(f"{r['repo']}: {status}")
-        return {"results": results}
+        # 真做完一轮对账才推进窗口（状态落在 git 内部目录，不污染工作区）。
+        if gate["available"] and decision["due"]:
+            gate["throttle"].commit(decision, reason=decision["reason"])
+        out = {"results": results}
+        if throttled:
+            out["sync_tier"] = decision.get("tier") or "T2"
+        return out
 
     def _doctor_store_consistency(self, cards: dict, errors: list,
                                   warns: list) -> None:
@@ -5239,26 +5277,157 @@ class Hive:
             task_ref=ref)
         return (True, "") if ok else (False, err)
 
+    # -- T-0353：统一同步节拍（status / sync-repos 共用） -------------------- #
+    def _sync_gate(self, purpose: str = "status", *, force: bool = False,
+                   local_remote_sha: str = "") -> dict:
+        """把「要不要问 Gitea / 要不要做一次对账」统一交给 hive_lsa 节拍。
+
+        两个入口共用同一个 `hive_repos.SyncThrottle`、同一组
+        `LS_REFRESH_S=1800 ±20% jitter` / T0 / T1 信号：
+
+          * ``purpose="status"``     —— 协调仓自动同步窗口（默认状态文件）
+          * ``purpose="sync-repos"`` —— 代码仓快进窗口（另一份状态文件）
+
+        分窗口而不是共用一个 seq：一次 `status` 不该让 orchestrate 的代码仓
+        同步整整 30 分钟不跑；但两者都遵守同一个节拍口径与防抖下限。
+        显式人工调用（CLI `sync-repos`）传 ``force=True``，保持旧行为不缩水。
+        """
+        if hive_repos is None:  # 残缺部署：没有节流器，退回旧的一次性判定
+            return {
+                "available": False, "throttle": None,
+                "hints": {"disabled": False, "tier": "T2"},
+                "decision": {"due": True, "ask_remote": True, "tier": "T2",
+                             "reason": "缺少 hive_repos.py，节流器不可用",
+                             "now": 0.0, "last_sync_at": 0.0,
+                             "next_t2_at": 0.0, "lsdb_seq": 0,
+                             "min_interval_s": 60.0,
+                             "t2_interval_s": 1800.0, "jitter": 0.20},
+            }
+        hints = hive_repos.sync_env_hints()
+        forced = bool(force or hints["force"])
+        basename = (hive_repos.SYNC_STATE_BASENAME if purpose == "status"
+                    else hive_repos.SYNC_REPOS_STATE_BASENAME)
+        throttle = hive_repos.SyncThrottle(self.dir, state_basename=basename)
+        decision = throttle.check(
+            tier=hints["tier"], peer_head_sha=hints["peer_head_sha"],
+            local_remote_sha=local_remote_sha,
+            event=hints["event"], force=forced)
+        # 紧急回退阀只关「自动」同步；人工显式跑 sync-repos 不受它影响。
+        if hints["disabled"] and not forced:
+            decision["due"] = False
+            decision["ask_remote"] = False
+            decision["reason"] = "HIVE_SYNC_NO_AUTOSYNC=1，自动同步已关闭"
+        return {"available": True, "throttle": throttle,
+                "hints": hints, "decision": decision}
+
+    def _status_autosync(self) -> tuple[dict, dict, dict]:
+        """T-0353：协调仓自动同步 —— 三态判定 + T2/T0 节拍。
+
+        事实账始终是 Git（``cards()`` 读工作区文件），这里只决定要不要让
+        本地 HEAD 追平 ``origin/main``，绝不用内存 LSDB 覆盖卡面。
+
+        三态（见 hive_repos.assess_sync_state）：
+          * 干净 + 可 ff-only  -> ``git merge --ff-only origin/main``（自动同步）
+          * 干净 + 分叉        -> 不 merge，横幅提示人工裁决
+          * 脏                 -> **零写操作**：不 fetch、不 merge、不 reset、
+                                 不 checkout / stash / clean，连节流记账都不落盘
+
+        远端探测由 hive_lsa 的 T2（1800s ±20% jitter）兜底 + T0 事件 /
+        T1 组播 head_sha 变化提前触发驱动；``fetch_if_changed()`` 的
+        10s TTL 前置比对原样保留，status 每 20s 一轮不再无条件连 Gitea。
+        """
+        if hive_repos is None:  # 残缺部署（只拷了 hive.py）：只读回落
+            if fetch_if_changed(self.dir):
+                self.fetch()
+            head = rev_parse(self.dir, "HEAD") or ""
+            remote = rev_parse(self.dir, "origin/main") or ""
+            behind = bool(head and remote and head != remote
+                          and git(["merge-base", "--is-ancestor",
+                                   "origin/main", "HEAD"], self.dir,
+                                  check=False).returncode != 0)
+            assess = {
+                "clean": True, "porcelain": "", "head_sha": head,
+                "remote_sha": remote, "behind": behind, "ff_possible": False,
+                "diverged": False, "state": "up-to-date", "action": "none",
+                "reason": "缺少 hive_repos.py，自动同步不可用", "banner": "",
+            }
+            decision = {
+                "due": False, "ask_remote": False, "tier": "T2",
+                "reason": assess["reason"], "now": 0.0, "last_sync_at": 0.0,
+                "next_t2_at": 0.0, "lsdb_seq": 0, "min_interval_s": 60.0,
+                "t2_interval_s": 1800.0, "jitter": 0.20,
+            }
+            health = {
+                "lsdb_seq": 0, "last_sync_at": "", "last_sync_ts": 0.0,
+                "head_sha": head, "remote_sha": remote, "behind": behind,
+                "tier": "T2", "reason": assess["reason"],
+                "state": assess["state"], "action": "none", "clean": True,
+                "autosynced": False, "throttled": False, "next_t2_at": 0.0,
+                "t2_interval_s": 1800.0, "jitter": 0.20,
+                "min_interval_s": 60.0, "banner": "",
+            }
+            return assess, decision, health
+
+        assess = hive_repos.assess_sync_state(self.dir)
+        gate = self._sync_gate("status", local_remote_sha=assess["remote_sha"])
+        throttle, decision = gate["throttle"], gate["decision"]
+        autosynced = False
+        state = None
+
+        # 脏工作区：跳过一切写操作，也不写节流状态文件（HIVE_SYNC_NO_AUTOSYNC
+        # 与 T2 窗口内的情况已由 _sync_gate 把 due 置 False，同样零写）。
+        if not assess["clean"]:
+            decision["due"] = False
+            decision["ask_remote"] = False
+            decision["reason"] = assess["reason"]
+        elif decision["due"] and decision["ask_remote"]:
+            # 只有 T2 到点 / T0 事件 / T1 head_sha 变化才走到这里；
+            # fetch_if_changed() 仍做 ls-remote 前置比对 + 10s TTL 缓存。
+            if fetch_if_changed(self.dir):
+                self.fetch()
+            assess = hive_repos.assess_sync_state(self.dir)
+            if assess["state"] == hive_repos.CLEAN_FF:
+                # 唯一的写操作：干净且可快进时追平，git 保证不丢任何改动。
+                p = git(["merge", "--ff-only", "origin/main"], self.dir,
+                        check=False)
+                if p.returncode == 0:
+                    autosynced = True
+                    assess = hive_repos.assess_sync_state(self.dir)
+            elif assess["state"] == hive_repos.CLEAN_DIVERGED:
+                # 分叉：只 fetch 更新远端 ref，绝不 merge。
+                decision["reason"] = assess["reason"]
+            state = throttle.commit(
+                decision, head_sha=assess["head_sha"],
+                remote_sha=assess["remote_sha"], reason=decision["reason"])
+        elif decision["due"]:
+            # due 但组播 head_sha 与本地一致：零 Gitea 流量，仍记一次窗口。
+            state = throttle.commit(
+                decision, head_sha=assess["head_sha"],
+                remote_sha=assess["remote_sha"], reason=decision["reason"])
+        else:
+            assess = hive_repos.assess_sync_state(self.dir)
+
+        health = hive_repos.build_sync_health(
+            assess, decision, state, autosynced=autosynced,
+            throttled=bool(assess["clean"] and not decision["due"]))
+        return assess, decision, health
+
     def cmd_status(self, as_json: bool = False, with_board: bool = False,
-                   summary: bool = False, include_archived: bool = False) -> None:
-        # T-0216：先 ls-remote 比对远端 SHA，没变就不白跑 git fetch --prune。
-        # ls-remote 失败 / SHA 变化 / HIVE_FETCH_ALWAYS=1 时才真 fetch。
-        if fetch_if_changed(self.dir):
-            self.fetch()
+                   summary: bool = False, include_archived: bool = False,
+                   sync_health_only: bool = False) -> None:
+        # T-0353：自动同步必须在 cards() 之前完成，ff-only 后工作区文件
+        # 才是最新卡面，看板才读得到别的节点刚 push 的状态。
+        assess, decision, health = self._status_autosync()
         # T-0219：列表页走摘要通道，不构造 verify/result_summary 这些详情字段。
         if summary:
             self._status_summary(as_json=as_json, include_archived=include_archived)
             return
         cards = self.cards()
-        # 读视角滞后：status 只 fetch 不 reset 工作区，本机落后 origin/main 时
-        # 看板读的是旧卡面，多机就各说各话（T-0324 曾被本看成 done、服务器
-        # 上是 closed）。不擅自替用户 merge，但必须把这件事显式标出来。
-        head_sha = rev_parse(self.dir, "HEAD")
-        remote_sha = rev_parse(self.dir, "origin/main")
-        local_stale = bool(
-            head_sha and remote_sha and head_sha != remote_sha
-            and git(["merge-base", "--is-ancestor", "origin/main", "HEAD"],
-                    self.dir, check=False).returncode != 0)
+        # 读视角滞后：不擅自替用户 merge 脏工作区，但必须把这件事显式标出来。
+        # T-0353 起 local_stale 由三态判定的 behind 给出；干净 ff-only
+        # 自动同步成功后 HEAD 追平远端，local_stale 自然转 false。
+        # 布尔字段保留（旧看板 / MCP 缓存仍在读），语义由 sync_health 补全。
+        local_stale = bool(assess["behind"])
         rows = []
         for tid, c in cards.items():
             claim = self.claim_info(tid) or {}
@@ -5334,7 +5503,10 @@ class Hive:
                 # 看板靠这三个字段区分「结果交了」和「真的能合入」
                 "land_ready": land_ready,
                 "land_block": land_block,
+                # T-0353：旧布尔字段保留（旧看板 / MCP 缓存仍在读），
+                # 新结构化对象给 T-0354 看板读；两者同时存在。
                 "local_stale": local_stale,
+                "sync_health": health,
                 "result": res.get("status", ""),
                 "result_status": res.get("status", ""),
                 "finished_at": res.get("finished_at") or "",
@@ -5352,17 +5524,31 @@ class Hive:
                 "push_source": "git" if st else "",
             })
         if as_json:
-            if with_board:
-                # board 摘要是**追加**形态，用 --board 显式开启，避免破坏
-                # dashboard 与既有脚本对「顶层是数组」的硬校验（app.js Array.isArray）。
-                out = {"tasks": rows, "board": dt.summarize_board(cards)}
+            # 顶层**默认仍是数组**：dashboard/app.js 与既有脚本对
+            # Array.isArray 硬校验，多一个对象就整页白屏。新字段一律挂在
+            # 每一行（local_stale 旧布尔 + sync_health 新对象）上。
+            if with_board or sync_health_only:
+                # 这两种是**显式开启的对象形态**，向后兼容地追加顶层键：
+                # 既有 --board 消费者只读 tasks/board，多两个键不影响。
+                out = {"tasks": rows,
+                       "sync_health": health,
+                       "local_stale": local_stale}
+                if with_board:
+                    out["board"] = dt.summarize_board(cards)
             else:
                 out = rows
             print(json.dumps(out, ensure_ascii=False, indent=2))
             return
-        if local_stale:
-            print("[WARN] 本地协调仓落后 origin/main，显示的卡面可能不是最新；"
-                  "跑 git pull（或 hive sync-repos）后再看状态")
+        # T-0353 三态横幅：脏工作区不许再有「跑 git pull」这种暗示要写
+        # 操作的建议，分叉要写明需人工裁决，节流窗口内说明会自动更新。
+        # assess_sync_state() 已按三态填好 banner；残缺部署下退回旧文案。
+        banner = assess.get("banner") or ""
+        if not banner and local_stale:
+            banner = (hive_repos.BANNER_THROTTLED if hive_repos is not None
+                      else "本地协调仓落后 origin/main，显示的卡面可能不是最新；"
+                           "跑 git pull（或 hive sync-repos）后再看状态")
+        if banner:
+            print(f"[WARN] {banner}")
         if not rows:
             print("（还没有任务）")
             return
@@ -6117,8 +6303,15 @@ class Hive:
                         ok = [r for r in res if isinstance(r, dict) and r.get("closed")]
                         tick["landed"] = len(ok)
                     if sync and can_write():
-                        sync_res = self.cmd_sync_repos(quiet=True)
-                        tick["synced"] = len(sync_res["results"])
+                        # T-0353：orchestrate 每 60s 一个 tick，但代码仓同步
+                        # 走与 status 同一个 T2(1800s ±20%)/T0 节流器；窗口内
+                        # 整个 sync 阶段跳过，不再每 tick 都 ls-remote 打 Gitea。
+                        self._sync_repos_throttled = True
+                        try:
+                            sync_res = self.cmd_sync_repos(quiet=True)
+                            tick["synced"] = len(sync_res["results"])
+                        finally:
+                            self._sync_repos_throttled = False
                     if doctor and can_write():
                         tick["doctor_ok"] = self.cmd_doctor()
                     if mode == "leader" and not self._leader_still(term):
@@ -8189,10 +8382,13 @@ def cmd_land(args) -> None:
 
 
 def cmd_status(args) -> None:
-    Hive(args.dir).cmd_status(args.json, args.board, summary=args.summary,
-                              include_archived=args.include_archived)
+    Hive(args.dir).cmd_status(
+        args.json, args.board, summary=args.summary,
+        include_archived=args.include_archived,
+        sync_health_only=bool(getattr(args, "sync_health", False)))
     # 看板地址只在人类可读输出里追加一行：--json 必须保持「顶层是数组」，
     # app.js 与既有脚本都对 Array.isArray 硬校验，多一个对象就整页白屏。
+    # 想拿顶层对象形态（sync_health / local_stale）请显式加 --sync-health。
     if not args.json:
         print(dashboard_status_line())
 
@@ -9008,6 +9204,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--include-archived", dest="include_archived",
                    action="store_true",
                    help="摘要通道里带上已归档的冷卡（archived: true）；默认只列热卡")
+    s.add_argument("--sync-health", dest="sync_health", action="store_true",
+                   help="--json 时顶层改为 {tasks, sync_health, local_stale} 对象"
+                        "（默认仍是数组，保持旧看板 Array.isArray 兼容）")
     s.set_defaults(func=cmd_status)
 
     # —— T-0219：冷热分离 ——
