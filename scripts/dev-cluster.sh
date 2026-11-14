@@ -20,13 +20,20 @@
 #   scripts/dev-cluster.sh start --foreground   # 前台跑，方便看 traceback
 #
 # 常用覆盖（环境变量）：
+#   HIVE_DEV_REPO=<开发副本仓库根>   # L1 代码隔离：指向独立开发副本的 hive.py
 #   HIVE_DEV_PORT=8888  HIVE_DEV_STATE=~/.hive/dev-cluster  HIVE_DEV_NAME=dev
+#   HIVE_DEV_MC_GROUP=239.255.42.2  HIVE_DEV_MC_PORT=47900  # L3 组播隔离
+#   HIVE_DEV_PROJECT_TAG=hive-dev
 
 set -eu
 
-# 仓库根目录 = 本脚本所在目录的上一级
+# 仓库根目录：默认 = 本脚本所在目录的上一级（保持既有默认路径语义不变）。
+# L1 代码隔离：HIVE_DEV_REPO 指向独立开发副本（从 origin/main 本地 clone，
+# 不带生产工作区的任何未提交改动），开发实例加载的是副本里的 hive.py，
+# 绝不直接跑生产工作区那份。
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+REPO_DIR=${HIVE_DEV_REPO:-$SCRIPT_DIR/..}
+REPO_DIR=$(CDPATH= cd -- "$REPO_DIR" && pwd)
 
 # ---- 隔离参数（与生产集群逐项错开，务必成对修改） ---------------------- #
 DEV_PORT="${HIVE_DEV_PORT:-8888}"              # 生产 8788
@@ -34,6 +41,11 @@ DEV_DISCOVERY_PORT="${HIVE_DEV_DISCOVERY_PORT:-8889}"  # 生产 8789
 DEV_NAME="${HIVE_DEV_NAME:-dev}"
 DEV_STATE="${HIVE_DEV_STATE:-$HOME/.hive/dev-cluster}"
 DEV_CLUSTER_ID="${HIVE_DEV_CLUSTER_ID:-hive-dev}"      # 生产 hive
+# L3 组播隔离：开发实例用独立组播组/端口。生产是 239.255.42.1:47899，
+# 开发默认 239.255.42.2:47900，绝不向生产组播组发任何一个包。
+DEV_MC_GROUP="${HIVE_DEV_MC_GROUP:-239.255.42.2}"
+DEV_MC_PORT="${HIVE_DEV_MC_PORT:-47900}"
+DEV_PROJECT_TAG="${HIVE_DEV_PROJECT_TAG:-hive-dev}"
 # 故意不启用 store / MCP：开发时用不上，也避免抢生产的 sqlite 与 8790 端口。
 DEV_LOG="$DEV_STATE/cluster.log"
 DEV_PID="$DEV_STATE/cluster.pid"
@@ -54,6 +66,11 @@ dev_env() {
     export HIVE_CLUSTER_DISCOVER=false
     export HIVE_CLUSTER_SYNC=false
     export HIVE_CLUSTER_MCP=false
+    # 控制面（L3）：开发实例换独立组播组/端口与 project_tag，避免与生产
+    # 控制面在同一组播组里互见。
+    export HIVE_CONTROL_MC_GROUP="$DEV_MC_GROUP"
+    export HIVE_CONTROL_MC_PORT="$DEV_MC_PORT"
+    export HIVE_CONTROL_PROJECT_TAG="$DEV_PROJECT_TAG"
     # 单机开发：本机就是主，不等选举窗口，也不与生产争 priority。
     export HIVE_CLUSTER_PRIORITY="${HIVE_DEV_PRIORITY:-1}"
 }
@@ -75,13 +92,15 @@ start)
     mkdir -p "$DEV_STATE"
     dev_env
     if [ "${1:-}" = "--foreground" ]; then
-        echo "前台启动：state=$DEV_STATE port=$DEV_PORT cluster_id=$DEV_CLUSTER_ID"
+        echo "前台启动：state=$DEV_STATE port=$DEV_PORT cluster_id=$DEV_CLUSTER_ID" \
+             "mc=$DEV_MC_GROUP:$DEV_MC_PORT repo=$REPO_DIR"
         exec "$PYTHON" "$HIVE" --dir "$REPO_DIR" cluster serve \
             --name "$DEV_NAME" --port "$DEV_PORT" --host 127.0.0.1 \
             --discovery-port "$DEV_DISCOVERY_PORT" --state-dir "$DEV_STATE" \
             --no-discover --no-sync --no-mcp --no-store
     fi
-    echo "启动开发集群：state=$DEV_STATE port=$DEV_PORT cluster_id=$DEV_CLUSTER_ID"
+    echo "启动开发集群：state=$DEV_STATE port=$DEV_PORT cluster_id=$DEV_CLUSTER_ID" \
+         "mc=$DEV_MC_GROUP:$DEV_MC_PORT repo=$REPO_DIR"
     nohup "$PYTHON" "$HIVE" --dir "$REPO_DIR" cluster serve \
         --name "$DEV_NAME" --port "$DEV_PORT" --host 127.0.0.1 \
         --discovery-port "$DEV_DISCOVERY_PORT" --state-dir "$DEV_STATE" \
@@ -126,7 +145,8 @@ status)
     else
         echo "开发集群：未运行"
     fi
-    echo "state=$DEV_STATE  port=$DEV_PORT  cluster_id=$DEV_CLUSTER_ID"
+    echo "state=$DEV_STATE  port=$DEV_PORT  cluster_id=$DEV_CLUSTER_ID" \
+         "mc=$DEV_MC_GROUP:$DEV_MC_PORT  repo=$REPO_DIR"
     ;;
 logs)
     exec tail -n 50 -f "$DEV_LOG"
