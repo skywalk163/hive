@@ -1,0 +1,39 @@
+{
+  "task": "T-0353",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0353",
+  "base": "main",
+  "head": "3ad18a4cf0db373209b263236e6ef33136d6abe4",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-14T19:57:56+08:00",
+  "finished_at": "2026-11-14T22:18:12+08:00",
+  "duration_s": 8417.0,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_status_autosync.py",
+      "code": 0,
+      "tail": [
+        "...........                                                              [100%]",
+        "11 passed in 215.85s (0:03:35)"
+      ]
+    }
+  ],
+  "summary": "# T-0353 交付说明\n\n在独立 worktree `C:\\dswork\\hive-wt\\T-0353` 完成，生产 `~/dswork/hive/` 一个字节未改；未跑 `doctor --repair`、未重启常驻进程、未对任何脏工作区执行 merge / reset / checkout / stash / clean。改动仅 `hive.py`、`hive_repos.py`、新建 `tests/test_status_autosync.py`（另按契约写本说明）。\n\n- `hive_repos.py`：新增共享三态判定 `assess_sync_state()`（实时 `git status --porcelain` + 双向 `merge-base --is-ancestor`，纯只读）、`SyncThrottle`（周期取 `hive_lsa.LS_REFRESH_S=1800s` ±20% jitter，T0 事件 / T1 组播 head_sha 变化可提前但受 60s 防抖，状态原子写进 git 内部目录）、`build_sync_health()` 与三态横幅文案。路径解析相关函数一字未动。\n- `hive.py`：`cmd_status` 在 `cards()` 前做三态自动同步——干净可 ff-only 才执行唯一写操作 `merge --ff-only origin/main`；干净分叉只 fetch 不 merge 并提示人工裁决；脏工作区零写（连节流记账都不落盘）。`local_stale` 布尔保留，每行新增 `sync_health`（7 个契约字段 + 诊断字段）。`--json` 顶层默认仍是数组（旧看板 `Array.isArray` 硬校验），显式 `--sync-health` / `--board` 才输出 `{tasks, sync_health, local_stale}`。\n- `sync-repos` 复用同一节流器与三态判定；`orchestrate --interval 60` 通过 `_sync_repos_throttled` 走 T2/T0 窗口，窗口内整段跳过（连 `resolve_repos` 都不跑），不再每 tick `ls-remote` 打 Gitea。显式 CLI 调用强制对账，`needs-confirm` / `missing` 语义与 0.16.06 路径解析顺序不变；`fetch_if_changed()` 的 10s TTL 缓存原样保留。\n\n验证：`python3 -m pytest -q tests/test_status_autosync.py` → **11 passed**（干净 ff-only、干净分叉、脏工作区 porcelain 前后一致且零 ls-remote/fetch/merge、30 分钟内不重复、jitter ±20%、T0 提前、T1 零流量、`local_stale` 仍在、`--json` 可解析）。旧回归 `test_status_git.py` / `test_sync_repos.py` / `test_prompt_wiring.py` → **42 passed**；`test_state_consistency_repair.py` / `test_task_budget.py` / `test_shelve.py` / `test_archive.py` / `test_dashboard_dispatch_ui.py` → **76 passed**；`test_core.py` 中与 land / sync_main 相关的 7 例另跑：2 例通过，5 例因 `_fake_done_card(verify=(\"true\",))` 的 POSIX `true` 在 Windows 上不存在而报 `result=failed`（交办方已提醒的 exit 255 类假失败）；用 `git archive HEAD` 导出的**未改动原始快照**跑同样两条用例，失败完全一致，确认与本次产物无关。Windows 上单例约 20–30s，未跑全量套件。\n\n遗留风险：卡面验收示例 `status --json | d.get('sync_health')` 需显式加 `--sync-health`；默认改顶层对象会让 `dashboard/app.js` 与既有脚本白屏，故保持数组兼容，请 T-0354 看板改读行级 `sync_health`。节流状态按用途分两份窗口文件（status / sync-repos），避免互相占用；若要合并成单一全局 seq 需重新评估代码仓同步时延。生产协调仓仍是脏工作区，上线后横幅变为「本地有未提交改动，自动同步已跳过」且不写入任何文件，需改动主人自行提交后再刷新。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "hive_repos.py",
+    "tests/test_status_autosync.py"
+  ],
+  "changed_files": [
+    "hive.py",
+    "hive_repos.py",
+    "tests/test_status_autosync.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "58cc6c7754eb46f1adc30976b87888e4",
+  "fence": 1
+}
