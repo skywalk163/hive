@@ -1,0 +1,41 @@
+{
+  "task": "T-0349",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0349",
+  "base": "main",
+  "head": "f0e48b9fb478d323709525577b9966a4f2cf3ed9",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-14T14:05:11+08:00",
+  "finished_at": "2026-11-14T14:53:13+08:00",
+  "duration_s": 2882.7,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_dev_cluster_isolation.py",
+      "code": 0,
+      "tail": [
+        "..........                                                               [100%]",
+        "10 passed in 0.57s"
+      ]
+    }
+  ],
+  "summary": "# T-0349 执行小结（doubao-win，WIN10，2026-11-14）\n\n## 做了什么\n\n前置卡：隔离开发沙箱 + 流量基线复现口径，产出后续 H-LSA 实现卡共用的\n开发副本路径、接入方式、基线分母与合入闸门清单。\n\n## 改动文件（仅限卡面 paths）\n\n- `scripts/dev-cluster.sh`：新增 `HIVE_DEV_REPO` 覆盖 `REPO_DIR`/`HIVE`，指向独立\n  开发副本（L1 代码隔离）；开发实例组播组/端口可配，默认 `239.255.42.2:47900`、\n  `project_tag=hive-dev`（L3 网络隔离）；保留 8888 / `hive-dev` / 127.0.0.1 /\n  `--no-discover --no-sync --no-store --no-mcp` / state_dir `~/.hive/dev-cluster`。\n- `tools/traffic_baseline.py`：纯标准库基线采集器，离线/在线均可跑，取不到的项\n  如实标 `unavailable` 并写原因；护栏拒绝 `--state-dir` 指向生产 `~/.hive/cluster`\n  （exit 2）；输出带时间戳、参数与口径来源的 JSON。\n- `tests/test_dev_cluster_isolation.py`：纯 Python 隔离自检，不依赖真实网络/集群；\n  导出 `assert_isolated(cfg)` 供后续卡复用；对照模块 `Limits` 默认组播口径校验\n  开发候选值逐项错开。\n- `docs/H-LSA-开发隔离与基线.md`：开发副本路径与 HEAD、接入方式、基线字段与本轮\n  实测、T-0357 合入闸门清单、自检命令、边界与风险。\n\n## 验证结果\n\n- `python3 -m pytest -q tests/test_dev_cluster_isolation.py`：**10 passed**\n  （本机 python 3.13.16，pytest 9.2.0；Windows 上 hive_compat 把 `python3`\n  映射到 `sys.executable`）。\n- 离线基线：实例未起时 `heartbeat` / `persistence` / `bandwidth` 标\n  `unavailable`（健康检查 WinError 10061 / 依赖心跳采样）；`git_activity` ok，\n  `ls-remote` 可达，HEAD `d7a888c725588852c9acfcbb3f7715c013056e3e`。\n- 在线 dev 实例（等价脚本隔离参数，127.0.0.1:8888，`cluster_id=hive-dev`，\n  peers=1，store/sync/discover/mcp 全关）：health 200；采集后已停止、释放 8888。\n- 在线基线（前序一轮 12 采样）：心跳请求 avg/peak 204B/204B，响应\n  3367.2B/3368B；`state.json` 采集时刻快照 23568B（退出后留存复核 23938B）；\n  落盘 12 次/分（5s 短窗折算）；带宽 1.866 kbps（3 节点 3 对估算，`estimate=true`）；\n  窗口 git 计数 0/0/0。实例停止后心跳/带宽不可复核，后续卡在 dev 常驻后重跑工具复核。\n- 生产状态前后快照零差异：`~/.hive/cluster/state.json` 最后写入 10:38:33，\n  `cluster_id=hive`、term 3843；本卡未触碰。\n- dev 日志无生产组播组 `239.255.42.1`、端口 47899/8787/8788/8789/8790、\n  生产 leader URL 与生产仓路径。\n- 护栏：`--state-dir` 指生产目录 → exit 2 拒绝。\n\n## 范围与边界\n\n- 本卡只改上述 4 个文件；未改 `hive_cluster.py` / `hive_control/*` / `hive.py` /\n  `config.json` / `.env` / `agents/*.json` / `tasks/*.md` / `results/*`。\n- 控制面 `plane_available:false` 是既有装配缺陷，归属 T-0351；组播环境变量装配\n  落点不在本卡 paths。本卡仅留好组播组/端口/标签的可配通路。\n- 脚本是 POSIX `.sh`；本机未直接执行该 `.sh`，在线验证用等价 `cluster serve`\n  隔离参数拉起；`.sh` 子命令行为待 POSIX 开发机（192.168.0.88 FreeBSD）复跑。\n- 带宽、落盘次数为估算/短窗折算，非生产级实测；多节点压测归 T-0355，上线复核\n  归 T-0357。\n- 开发副本 `G:\\dswork\\hive-dev-src`（本地 clone 自 origin/main，HEAD `d7a888c`，\n  工作区干净）；未复制生产工作区的任何未提交改动。\n- 未跑 `doctor --repair`，未执行 `upgrade publish|apply|rollout`，未重启任何\n  生产常驻进程。",
+  "error": "",
+  "declared_paths": [
+    "scripts/dev-cluster.sh",
+    "tools/traffic_baseline.py",
+    "tests/test_dev_cluster_isolation.py",
+    "docs/H-LSA-开发隔离与基线.md"
+  ],
+  "changed_files": [
+    "docs/H-LSA-开发隔离与基线.md",
+    "scripts/dev-cluster.sh",
+    "tests/test_dev_cluster_isolation.py",
+    "tools/traffic_baseline.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "bfd599e3c96a47c39d437f37f2044bd2",
+  "fence": 2
+}
