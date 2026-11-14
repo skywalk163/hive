@@ -1,0 +1,42 @@
+{
+  "task": "T-0354",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0354",
+  "base": "main",
+  "head": "19a1029600608dce63e005074c57ebac2dd8622f",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-14T21:17:47+08:00",
+  "finished_at": "2026-11-14T21:17:47+08:00",
+  "duration_s": 0.4,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_dashboard_hlsa.py",
+      "code": 0,
+      "tail": [
+        ".........................                                                [100%]",
+        "25 passed in 29.89s"
+      ]
+    }
+  ],
+  "summary": "# T-0354 交付说明（deepseek-win）\n\n## 做了什么\n\n把「一句无差别的 git pull 提示」换成**同步健康度指示**，并给看板加增量订阅 +\n落盘节流。四档状态各有独立文案，运维一眼能分清「同步慢了 / 本地脏了 / 真分叉」。\n\n## 改了哪些文件（仅卡面 paths 内 5 个）\n\n- **`dashboard/app.js`**：新增一段纯函数（`SYNC HEALTH PURE BEGIN/END`）实现\n  `syncHealthMode / syncHealthBanner / syncHealthChip / syncRetryText`：\n  ok（横幅隐藏 + 顶栏 `LSDB seq / 最后同步 / 档位 T0/T1/T2`）、behind\n  （「状态同步中，已落后 N 条」+ 自动重试倒计时）、dirty（「本地有未提交改动，\n  自动同步已跳过」+ 联系改动主人）、diverged（「需人工裁决」+ head/remote sha）。\n  旧的「请执行 git pull（或 hive sync-repos）」**零命中**；本地脏显示成 warn 而非\n  danger，不提供任何会 reset 工作区的按钮。顶栏 span 由 `ensureSyncChip()` 按需插入\n  （`index.html` 不在 paths 内）。刷新仍以 15s 为兜底、页面不可见时暂停，优先走\n  `?since=<游标>` 增量订阅；游标取响应头 `X-Hive-LSDB-Seq`，旧服务端没有就退回全量。\n- **`dashboard/serve.py`**：`/api/status` 增加 `X-Hive-LSDB-Seq`（增量游标）与\n  `sync_health` 字段；`?since=` 无变更回 200 + `{\"unchanged\":true}`（比 304 好：\n  fetch 不判空、还能带健康度）；新增 `X-Refresh-Mtime` 心跳头，因为落盘节流后\n  快照 mtime 会长期不动，只看它会把「集群安静」误判成「刷新停摆」。\n  **保留** `Cache-Control: no-store`、`X-Snapshot-Mtime`、`/api/push` 与\n  `POST /api/task` 的只读纪律，裸数组根的响应体结构一字未改。\n  `refresh_loop` 也接了同一套 seq 节流 + 原子写 + 心跳 touch。\n- **`scripts/serve-dashboard.sh`**：20s 节拍保留，但只有 `sync_health.lsdb_seq`\n  变化才重写 `status.json`；每拍只 touch 心跳文件；节拍加 ±20% jitter。\n  旧后端（没有 sync_health）退回每拍都写，宁可多写不漏变化。\n- **`tests/test_dashboard_hlsa.py`**（新建，25 用例）：四档分支、unchanged、\n  `X-Hive-LSDB-Seq`、no-store、旧后端降级、落盘节流（真跑 `refresh()` 的沙箱测试）\n  全覆盖。\n- **`dashboard/dev/hlsa_banner_test.js`**（新建，可选）：把 app.js 纯函数段抠进\n  node vm 逐条断言四档分支，38 项断言全过。\n\n## 两个实现上额外补的坑\n\n1. **增量游标是二维的**：`/api/push`（及集群实时进度）是请求时合并进任务行的，\n   不在 `status.json` 的 lsdb_seq 里。只按 seq 判 unchanged 会把刚推上来的 progress\n   吞掉。游标 = `lsdb_seq + 叠加层指纹`，并有专门用例钉住「push 后必须回全量」。\n2. **集群心跳不能让游标抖**：`state.json` 每次心跳都重写，若取文件 mtime 做指纹，\n   unchanged 永远不触发、增量订阅退化成全量。指纹只取 `progress` 段的稳定序列化\n   （不发 HTTP、不读整份状态），另有用例钉住「term/leader 变化不动游标」。\n\n## 验证\n\n| 命令 | 结果 |\n| --- | --- |\n| `python3 -m pytest -q tests/test_dashboard_hlsa.py`（卡面验收命令） | **25 passed** |\n| `node dashboard/dev/hlsa_banner_test.js`（可选） | **38 项断言全过** |\n| `node --check dashboard/app.js` / `python3 -m py_compile dashboard/serve.py` | OK |\n| `bash -n scripts/serve-dashboard.sh` | OK |\n| dashboard 相邻回归（freshness/dispatch/cluster/bind/auth/... 共 11 个文件） | **101 passed, 4 skipped** |\n\n## 遗留风险 / 说明\n\n- `hive.py` 的 `sync_health` 字段归 T-0353；本卡对「旧后端没有该字段」做了完整\n  降级（合成 `degraded` + 收拢 `local_stale`），滚动升级期间不会白屏、也不会把\n  旧后端锁死成永不刷新。两卡合入后即拿到完整四档语义。\n- 顶栏同步指示通过 JS 动态插入（未改 `index.html`，不在本卡 paths）；顶栏高度由\n  既有 `syncTopbarHeight()` 实测，不受影响。\n- `tests/test_no_window.py::test_every_subprocess_call_is_guarded` 在本基线有\n  **既有 1 条红**（`hive_repos.py::_git` 缺 `no_window_kwargs`），与本卡改动无关：\n  该文件在 worktree 里未修改，HEAD 版本同样缺。归属 T-0353 / 后续硬化，未越界修。\n- 未碰生产 8787 实例、未重启任何 `serve-dashboard.sh`（生产）、未改 `config.json`；\n  接口测试全部用临时 status.json + 隔离的叠加层目录，不读 `~/.hive/cluster`。",
+  "error": "",
+  "declared_paths": [
+    "dashboard/app.js",
+    "dashboard/serve.py",
+    "scripts/serve-dashboard.sh",
+    "dashboard/dev/hlsa_banner_test.js",
+    "tests/test_dashboard_hlsa.py"
+  ],
+  "changed_files": [
+    "dashboard/app.js",
+    "dashboard/serve.py",
+    "scripts/serve-dashboard.sh",
+    "dashboard/dev/hlsa_banner_test.js",
+    "tests/test_dashboard_hlsa.py"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
