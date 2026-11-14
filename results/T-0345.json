@@ -1,0 +1,47 @@
+{
+  "task": "T-0345",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0345",
+  "base": "main",
+  "head": "82f11a2d42156cc01eba46e048d8dbdb06c19e02",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-14T10:17:02+08:00",
+  "finished_at": "2026-11-14T10:45:43+08:00",
+  "duration_s": 1721.4,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_demo_constrained.py",
+      "code": 0,
+      "tail": [
+        "...........                                                              [100%]"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest -q tests/test_kv_cache.py",
+      "code": 0,
+      "tail": [
+        "....                                                                     [100%]"
+      ]
+    }
+  ],
+  "summary": "# T-0345 完成说明\n\n- 接线：新增 `src/lightprism/demo/infer_demo.py`，把 `DemoVocab` 适配到 `infer.PrismGenerator`，复用 `allowed_next` 状态机与 `_apply_constraint` 掩码；`smoke.py` 删除裸 argmax，`make demo` / `lightprism chat` 统一走受约束路径。\n- 空槽：`vocab.size=2900` 之后、PAD/UNK 之外的槽位每步置 `-inf`，开关可做 ablation。\n- 实测（20 条真实任务，64 token）：约束版结构合法 **20/20 = 100%**（产品指标）；无约束裸 argmax **0/20 = 0%**、20 条全空格；代码段合法 **0/20**、20 条代码段全空（能力指标）。\n- Ablation：空槽 mask 接/不接数字完全一致，argmax 仍塌到空格 1923；100% 只由状态机 + 结构推进带来，不能当能力证据。\n- 验证：`python3 -m pytest -q tests/test_demo_constrained.py` 11 passed；`tests/test_kv_cache.py` 4 passed；回归 62 passed / 2 skipped；`make demo` 有 checkpoint 时输出 `<CODE>…</CODE><V:PASS>`。\n- 风险：本机无原 checkpoint，用仓内脚本重训 50 步（loss 6.046，sha256 80bf2e49…），能力结论与 `V2=0/20` 一致；`make demo` 缺 checkpoint 分支在 bash 3.2 + zh_CN 下有既有 unbound variable 问题（基线可复现，不属本卡）。",
+  "error": "",
+  "declared_paths": [
+    "src/lightprism/demo/infer_demo.py",
+    "src/lightprism/demo/smoke.py",
+    "tests/test_demo_constrained.py",
+    "reports/约束解码接线报告.md"
+  ],
+  "changed_files": [
+    "src/lightprism/demo/smoke.py",
+    "reports/约束解码接线报告.md",
+    "src/lightprism/demo/infer_demo.py",
+    "tests/test_demo_constrained.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "26ab74d79ab3424997b2f37c2d257ea0",
+  "store_write_error": "T-0345 结果写入 leader store 失败（已尝试 4 次）：T-0345 的租约已过期，结果被拒（lease lost）"
+}
