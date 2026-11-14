@@ -119,6 +119,14 @@ except ImportError:  # pragma: no cover
     def no_window_kwargs() -> dict:
         return {}
 
+# T-0352：H-LSA 协议核心（T-0350 产出，纯标准库、零 I/O、不起线程）。
+# 本模块只在既有心跳节拍上调用它的 note_change / tick / build_digest，
+# 自己不另写定时器；hive_lsa 缺失时整层退化为 0.16.05 既有行为。
+try:
+    import hive_lsa
+except ImportError:  # pragma: no cover
+    hive_lsa = None
+
 DEFAULT_CLUSTER_ID = "hive"
 EVENT_LIMIT = 500
 # 聊天（跨机留言）在内存里保留多少条；磁盘 chat.jsonl 只追加不删，
@@ -1495,6 +1503,8 @@ class Cluster:
         self._store_serving_ready = True
         self._store_lag_target = 0
         self._store_reconcile_thread: threading.Thread | None = None
+        # H-LSA 状态机（T-0352）：纯内存、零 I/O、不起线程；缺失模块时为 None。
+        self._lsa = None
 
         self.port = config.port
         self.advertise_host = config.advertise or (
@@ -1502,6 +1512,7 @@ class Cluster:
         self._load_state()
         self._load_chat()
         self._put_self_node()
+        self._lsa = self._build_lsa_core()
 
     def _store_seq(self) -> int:
         """持锁路径专用：读缓存的本机 store 位点，绝不碰 store._lock（T-0327）。"""
@@ -1972,6 +1983,102 @@ class Cluster:
             self.cond.notify_all()
         except RuntimeError:
             pass
+
+    # -- H-LSA 上行（T-0352） --------------------------------------------- #
+    # 纪律：节拍复用既有心跳循环（_heartbeat_once 里 tick 一次），不新增常驻
+    # 线程 / 定时循环；纯 last_seen / 租约续签只走 _mark_touch_locked，绝不
+    # note_change；摘要报文不夹带 progress/leases/nodes/agents 状态体。
+
+    def _build_lsa_core(self):
+        if hive_lsa is None:
+            return None
+        project_tag = str(os.environ.get("HIVE_CONTROL_PROJECT_TAG")
+                          or self.config.cluster_id)
+        area = hive_lsa.make_area("hive", self.config.cluster_id, project_tag)
+        return hive_lsa.LSACore(
+            originator=self.node_id, area=area, project_tag=project_tag,
+            leader_epoch=self.term)
+
+    @staticmethod
+    def _lsa_diff_fields(old: dict, new: dict) -> dict:
+        """字段级 diff：只取真正变化的实质字段，剔除本地记账元数据。"""
+        skip = {"gen", "term", "leader_id", "updated_at", "updated_epoch",
+                "origin", "node_id"}
+        out = {}
+        for key, val in new.items():
+            if key in skip:
+                continue
+            if old.get(key) != val:
+                out[key] = val
+        return out
+
+    def _lsa_note_change_locked(self, tid: str, diff: dict) -> None:
+        if self._lsa is None or not diff:
+            return
+        try:
+            self._lsa.note_change(key=("hive", str(tid)), diff=diff)
+        except Exception:  # noqa: BLE001 核心状态机异常不拖垮写路径
+            pass
+
+    def _lsa_tick_locked(self) -> list[dict]:
+        """在既有心跳节拍上推进状态机；返回本拍待发的 change LSA 报文。"""
+        if self._lsa is None:
+            return []
+        self._lsa.leader_epoch = self.term
+        try:
+            result = self._lsa.tick()
+        except Exception:  # noqa: BLE001
+            return []
+        diffs: list[dict] = []
+        for pkt in result.get("packets") or []:
+            if pkt.get("type") != "lsa":
+                continue
+            diffs.extend(pkt.get("lsas") or [])
+        return diffs
+
+    def _lsa_summary_locked(self) -> dict | None:
+        """心跳摘要块：(seq, digest, epoch, area)，不含任何状态体。"""
+        if self._lsa is None:
+            return None
+        self._lsa.leader_epoch = self.term
+        try:
+            dig = self._lsa.build_digest(kind=hive_lsa.DIGEST)
+        except Exception:  # noqa: BLE001
+            return None
+        return {
+            "seq": int(dig.get("seq") or 0),
+            "digest": str(dig.get("digest") or ""),
+            "epoch": int(dig.get("leader_epoch") or self.term),
+            "area": str(dig.get("area") or ""),
+            "head_sha": str(dig.get("head_sha") or ""),
+        }
+
+    def _apply_lsa_diffs_locked(self, lsas: list) -> None:
+        """对端泛洪来的 change LSA：先装 LSDB 去重，再把字段级 diff 落到本地。"""
+        if not lsas:
+            return
+        if self._lsa is not None:
+            try:
+                self._lsa.merge_incoming(lsas)
+            except Exception:  # noqa: BLE001
+                pass
+        for raw in lsas:
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("kind") or "change") != "change":
+                continue
+            key = raw.get("key") or ["", ""]
+            tid = str(key[1]) if len(key) > 1 else ""
+            diff = raw.get("diff") or {}
+            if not tid or not isinstance(diff, dict):
+                continue
+            lease_fields = {"lease_until", "lease_until_epoch", "released",
+                            "agent", "host", "claimed_at", "grace_until",
+                            "grace_until_epoch", "recovered_by"}
+            target = self.leases if lease_fields.intersection(diff) else self.progress
+            rec = dict(target.get(tid) or {})
+            rec.update(diff)
+            target[tid] = rec
 
     def _state_payload_locked(self) -> dict:
         return {
@@ -2727,7 +2834,11 @@ class Cluster:
             "leader_id": self.leader_id or (self.node_id if leader else ""),
             "gen": gen,
         }
-        self._merge_progress_locked(tid, item)
+        accepted = self._merge_progress_locked(tid, item)
+        if accepted:
+            # 实质进度/状态变更才进 LSA；被新旧裁决拒掉的旧包不登记。
+            self._lsa_note_change_locked(
+                tid, self._lsa_diff_fields(old, item))
         self._emit_locked(
             "task_progress", node_id=item["node_id"], task=tid,
             message=item["message"] or item["step"] or item["state"],
@@ -2788,7 +2899,15 @@ class Cluster:
             "grace_until_epoch": float(old.get("grace_until_epoch") or 0.0),
             "recovered_by": str(old.get("recovered_by") or ""),
         }
-        self._merge_lease_locked(tid, item)
+        accepted = self._merge_lease_locked(tid, item)
+        if accepted:
+            # claim / 释放是实质变更；纯续签（只把 lease_until 往后推）属于
+            # touch，按 T-0352 纪律不产生 LSA —— 与 last_seen 刷新同档。
+            diff = self._lsa_diff_fields(old, item)
+            renewal_only = {"lease_until", "lease_until_epoch"}
+            substantive = {k: v for k, v in diff.items()
+                           if k not in renewal_only}
+            self._lsa_note_change_locked(tid, substantive)
         self._emit_locked(
             "lease_released" if item["released"] else "lease_claimed",
             node_id=item["node_id"], task=tid,
@@ -3306,6 +3425,8 @@ class Cluster:
             for tid, item in leases.items():
                 if isinstance(item, dict):
                     self._merge_lease_locked(str(tid), item)
+        # T-0352：快照通道捎带的增量 change LSA（与心跳响应同一格式）。
+        self._apply_lsa_diffs_locked(snap.get("lsa_diffs") or [])
         # 不在这收尾处无条件 _mark_dirty_locked：合并里的每一条写入
         # （_merge_progress/_merge_lease/_update_node/_merge_event）已经各自
         # 按「是否真的变了」置脏。原先这里再补一刀，等于每次心跳都把
@@ -3324,6 +3445,8 @@ class Cluster:
                         self._merge_lease_locked(str(tid), item)
         for ev in body.get("events") or []:
             self._merge_event_locked(ev)
+        # T-0352：心跳响应里的增量 change LSA（去重 / 判新旧在 core 内完成）。
+        self._apply_lsa_diffs_locked(body.get("lsa_diffs") or [])
 
     # -- 主节点 ------------------------------------------------------------ #
     def _adopt_leader_locked(self, rec: dict, term: int,
@@ -3880,6 +4003,10 @@ class Cluster:
             # 空闲期没有新事件时响应里 events 恒为空。
             sd = _state_digest(self.progress, self.leases)
             events_since = max(0.0, _now() - EVENT_WINDOW_S)
+            # T-0352：节拍复用本心跳循环推进 H-LSA 状态机，不新增常驻线程 /
+            # 定时循环。待发的 change LSA 随本拍心跳上行；摘要块只带水位。
+            lsa_diffs = self._lsa_tick_locked()
+            lsa_summary = self._lsa_summary_locked()
             if role == "leader":
                 self.leader_lease_until = _now() + self.config.leader_lease
                 body = {"node": self._self_node(), "term": self.term,
@@ -3892,6 +4019,10 @@ class Cluster:
                 body = {"node": self._self_node(), "term": self.term,
                         "leader": False, "sd": sd,
                         "events_since": events_since}
+            if lsa_summary is not None:
+                body["lsa"] = lsa_summary
+            if lsa_diffs:
+                body["lsa_diffs"] = lsa_diffs
             # 兜底：某一拍的全量包丢了、对端又恰好不在线时，每
             # FULL_BROADCAST_S 主动重传一次，避免永远停在旧视图上。
             if _now() - self._broadcast_at >= FULL_BROADCAST_S:
@@ -4422,6 +4553,9 @@ class Cluster:
                 self._adopt_leader_locked(node, max(term, self.term),
                                           refresh_lease=True)
             self._merge_body_state_locked(body)
+            # T-0352：对端随心跳泛洪来的 change LSA 先装本地 LSDB / 落字段
+            # 级 diff；与 body 里既有 progress/leases 合并走同一把主锁。
+            self._apply_lsa_diffs_locked(body.get("lsa_diffs") or [])
             # 0.16.05：心跳响应不再无条件搬 40-50KB 全量状态。
             #
             # 旧实现用 `changed = req_gen != self.generation` 判断要不要回全量。
@@ -4431,8 +4565,22 @@ class Cluster:
             # 摘要：请求方带 `sd`，两边摘要相等就只回主干。
             req_sd = str(body.get("sd") or "") if isinstance(body, dict) else ""
             my_sd = _state_digest(self.progress, self.leases)
-            # 老版本不带 sd：仍按旧语义回全量，滚动升级期间不丢状态。
-            changed = (not req_sd) or (req_sd != my_sd)
+            req_lsa = body.get("lsa") if isinstance(body, dict) else None
+            lsa_peer = isinstance(req_lsa, dict) and self._lsa is not None
+            if lsa_peer:
+                # H-LSA 邻居：摘要一致 → 空载荷；不一致 → 只回本节点待发的
+                # 增量 change LSA，绝不回整份 progress/leases/nodes.agents。
+                decision = self._lsa.on_hello(req_lsa)
+                lsa_noop = decision.get("action") == hive_lsa.NO_OP
+                lsa_reply_diffs = [] if lsa_noop else self._lsa_tick_locked()
+                progress_out: dict = {}
+                leases_out: dict = {}
+            else:
+                # 老版本不带 sd/lsa：仍按旧语义回全量，滚动升级期间不丢状态。
+                changed = (not req_sd) or (req_sd != my_sd)
+                progress_out = copy.deepcopy(self.progress) if changed else {}
+                leases_out = copy.deepcopy(self.leases) if changed else {}
+                lsa_reply_diffs = []
             # 事件：老实现用 `event_seq` 增量，但 seq 是各节点各自的计数器、
             # 切主还会重置，合并进来的事件 seq 来自四面八方（现场本机
             # event_seq=664，deque 里却有 seq=17162 的事件），于是
@@ -4474,10 +4622,12 @@ class Cluster:
                 if self.leader_lease_until else "",
                 "nodes": self._heartbeat_nodes_locked(),
                 "events": events,
-                "progress": copy.deepcopy(self.progress) if changed else {},
-                "leases": copy.deepcopy(self.leases) if changed else {},
+                "progress": progress_out,
+                "leases": leases_out,
                 # 供新节点确认摘要是否收敛（老版本忽略）。
                 "sd": my_sd,
+                "lsa": self._lsa_summary_locked(),
+                "lsa_diffs": lsa_reply_diffs,
                 "generation": self.generation,
                 "event_seq": self.event_seq,
                 "store_commit_seq": self._store_seq(),
