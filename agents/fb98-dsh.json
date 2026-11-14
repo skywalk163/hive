@@ -1,0 +1,26 @@
+{
+  "name": "fb98-dsh",
+  "host": "fb98",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify",
+    "python",
+    "pytest"
+  ],
+  "capabilities": [
+    "freebsd",
+    "python",
+    "pytest"
+  ],
+  "repos": {
+    "hive": "/home/skywalk/dswork/hive"
+  },
+  "launch": "",
+  "worktrees": "",
+  "max_concurrency": 1,
+  "created": "2026-11-14T10:39:15+08:00"
+}
