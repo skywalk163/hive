@@ -1,0 +1,41 @@
+{
+  "task": "T-0351",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0351",
+  "base": "main",
+  "head": "088f9c7a37b438cb5a3c3096938ba3da4e9685fc",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-14T14:01:07+08:00",
+  "finished_at": "2026-11-14T14:19:42+08:00",
+  "duration_s": 1115.2,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_control_plane_attach.py",
+      "code": 0,
+      "tail": [
+        "..........                                                               [100%]",
+        "10 passed in 1.42s"
+      ]
+    }
+  ],
+  "summary": "# T-0351 完成说明\n\n## 改了什么\n\n- **装配修复**（`hive_control/adapter.py`）：`ControlPlane` 现在按 `plane.py:286` 的签名补齐\n  `node` / `address` / `listen_port` / `config`。\n  - `node` ← `config.name`（`cluster serve --name`）\n  - `address` ← `cluster.advertise_host` / `config.advertise`（`--advertise`），兜底 `0.0.0.0`\n  - `listen_port` ← `config.port`（`--port`）\n  - `config` ← 新增 `ControlConfig`（cluster_id / project_tag / 组播覆盖 / LSA 节奏）\n  - 无 `name`/`port` 的 duck-typed 测试替身与导入失败仍走「降级 + 记日志」，不拖垮 serve。\n- **H-LSA T1 摘要下行**（`hive_control/downlink.py`）：\n  - 新报文 `{\"type\":\"lsa_digest\"}`，字段 `leader_epoch/seq/digest/head_sha/n_changes/area/project_tag/cluster_id/sent_at(+hmac)`，\n    **不含任何状态体**，`encode_lsa_digest` 超 1400B 直接拒绝。\n  - `LsaDigestSender`：只有 Leader 发，60s 一拍，与既有 0.5/1.0/2.0s 动态节奏分层并存；\n    切主 `suppress_window = 2 × hello_interval = 4.0s` 内不泛洪；发送复用 `DownlinkSender.send_raw`，\n    fallback 逐节点单播语义不变。\n  - `LsaDigestReceiver`：校验 `cluster_id` / `project_tag` / HMAC / `leader_epoch` 单调（同 epoch 按 seq 去重），\n    旧主/幽灵/开发实例误入包直接丢并计数。\n  - 摘要来源优先注入，否则尝试 `hive_lsa.tick()` + `build_digest()`；T-0350 未落地时静默不发，控制面照常工作。\n- **网络隔离可配**（`hive_control/config.py`）：`ControlConfig` 新增 `cluster_id` / `multicast_group` /\n  `multicast_port` / `lsa_interval` / `hmac_key`，并支持 `HIVE_CONTROL_MULTICAST_GROUP/PORT` 环境变量。\n  `cluster_id` 非 `hive` 时默认走 `239.255.42.2:47900`，dev 实例不会进生产组播域。\n- **顺带修**：adapter 的 `request_pull` 之前按 `handler(body)` 调编排器，实际签名是\n  `request_pull(project, mode) -> request_id`，已对齐并保留对旧假编排器的兼容；对外仍是 202 + pending 语义。\n\n## 验证\n\n- 卡片验收：`python3 -m pytest -q tests/test_control_plane_attach.py` → **10 passed**。\n- 相关回归：`tests/test_control_plane_attach.py tests/test_control_adapter.py tests/test_control_downlink.py`\n  → **47 passed**（含 T-0311 既有 D14/降级/HTTP 用例）。\n- **dev 隔离实例**（`scripts/dev-cluster.sh start --foreground`，port 8888、`cluster_id=hive-dev`）：\n  `GET /api/cluster/status` 返回\n  ```json\n  {\"enabled\": true, \"running\": true, \"plane_available\": true,\n   \"degraded\": false, \"multicast_mode\": \"multicast\",\n   \"lsa\": {\"tx\": {\"interval\": 60.0, \"suppress_window\": 4.0},\n           \"rx\": {\"received\": 0, \"accepted\": 0}}}\n  ```\n  `lsof` 确认该进程只绑定 `UDP *:47900`（开发组）与 `TCP 127.0.0.1:8888/8889`，\n  **未绑定/未发送生产组播 `239.255.42.1:47899`**。\n- 未改 `plane.py` / `hive_cluster.py` / `hive.py`，未重启生产 cluster serve，未改 `config.json` / `.env`。\n\n## 说明 / 风险\n\n- `hive_lsa`（T-0350，workbuddy-win11 持有）尚未落 main，dev 实例上 `lsa.tx.sent=0` 属预期；\n  装配与收发/校验链路已由 fake provider 的单测覆盖，T-0350 落地后无需再改本卡代码即可产出摘要。\n- 单节点 dev 集群里控制面自身选主仍为 null（无邻居 Hello，既有行为，不属本卡）。",
+  "error": "",
+  "declared_paths": [
+    "hive_control/adapter.py",
+    "hive_control/downlink.py",
+    "hive_control/config.py",
+    "tests/test_control_plane_attach.py"
+  ],
+  "changed_files": [
+    "hive_control/adapter.py",
+    "hive_control/config.py",
+    "hive_control/downlink.py",
+    "tests/test_control_plane_attach.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "d43b51eeb54a48878813128964c326af",
+  "store_write_error": "T-0351 结果写入 leader store 失败（已尝试 4 次）：T-0351 的租约已过期，结果被拒（lease lost）"
+}
