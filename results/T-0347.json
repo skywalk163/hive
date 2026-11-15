@@ -1,0 +1,59 @@
+{
+  "task": "T-0347",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0347",
+  "base": "main",
+  "head": "ee0582056643bbea287e5c89dd70b9f27d988c6d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-15T01:25:35+08:00",
+  "finished_at": "2026-11-15T01:25:35+08:00",
+  "duration_s": 0.6,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_train_demo.py",
+      "code": 0,
+      "tail": [
+        ".............                                                            [100%]"
+      ]
+    },
+    {
+      "cmd": "python3 -m lightprism.demo.train_demo --config configs/demo-3m.json --steps 20",
+      "code": 0,
+      "tail": [
+        "      \"split_seed\": 20261112",
+        "    }",
+        "  },",
+        "  \"checkpoint\": \"/Users/skywalk/.hive/agents/trae-mac/wt/T-0347/checkpoints/demo-3m/model.pt\"",
+        "}"
+      ]
+    }
+  ],
+  "summary": "# T-0347 完成摘要\n\n## 结论\n\nCPU 上把 demo 决策层跑够步数（3000 步），并把对照语料与真实运行标签合并进统一目录。结论：\n**50 步的退化是「没跑够」，不是 3.4M 容量不够。**\n\n- train loss 8.08 → **1.26**；val 4.82（步 100）→ **2.69325（步 2100，最低）**，末步 2.7157。\n- **3000 步内没有过拟合起点**（val 相对最优最大回升 0.79%，未达 1% 阈值，`overfit_step=null`）。\n- 生成从「全空格」变成能产出 `light ai check ok=true` 的光明代码（4 条固定 prompt 中 2 条通过）。\n- 控制 token 占比 0.18% → **1.51%**（加权口径），决策 token **0.36%**（加权）/ 0.014%（raw）。\n  决策密度未达卡面 1% 目标：受 29 条真实日志限制，未用合成标签硬凑，详见报告 §3.4。\n\n## 改动（仅契约内路径）\n\n- `src/lightprism/demo/train_demo.py`\n  - 新增 `--build-unified`（生成 `data/unified/`，含 `light ai check` 真值背书，带缓存可续跑）；\n  - 统一数据源：语料快照 / 词表 / SFT / 决策日志 / 对照语料；\n  - 新增翻译（pair / light_only）、运行时决策、err 三类渲染；\n  - `pack_stream` 支持逐步 loss 权重（结构/决策/验证 token ×3.0）；\n  - 每步记录 train loss/lr/grad_norm/elapsed，每 100 步 val，自动过拟合起点判定；\n  - lr 余弦按总步数（warmup 自动 2%）；新增 `--smoke`；light 根目录回退链补本机路径。\n- `tests/test_train_demo.py`：13 个用例覆盖词表槽位、切分、三类渲染、控制 token 加权、\n  数据源汇总、端到端训练 + checkpoint 重载。\n- `data/unified/`：`vocab_4096.json` / `corpus.jsonl`（392 文件）/ `json_tasks` / `code_tasks` /\n  `err_tasks` / `decisions.jsonl`（29 条）/ `translation_tasks.jsonl`（1394 条，\n  light ai check 通过率 85.52%）/ `manifest.json`。\n- `reports/训练报告_v2.md`：语料统计（raw/weighted 双口径）、loss 与 val 曲线、过拟合起点、\n  成功/失败样例（含 ai check 结果）、耗时与硬件、与 50 步基线对比、未证明项。\n\n## 验证\n\n- `PYTHONPATH=src python3 -m pytest -q tests/test_train_demo.py` → **13 passed**；\n  另跑 `tests/test_model.py tests/test_kv_cache.py` 全绿。\n- `PYTHONPATH=src python3 -m lightprism.demo.train_demo --config configs/demo-3m.json --steps 20`\n  → 通过，1m49s，产出 `checkpoints/demo-3m/model.pt`。\n- 长跑：FreeBSD 15.1（192.168.0.88，12 核，torch 2.12.1a0）3000 步 8585s，\n  checkpoint 13 MB、`--smoke` 通过（23 token，非空，含合法光明代码）。\n- `python3 -m ...` 需 `PYTHONPATH=src`（仓库未做 editable install）。\n\n## 风险 / 未完成\n\n- 翻译方向仍会混淆 Python 段与光明段（需要独立 `<PY>` / `<LIGHT>` 词表 token，超出本卡范围）。\n- 决策密度 0.36%（加权）未到 1%：扩真实日志比加大重复更有效。\n- 未做下游任务端到端评测。\n\n\n## 结果未落 store（T-0296）\n\n- Git 侧已完成：res/T-0347 分支、task/T-0347（head ee0582056643bbea287e5c89dd70b9f27d988c6d）\n- store 侧**未写入**：T-0347 结果写入 leader store 失败（已尝试 4 次）：T-0347 的租约已过期，结果被拒（lease lost）\n- 影响：看板/claim 的 store 视图看不到结果，租约过期后这张卡可能被重新派发；Git 结果不会丢，`hive land` 读的是Git 侧 res/T-0347，可以照常合入。\n- 下一步：**不要直接重跑 `hive submit T-0347`**（`result_info` 会报「已经有结果」把重跑挡住）；要让 store 视图一致，先删 res/T-0347 分支再重跑，或用 `hive doctor` 体检 / `hive repair --apply` 对齐状态。",
+  "error": "",
+  "declared_paths": [
+    "src/lightprism/demo/train_demo.py",
+    "data/unified/",
+    "data/sft/",
+    "tests/test_train_demo.py",
+    "reports/训练报告_v2.md"
+  ],
+  "changed_files": [
+    "data/unified/.light_check_cache.json",
+    "data/unified/code_tasks.jsonl",
+    "data/unified/corpus.jsonl",
+    "data/unified/decisions.jsonl",
+    "data/unified/err_tasks.jsonl",
+    "data/unified/json_tasks.jsonl",
+    "data/unified/manifest.json",
+    "data/unified/translation_tasks.jsonl",
+    "data/unified/vocab_4096.json",
+    "reports/训练报告_v2.md",
+    "src/lightprism/demo/train_demo.py",
+    "tests/test_train_demo.py"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
