@@ -1,0 +1,40 @@
+{
+  "task": "T-0372",
+  "agent": "raccoon-fb98",
+  "mode": "manual",
+  "status": "failed",
+  "branch": "task/T-0372",
+  "base": "main",
+  "head": "b8d95fcd1d9b2cc9547da1f7c7e8673c1feb46ef",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-16T13:20:53+08:00",
+  "finished_at": "2026-11-16T19:43:52+08:00",
+  "duration_s": 22979.9,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python3 -m pytest -q tests/",
+      "code": 1,
+      "tail": [
+        "",
+        "tests/test_openi_v3_judge.py:350: AssertionError",
+        "=========================== short test summary info ============================",
+        "FAILED tests/test_acceptance.py::test_acceptance_main_exit_code_reflects_failures",
+        "FAILED tests/test_openi_v3_judge.py::test_label_coverage_surfaces_partial_coverage"
+      ]
+    }
+  ],
+  "summary": "# T-0372 提交说明：续训到 5000 步，判定 3000 步是否上限\n\n## 结论\n`3000 步接近上限`。同一配置/seed/数据/机器从零跑满 5000 步（脚本无 resume，按卡面指定 `--steps 5000` 唯一可复现路径），val 最低点仍在步 2100（2.67325，未后移），从步 3000（2.71068）续训到 5000（2.91890）收益 −0.20822 <0.02，val 自步 2600 起回抬（overfit_step=2600），4500—5000 单调回抬 +0.04041，末值比 3000 步基线末值高 +0.20323（≈24σ 噪声）。三档判据中「5000 步仍有收益」不成立、「3000 步接近上限」成立，差异远超噪声故不判 inconclusive。\n\n## 交付物（均在 paths 允许范围内）\n- `reports/续训5000步报告.md`：完整结论、5000 步 50 个 val 原始点、最低点步号、4500—5000 回抬、两 checkpoint 结构合法率对比与命令、噪声估计、证据等级、禁止项核对。\n- `checkpoints/demo-3m-5000/train_log.json`（5000 条 history，gitignore 本地归档，符合卡面约定）、`compare_ckpt_results.json`（两 checkpoint 20 条生成原始输出 + 指标）。\n- `checkpoints/demo-3m-5000/evidence/{analysis.json,analyze_curve.py,compare_ckpt.py,compare_ckpt_results.json,train_log.json,train_5000.log}`：复算脚本与全部原始证据（checkpoints/ 按 gitignore 本地归档，报告正文内嵌全部 val 原始点与 canonical 4 逐字生成输出确保可入库部分自洽）。\n- model.pt 按现有 gitignore 规则本地归档（未入库）。\n\n关键数字：3000 步基线 val 最低 2.69325@2100、末值 2.71567；5000 步 val 最低 2.67325@2100、末值 2.91890；两 checkpoint 同一固定 20 条测试集上 `light ai check` 代码段合法率 3000=9/20(0.45)、5000=8/20(0.40)；产品结构合法率两者 20/20；能力结构率两者 8/20；canonical 4 为 3/4 vs 2/4（与 3000 步报告 §六的 2/4 差 1 条，已如实登记为 greedy 生成波动）。\n\n## 验收测试（如实登记，不硬凑，不改代码/测试）\n`PYTHONPATH=src python3 -m pytest -q tests/`：共 241 项，**239 passed / 2 failed**。2 个失败在**完全未改动的原始 main（HEAD ee05820）上逐字复跑同样失败**，与本卡仅新增报告/证据文件无关：\n1. `tests/test_acceptance.py::test_acceptance_main_exit_code_reflects_failures` — 断言空目录 `--only V7` 返回 1，实测返回 0（make demo 从干净 clone 计时 0.3s 被判 pass；环境/计时口径问题）。\n2. `tests/test_openi_v3_judge.py::test_label_coverage_surfaces_partial_coverage` — 断言 `has_err_validation is False`，实测 True；该 fixture 现已含 ERR 验证样本，属 T-0370（补监督信号/ERR 覆盖，当前 doubao-win 在跑）的范畴，按卡面\"不改既有测试期望、只改 paths 内文件\"要求不处理。\n\n按任务契约「验收卡、不改代码」，未改任何源码/测试/config/bench.py，未动其它任务卡与 agents 配置，未写入任何 token 或密钥。若验收要求全绿，需先合入 T-0370 的数据补强（预期修好 #2），#1 为独立 environment 问题。\n\n## 时间与环境\n- 领取：2026-11-16 13:20；训练完成：19:16（约 5h50min）；提交：19:35。\n- 超时说明：卡面 timeout 480min / lease 420min；实际训练 350min（含启动/评测/报告总计约 375min）。宿主 192.168.0.88 上长期运行 VirtualBox win10 虚拟机（~295% CPU）与 Chrome 等占用（负载 17/12 核），导致 5000 步实际 ~4.2s/步（基线无争用时 2.86s/步）；训练进程全程健康、无中断、无换机、无重试，投入步数足额 5000，非\"卡住\"。无权限 renice、未触碰他人进程。",
+  "error": "verify 未通过",
+  "declared_paths": [
+    "configs/",
+    "reports/续训5000步报告.md",
+    "checkpoints/"
+  ],
+  "changed_files": [
+    "reports/续训5000步报告.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "d698342c02774381aa99e1664f75c092",
+  "store_write_error": "T-0372 结果写入 leader store 失败（已尝试 4 次）：T-0372 的租约已过期，结果被拒（lease lost）"
+}
