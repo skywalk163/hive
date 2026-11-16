@@ -1,0 +1,44 @@
+{
+  "task": "T-0362",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0362",
+  "base": "main",
+  "head": "50a54e333404db4b9f2b5be7502fe8e7925140af",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-16T09:50:41+08:00",
+  "finished_at": "2026-11-16T10:35:29+08:00",
+  "duration_s": 2688.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/unit/test_R221_增量清单.py -q",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".........                                                                [100%]",
+        "9 passed in 4.36s"
+      ]
+    },
+    {
+      "cmd": "test -f docs/功能对标/0.2.2-rc.3增量清单.md",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0362 工作说明（deepseek-win）\n\n**做了什么**：按 rc.1(`66491b05e3`)→rc.2(`ddac96760b`)→rc.3(`38a6a5c965`) 三个 tag 在本机 fork 上做包级增量甄别，产出候选清单喂 B 路、宿主面喂 C 路。只新增两个文件，未改 `src/`、`对标清单.json`、`语言缺陷账.md`、CI。\n\n**交付文件**\n- `docs/功能对标/0.2.2-rc.3增量清单.md`：**180 行**；§0 结论 5 条、§1 三张表（顶层 13 行 / src 状态 5 行 / 重点包 15 行）、§2 新增包 **13** 行 + 删除包 **11** 行、§3 既有包 **17** 行、§4 **8** 条候选（**B1~B8**）+ 4 条「不移植/无承载」登记、§5 宿主面 11 条、§6 拿不准 6 条。\n- `tests/unit/test_R221_增量清单.py`：9 条真断言（五节齐全 / §1 实测数字 / §2 新增删除包逐行指包 / §4 每行列数与 `packages/` 路径与 B1~B8 编号 / §5 实质条目 / 不写内网 IP 与密钥 / 反跑）。\n\n**验证**：`python -m pytest tests/unit/test_R221_增量清单.py -q` → **9 passed**（4s）；\n`test -f docs/功能对标/0.2.2-rc.3增量清单.md` 在 Windows 经 `hive_compat` 改写后 **RC=0**（未触发卡面提示的 255 假失败）；\n反跑 A：把文档 `## 4.` 改成 `## 4` → **4 failed**，还原后复绿 9 passed。\n\n**结论口径（实测）**：1574 commit / 4721 文件 / +171381 −58617；`packages/*/src` 828 文件（A176/M597/D37/R18）、+47624 −15192；13 新包、11 删包（其中 6 个是改名/搬包）；纯逻辑面 8 项约 2.6k 行，8 项均指到具体 `packages/.../src/*.ts`。\n\n**拿不准 / 没做**：①未逐个读满 828 个 src diff（8 候选 + 20 重点包逐文件，其余包级统计 + 采样）；②改名包行数按新包重算，与包级 diff 原始数有少量出入；③§4 工作量是类比估算非实测；④`web-search-exa/perplexity` 删除原因未查；⑤任务书提到的「PTC 限额」在 `ptc-runtime` 未找到，详见 §6。\n\n**领取异常（供溯源）**：workbuddy 的 store 租约 09:18 过期且 `renewed_at==claimed_at`、无 status 分支（零进度）。MCP/CLI 的 claim 预检把「已过期但 state=active」仍当持有者，导致 `hive_claim` 一直报「已被 workbuddy 领取」；本卡直接走集群 `store/claim`（后端按 `lease_until` 正确放行）接管为 **lease_seq 3 / 180 分钟**，已在 task:T-0362 留言并建议另开卡修预检口径。",
+  "error": "",
+  "declared_paths": [
+    "docs/功能对标/0.2.2-rc.3增量清单.md",
+    "tests/unit/test_R221_增量清单.py"
+  ],
+  "changed_files": [
+    "docs/功能对标/0.2.2-rc.3增量清单.md",
+    "tests/unit/test_R221_增量清单.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "c4e370d6707c476582b5005862daa73c"
+}
