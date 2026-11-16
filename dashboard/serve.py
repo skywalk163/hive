@@ -111,7 +111,30 @@ NO_STORE = "no-store, no-cache, must-revalidate, max-age=0"
 
 # 任务操作代理：后端调用 hive CLI 真正执行（前端按钮 -> 这里 -> python3 hive.py）
 HIVE_PY = HIVE_ROOT / "hive.py"
-HIVE_OP_TIMEOUT = 120  # 单条操作超时（秒）；hive 命令涉及 git push，给足余量
+# 单条 hive 操作超时（秒）的默认值。gitea 慢时 `hive status --json`（含 T-0353
+# 的 autosync fetch）实测 132s、带 verify 的 submit 约 150s —— 120s 会把本会成功
+# 的慢命令直接腰斩，刷新循环于是每拍超时、看板停在旧快照（2026-11-16 实际
+# 发生过）。可配置，优先级沿用 hive 的「环境变量 > 配置文件 > 默认值」：
+#   HIVE_DASH_OP_TIMEOUT=300               # 环境变量（服务管理器用）
+#   dashboard/settings.json 的 op_timeout_s  # 配置文件（POST /api/config 可改）
+# refresh_loop / _refresh_status 每次调用现读，改 settings.json 无需重启看板。
+HIVE_OP_TIMEOUT_DEFAULT = 300
+
+
+def _hive_op_timeout() -> int:
+    """单条 hive CLI 操作的超时上限（秒）。"""
+    raw = (os.environ.get("HIVE_DASH_OP_TIMEOUT") or "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return HIVE_OP_TIMEOUT_DEFAULT
+    val = cfg.get("op_timeout_s") if isinstance(cfg, dict) else None
+    if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+        return int(val)
+    return HIVE_OP_TIMEOUT_DEFAULT
+
 # 集群升级要 fetch 整个协调仓再 ff 合并，给更长的超时。
 UPGRADE_TIMEOUT = 300
 # 主控一键下发要逐台等待；给一个更宽的总上限（秒）。
@@ -649,7 +672,8 @@ def refresh_loop(status_path, interval):
         try:
             proc = subprocess.run(argv, capture_output=True, text=True,
                                   encoding="utf-8", env=PYTHON_ENV,
-                                  timeout=HIVE_OP_TIMEOUT, **no_window_kwargs())
+                                  timeout=_hive_op_timeout(),
+                                  **no_window_kwargs())
             if proc.returncode == 0 and proc.stdout.strip():
                 if status_needs_rewrite(status_path, proc.stdout):
                     write_status_atomic(status_path, proc.stdout)
@@ -1797,10 +1821,11 @@ def build_handler(status_path, write_auth="off"):
             else:  # unassign
                 argv += ["unassign", tid, "--reason", note]
 
+            op_timeout = _hive_op_timeout()
             try:
                 proc = subprocess.run(argv, capture_output=True, text=True,
                                      encoding="utf-8", env=PYTHON_ENV,
-                                     timeout=HIVE_OP_TIMEOUT, **no_window_kwargs())
+                                     timeout=op_timeout, **no_window_kwargs())
             except FileNotFoundError:
                 append_audit({"action": action, "task": tid, "ok": False,
                               "agent": who.get("agent"), "detail": "找不到 hive.py"})
@@ -1810,7 +1835,7 @@ def build_handler(status_path, write_auth="off"):
                 append_audit({"action": action, "task": tid, "ok": False,
                               "agent": who.get("agent"), "detail": "超时"})
                 self._send_json(504, {"ok": False,
-                                      "error": "操作超时（%d 秒）" % HIVE_OP_TIMEOUT})
+                                      "error": "操作超时（%d 秒）" % op_timeout})
                 return
 
             out = (proc.stdout or "").strip()
@@ -1837,8 +1862,10 @@ def build_handler(status_path, write_auth="off"):
             self._send_json(200, resp)
 
         # ---- /api/upgrade：集群升级（主控发布 / 子节点检索与升级）----
-        def _run_hive(self, args, timeout=HIVE_OP_TIMEOUT):
+        def _run_hive(self, args, timeout=None):
             """跑一条 hive CLI，返回 (rc, stdout, stderr)。"""
+            if timeout is None:
+                timeout = _hive_op_timeout()
             proc = subprocess.run(hive_argv(*args), capture_output=True,
                                   text=True, encoding="utf-8",
                                   env=PYTHON_ENV, timeout=timeout,
@@ -1974,7 +2001,7 @@ def build_handler(status_path, write_auth="off"):
                 proc = subprocess.run(
                     hive_argv("status", "--json"),
                     capture_output=True, text=True, encoding="utf-8",
-                    env=PYTHON_ENV, timeout=HIVE_OP_TIMEOUT,
+                    env=PYTHON_ENV, timeout=_hive_op_timeout(),
                     **no_window_kwargs())
                 if proc.returncode == 0 and proc.stdout.strip():
                     write_status_atomic(status_path, proc.stdout)

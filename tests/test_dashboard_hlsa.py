@@ -625,3 +625,36 @@ def test_frontend_pure_functions_behaviour():
         "同步健康度纯函数测试失败：\nstdout=%s\nstderr=%s"
         % (proc.stdout, proc.stderr))
     assert "ALL SYNC HEALTH UI CHECKS PASSED" in proc.stdout
+
+
+def test_hive_op_timeout_priority_env_over_file_over_default(tmp_path, monkeypatch):
+    """看板 CLI 超时可配置：环境变量 > settings.json > 默认值（2026-11-16 腰斩事故）。"""
+    monkeypatch.setattr(serve, "CONFIG_PATH", tmp_path / "settings.json")
+    monkeypatch.delenv("HIVE_DASH_OP_TIMEOUT", raising=False)
+
+    # 默认值：无环境变量、无配置文件
+    assert serve._hive_op_timeout() == serve.HIVE_OP_TIMEOUT_DEFAULT
+
+    # 配置文件：op_timeout_s 生效（POST /api/config 落的就是这个文件）
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"op_timeout_s": 480}), encoding="utf-8")
+    assert serve._hive_op_timeout() == 480
+
+    # 环境变量优先于配置文件
+    monkeypatch.setenv("HIVE_DASH_OP_TIMEOUT", "600")
+    assert serve._hive_op_timeout() == 600
+
+    # 非法值一律回退：环境变量非数字 / 非正数，配置文件坏 JSON、布尔、非正数
+    monkeypatch.setenv("HIVE_DASH_OP_TIMEOUT", "abc")
+    assert serve._hive_op_timeout() == 480
+    monkeypatch.setenv("HIVE_DASH_OP_TIMEOUT", "0")
+    assert serve._hive_op_timeout() == 480
+    monkeypatch.delenv("HIVE_DASH_OP_TIMEOUT", raising=False)
+    (tmp_path / "settings.json").write_text("{not json", encoding="utf-8")
+    assert serve._hive_op_timeout() == serve.HIVE_OP_TIMEOUT_DEFAULT
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"op_timeout_s": True}), encoding="utf-8")
+    assert serve._hive_op_timeout() == serve.HIVE_OP_TIMEOUT_DEFAULT
+    (tmp_path / "settings.json").write_text(
+        json.dumps({"op_timeout_s": -5}), encoding="utf-8")
+    assert serve._hive_op_timeout() == serve.HIVE_OP_TIMEOUT_DEFAULT
