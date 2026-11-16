@@ -1,0 +1,67 @@
+{
+  "task": "T-0361",
+  "agent": "fb88-dsh",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0361",
+  "base": "main",
+  "head": "f73a14ecc548c58a95c96e204d4c00ff985708e8",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-16T09:05:32+08:00",
+  "finished_at": "2026-11-16T09:06:08+08:00",
+  "duration_s": 36.2,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import pathlib,subprocess,sys; d=pathlib.Path('benchmarks/light-lang-bench/07-track-b'); sys.exit(1) if not (d/'规格.md').exists() else sys.exit(0)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import pathlib,subprocess,sys; d=pathlib.Path('benchmarks/light-lang-bench/07-track-b'); sys.exit(subprocess.run(['sh','build.sh'],cwd=str(d)).returncode)\"",
+      "code": 0,
+      "tail": [
+        "OK   handler 交叉对拍通过（详见 .build/selfcheck.log）",
+        "",
+        "构建完成。B2_status=ok",
+        "自测：sh run_b1.sh tests/case_basic.ndjson | diff - tests/expected_b1.txt",
+        "      sh run_b2.sh tests/case_basic.ndjson | diff - tests/expected_b1.txt"
+      ]
+    },
+    {
+      "cmd": "python3 -c \"import pathlib,subprocess,sys; d=pathlib.Path('benchmarks/light-lang-bench/07-track-b'); r=subprocess.run(['sh','run_b1.sh','tests/case_basic.ndjson'],cwd=str(d),capture_output=True); sys.exit(1) if r.returncode else sys.exit(0 if r.stdout==(d/'tests/expected_b1.txt').read_bytes() else 2)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0361 工作总结 · Track B：MiniBridge 规格 + Python/Go/C 三 handler（B1 进程编排 / B2 C FFI）\n\n## 结论\n\n**完成。** B1 与 B2 **都真实跑通并逐字节一致**；B2 走的是 **真实 C FFI**（`B2_status=ok`），\n**没有**使用 `blocked_no_c_compiler` 降级路径，也**没有**用 Python/Go 冒充 C。\n\n| 判据 | 结果 |\n|------|------|\n| verify 1（`规格.md` 存在） | **rc=0** |\n| verify 2（`sh build.sh`） | **rc=0** |\n| verify 3（`run_b1.sh` 输出 == `expected_b1.txt`） | **rc=0**（逐字节） |\n| B2 == B1（`run_b2.sh`） | **逐字节相同**（`B2_status=ok`） |\n| 边界：坏句柄名 → `ERR`、退出码 0 | 通过 |\n| 边界：非法 JSON → `WARN invalid_json index=<n>`、退出码 0 | 通过（index=3 / index=5） |\n| `build.sh` 幂等（连跑 3 轮） | 通过 |\n| 结构判据 D4（路由决策不在 `引 ...:` 块内） | 通过（全仓 1 个 `引 C:`，块内仅纯 C 计算） |\n| handler 四向交叉对拍 | 6 组输入 × 4 个实现面全过 |\n\n## 关键环境事实（与任务卡的假设不一致，已按实测调整）\n\n任务卡 §4 假设「本机无 C 编译器、B2 走降级」。**实测不成立**：\n\n```\n$ command -v cc clang gcc\n/usr/bin/cc\n/usr/bin/clang\n（gcc 缺失）\n```\n\n光明 `引 C:` 的编译器探测顺序是 `gcc → cc → clang`，**命中 `cc`** 即成功。\n实测 `light run examples/J阶段_L4_C_Go_MoonBit/J1_C_快速求和.light` 的 C 腿能编过\n（报错只在 `快速求和(int)` 的 argtypes 不匹配——那是示例自身的类型问题，不是编译失败）。\n\n因此本卡按规格 §4.2 **(a) 真实 FFI** 落地，并在 `规格.md` §4.2 与 `README.md`\n写明了这一判定与依据。**降级路径仍然实现并实测过**（见下），只是本机不走它。\n\n## 交付物\n\n```\nbenchmarks/light-lang-bench/07-track-b/\n├── 规格.md                    MiniBridge 语言无关规格（自包含，B1 + B2）\n├── route.conf                 service → handler（TAB 分隔，含通配行）\n├── handlers/\n│   ├── h_py_append.py         有状态落盘：OK <out.log 累计行数>\n│   ├── h_go_len/{go.mod,main.go}  纯计算：LEN <UTF-8 字节数>\n│   └── h_c_hash.c             同一份源码编出 CLI（B1）与 .so（B2）\n├── minibridge.light           主流程\n├── mb_路由.light              路由决策（读配置 / 查表 / 默认分支）\n├── mb_进程.light              B1 外部进程调用\n├── mb_cffi.light              B2 C FFI（全仓唯一的 `引 C:`）\n├── mb_调度.light              B1/B2 唯一分叉点\n├── build.sh                   一键构建（幂等）\n├── run_b1.sh / run_b2.sh      端到端入口\n├── README.md                  验收步骤 + 实测结果 + 已知限制\n└── tests/\n    ├── case_basic.ndjson / expected_b1.txt   3 条记录、3 个 service\n    ├── case_edge.ndjson / expected_edge.txt  坏句柄名 / 非法 JSON / 通配\n    └── selfcheck_handlers.sh                 四向交叉对拍\n```\n\n## 设计要点（值得复核的三处判断）\n\n### 1. B2 用 `引 C:` 一套语法，并刻意排除另一套\n\n规格 §4.2 要求任务包**指定一套** FFI 语法，否则 Agent 会在两套之间反复试错，\n把「语法选择成本」混进 L4 引用成功率。本实现指定 `引 C:` 块，并在 README 里\n存档了另一套 `加载库` 的实测记录但**不使用**。\n\n实测另一套时抓到一个真实边界问题：`返回 整数` 映射到 ctypes `c_int`（32 位有符号），\n会把 64 位返回值截断成负数；必须写 `长整数`。这类问题属修订版 §1.4 要求\n**单独分桶**的「ctypes 类型边界」错误，不计入光明语言本身。\n\n### 2. `引 C:` 块与 `.c` 文件是两个物理副本 → 四向对拍守住\n\n`mb_cffi.light` 的内联 C 与 `handlers/h_c_hash.c` 天然会漂移。一旦漂移，\n「B1 与 B2 逐字节相同」就可能变成「两条一样错的结果」——这正是最容易糊弄过去的假绿。\n\n`tests/selfcheck_handlers.sh`（`build.sh` 自动调用，失败即 build 红）把\n**C 可执行文件 / C 共享库 / 从 `.light` 抽出 `引 C:` 现场编译的 .so / 独立重写的\nPython 参照实现** 四向对齐，6 组输入覆盖 ASCII、中文 UTF-8 多字节、\n跨 32 位符号位的长输入。\n\n### 3. 两处「幂等/可复现」的真实坑，都是实测踩出来才修的\n\n- **`build.sh` 的 heredoc 反引号**：launcher 用不带引号的 heredoc 生成，\n  注释里写 `` `light run` `` 被 shell 当命令替换执行，产生 `light: not found` 噪声。\n  已改成带引号 heredoc + `sed` 替换占位符。\n- **`h_py_append` 有状态 → 自测污染目录**：自检脚本原本在仓库根跑 `h_py_append`，\n  留下 `out.log`，下一轮 build 时计数从 `OK 2` 起，幂等性判据假红。\n  已改为在独立临时目录跑，并顺带断言「连续两次 OK 1 → OK 2」把落盘计数语义也测了。\n\n此外 `run_b1.sh` / `run_b2.sh` 每次运行前清 `out.log`，保证同一输入可复现；\n但**运行内部**多条记录仍正常累计（`OK 1/2/3`），考点没被削掉。\n\n## 降级路径（规格 §4.2(b)）已实现并实测，本机不走\n\n用只含 `python3/sh/go/git/...` 的 PATH 复现无编译器环境：\n\n```\n$ env PATH=<无 cc/clang/gcc> sh build.sh\n    → B2_status=blocked_no_c_compiler（退出码 0）\n$ env PATH=<同上> sh run_b2.sh tests/case_basic.ndjson\n    SKIP: no C compiler\n    B2_status=blocked_no_c_compiler   ← 退出码 0，不算失败\n```\n\n降级时**没有**改用 Python/Go 顶替 C，也**没有**伪造 `.so`（规格 §4.2 第 3 条）。\n此时报告应记 `environment_blocked`，B2 结论不计入 L4 引用成功率。\n\n## 过程中发现的光明语言问题（不在本卡允许修改范围，仅记录）\n\n本卡 paths 限定 `07-track-b`，以下问题都**没有**去改 `src/` 或 `stdlib/`，\n只在与它们兼容的写法上绕开，并记录供后续立卡：\n\n1. **`_light_builtin` 的 stdlib 探测依赖 cwd**：`连接路径` / `当前目录` / `环境变量`\n   等地板函数，在 cwd 不是 light 仓根时会退化成「`_light_builtin` 没有该属性」。\n   本卡用 `--stdlib-dir` + `PYTHONPATH` 的 launcher 绕开（`build.sh` 生成）。\n2. **中文标识符与内置映射撞名会静默坏掉**：把变量命名为 `输出`（= print 的别名）\n   会让**整个文件**解析失败，但报错指向的却是别处的行号，极难定位。\n   已改用 `文本行`。同类风险名：`打印` / `印` / `显示` / `写` / `文本` / `类型` 等。\n3. **`末` 作变量名**会让含它的二元表达式解析失败（`末 + \"b\"` 报「意外的标记」），\n   单独使用 `印(末)` 却正常——词法白名单与表达式解析不一致。\n4. **`如果 <表达式>` 后接某些字符串比较** 可触发 `maximum recursion depth exceeded`\n   （`如果 甲 == \"\"` 在最小复现里复现；本卡实文件里未复现，怀疑与上下文相关）。\n5. `读取N字节(巨大值)` 可用（不会一次性分配），本卡据此实现 stdin 分块读。\n\n## 未做 / 明示不做\n\n- **不写 C++/Rust/MoonBit 版本**（任务卡 §0 明确要求，Track B 只做 Light 侧）。\n- 未提交 `branch=task/T-0361` 之外的分支；未动其它任务卡与 agents 配置。\n- 未写入任何 token 或密钥。构建产物（`.build/`、三个二进制、`out.log`）已 `.gitignore`。\n\n\n## 结果未落 store（T-0296）\n\n- Git 侧已完成：res/T-0361 分支、task/T-0361（head f73a14ecc548c58a95c96e204d4c00ff985708e8）\n- store 侧**未写入**：T-0361 结果写入 leader store 失败（已尝试 4 次）：T-0361 的租约已过期，结果被拒（lease lost）\n- 影响：看板/claim 的 store 视图看不到结果，租约过期后这张卡可能被重新派发；Git 结果不会丢，`hive land` 读的是Git 侧 res/T-0361，可以照常合入。\n- 下一步：**不要直接重跑 `hive submit T-0361`**（`result_info` 会报「已经有结果」把重跑挡住）；要让 store 视图一致，先删 res/T-0361 分支再重跑，或用 `hive doctor` 体检 / `hive repair --apply` 对齐状态。",
+  "error": "",
+  "declared_paths": [
+    "benchmarks/light-lang-bench/07-track-b"
+  ],
+  "changed_files": [
+    "benchmarks/light-lang-bench/07-track-b/.gitignore",
+    "benchmarks/light-lang-bench/07-track-b/README.md",
+    "benchmarks/light-lang-bench/07-track-b/build.sh",
+    "benchmarks/light-lang-bench/07-track-b/handlers/h_c_hash.c",
+    "benchmarks/light-lang-bench/07-track-b/handlers/h_go_len/go.mod",
+    "benchmarks/light-lang-bench/07-track-b/handlers/h_go_len/main.go",
+    "benchmarks/light-lang-bench/07-track-b/handlers/h_py_append.py",
+    "benchmarks/light-lang-bench/07-track-b/mb_cffi.light",
+    "benchmarks/light-lang-bench/07-track-b/mb_调度.light",
+    "benchmarks/light-lang-bench/07-track-b/mb_路由.light",
+    "benchmarks/light-lang-bench/07-track-b/mb_进程.light",
+    "benchmarks/light-lang-bench/07-track-b/minibridge.light",
+    "benchmarks/light-lang-bench/07-track-b/route.conf",
+    "benchmarks/light-lang-bench/07-track-b/run_b1.sh",
+    "benchmarks/light-lang-bench/07-track-b/run_b2.sh",
+    "benchmarks/light-lang-bench/07-track-b/tests/case_basic.ndjson",
+    "benchmarks/light-lang-bench/07-track-b/tests/case_edge.ndjson",
+    "benchmarks/light-lang-bench/07-track-b/tests/expected_b1.txt",
+    "benchmarks/light-lang-bench/07-track-b/tests/expected_edge.txt",
+    "benchmarks/light-lang-bench/07-track-b/tests/selfcheck_handlers.sh",
+    "benchmarks/light-lang-bench/07-track-b/规格.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "f291714366ff430b882f916102be8458"
+}
