@@ -1,0 +1,49 @@
+{
+  "task": "T-0364",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0364",
+  "base": "main",
+  "head": "8ad5f2d3e74f2f4b9302decb3615e435b0626bbc",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-16T09:10:02+08:00",
+  "finished_at": "2026-11-16T10:43:05+08:00",
+  "duration_s": 5584.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/unit/test_R221_B7模型增补.py -q",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 13.12s"
+      ]
+    },
+    {
+      "cmd": "test -f src/模型目录.light",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0364（R221-B7）交付说明 —— llm-deepseek 增补（R220 漏项）\n\n上游范围：`dsh-v0.2.1-rc.3..dsh-v0.2.2-rc.3`（`38a6a5c965`），\n`packages/llm/llm-deepseek/src` 12 文件 / +280 −32。本卡只落纯逻辑，宿主面不移植。\n\n## 1. 改了哪几个函数/段落\n\n### `src/模型目录.light`（28253 → 45621 字节，LF 归一）\n新增 §B7，22 个段落：\n\n| 组 | 段落 |\n|---|---|\n| 常量 | `模型增补_徽章最长字素`(12)、`模型增补_徽章色调表`、`模型增补_默认色调`、`模型增补_产品元数据` |\n| 字符属性 | `模型增补_在区间`、`模型增补_是控制码位`、`模型增补_是行段分隔`、`模型增补_是双向控制`、`模型增补_是不可读码位`、`模型增补_含不可读码位`、`模型增补_是空白码位`、`模型增补_是默认可忽略码位`、`模型增补_有可见字素`、`模型增补_是区域指示符`、`模型增补_是附加记号` |\n| 字素 | `模型增补_字素簇数` |\n| 文本 | `模型增补_徽章文本`、`模型增补_徽章文本原因` |\n| 语言 | `模型增补_语言标识合法`、`模型增补_本地化徽章文本` |\n| 徽章 | `模型增补_可选对象`、`模型增补_非法徽章`、`模型增补_选定色调`、`模型增补_徽章` |\n| 目录 | `模型增补_收集徽章`、`模型增补_目录模型信息` |\n\n既有函数改动 1 处：`解码模型清单` 在 `capabilities` 之后条件写入 `badge`\n（`kind=无` 不写键，`invalid` 也不隐藏条目——与上游 `ListingEntry.badge?` 同形）。\n导入新增 `字典项列表`；导出追加上述名字（沿用本文件多行导出约定）。\n\n### `src/模型列表缓存.light`（6573 → 15100 字节）\n新增 §B7，9 个段落：\n\n`模型增补缓存_视图刷新时机`、`模型增补缓存_作用域变了`、`模型增补缓存_自动刷新延迟`、\n`模型增补缓存_清单变化了`、`模型增补缓存_通知`、`模型增补缓存_通知失败文案`、\n`模型增补缓存_刷新失败文案`、`模型增补缓存_刷新结算`、`模型增补缓存_释放结算`\n\n文件头「保留的纯逻辑」追加 ⑥–⑨（maxAge=0 语义 / 变化通知 / 排程换算 / refresh 结算）；\n`解析列表时序` 注释补 rc.3 的 `maxAgeMs=0` 口径。导入新增 `值工具.深相等JSON`——\n复用仓里既有的上游 `deepEqualJson` 移植，不再另写一份深比较。\n\n## 2. 新增判据与断言数\n\n`examples/test_R221_B7模型增补.light`：11 个分段、**115 行断言**、**123 个上游标注标签**\n（`[badge*]`/`[nobadge*]`/`[meta*]`/`[text*]`/`[proto]`/`[lang*]`/`[catalog*]`/`[modelinfo*]`/\n`[timing*]`/`[publish*]`/`[identical*]`/`[retain*]`/`[disabled*]`/`[signedout*]`/`[credlookup*]`/`[dispose*]`），\n逐条注释写明取自哪个上游 `it(...)`。唯一标记串：`R221-B7-BADGE-MARKER`。\n\n`tests/unit/test_R221_B7模型增补.py`：7 条用例——示例全绿 + 标记串、断言数/标注数下限、\n两模块字节数不减少（28906 / 6693 为改前口径）、新段落跨 src 唯一且统一前缀、\n既有导出未丢、上游文案逐字钉死、**自动反跑**（改反示例一条期望 → 子进程 rc≠0）。\n\n## 3. 判据输出原文\n\n```text\n$ python 运行.py examples/test_R221_B7模型增补.light\nR221-B7-BADGE-MARKER 徽章上限=12 / maxAge0=每次访问刷新--- 测试 R221_B7模型增补 通过 ---\n[rc=0]\n\n$ python -m pytest tests/unit/test_R221_B7模型增补.py -q\nbringing up nodes...\n.......                                                                  [100%]\n7 passed in 7.12s\n[rc=0]\n\n$ python hive_compat.py run \"test -f src/模型目录.light\"\n[rc=0]\n```\n\n既有示例回归（改的两个模块的四张旧判据）：`test_T0173_B1缓存.light` / `test_T0173_B1解码.light` /\n`test_模型目录.light` / `test_模型目录扩展.light` 全部 `rc=0`。\n\n## 4. 反跑记录（在最终内容上执行，值反 + 抛反各 1 处）\n\n| 反跑 | 改法 | 结果 | 恢复 |\n|---|---|---|---|\n| 值反 | `模型增补_徽章最长字素 为 12` → `为 13` | 示例 `rc=1`，命中 `[badge0b] MAX_BADGE_TEXT_LENGTH=12 实际=13` | 按字节恢复，sha256 一致 |\n| 抛反 | `解析列表时序` 负数年龄的 `抛出 …` → `返回 {... \"maxAgeMs\": 0}` | 示例 `rc=1`，命中 `[timing13] maxAgeMs 负数必须抛错 实际=False 期望=True` | 按字节恢复，sha256 一致 |\n\n恢复后复跑：`rc=0` 且通过行存在，两模块 sha256 与改前逐字节一致：\n\n```\n模型目录.light        3fd999b3454a485bd96ae12cd4e998c2536af8416981b7d7a62f5ffab0127162\n模型列表缓存.light    2ec7cf0fd6544e56f54e4cf76304742bdcf09cc5188d419b33313b2438b31bfc\nexamples/test_R221_B7模型增补.light  06c6f70f05938eaef3a7471e179f054792074a358eb9f5ef9c6ba89d80c79809\ntests/unit/test_R221_B7模型增补.py   a3a222f1622e78595700729094adee1a5582367e78450814536b861401cc6be5\n```\n\npytest 侧另有 `test_反跑_改反一条期望值必须红`：把 `\"client_metadata is not an object\"` 改反后\n子进程 rc≠0（绿转红），原文件不动。\n\n## 5. 段落名冲突扫描\n\n跨 `src/*.light` 统计 4482 个段落名；本卡新增 **31** 个（模型目录 22 + 缓存 9），\n全部带 `模型增补` 前缀、各出现 **1 次** → **新增名字冲突 0**。\n仓里既有 125 组重名属基线问题，无一组含 `模型增补*`（本卡未触碰）。\n\n## 6. `credential.ts` 结论：**有承载，但落点不在本卡 paths → 本卡不落（登记后续）**\n\n- 语义落点存在：`src/凭据链.light` 是凭据权威模块（来源表 / 优先级倒置 / 可否写入 / `{configured,source,writable}` 视图），\n  正是「挂载了凭据服务则存储权威、含缺失；未挂载才读启动环境」该落的地方；\n  `src/设置模型页.light` §8 `校验密钥` 覆盖了客户端「空白 → 格式错误」这半边。\n- 但对照上游有两块缺口：\n  1. **seam 权威分支缺失**：上游 `resolveDeepSeekApiKey` / `deepSeekApiKeyConfigured` 先看\n     `ctx.get('credentials')`——服务在，缺失就是权威答案，**不再读启动环境**；服务不在才回退\n     `launchEnvironmentOf(ctx).get(ref)`。本仓 `凭据链` 只有四源合并优先级（file > env > project-env > user-env），\n     没有「seam 有无」这条分支。\n  2. **可用性校验口径偏窄**：`assertUsableApiKey` = `normalizeApiKey`（trim 后必须全部落在\n     可打印 ASCII `0x21–0x7E`；空 → `empty`；越界 → `illegalCharacters`）+ 两条拒绝文案；\n     本仓 `校验密钥` 只查空格/制表/换行，不含 Latin-1/控制字符越界。\n- 硬约束「只改 paths 内文件、不碰既有模块」压过「落到现有凭据模块」，故**不新建模块、不在错误模块里复制一份**。\n  建议由凭据线单开一张卡：`凭据链.light` 增 seam 权威判定 + `assertUsableApiKey` 纯语义，\n  `设置模型页.light` 的 `校验密钥` 对齐 printable-ASCII 口径。\n\n## 7. 未移植（宿主面，如实登记，不伪装成已做）\n\n- `fetch` / HTTP 与错误归因、`AbortController`、`dsh-timeout` deadline、定时器与 `await`、\n  `node:crypto` 作用域哈希、`ctx.emit('llm/models-updated')`；\n- `requestModelListing` / `LISTING_TIMEOUT`（B1 已声明不移植，本卡不变）；\n- `Intl.Segmenter` 全量 UAX #29：按 G-1 近似（常用组合记号块 / 变体选择符 / emoji 修饰符 /\n  键帽 / 标签字符 / 区域指示符成对 / ZWJ），已在文件头写明影响面（仅第 13 个用户感知字符这类边界）。\n\n## 8. 偏离声明\n\n- G-1（字素近似）、G-2（`__proto__` 机理不同、行为一致）已写在 `模型目录.light` 文件头。\n- 时序面：`模型增补缓存_刷新结算` 把「观看」（`await view(settings)`）交给调用方，入参收\n  `曾认证 / 观后认证`，其余分支与上游 `refresh()` 逐条对应。",
+  "error": "",
+  "declared_paths": [
+    "src/模型目录.light",
+    "src/模型列表缓存.light",
+    "examples/test_R221_B7模型增补.light",
+    "tests/unit/test_R221_B7模型增补.py"
+  ],
+  "changed_files": [
+    "src/模型列表缓存.light",
+    "src/模型目录.light",
+    "examples/test_R221_B7模型增补.light",
+    "tests/unit/test_R221_B7模型增补.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "9fb60e34c8e943d3a93a83f40d08b214",
+  "store_write_error": "T-0364 结果写入 leader store 失败（已尝试 4 次）：T-0364 的租约已过期，结果被拒（lease lost）"
+}
