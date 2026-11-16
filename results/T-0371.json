@@ -1,0 +1,67 @@
+{
+  "task": "T-0371",
+  "agent": "raccoon-fb98",
+  "mode": "manual",
+  "status": "failed",
+  "branch": "task/T-0371",
+  "base": "main",
+  "head": "8d5ed5809590ce91afd71a8c97fd820621acfed4",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-16T23:19:29+08:00",
+  "finished_at": "2026-11-16T23:20:52+08:00",
+  "duration_s": 83.4,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python3 -m pytest -q tests/",
+      "code": 1,
+      "tail": [
+        "tests/test_train_demo.py:132: AssertionError",
+        "=========================== short test summary info ============================",
+        "FAILED tests/test_acceptance.py::test_acceptance_main_exit_code_reflects_failures",
+        "FAILED tests/test_openi_v3_judge.py::test_label_coverage_surfaces_partial_coverage",
+        "FAILED tests/test_train_demo.py::test_decision_sequences_use_real_labels_only"
+      ]
+    },
+    {
+      "cmd": "PYTHONPATH=src python3 -m lightprism budget --json",
+      "code": 0,
+      "tail": [
+        "  \"l0_core_size\": 44,",
+        "  \"l0_core_source\": \"内置冻结表（未能 import light 仓的 src.keywords: ModuleNotFoundError）\",",
+        "  \"decision_density_cap\": 0.02,",
+        "  \"issues\": []",
+        "}"
+      ]
+    }
+  ],
+  "summary": "# T-0371 工作说明（词表加 PY / LIGHT 段标记）\n\n- 做了什么：在 64K 预算 `reserved` 头部切出 `<PY>`=64000 / `<LIGHT>`=64001（总额仍 65536、l0_core 仍 44、不占决策/验证额度）；demo 4096 词表追加 `<PY>`=2900 / `<LIGHT>`=2901（旧 id 不变、嵌入仍 4096、旧 checkpoint strict 可加载）。\n- 序列：新增共享核心 `_render_translation_core`，训练 `render_training_translation` 与推理 `render_inference_translation` 共用；`sequence.py` 支持段解析/渲染与配对校验；翻译数据 1394 行补 `sequence_marked`，manifest 更新 size/span/段 id/sha256。\n- 改的文件：`src/lightprism/vocab.py`、`sequence.py`、`demo/sft_build.py`；`data/unified/{vocab_4096.json,translation_tasks.jsonl,manifest.json}`；`tests/{test_sequence,test_sft_data,test_demo_vocab}.py`；`reports/段标记对照报告.md`；`docs/词表预算.md`。全部在卡面 paths 内，未动契约外文件。\n- 验证：`pytest -q tests/test_sequence.py tests/test_sft_data.py tests/test_demo_vocab.py` → 57 passed；`lightprism budget --json` → ok=true / 65536 / issues=[]；`train_demo --steps 20` → rc=0（1m18s）。\n- 全量 pytest：275 条 → 271 passed / 1 skipped / **3 failed**；3 条均为 `main@5344e52` 已有基线红（acceptance V7、T-0370 的 judge 覆盖、decisions 29→241），已在未改动 main 复跑确认，非本卡引入；修复点均在 paths 外。\n- 反向验证：把训练侧写死旧 `<CODE>`（推理不动）→ 守卫测试 2 failed；还原后 2 passed，已实际跑过。\n- A/B（200 步 / 同 seed / 同超参 / 同词表，只换格式）：val 4.44012 vs 4.43952；翻译 CE 3.74018 vs 3.82678；结构合法率 0/0；段边界 teacher-forced 命中 13/16 (81.25%) vs 0/16。证据等级 **inconclusive**：markers 的 `<LIGHT>` 只在翻译行出现，曝光远低于到处出现的 `<CODE>`，同预算下欠训练；不是“新标记更差”的结论。\n- 遗留：`src/lightprism/demo/train_demo.py` 不在本卡 paths，生产训练仍走旧双 `<CODE>`；接线只需一行 import + 一行 return，留给后续卡。200 步不足，下一步做曝光对齐 + ≥3000 步重跑。\n- 未卡住；没有写入 token/密钥。\n\n## 结果未落 store（T-0296）\n\n- Git 侧已完成：res/T-0371 分支、task/T-0371（head 8d5ed5809590ce91afd71a8c97fd820621acfed4）\n- store 侧**未写入**：T-0371 结果写入 leader store 失败（已尝试 4 次）：T-0371 的租约已过期，结果被拒（lease lost）\n- 影响：看板/claim 的 store 视图看不到结果，租约过期后这张卡可能被重新派发；Git 结果不会丢，`hive land` 读的是Git 侧 res/T-0371，可以照常合入。\n- 下一步：**不要直接重跑 `hive submit T-0371`**（`result_info` 会报「已经有结果」把重跑挡住）；要让 store 视图一致，先删 res/T-0371 分支再重跑，或用 `hive doctor` 体检 / `hive repair --apply` 对齐状态。",
+  "error": "verify 未通过",
+  "declared_paths": [
+    "src/lightprism/vocab.py",
+    "src/lightprism/sequence.py",
+    "src/lightprism/demo/sft_build.py",
+    "data/unified/",
+    "configs/",
+    "tests/test_sequence.py",
+    "tests/test_sft_data.py",
+    "tests/test_demo_vocab.py",
+    "reports/段标记对照报告.md",
+    "docs/词表预算.md"
+  ],
+  "changed_files": [
+    "data/unified/manifest.json",
+    "data/unified/translation_tasks.jsonl",
+    "data/unified/vocab_4096.json",
+    "docs/词表预算.md",
+    "reports/段标记对照报告.md",
+    "src/lightprism/demo/sft_build.py",
+    "src/lightprism/sequence.py",
+    "src/lightprism/vocab.py",
+    "tests/test_demo_vocab.py",
+    "tests/test_sequence.py",
+    "tests/test_sft_data.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "fd09aca0f3164d14b2199416fcd37ee5"
+}
