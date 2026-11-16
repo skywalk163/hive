@@ -2249,6 +2249,60 @@ def read_ref_file(repo: Path, ref: str, path: str):
         return p.stdout
 
 
+def read_ref_files_batch(repo: Path, specs: list[str]) -> dict[str, str | None]:
+    """一次 ``git cat-file --batch`` 读回多个 ``<ref>:<path>`` 的内容。
+
+    逐卡 ``git show`` 的扇出在 Windows 上是纯进程开销：248 张卡 × 3 类 ref
+    （claim/res/status）× ~0.3s ≈ 200s+，`status --json` 被拖到分钟级、看板
+    刷新循环被 120s 超时腰斩（2026-11-16 实测；git fetch 本身只要 1s）。
+    一个子进程替代 N 个。
+
+    返回 {spec: 内容文本}，缺失的 ref 值为 None；解析不出预期条数时返回
+    空 dict，调用方回退逐个 read_ref_file，绝不比原来更差。
+
+    实现注：必须拿**字节**输出——cat-file 的 size 是字节数，而含中文的
+    JSON 字节数≠字符数。run() 的代理层统一把 stdout 解码成文本，这里走
+    它的直通分支（显式 stdout=PIPE 即透传真 subprocess）；cat-file 不会
+    fork 长寿网络后代，T-0285 的 EOF 挂死风险不适用于这条命令。
+    """
+    if not specs:
+        return {}
+    stdin = ("\n".join(specs) + "\n").encode("utf-8")
+    try:
+        with _GIT_LOCK:
+            p = subprocess.run(["git", "cat-file", "--batch"], cwd=str(repo),
+                               input=stdin, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, check=False,
+                               timeout=120, **no_window_kwargs())
+    except Exception:  # noqa: BLE001  批量读只是加速器，失败不致命
+        return {}
+    if p.returncode != 0:
+        return {}
+    data = p.stdout or b""
+    out: dict[str, str | None] = {}
+    pos = 0
+    for spec in specs:
+        nl = data.find(b"\n", pos)
+        if nl < 0:
+            return {}                      # 输出不完整：整体放弃
+        header = data[pos:nl].decode("utf-8", "replace").strip()
+        pos = nl + 1
+        if not header or header.endswith(" missing"):
+            out[spec] = None                # ref 不存在：缓存住「缺失」
+            continue
+        parts = header.split(" ", 2)
+        if len(parts) != 3 or not parts[2].isdigit():
+            return {}                      # 头部不认识：整体放弃
+        size = int(parts[2])
+        if pos + size > len(data):
+            return {}
+        out[spec] = data[pos:pos + size].decode("utf-8", "replace")
+        pos += size + 1                     # 内容后还带一个换行
+    if len(out) != len(specs):
+        return {}
+    return out
+
+
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
 # 任务卡状态机。加新状态时务必同步改这几个集合，别让「在飞」的判断散落在各处字符串比较里。
@@ -2449,6 +2503,25 @@ class Hive:
             raise HiveError(f"没有登记 agent {name}")
         return json.loads(p.read_text(encoding="utf-8"))
 
+    def _read_ref_cached(self, ref: str, path: str):
+        """带批量的 ref 读：命中 ``_ref_cache`` 直接用，未预热回退逐个读。
+
+        cmd_status 会先用 read_ref_files_batch 把全部卡的 claim/res/status
+        一次性读回；其他调用方（submit/close 等单卡路径）没预热，行为与
+        read_ref_file 完全一致。
+        """
+        spec = f"{ref}:{path}"
+        cache = getattr(self, "_ref_cache", None)
+        if cache is None or spec not in cache:
+            return read_ref_file(self.dir, ref, path)
+        raw = cache[spec]
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+
     def claim_info(self, tid: str):
         if claim_backend() == "store":
             store = local_store()
@@ -2460,15 +2533,15 @@ class Hive:
                 out["agent"] = out.get("owner") or ""
                 out["lease_until"] = lease_until_iso(out.get("lease_until"))
                 return out
-        return read_ref_file(self.dir, f"origin/claim/{tid}", f"claims/{tid}.json")
+        return self._read_ref_cached(f"origin/claim/{tid}", f"claims/{tid}.json")
 
     def status_info(self, tid: str):
         """agent 主动推送的任务进度（status/<tid> 分支）；没推过则 None。"""
-        return read_ref_file(self.dir, f"origin/status/{tid}", f"status/{tid}.json")
+        return self._read_ref_cached(f"origin/status/{tid}", f"status/{tid}.json")
 
     def result_info(self, tid: str):
         # 先看进行中的 res 分支，再看 close 后归档到 main 的 results/
-        data = read_ref_file(self.dir, f"origin/res/{tid}", f"results/{tid}.json")
+        data = self._read_ref_cached(f"origin/res/{tid}", f"results/{tid}.json")
         if data is not None:
             return data
         local = self.dir / "results" / f"{tid}.json"
@@ -5423,6 +5496,16 @@ class Hive:
             self._status_summary(as_json=as_json, include_archived=include_archived)
             return
         cards = self.cards()
+        # 逐卡 git show 是 status 的真正瓶颈（248 卡 × 3 类 ref × ~0.3s ≈ 200s+，
+        # Windows 进程开销；fetch 本身只要 1s）。autosync 已完成、origin refs
+        # 已定，这里一次 cat-file --batch 全读回；失败自动回退逐个读。
+        self._ref_cache = {}
+        specs = []
+        for tid in cards:
+            specs.append(f"origin/claim/{tid}:claims/{tid}.json")
+            specs.append(f"origin/res/{tid}:results/{tid}.json")
+            specs.append(f"origin/status/{tid}:status/{tid}.json")
+        self._ref_cache = read_ref_files_batch(self.dir, specs)
         # 读视角滞后：不擅自替用户 merge 脏工作区，但必须把这件事显式标出来。
         # T-0353 起 local_stale 由三态判定的 behind 给出；干净 ff-only
         # 自动同步成功后 HEAD 追平远端，local_stale 自然转 false。

@@ -442,3 +442,41 @@ def test_sync_one_repo_reuses_three_state_diverged(repos, monkeypatch):
     assert out["status"] == "diverged"
     assert "人工裁决" in out["reason"]
     assert attempts == [], "干净分叉不该尝试 merge --ff-only"
+
+
+# --------------------------------------------------------------------------- #
+# 批量 ref 读（read_ref_files_batch）：status 瓶颈修复的回归
+# --------------------------------------------------------------------------- #
+def test_read_ref_files_batch_matches_individual_reads(repos):
+    """批量 cat-file 读回的内容与逐个 git show 完全一致；缺失 ref 记 None。"""
+    spec_ok = "origin/main:tasks/T-9000.md"
+    spec_missing_ref = "origin/res/T-9000:results/T-9000.json"
+
+    batch = hive.read_ref_files_batch(repos.a, [spec_ok, spec_missing_ref])
+    assert len(batch) == 2, "两条 spec 都该有结果（含缺失的）"
+    single = hive.read_ref_file(repos.a, "origin/main", "tasks/T-9000.md")
+    assert batch[spec_ok] == single, "批量读与逐个读内容必须一致"
+    assert "T-9000" in single and "基线卡" in single
+    assert batch[spec_missing_ref] is None, "缺失的 ref 应缓存住 None"
+
+    # 空 spec 列表 / 全缺失：不炸、不误报
+    assert hive.read_ref_files_batch(repos.a, []) == {}
+    all_missing = hive.read_ref_files_batch(
+        repos.a, ["origin/claim/T-9000:claims/T-9000.json",
+                  "origin/status/T-9000:status/T-9000.json"])
+    assert all(all_missing.get(s) is None for s in (
+        "origin/claim/T-9000:claims/T-9000.json",
+        "origin/status/T-9000:status/T-9000.json"))
+
+
+def test_cmd_status_uses_batch_and_stays_correct(repos, capsys):
+    """cmd_status 走批量缓存后，卡面/健康度/状态推导与逐个读时一致。"""
+    repos.push_card("T-9006")
+    h = hive.Hive(repos.a)
+    rows = _status_json(h, capsys)
+    assert any(r["id"] == "T-9006" for r in rows), "自动同步后应看到远端新卡"
+    for row in rows:
+        assert "sync_health" in row and "local_stale" in row
+        assert row["sync_health"]["behind"] is False
+    # 缓存确实被预热且被消费（缺失 ref 也进了缓存，不再逐个 show）
+    assert isinstance(h._ref_cache, dict) and len(h._ref_cache) >= len(rows) * 3
