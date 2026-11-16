@@ -1,0 +1,45 @@
+{
+  "task": "T-0365",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0365",
+  "base": "main",
+  "head": "f099c72e065f4be9f15be78f99625a98a07f8326",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-16T11:15:28+08:00",
+  "finished_at": "2026-11-16T11:25:38+08:00",
+  "duration_s": 610.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/unit/test_R221_宿主面登记.py -q",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".........                                                                [100%]",
+        "9 passed in 9.49s"
+      ]
+    },
+    {
+      "cmd": "test -f docs/宿主面登记清单.md",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0365 交付说明（doubao-win）\n\n## 结论\n\n`docs/宿主面登记清单.md` 末尾 append `## 11. 0.2.2-rc.2/rc.3 增量宿主面登记（2026-11-16，R221-C 补登）`，\n纯 append 67 行、0 删除；判据脚本 `tests/unit/test_R221_宿主面登记.py` 9 项全绿，反跑双证。\n\n- **新增条数：22 条**（§10 基数 126，累计 148）\n- **§11 各子节条数**：11.1 client 渲染层与桌面壳 **5**；11.2 协作/终端/子代理宿主侧 **5**；\n  11.3 平台专属与原生宿主 **3**；11.4 Node 生态服务、工具壳与文档模板 **9**\n- **统计行前后值**：`登记 126 → **148**`（§10 原行 `登记 113 → **126**` **原文未动**）\n- 其中 9 条为「部分」（纯逻辑侧已进 `对标清单.json`，宿主侧仍缺），其余 13 条为纯宿主面\n\n## 判不准归属（单列，未硬塞进表）\n\n1. 代码块按语言扩展渲染（client 侧未定位到具体包）\n2. 插件索引 Star / 下载量（A1 §1.3 未出现独立包锚点）\n3. 多语言资源（日 / 西 / 法 / 德 / 俄 / 葡）未见独立包\n4. Gemini 原生提供方接线、模型请求 UA 启动标记（`llm/` 下未逐文件定位）\n5. 桌面更新渠道切换、插件热更新与恢复（`apps/desktop` 内未逐文件定位，暂随 11.1 第 5 行登记面）\n6. Cordis Core 4.1.0 / Loader 1.1.0 / Include 1.1.0、Zod 4.6.6 / Stagehand 4.4.0（vendor 版本升级，非包级新增）\n7. Git Worktree 评审 UI（`experimental/worktree` 仅清理判定纯逻辑已进 B-f2，评审 UI 未定位）\n\n## 验收结果\n\n| 判据 | 结果 |\n|---|---|\n| `python -m pytest tests/unit/test_R221_宿主面登记.py -q` | **9 passed**（连跑 3 次一致） |\n| `test -f docs/宿主面登记清单.md` | Windows 无 POSIX `test`，用 `Test-Path -PathType Leaf` → **True**（hive 的 `verify_command` 对 Windows 有兼容垫层） |\n| 反跑①：删掉整节 `## 11.` | **7 failed**（红） |\n| 反跑②：恢复后复绿 | **9 passed**（绿） |\n| 回归：`test_R221_增量清单` / `_指南对账` / `_B7模型增补` 一起跑 | **25 passed** |\n\n## 判据口径（不是「只查文件存在」）\n\n脚本读 utf-8 原文后逐行断言：§11 按行首锚定只出现一次；子节 3~4 个；数据行 ≥ 8；\n每行恰好 5 列且末列以「登记」开头；每行必须含 `packages/` 或 `apps/` 的包/文件锚点；\n每行必须带「缺宿主层 / 平台专属 / 依赖 Node 生态 / 纯 UI / 文档」中至少一个不移植理由；\n统计行必须等于 `126 + 实际行数`；§9/§10 标题与 `登记 113 → **126**` 原文仍在、章节顺序不乱；\n判不准归属 7 项单列且不得出现在表格里。另有 3 条 in-test 反跑（整节删除 / 破坏一行状态列 / 删统计行）必须抛 AssertionError。\n\n## 边界\n\n- 只改 `paths` 内两个文件；未动 §0–§10 任何一行（`git diff` 只有 67 行 `+`、0 行 `-`）。\n- 未写 token / 密钥 / 内网 IP；上游实机数字均取自 A1/A2 交付文本，未自造新数字。\n- 本机 Windows：verify 的 POSIX 判据走 hive 兼容垫层，未触发 exit 255 假失败，故未切 192.168.0.88。",
+  "error": "",
+  "declared_paths": [
+    "docs/宿主面登记清单.md",
+    "tests/unit/test_R221_宿主面登记.py"
+  ],
+  "changed_files": [
+    "docs/宿主面登记清单.md",
+    "tests/unit/test_R221_宿主面登记.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "2a0d4c38cef94a94bb19c6d881cbdf5d",
+  "store_write_error": "T-0365 结果写入 leader store 失败（已尝试 4 次）：T-0365 的租约已过期，结果被拒（lease lost）"
+}
