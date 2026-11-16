@@ -1,0 +1,52 @@
+{
+  "task": "T-0369",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0369",
+  "base": "main",
+  "head": "d26e47eabaf3d99307001feb7e045b4c5134fe02",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-16T12:53:11+08:00",
+  "finished_at": "2026-11-16T12:56:17+08:00",
+  "duration_s": 186.9,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/unit/test_R221_Bf4会话与子代理.py -q",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "..............                                                           [100%]",
+        "14 passed in 21.85s"
+      ]
+    },
+    {
+      "cmd": "test -f src/会话.light",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0369（R221-Bf4）工作说明\n\n## 做了什么（上游 dsh-v0.2.2-rc.3 = 38a6a5c965）\n\n三条指南条目全部落地，且**先读了上游源码**再写（未凭记忆）：\n\n- **#14 session-append-overloads** → `src/会话.light`\n  `Session.append` 上游是双重重载（单事件 / 事件元组数组）。光明无函数重载，用**形状分派**复刻：\n  `记录事件(类型, 数据=空)` 第一个实参非字符串即转 `记录事件批(类型)`；单事件返回单条（形状不变），\n  数组返回同长数组，空数组返回 `[]`。批量路径**先全量校验再落盘**（对齐上游 `#appendEvents` 的\n  「先 snapshotAppend 全部候选，再逐条 push」），任一条不合法整批不写；每条仍走 `记录事件`，\n  所以产出的**事件形状与钩子广播与单事件完全同源**（日志格式不变，指南明确要求）。\n- **#13 runtime-context-reminders** → `src/会话日志深化.light`\n  按 `packages/core/agent-loop/src/runtime-context.ts` 的 `RuntimeContextProjection.project` 复刻：\n  首份/后续两种引导语（首份**不宣称**覆盖更早上下文，后续明确覆盖「对话摘要保留的上下文」）、\n  `CLEARED` 常量逐字、`form:'snapshot'` + `sections:[]` 清空标记、条目深比相等则不因文案刷新、\n  旧记录（无 `source.sections`）**只刷新一次**（用 `会话提醒回灌` 把产出回灌保留态后同条目即判等）、\n  正文里的 `</system-reminder>` 按上游 `/gi` 语义转义成 `<\\/system-reminder>`（大小写不敏感 + 容许标签内空白）。\n- **#15 subagent-interrupt-default** → `src/子代理预设选择.light` + `src/代理团队.light`\n  严格区分**两个层次**：插件默认恒为真（上游 `z.boolean().default(true)`）；内置组合默认假\n  （base + web-app `standard`/`cordis`/`ptc` 四处）。关掉的只是 `interrupt_agent` **工具**，\n  `send_message`/`list_agents`/`wait_agent` 与 `ctx.subagents.interrupt()` 服务 API 仍在。\n  Team 模式同一条规则（上游 `TEAM_TOOLS` 只有四个 `team_task_*`，Team 包不自带中断工具）。\n\n## #13 落点定位结论（任务书要求「先定位」）\n\n本仓「运行时上下文快照的**渲染**」确实另有落点（`src/提示模板.light`、`src/系统提示.light`\n的 `渲染上下文快照`），但**本卡判的是日志写入侧的记录形状与提醒包装**（#13 原文说的就是\n「`user/message` 记录的文本被包进 `system-reminder`」以及「旧记录刷新一次」），\n属于 `会话日志深化.light` 的职责，因此**没有去双写** `时间上下文.light`（`src/时间上下文.light`\n只做时区/时长读数，不含 runtime-context 记录形状，经核不属于本条落点）。\n渲染侧文案本次**未动**，见下方「没做的部分」。\n\n## 改了哪些文件\n\n| 文件 | 变化 |\n|---|---|\n| `src/会话.light` | `记录事件` 加分派 + `数据` 默认参；新增 `记录事件批`（先验后写） |\n| `src/会话日志深化.light` | 重写 §7：`追加事件批` + 新增 `会话提醒*` 一组（含投影/保留态/回灌/转义） |\n| `src/子代理预设选择.light` | 重写 §6：新增内置组合名表、插件默认、组合合成判定、控制工具面 |\n| `src/代理团队.light` | 新增 §Team：团队工具名表、团队含中断、中断后任务快照/未读数 |\n| `examples/test_R221_Bf4会话与子代理.light` | 判据重写，**106 条断言**（任务书要求 ≥24） |\n| `tests/unit/test_R221_Bf4会话与子代理.py` | 7 条 → **14 条**，钉结构性不变量 |\n\n## 验证\n\n- `python -m pytest tests/unit/test_R221_Bf4会话与子代理.py -q` → **14 passed**\n- `python 运行.py examples/test_R221_Bf4会话与子代理.light` → `--- 测试 R221_Bf4会话与子代理 通过 ---`\n- 既有判据回归 15 个全绿（会话/会话日志深化/代理团队/R175_B3复刻/会话V3迁移/会话格式/会话存储/\n  会话持久化JSONL/会话日志增量/子代理核心/子代理深化/子代理续传/团队看板/会话投影缓存/会话冷读）\n- **段落名冲突扫描**：本卡 32 个段落名跨 `src/*.light` 零冲突（全仓另有 164 组历史重名，均非本卡）\n- **反跑 5 处**（全部 变异→红→还原→绿）：\n  值反①内置组合默认改真 → `sub-内置默认关 实际=true 期望=false`\n  值反②落盘挪进循环（半批）→ `ap-坏批不落盘 实际=5 期望=4`\n  值反③首份文案改成宣称覆盖 → `断言含失败: ctx-首次不覆盖`\n  抛反①时间戳校验改恒假（该抛不抛）→ `应抛错未抛: ap-坏批报错`\n  抛反②未知引导种类静默兜底 → `应抛错未抛: ctx-未知种类报错`\n\n## 没做 / 做不到（诚实列）\n\n1. **渲染侧文案未改**：`src/提示模板.light` / `src/系统提示.light` 的 `渲染上下文快照` 仍是\n   `Current runtime context. This snapshot supersedes earlier runtime-context snapshots.`（英文旧文案，\n   且**每一份都宣称覆盖**）。这两处不在本卡 `paths` 内，按要求未动。若要对齐上游的\n   「首份不宣称覆盖」，需另开卡改这两处——本卡只保证了**写入侧**的两种引导语正确。\n2. **`Session.append` 的 `opts`（surfaceOp / sourceEventSeqs）未复刻**：上游批量条目是\n   `[type, data, surfaceOpts]` 三元组，本仓事件记录没有 surface intent 这一层（surface 由\n   `会话.light` 的 `投影节点0`/`整理消息` 自己算），硬塞会与既有投影语义打架。批量条目本次为\n   `[类型, 数据]`；日志层 `追加事件批` 仍是 `[类型, 载荷, 时间戳]`。这是**有意的口径差**，非遗漏。\n3. **`RuntimeContextProjection` 的 surface 回放未复刻**：上游构造时用 `eventsNewestFirst` +\n   `surface.nodes` 回放历史判断「哪条快照仍在 surface 上」。本仓本模块不持有 surface 投影，\n   改为调用方传入「存在」事实（`会话提醒保留态`）。回放逻辑本身在 `会话日志深化` 的投影段里已有，\n   但未把它接成「找最近一条仍在 surface 的 runtime-context」，因为 surface 归属属于 `会话.light` 职责。\n4. **Team 侧只做判定不做装配**：`会话提醒团队工具名表` 是「按规则算出工具名清单」的纯逻辑；\n   真正的 profile/preset YAML 装配（上游 `cordis.patch.yml`）属宿主面，本仓无承载，按仓库惯例登记不移植。\n5. **`interrupt` 配置键名**：本仓既有约定用中文键 `中断`，上游线键是 `interrupt`。两个键名\n   `预选含中断工具` / `预选组合含中断` **都接受**（中文优先），避免与既有调用点断层；这属于本地适配，\n   不是上游语义差异。\n\n## 风险\n\n- `记录事件` 加了形状分派：若将来有人给 `类型` 传非字符串（例如误传数字），现在会走到批量分支并抛\n  `批量追加要求事件数组`，报错文案不如以前直白。但这是**唯一**能表达「双重重载」的纯光明做法，\n  且已在 `tests/unit` 里钉住分派形状。\n- 批量路径依赖「先构造 `待写` 再落盘」；`tests/unit/test_批量追加先全量校验再落盘` 用\n  「落盘语句必须在 `设 序号 为 序号 + 1` 之后」钉死，改回边验边写会红。\n\n\n## 结果未落 store（T-0296）\n\n- Git 侧已完成：res/T-0369 分支、task/T-0369（head d26e47eabaf3d99307001feb7e045b4c5134fe02）\n- store 侧**未写入**：T-0369 结果写入 leader store 失败（已尝试 4 次）：T-0369 的租约已过期，结果被拒（lease lost）\n- 影响：看板/claim 的 store 视图看不到结果，租约过期后这张卡可能被重新派发；Git 结果不会丢，`hive land` 读的是Git 侧 res/T-0369，可以照常合入。\n- 下一步：**不要直接重跑 `hive submit T-0369`**（`result_info` 会报「已经有结果」把重跑挡住）；要让 store 视图一致，先删 res/T-0369 分支再重跑，或用 `hive doctor` 体检 / `hive repair --apply` 对齐状态。",
+  "error": "",
+  "declared_paths": [
+    "src/会话.light",
+    "src/会话日志深化.light",
+    "src/子代理预设选择.light",
+    "src/代理团队.light",
+    "examples/test_R221_Bf4会话与子代理.light",
+    "tests/unit/test_R221_Bf4会话与子代理.py"
+  ],
+  "changed_files": [
+    "examples/test_R221_Bf4会话与子代理.light",
+    "src/代理团队.light",
+    "src/会话.light",
+    "src/会话日志深化.light",
+    "src/子代理预设选择.light",
+    "tests/unit/test_R221_Bf4会话与子代理.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "4789b3ac2f9048a09cdc7731592d7efd"
+}
