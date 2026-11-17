@@ -260,6 +260,26 @@ def test_overlay_change_invalidates_cursor(tmp_status):
     assert pushed_row["progress"] == 55, "直推的进度没合并进任务行"
 
 
+def test_same_seq_content_change_invalidates_cursor(tmp_path):
+    """T-0384：卡面变了但 lsdb_seq 没变，游标也必须变（否则前端一直拿 unchanged）。
+
+    真实现场：T-0384 已 done 并合入，seq 仍停在 15，页面带着旧游标轮询，
+    永远收到 {"unchanged": true}，面板一直显示 running / 租约过期 / 异常。
+    """
+    path = write_status(tmp_path, snapshot(seq=7, rows=[row("T-9001", state="running")]))
+    with board(path) as base:
+        _code, _body, before = get(base, "/api/status")
+        cursor = before[serve.SYNC_SEQ_HEADER]
+        # 只改卡面内容，seq 一字不动
+        write_status(tmp_path, snapshot(seq=7, rows=[row("T-9001", state="done")]))
+        code, body, headers = get(base, "/api/status?since=" + cursor)
+    assert code == 200, body
+    assert headers[serve.SYNC_SEQ_HEADER] != cursor, (
+        "内容变了但 seq 没变，游标必须前进，否则看板永远停在旧卡面")
+    assert body.get("unchanged") is not True
+    assert body["tasks"][0]["state"] == "done"
+
+
 def test_since_other_seq_returns_full_payload(tmp_status):
     """游标不匹配 = 有变化 → 回全量（并带上新的游标）。"""
     with board(tmp_status) as base:
@@ -385,13 +405,26 @@ def test_sync_health_of_flags_missing_seq_as_unknown():
 # 4. 落盘节流（serve.py 的进程内刷新循环 + 脚本共用同一判据）
 # --------------------------------------------------------------------------- #
 
-def test_status_needs_rewrite_only_on_seq_change(tmp_path):
+def test_status_needs_rewrite_on_seq_or_content_change(tmp_path):
     path = tmp_path / "status.json"
     path.write_text(json.dumps(snapshot(seq=7)), encoding="utf-8")
 
-    same = json.dumps(snapshot(seq=7, rows=[row("T-9001", state="running")]))
-    assert serve.status_needs_rewrite(path, same) is False, (
-        "序号没变就不该重写 status.json（否则 20s 一次全量序列化）")
+    identical = json.dumps(snapshot(seq=7))
+    assert serve.status_needs_rewrite(path, identical) is False, (
+        "序号与内容都没变就不该重写 status.json（否则 20s 一次全量序列化）")
+
+    # T-0384 回归：lsdb_seq 是集群对账轮次，不随本地 close/改卡前进。
+    # 序号没变但卡面变了（如 T-0384 done）必须落盘，否则看板永久停在旧卡面。
+    changed_card = json.dumps(snapshot(seq=7, rows=[row("T-9001", state="done")]))
+    assert serve.status_needs_rewrite(path, changed_card) is True, (
+        "内容变了但序号没变时也要落盘（T-0384 面板假异常）")
+
+    # 每行里的 sync_health 是全局健康度副本，含每拍变化的诊断字段；
+    # 它不能参与内容指纹，否则节流永远失效。
+    noisy = snapshot(seq=7)
+    noisy["tasks"][0]["sync_health"] = {"last_sync_ts": 1.0, "next_t2_at": 2.0}
+    assert serve.status_needs_rewrite(path, json.dumps(noisy)) is False, (
+        "每拍变化的 sync_health 不该让快照被判为内容变化")
 
     newer = json.dumps(snapshot(seq=8))
     assert serve.status_needs_rewrite(path, newer) is True, "序号变了必须落盘"

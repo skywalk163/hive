@@ -41,8 +41,8 @@ mkdir -p "$DASH"
 
 # --- THROTTLE FUNCTIONS BEGIN ---
 # tests/test_dashboard_hlsa.py 会把这一段原样抠进临时沙箱单独跑（不启服务、不连网），
-# 用它证明「序号没变 → status.json 一个字节不写、只更新心跳」。改这一段时保持
-# 自包含：只用 $HIVE / $DASH / $STATUS / $STAMP 与 POSIX sh 工具。
+# 用它证明「序号与内容都没变 → status.json 一个字节不写、只更新心跳」。改这一段时
+# 保持自包含：只用 $HIVE / $DASH / $STATUS / $STAMP 与 POSIX sh 工具。
 # 一份状态 JSON 里的 LSDB 序号（sync_health.lsdb_seq）。
 # 旧后端没有 sync_health → 输出空串，调用方据此退回「每拍都写」的旧行为。
 # 用 python3 取值而不是 grep/awk：字段顺序、嵌套、转义都不该由 sed 猜。
@@ -62,6 +62,40 @@ if isinstance(health, dict) and not health.get("degraded"):
     seq = health.get("lsdb_seq", health.get("seq"))
     if isinstance(seq, int) and seq >= 0:
         print(seq)
+PY
+}
+
+# 一份状态 JSON 的内容指纹（tasks 数组规范化后哈希）。
+# T-0384：lsdb_seq 只是集群对账轮次，不随本地 close/改卡前进。只比 seq 会把看板
+# 永久冻在旧卡面（实测 T-0384 已 done 两小时，面板还显示 running/租约过期）。
+# 每行自带一份 sync_health 副本（含每拍变化的 last_sync_ts 等），必须剔掉再哈希，
+# 否则指纹每拍都变，节流等于没有。
+status_sig() {
+    [ -f "$1" ] || return 0
+    python3 - "$1" <<'PY' 2>/dev/null
+import hashlib
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8-sig") as fh:
+        data = json.load(fh)
+except Exception:
+    raise SystemExit(0)
+if isinstance(data, dict):
+    tasks, board = data.get("tasks"), data.get("board")
+else:
+    tasks, board = data, None
+if not isinstance(tasks, list):
+    tasks = []
+rows = [{k: v for k, v in t.items() if k != "sync_health"}
+        if isinstance(t, dict) else t for t in tasks]
+try:
+    packed = json.dumps([rows, board], ensure_ascii=False, sort_keys=True,
+                        default=str)
+except Exception:
+    raise SystemExit(0)
+print(hashlib.sha256(packed.encode("utf-8")).hexdigest()[:12])
 PY
 }
 
@@ -92,12 +126,15 @@ refresh() {
     fi
     new_seq="$(status_seq "$tmp")"
     old_seq="$(status_seq "$STATUS")"
-    if [ -n "$new_seq" ] && [ -s "$STATUS" ] && [ "$new_seq" = "$old_seq" ]; then
-        # 落盘节流（T-0354 §3）：序号没变 = 卡面内容等价，不重写 status.json，
-        # 只 touch 心跳。省掉 20s 一次的全量序列化与整份落盘。
+    new_sig="$(status_sig "$tmp")"
+    old_sig="$(status_sig "$STATUS")"
+    if [ -n "$new_seq" ] && [ -n "$new_sig" ] && [ -s "$STATUS" ] \
+        && [ "$new_seq" = "$old_seq" ] && [ "$new_sig" = "$old_sig" ]; then
+        # 落盘节流（T-0354 §3 + T-0384）：序号与内容都没变 = 卡面等价，不重写
+        # status.json，只 touch 心跳。省掉 20s 一次的全量序列化与整份落盘。
         rm -f "$tmp"
     else
-        # 序号变了 / 首次 / 旧后端没有序号：照旧整份替换（旧后端宁可多写也不漏变化）。
+        # 序号或内容变了 / 首次 / 旧后端没有序号：整份替换（宁可多写也不漏变化）。
         mv -f "$tmp" "$STATUS" 2>/dev/null || rm -f "$tmp"
     fi
     # 心跳独立于快照内容：刷新循环活着就要留下证据（serve.py 用它判「停摆」）。

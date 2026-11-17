@@ -619,13 +619,48 @@ def overlay_epoch():
     return digest[:12]
 
 
-def combined_cursor(seq, overlay):
-    """把「快照序号 + 叠加层指纹」折成一个前端可用的整数游标。
+def snapshot_signature(data):
+    """任务快照的**内容指纹**（T-0384 假异常）。
+
+    背景：`sync_health.lsdb_seq` 只在一次真正完成的集群对账后前进（hive_repos
+    的 commit），而本地 close/改卡、别人推上来后本机手动 pull，都能改变卡面却
+    不动它。只看 seq 时，卡面已经变了、seq 没变，看板就会永远停在旧快照上——
+    T-0384 已 done 并合入，面板却一直显示「running / 租约过期 / 异常」。
+
+    所以落盘节流和增量游标都必须带上内容维度：这里对 `tasks` 做规范化序列化
+    再哈希。每行里的 `sync_health` 是同一份全局健康度的副本（含 last_sync_ts、
+    next_t2_at 等每拍都会变的诊断字段），必须剔掉，否则指纹每 20s 都变，
+    节流直接失效。`board` 如果存在也一并纳入。
+    """
+    if isinstance(data, dict):
+        tasks = data.get("tasks")
+        board = data.get("board")
+    else:
+        tasks = data
+        board = None
+    if not isinstance(tasks, list):
+        tasks = []
+    rows = []
+    for row in tasks:
+        if isinstance(row, dict):
+            rows.append({k: v for k, v in row.items() if k != "sync_health"})
+        else:
+            rows.append(row)
+    try:
+        packed = json.dumps([rows, board], ensure_ascii=False, sort_keys=True,
+                            default=str)
+    except (TypeError, ValueError):
+        return ""
+    return hashlib.sha256(packed.encode("utf-8")).hexdigest()[:12]
+
+
+def combined_cursor(seq, overlay, snapshot=""):
+    """把「快照序号 + 叠加层指纹 + 内容指纹」折成一个前端可用的整数游标。
 
     前端只需要把上次的值原样回传（不解析、不递增），所以这里取稳定哈希即可，
     不需要全局单调递增。同一份内容必须得到同一个值；任一维变了值就得变。
     """
-    digest = hashlib.sha256(("%d|%s" % (int(seq), str(overlay)))
+    digest = hashlib.sha256(("%d|%s|%s" % (int(seq), str(overlay), str(snapshot)))
                             .encode("utf-8")).hexdigest()
     return int(digest[:8], 16)
 
@@ -641,11 +676,25 @@ def seq_of_status_text(text):
     return lsdb_seq_of(data)
 
 
-def status_needs_rewrite(status_path, new_text):
-    """落盘节流（T-0354 §3）：seq 没变就不重写 status.json。
+def signature_of_status_text(text):
+    """一段状态 JSON 文本 → 内容指纹；解析失败返回空串（调用方按「变了」处理）。"""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return ""
+    return snapshot_signature(data)
 
-    True  —— 需要重写（首次 / 没有旧文件 / 序号变了 / 旧后端没有可信序号）；
-    False —— 内容等价，跳过整份序列化落盘，只 touch 心跳文件。
+
+def status_needs_rewrite(status_path, new_text):
+    """落盘节流（T-0354 §3 / T-0384 修复）：序号**或内容**变了才重写 status.json。
+
+    True  —— 需要重写（首次 / 没有旧文件 / 序号变了 / 内容变了 / 旧后端没有可信序号）；
+    False —— 序号与内容都等价，跳过整份序列化落盘，只 touch 心跳文件。
+
+    T-0354 原本只看 seq，前提是「卡面变了 seq 一定变」。实测这个前提不成立：
+    lsdb_seq 是集群对账轮次，不是卡面版本；T-0384 关闭两小时后 seq 仍是 15，
+    快照被永久冻在「running / 租约过期」，面板一直报异常。所以节流键必须加上
+    内容指纹（见 snapshot_signature）。
     """
     new_seq = seq_of_status_text(new_text)
     if new_seq is None:
@@ -654,7 +703,9 @@ def status_needs_rewrite(status_path, new_text):
         old_text = Path(status_path).read_text(encoding="utf-8-sig")
     except OSError:
         return True
-    return seq_of_status_text(old_text) != new_seq
+    if seq_of_status_text(old_text) != new_seq:
+        return True
+    return signature_of_status_text(old_text) != signature_of_status_text(new_text)
 
 
 def refresh_loop(status_path, interval):
@@ -664,8 +715,9 @@ def refresh_loop(status_path, interval):
     才会出现在快照里；这个循环就是兜底——长时间没推送的卡也由它刷新出真实状态
     （租约过期 → stale，交给 watchdog 回收）。
 
-    T-0354：落盘节流——`sync_health.lsdb_seq` 没变就不重写整份快照（20~30s 一次的
-    全量序列化在多机看板上会同时落盘），只 touch 心跳文件供 /api/status 判活。
+    T-0354：落盘节流——`sync_health.lsdb_seq` 与任务内容指纹都没变就不重写整份
+    快照（20~30s 一次的全量序列化在多机看板上会同时落盘），只 touch 心跳文件供
+    /api/status 判活。T-0384 起内容维度必须参与（seq 不随本地卡面变化前进）。
     """
     argv = hive_argv("status", "--json", "--sync-health")
     while True:
@@ -1261,12 +1313,16 @@ def build_handler(status_path, write_auth="off"):
 
             health = sync_health_of(data)
             seq = health["lsdb_seq"] if health["seq_known"] else None
-            # 游标 = 快照序号 + 叠加层指纹。只有后端给了可信序号时游标才有效；
-            # 旧后端 seq=None，整段增量逻辑直接放行到全量响应。
-            cursor = combined_cursor(seq, overlay_epoch()) if seq is not None else None
+            # 游标 = 快照序号 + 叠加层指纹 + 任务内容指纹。只有后端给了可信序号时
+            # 游标才有效；旧后端 seq=None，整段增量逻辑直接放行到全量响应。
+            # 内容维度是 T-0384 修复：卡面变了但 seq 没变时必须让游标前进，否则
+            # 前端带回旧游标会一直拿到 unchanged，页面永远停在旧卡面。
+            cursor = (combined_cursor(seq, overlay_epoch(), snapshot_signature(data))
+                      if seq is not None else None)
             headers = self._snapshot_headers(cursor)
 
-            # 增量订阅（T-0354 §2）：序号没变就只回一个轻量确认，避免 15s 一次
+            # 增量订阅（T-0354 §2）：序号与内容都没变就只回一个轻量确认，避免 15s
+            # 一次
             # 全量重传（快照几百 KB ~ 几十 MB）。这里用 200 + {"unchanged": true}
             # 而不是 304：浏览器 fetch() 把 304 当非 2xx、body 为空，前端反而要
             # 额外判空；JSON 确认同样只有几百字节，且能带上下一次的健康度。
@@ -1304,11 +1360,12 @@ def build_handler(status_path, write_auth="off"):
             """快照时刻 + 增量游标 + 刷新心跳。
 
             - `X-Snapshot-Mtime`：状态文件 mtime（内容生成时刻），语义与 T-0191 一致；
-            - `X-Hive-LSDB-Seq`：增量订阅游标（`lsdb_seq` 与 `/api/push` 叠加层的
-              合成指纹）。前端 `?since=` 带回这个值；旧后端没有可信序号时给 "0"
+            - `X-Hive-LSDB-Seq`：增量订阅游标（`lsdb_seq`、`/api/push` 叠加层与任务
+              内容指纹的合成值）。前端 `?since=` 带回这个值；旧后端没有可信序号时给 "0"
               （**不能**拿它当游标，见 serve_status）；
-            - `X-Refresh-Mtime`：刷新循环心跳文件 mtime。落盘节流后「序号没变」就不重写
-              status.json，mtime 会长时间不动，只看它会把「集群安静」误判成「刷新停摆」。
+            - `X-Refresh-Mtime`：刷新循环心跳文件 mtime。落盘节流后「序号与内容都没变」
+              就不重写 status.json，mtime 会长时间不动；只看它会把「集群安静」误判成
+              「刷新停摆」，所以心跳单独维护。
             """
             headers = {}
             try:
