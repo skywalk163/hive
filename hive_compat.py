@@ -50,13 +50,19 @@ Git for Windows 常见安装位置；`python3` 直接映射到 `sys.executable`�
     parse_command(cmd)       -> (env, kind, rest) | None
     resolve_bash() / resolve_python3() / resolve_python() -> 可执行文件绝对路径 | None
 
-make 能力过滤（T-0343，给派发层用的纯函数，不碰看板/集群协议）::
+能力过滤（T-0343 建立，T-0344 真正接进 `hive.py` 的 dispatch；纯函数，
+不碰看板/集群协议）::
 
     command_requires_make(cmd)          -> bool
-    required_capabilities(card)         -> set[str]   needs ∪ 从 verify 推出的能力
+    required_capabilities(card)         -> set[str]   needs ∪ verify_requires ∪ verify 推出的能力
+    denied_capabilities(agent)          -> set[str]   机器显式声明「没有」的能力
     declared_capabilities(agent)        -> set[str]   扣掉显式「无某能力」的声明
+    missing_declared_capabilities(agent, card) -> set[str]  派单软过滤用
     agent_supports(agent, caps)         -> bool
     filter_agents_for_card(card, agents)-> list[str]  能力合格的 agent 名（已排序）
+
+注意「软过滤」与 `agent_supports()` 的严格子集判定不同：卡面 `verify_requires`
+只拦机器**自己写了没有**的项，没声明过的机器照旧派单，避免新字段把队列卡死。
 
 另外提供子进程「无窗」出口（T-0206）：Windows 上不给 `creationflags`，console
 子进程（git 是 console 程序）在父进程没有控制台时会**自己新建一个可见控制台**
@@ -533,16 +539,61 @@ def command_requires_make(cmd: str) -> bool:
 
 
 def required_capabilities(card: dict) -> set[str]:
-    """卡实际需要的能力：卡面 `needs` ∪ 从 verify 命令推出来的能力（目前只有 make）。
+    """卡实际需要的能力：`needs` ∪ `verify_requires` ∪ 从 verify 命令推出来的能力。
 
     卡面没写 `needs: make`、但 verify 里是 `make demo` 时，这里仍会把 make 算进去，
     避免「漏标 needs」把卡派到 Windows 提交机上假失败。
+
+    `verify_requires`（T-0344）声明的是判据运行环境（torch / avx2 / posix…），
+    不是「agent 干活的本领」：派单层按「显式声明缺能力」软过滤，见
+    :func:`missing_declared_capabilities`。没写这个字段的旧卡行为一字不变。
     """
     needs = {str(n).strip().lower()
              for n in (card.get("needs") or []) if str(n).strip()}
+    raw = card.get("verify_requires") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    needs |= {str(r).strip().lower() for r in raw if str(r).strip()}
     if any(command_requires_make(v) for v in (card.get("verify") or [])):
         needs.add(MAKE_CAPABILITY)
     return needs
+
+
+def denied_capabilities(agent: dict) -> set[str]:
+    """agent **显式声明没有**的能力（不猜、不按「没写 = 没有」推断）。
+
+    支持三种写法：能力表里的负标签（`no-torch` / `-torch` / `!torch`）、
+    `no_capabilities` 一类字段、以及布尔开关（`no_torch: true` /
+    `has_torch: false`）。派单层拿它做软过滤：只有机器自己说「我没有」，
+    才把需要该能力的判据卡从它手上拿走，没声明的机器照旧派单。
+    """
+    have = {str(c).strip().lower()
+            for key in ("abilities", "capabilities")
+            for c in (agent.get(key) or [])}
+    denied: set[str] = set()
+    for cap in have:
+        if cap.startswith("no-") or cap.startswith(("-", "!")):
+            denied.add(_strip_negative(cap))
+    for key in _NO_CAP_KEYS:
+        raw = agent.get(key) or []
+        if isinstance(raw, str):
+            raw = [raw]
+        for item in raw:
+            denied.add(_strip_negative(str(item).strip().lower()))
+    # 通用布尔开关：`no_torch: true` / `has_torch: false`。只认这两个前缀，
+    # 不去猜裸字段（agent 上 `dispatchable: false` 之类绝不能被当成能力否定）。
+    for key, value in agent.items():
+        low = str(key).strip().lower()
+        if low.startswith("no_") and _truthy(value):
+            denied.add(low[3:])
+        elif low.startswith("has_") and not _truthy(value):
+            denied.add(low[4:])
+    if "no_make" in agent and _truthy(agent["no_make"]):
+        denied.add(MAKE_CAPABILITY)
+    for key in ("has_make", "make"):
+        if key in agent and not _truthy(agent[key]):
+            denied.add(MAKE_CAPABILITY)
+    return denied
 
 
 def declared_capabilities(agent: dict) -> set[str]:
@@ -558,23 +609,25 @@ def declared_capabilities(agent: dict) -> set[str]:
     have = {str(c).strip().lower()
             for key in ("abilities", "capabilities")
             for c in (agent.get(key) or [])}
-    denied: set[str] = set()
-    for cap in list(have):
-        if cap.startswith("no-") or cap.startswith(("-", "!")):
-            have.discard(cap)
-            denied.add(_strip_negative(cap))
-    for key in _NO_CAP_KEYS:
-        raw = agent.get(key) or []
-        if isinstance(raw, str):
-            raw = [raw]
-        for item in raw:
-            denied.add(_strip_negative(str(item).strip().lower()))
-    if "no_make" in agent and _truthy(agent["no_make"]):
-        denied.add(MAKE_CAPABILITY)
-    for key in ("has_make", "make"):
-        if key in agent and not _truthy(agent[key]):
-            denied.add(MAKE_CAPABILITY)
-    return {cap for cap in have if cap not in denied}
+    denied = denied_capabilities(agent)
+    return {cap for cap in have
+            if cap not in denied
+            and not cap.startswith("no-")
+            and not cap.startswith(("-", "!"))}
+
+
+def missing_declared_capabilities(agent: dict, card: dict) -> set[str]:
+    """卡面 `verify_requires` 里，agent 显式声明不具备的能力集合。
+
+    与 `agent_supports()` 的严格子集判定不同，这里是**软过滤**：只认机器明确
+    说「没有」的项（T-0344：本机缺 torch，判据一收集就空，产物其实没问题）。
+    没显式声明的机器一律放行，避免新增字段把现有派单全卡死。
+    """
+    raw = (card or {}).get("verify_requires") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    need = {str(r).strip().lower() for r in raw if str(r).strip()}
+    return need & denied_capabilities(agent or {})
 
 
 def agent_supports(agent: dict, capabilities) -> bool:

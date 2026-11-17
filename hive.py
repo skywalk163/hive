@@ -196,6 +196,10 @@ TASK_FIELDS = [
     # 出题人显式声明的复杂度档位（low/medium/high/xl）。不写则自动按
     # paths/verify/depends/needs/正文长度估算，见 task_budget()。
     "complexity",
+    # 判据需要的运行环境（如 torch / avx2 / posix）。派单时用来避开「显式声明
+    # 不具备该能力」的机器，防止判据在收集阶段假红（T-0342 / T-0344）。
+    # 不写就完全不影响既有派单行为，属 opt-in。
+    "verify_requires",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -1517,6 +1521,178 @@ def run_verify(cmd: str, cwd, timeout: int = 1800):
     """
     return run(verify_command(cmd), cwd=cwd, check=False, shell=True, timeout=timeout)
 
+
+# --------------------------------------------------------------------------- #
+# verify 「环境性假红」识别（T-0342 / T-0344 的教训，2026-11-13）
+#
+# 最近两张卡都栽在同一个坑：判据在执行的这台机器上根本跑不起来，结果却和
+# 「产物不合格」长得一模一样 —— 都只记一句 `verify 未通过`：
+#   * T-0342：Windows worktree 里 `bench.py:29 import resource`（POSIX-only）
+#     → ModuleNotFoundError rc=1，吞吐判定一次都没跑到；
+#   * T-0344：本机缺 torch，测试模块级 importorskip 让 pytest 收集为空
+#     → `found no collectors` rc=4，两条用例一条都没执行。
+# 人工只能在卡面附注里解释，看板上仍是 `done + failed` 的矛盾态。
+#
+# 这里做**标注，不做判绿**：识别出来的失败照样是 failed、照样挡 land，
+# 只是把「环境跑不动」和「产物真失败」分开记账，并给出可操作的复跑建议。
+# 拿不准的一律不标（宁可仍是普通 failed，绝不偷偷放松判据）。
+# --------------------------------------------------------------------------- #
+
+PLATFORM_ONLY_MODULES = frozenset({
+    "resource", "fcntl", "pwd", "grp", "termios", "pty", "syslog", "posix",
+    "msvcrt", "winreg", "_winapi", "winsound",
+})
+
+_NO_COLLECT_TOKENS = (
+    "no tests collected", "collected 0 items", "no tests ran",
+    "found no collectors", "no collector", "error collecting",
+    "errors during collection", "importorskip", "skipped due to missing",
+)
+
+_CMD_MISSING_TOKENS = (
+    "command not found", "not recognized as an internal or external command",
+    "不是内部或外部命令", "找不到解释器", "找不到 bash", "找不到 python",
+    "hive_compat: 找不到",
+)
+
+_ENV_HINT = ("请到具备该依赖/平台的目标机复跑，或用人工 submit 提交目标机实测证据；"
+             "本结果仍按 failed 归档、仍挡 land，绝不自动判绿。卡面可写 "
+             "verify_requires 让派单避开显式声明缺该能力的机器。")
+
+_MODULE_NOT_FOUND_RX = re.compile(
+    r"(?:modulenotfounderror|importerror)[^\n]*?no module named ['\"]([^'\"]+)['\"]")
+# pytest 真跑出了断言失败时，绝不标成环境假红（这是产物问题的强信号）
+_REAL_FAILURE_RX = re.compile(r"\b\d+ failed\b|assertionerror|\bfailed tests?/")
+
+
+def _verify_output_text(tail) -> str:
+    if isinstance(tail, (list, tuple)):
+        return "\n".join(str(x) for x in tail)
+    return str(tail or "")
+
+
+def classify_verify_failure(cmd: str, code, tail) -> dict | None:
+    """一条失败的 verify 是不是「这台机器跑不动」；不是就返回 None。
+
+    纯函数，不碰进程/文件，方便对**历史结果**回溯判读。返回值只用于标注与提示，
+    调用方必须保持原来的 failed 判定，不允许据此把结果改成 done。
+    """
+    try:
+        rc = int(code)
+    except (TypeError, ValueError):
+        return None
+    if rc == 0 or not tail:
+        return None
+    text = _verify_output_text(tail)
+    low = text.lower()
+    command = str(cmd or "").lower()
+    if _REAL_FAILURE_RX.search(low):
+        return None
+
+    kind = reason = ""
+    if ("pytest" in command and rc in (2, 3, 4, 5)
+            and any(t in low for t in _NO_COLLECT_TOKENS)):
+        kind = "no_tests_collected"
+        reason = (f"pytest 收集阶段就结束了（rc={rc}），没有收集到任何用例；"
+                  "常见原因是依赖缺失触发 importorskip / 收集期 ImportError，"
+                  "不等于测试失败")
+    else:
+        m = _MODULE_NOT_FOUND_RX.search(low)
+        if m:
+            module = m.group(1).split(".")[0]
+            if module in PLATFORM_ONLY_MODULES:
+                kind = "platform_module"
+                reason = (f"判据依赖平台专有模块 {module!r}，"
+                          "本机系统执行不了（POSIX/Windows 口径不一致）")
+            else:
+                kind = "missing_dependency"
+                reason = (f"本机缺少模块 {module!r}（疑似环境缺依赖，"
+                          "也可能是产物漏了实现，需人工确认）")
+        elif any(t in low for t in _CMD_MISSING_TOKENS):
+            kind = "command_missing"
+            reason = "判据要调用的命令/解释器在本机不存在（平台 PATH 口径不一致）"
+    if not kind:
+        return None
+    return {"kind": kind, "reason": reason, "hint": _ENV_HINT,
+            "cmd": str(cmd or ""), "code": rc}
+
+
+def verify_entry(cmd: str, p) -> dict:
+    """把一次 verify 执行收进结果 JSON；额外挂上环境性失败标注（若有）。
+
+    `tail` 仍只留最后 5 行（老格式不变），但分类用**完整输出**判读 ——
+    关键报错可能在 traceback 中间，只留尾部会漏判。
+    """
+    out = f"{getattr(p, 'stdout', '') or ''}{getattr(p, 'stderr', '') or ''}"
+    entry = {"cmd": cmd, "code": p.returncode,
+             "tail": out.strip().splitlines()[-5:]}
+    env = classify_verify_failure(cmd, p.returncode, out)
+    if env:
+        entry["env_error"] = {"kind": env["kind"], "reason": env["reason"]}
+    return entry
+
+
+def result_failure_kind(res: dict) -> dict | None:
+    """判读一份结果的失败性质：新结果读标注，老结果按 verify 输出回溯。
+
+    历史卡（T-0342 / T-0344 等）没有 `failure_kind` 字段，靠这里从
+    `verify[].tail` 反推，不用回写任何历史数据就能在看板/体检里显形。
+    """
+    if not isinstance(res, dict) or not res.get("status") \
+            or res.get("status") == "done":
+        return None
+    bad = [v for v in (res.get("verify") or [])
+           if isinstance(v, dict) and v.get("code")]
+    if not bad:
+        return None
+    items = []
+    for v in bad:
+        env = v.get("env_error") or classify_verify_failure(
+            v.get("cmd"), v.get("code"), v.get("tail"))
+        if env:
+            items.append({"cmd": env["cmd"], "code": env["code"],
+                          "kind": env["kind"], "reason": env["reason"]})
+    if not items:
+        return None
+    all_env = len(items) == len(bad)
+    return {"kind": str(res.get("failure_kind") or
+                        ("environment" if all_env else "mixed")),
+            "items": items, "all_environment": all_env, "hint": _ENV_HINT}
+
+
+def annotate_result_failure(result: dict) -> dict:
+    """产结果时把失败性质写进 JSON（只加字段，不改 status / error 判定）。"""
+    fk = result_failure_kind(result)
+    if fk:
+        result["failure_kind"] = fk["kind"]
+        result["verify_env_errors"] = fk["items"]
+    return result
+
+
+def verify_failure_message(verify: list, default: str = "verify 未通过") -> str:
+    """失败原因文案：环境性假红要点名，别再笼统写「verify 未通过」。"""
+    fk = result_failure_kind({"status": "failed", "verify": verify or []})
+    if not fk or not fk["all_environment"]:
+        return default
+    reasons = "；".join(dict.fromkeys(i["reason"] for i in fk["items"]))
+    return (f"{default}（疑似环境/平台不可执行，非产物判据失败）：{reasons}。"
+            + _ENV_HINT)
+
+
+def verify_requires_lack(agent: dict, card: dict) -> set[str]:
+    """派单层的能力软过滤出口：机器显式声明缺的判据环境。
+
+    T-0343 在 `hive_compat` 里写好的能力过滤一直只有测试在调、生产没接线，
+    于是「本机缺 torch」的机器照样领到需要 torch 的判据卡（T-0344）。
+    这里只做**显式否定**匹配，没声明的机器照旧派单，零回归。
+    """
+    try:
+        import hive_compat
+        return hive_compat.missing_declared_capabilities(agent, card)
+    except (ImportError, AttributeError):
+        return set()
+
+
 def cluster_ensure(hive_dir=None) -> bool:
     """给常驻 worker/总控用：本机没有集群就静默拉起。"""
     if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("HIVE_TESTING"):
@@ -2027,18 +2203,26 @@ def _verify_verdict(verify: list, with_codes: bool = True) -> dict:
         if isinstance(v, dict):
             cmd = str(v.get("cmd") or "")
             entries.append({"cmd": cmd, "code": v.get("code"),
-                            "strength": _verify_strength(cmd)})
+                            "strength": _verify_strength(cmd),
+                            "env_error": v.get("env_error") or
+                            classify_verify_failure(cmd, v.get("code"),
+                                                    v.get("tail"))})
         else:
             cmd = str(v)
             entries.append({"cmd": cmd, "code": None,
-                            "strength": _verify_strength(cmd)})
+                            "strength": _verify_strength(cmd),
+                            "env_error": None})
     has_strong = any(e["strength"] == "strong" for e in entries)
     if not with_codes:
         return {"verdict": "strong" if has_strong else "weak",
                 "verify": entries, "has_strong": has_strong}
     all_green = bool(entries) and all(e["code"] == 0 for e in entries)
+    bad = [e for e in entries if e["code"] != 0]
     if not all_green:
-        verdict = "fail"
+        # 所有失败项都带环境签名时单独说「环境不可用」，别让人把
+        # `import resource` / 收集为空当成产物没写对（T-0342 / T-0344）。
+        verdict = ("env-blocked" if bad and all(e["env_error"] for e in bad)
+                   else "fail")
     elif has_strong:
         verdict = "strong-pass"
     else:
@@ -3601,6 +3785,15 @@ class Hive:
                     blocked.append(
                         f"能力缺失（{name} 缺 {', '.join(sorted(lack))}）")
                     continue
+                # T-0344：卡面 `verify_requires` 声明判据需要的运行环境。
+                # 只拦「机器自己写了没有该能力」的情况，没声明的一律放行，
+                # 免得新字段把现有队列一次性全卡死。
+                soft_lack = verify_requires_lack(a, c)
+                if soft_lack:
+                    blocked.append(
+                        f"判据环境不匹配（{name} 显式声明缺 "
+                        f"{', '.join(sorted(soft_lack))}，本卡 verify_requires 需要）")
+                    continue
                 mode = a.get("mode") or ("manual" if a.get("manual") else "exec")
                 # T-0259：manual 默认仍不自动派，但显式写 `dispatchable: true`
                 # 的例外。这类机器上有常驻 worker 会在收件箱里接活（建 worktree、
@@ -4060,6 +4253,8 @@ class Hive:
     def cmd_doctor(self) -> bool:
         errors: list[str] = []
         warns: list[str] = []
+        env_failed: list[str] = []        # 判据在本机跑不动（环境性假红）
+        verdict_mismatch: list[str] = []  # 人工判绿但结果台账仍是 failed
         if not (self.dir / ".git").exists():
             print("[ERR] 不是 git 仓库")
             return False
@@ -4234,6 +4429,10 @@ class Hive:
                     warns.append(
                         f"任务 {tid} 只有弱验收（grep/test -f 之类），"
                         f"成果没被真正执行验证")
+            if result_failure_kind(res_d):
+                env_failed.append(tid)
+            if st == "done" and (res_d or {}).get("status") == "failed":
+                verdict_mismatch.append(tid)
             if st == "ready" and c.get("owner"):
                 warns.append(f"任务 {tid} 是 ready 但有 owner")
             for n in c.get("needs") or []:
@@ -4246,6 +4445,22 @@ class Hive:
         # 某个 agent 领卡失败、报出误导文案之后才被人发现。
         if claim_backend() == "store":
             self._doctor_store_consistency(cards, errors, warns)
+
+        # 近几天反复出现的两类「看着像坏、其实说不清」的账，单独汇总一次，
+        # 别让人翻 300 张卡才找到 T-0342 / T-0344 这种环境假红。
+        if env_failed:
+            sample = ", ".join(env_failed[:5])
+            warns.append(
+                f"{len(env_failed)} 张卡疑似环境性假红（{sample}"
+                f"{'…' if len(env_failed) > 5 else ''}）：verify 在交付机不可执行"
+                "（缺依赖 / 平台专有模块 / pytest 收集为空），结果仍按 failed 归档；"
+                "请到目标机复跑或人工裁决，不要直接改弱判据")
+        if verdict_mismatch:
+            sample = ", ".join(verdict_mismatch[:5])
+            warns.append(
+                f"{len(verdict_mismatch)} 张卡人工判绿但结果台账仍是 failed"
+                f"（{sample}{'…' if len(verdict_mismatch) > 5 else ''}）："
+                "台账原文保留不订正，看板已标注，属人工裁决不是漏关")
 
         for w in warns:
             print(f"[WARN] {w}")
@@ -5054,8 +5269,7 @@ class Hive:
         verify = []
         for cmd in (card.get("verify") or []):
             p = run_verify(cmd, cwd=wt)
-            verify.append({"cmd": cmd, "code": p.returncode,
-                           "tail": (p.stdout + p.stderr).strip().splitlines()[-5:]})
+            verify.append(verify_entry(cmd, p))
             log(f"{tid} 验证 {p.returncode}: {cmd}")
         ok = all(v["code"] == 0 for v in verify)
 
@@ -5075,7 +5289,7 @@ class Hive:
             else:
                 error = ""
         else:
-            error = "verify 未通过"
+            error = verify_failure_message(verify)
 
         summary_file = wt / ".hive" / "summary.md"
         if summary_file.exists() and summary_file.stat().st_size > 0:
@@ -5101,6 +5315,7 @@ class Hive:
             "declared_paths": card.get("paths") or [],
             "changed_files": changed, "out_of_paths": oop,
         }
+        annotate_result_failure(result)
         if claim.get("lease_id"):
             result["lease_id"] = claim["lease_id"]
         if claim.get("fence") is not None:
@@ -5576,6 +5791,8 @@ class Hive:
             land_block = ""
             if res.get("status") == "done" and state not in ("done", "closed"):
                 land_ready, land_block = self._land_probe(tid, c, res, cards)
+            # 失败性质：新结果读标注，历史结果按 verify 输出回溯（T-0342/0344）
+            fk = result_failure_kind(res)
             rows.append({
                 "id": tid,
                 "state": state,
@@ -5628,6 +5845,15 @@ class Hive:
                 "sync_health": health,
                 "result": res.get("status", ""),
                 "result_status": res.get("status", ""),
+                # 「环境跑不动」与「产物真失败」分开：看板据此换徽标/文案
+                "failure_kind": fk["kind"] if fk else "",
+                "env_error_hint": fk["hint"] if fk else "",
+                "verify_env_errors": fk["items"] if fk else [],
+                "result_error": res.get("error") or "",
+                # 人工判绿（close --as-done）后结果台账仍是 failed：原文保留不订正，
+                # 但看板要明说，别让人以为还有一张失败卡挂在队列里。
+                "verdict_mismatch": bool(state in ("done", "closed")
+                                        and res.get("status") == "failed"),
                 "finished_at": res.get("finished_at") or "",
                 "duration_s": res.get("duration_s", 0),
                 "head": res.get("head") or "",
@@ -7315,8 +7541,7 @@ class Worker:
         if not blocked:
             for cmd in (card.get("verify") or []):
                 p = run_verify(cmd, cwd=wt)
-                verify.append({"cmd": cmd, "code": p.returncode,
-                               "tail": (p.stdout + p.stderr).strip().splitlines()[-5:]})
+                verify.append(verify_entry(cmd, p))
                 log(f"{tid} 验证 {p.returncode}: {cmd}")
 
         ok = (not blocked and code == 0 and not timed_out
@@ -7334,7 +7559,8 @@ class Worker:
             if timed_out:
                 error = "超时"
             elif bad:
-                error = "verify 未通过: " + " | ".join(bad[:2])
+                error = verify_failure_message(
+                    verify, "verify 未通过: " + " | ".join(bad[:2]))
             else:
                 error = f"agent 退出码 {code}"
         else:
@@ -7371,6 +7597,7 @@ class Worker:
             "declared_paths": card.get("paths") or [],
             "changed_files": changed, "out_of_paths": oop,
         }
+        annotate_result_failure(result)
         if self.open_pr and ok and not verify_only:
             result["pr"] = self.h.open_pr_for(tid, card, result, repo)
             log(f"{tid} PR: " + (result["pr"].get("url")
@@ -7942,6 +8169,9 @@ def cmd_task(args) -> None:
     }
     if args.complexity:
         card["complexity"] = args.complexity
+    # 只在出题人真的声明了才写：空字段不该把每张旧卡的 frontmatter 都改一遍
+    if getattr(args, "verify_requires", None):
+        card["verify_requires"] = args.verify_requires
     write_card(h.dir / "tasks" / f"{tid}.md", card, body or f"# {args.title}\n")
     h.commit_and_push(f"task: add {tid} {args.title}", [f"tasks/{tid}.md"])
     log(f"已创建 {tid}；时间预算 timeout={timeout}m lease={lease}m "
@@ -8680,9 +8910,18 @@ def cmd_result(args) -> None:
         print(f"branch: {res.get('branch')}  head: {res.get('head')}")
         print(f"验收强度: {verdict['verdict']}")
         for e in verdict["verify"]:
-            print(f"  [{e['code']}] ({e['strength']}) {e['cmd']}")
+            env = e.get("env_error") or {}
+            mark = f"  ⚠ {env['kind']}: {env['reason']}" if env else ""
+            print(f"  [{e['code']}] ({e['strength']}) {e['cmd']}{mark}")
         if verdict["verdict"] == "weak-pass":
             print("  ! 只有弱验收（grep/test -f 之类），成果没有被真正执行验证")
+        if verdict["verdict"] == "env-blocked":
+            print("  ! 验收命令在本机不可执行（环境/平台不匹配），结果仍按 failed 归档，"
+                  "未自动判绿")
+            print("  ! " + _ENV_HINT)
+        fk = result_failure_kind(res)
+        if not fk and res.get("status") == "failed":
+            print("  ! 失败原因不是环境签名；按产物失败排查 verify 输出")
         print("-" * 60)
         print(res.get("summary", ""))
 
@@ -9156,6 +9395,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--needs", nargs="*", help="能力标签，如 windows exe")
     s.add_argument("--paths", nargs="*")
     s.add_argument("--verify", action="append")
+    s.add_argument("--verify-requires", dest="verify_requires", nargs="*",
+                   help="判据运行环境，如 torch avx2 posix；机器显式声明缺该能力时不派单")
     s.add_argument("--depends", nargs="*")
     s.add_argument("--lease", type=int, default=None,
                    help="租约分钟；不传按任务复杂度自动估算")
