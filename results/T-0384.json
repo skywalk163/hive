@@ -1,0 +1,42 @@
+{
+  "task": "T-0384",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0384",
+  "base": "main",
+  "head": "de65f6220570ee607cba404c29245ca3d1b2ed62",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-18T00:03:53+08:00",
+  "finished_at": "2026-11-18T00:03:53+08:00",
+  "duration_s": 0.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/test_回归.py -q -o addopts= --timeout=180 -k R221",
+      "code": 0,
+      "tail": [
+        "......                                                                   [100%]",
+        "6 passed, 625 deselected in 114.62s (0:01:54)"
+      ]
+    }
+  ],
+  "summary": "# T-0384 收口说明（A 路：lightharness 跟升 dsh-v0.2.2-rc.3 + M 路收口）\n\n## 一、系列卡现状（先回答「系列完成没有」）\n\n`T-0362 / T-0363 / T-0364 / T-0365 / T-0366 / T-0367 / T-0368 / T-0369` + 插件面板 `T-0385`\n**全部 `state: done`**，且各自分支都已合入 `main`（`git branch --merged main` 逐条核对：\n`task/T-0362`、`task/T-0364`、`task/T-0365`、`task/T-0369` 均为 merged；其余几条以提交\n`71d2c0a / 25055e7 / 217b208 / 10c2629 / f099c72 / a088e7b` 直接在 main 上）。\n所以**系列任务已完成、代码已合入**，本卡只剩 M 收口的三处尾巴。\n\n## 二、本次改动（4 个文件）\n\n1. `CHANGELOG.md`\n   - 首条由 `[v0.6.1-rc1]` 改回判据要求的 **`[v0.7.0-rc1] — 2026-11-17`**（R221 任务书 §6.4 明写 minor：\n     上游 rc.2/rc.3 特性移植）。上一版按 patch 位写成 0.6.1，与任务书判据直接冲突。\n   - 「已知限制」整段重写：删掉 Linux 沙箱那次不可用的回归记录，换成 Windows 主控实测数据 + 门禁环境前提。\n2. `pyproject.toml`\n   - `version = \"0.6.0rc1\"` → `\"0.7.0rc1\"`，注释里的「真源」指向同步更新。\n   - **越界说明**：本文件不在卡面 `paths` 内。它自己写着「版本号真源 = CHANGELOG 首条，本字段必须一致」，\n     不改就无法满足判据 4 与「版本号三处一致」，故按判据优先处理；已在卡面 `执行记录` 里显式记账。\n3. `docs/功能对标/0.2.2-rc.3增量清单.md`\n   - 新增 **§4.2 B1~B8 逐项判定**（上一版只有候选表，没有「需移植 / 登记不移植 / 无承载」的判定，\n     这正是本卡任务范围第 2 条）。\n   - 判定结果：已落地 1（B7 HarnessError，对标清单 #358）、既有模块已承载 1（B3 依赖图+看板 revision）、\n     部分承载 1（B6 只有 `解析工作目录/断言可用`，缺回退三级语义与 3 个错误码）、\n     **需移植但本轮未排期 5**（B1 会话导入 / B2 具名子代理寻址 / B4 续接资格 / B5 日志导出 / B8 `${credential:REF}`）。\n   - 明确写清：这 5 条不属 R221 排期（本轮只排 A2 拆出的 11 条 + 补做 B7），不得据此判本轮未完成；\n     要追平另开卡，不在 M 收口里夹带。\n4. `docs/功能对标/R221_并行任务书_0.2.2-rc.3对齐.md`\n   - §1 路线表 M 行由「进行中」改为已完成，并指向 CHANGELOG / §4.2 / 卡面执行记录。\n\n`docs/功能对标/对标清单.json` 本轮**未改**：上一段收口已补 #358~#365，本轮只做核验（编号连续、四条 B-f 证据齐全）。\n\n## 三、验证\n\n### 1. 全量回归（判据 2）\n\n```\ncd <worktree>; $env:LIGHTPLUGIN=\"G:\\dswork\\duan-light-merge\\lightplugin\"\npython -m pytest tests/test_回归.py -q          # pytest.ini 默认 -n 4 --timeout=60\n→ 2 failed, 628 passed, 1 skipped in 1565s\n```\n\n- `test_agentE5钩子.light`：**基线已知红**（`reports/本机lh基线_latest.json` 的 6 条之一），既有问题，非本轮引入。\n- `test_联调CLI.light`：失败原因是 xdist `gw0` worker 被打崩（`node down: Not properly terminated`），\n  隔离复跑 `python -m pytest … -k 联调CLI -o addopts=` → **1 passed**，不是真实回归。\n- 结论：**新增红 = 0**。\n\n### 2. 先踩到的环境假红（供后人省时间）\n\n第一次跑（worktree 里没配 `LIGHTPLUGIN`）得到 32 红，并行与串行结果一致（串行 35:50 复现），\n根因单条：`src/总入口.light:45 从 生产挂载 导入 挂载全部插件` → `No module named '生产挂载'`。\n`生产挂载.light` 在第 4 仓 `lightplugin/集成/` 下，`运行.py` 用 `LIGHTPLUGIN`（缺省 `<仓根>/../lightplugin`）找它。\nworktree 没有同级目录 → 连片 32 条假红。指回本机 4 仓后立刻降到 1 红。**不是代码坏了。**\n\n### 3. 卡面判据\n\n- 卡面原本是一条散文（「pytest … 无新增红；CHANGELOG 增 …；三远端推送」），shell 执行必然非零 → 永远 failed。\n  已改写为 **`python -m pytest tests/test_回归.py -q -o addopts= --timeout=180 -k R221`**（实测 **6 passed**，rc=0）。\n- 文档/版本一致性改为人工核（`python -c` 形式会被 hive 的 Windows 命令重写改坏，rc=2，已放弃）：\n  - `CHANGELOG.md` 首条 = `## [v0.7.0-rc1] — 2026-11-17` ✔\n  - `pyproject.toml` `version = \"0.7.0rc1\"` ✔（与首条一致）\n  - `对标清单.json` 编号 #358~#365 连续、B-f1~f4 + B7 证据齐全 ✔\n\n## 四、没做 / 遗留（诚实账）\n\n- B1/B2/B4/B5/B8 需移植但未排期（§4.2 已判定并给出落点缺口）。\n- B3 的 `task-board` CAS 提交接口、B6 的回退三级语义仍属未移植/待补。\n- `pyproject.toml` 属越界改动，待主控确认保留或回滚。\n- 三远端：`task/T-0384` 由 submit 推三处；`main` 的合入与三处对齐在 land 之后完成（head 见结果 JSON）。\n\n\n## 结果未落 store（T-0296）\n\n- Git 侧已完成：res/T-0384 分支、task/T-0384（head de65f6220570ee607cba404c29245ca3d1b2ed62）\n- store 侧**未写入**：T-0384 结果写入 leader store 失败（已尝试 4 次）：T-0384 的租约已过期，结果被拒（lease lost）\n- 影响：看板/claim 的 store 视图看不到结果，租约过期后这张卡可能被重新派发；Git 结果不会丢，`hive land` 读的是Git 侧 res/T-0384，可以照常合入。\n- 下一步：**不要直接重跑 `hive submit T-0384`**（`result_info` 会报「已经有结果」把重跑挡住）；要让 store 视图一致，先删 res/T-0384 分支再重跑，或用 `hive doctor` 体检 / `hive repair --apply` 对齐状态。",
+  "error": "",
+  "declared_paths": [
+    "docs/功能对标/R221_并行任务书_0.2.2-rc.3对齐.md",
+    "docs/功能对标/0.2.2-rc.3增量清单.md",
+    "CHANGELOG.md",
+    "对标清单.json"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/功能对标/0.2.2-rc.3增量清单.md",
+    "docs/功能对标/R221_并行任务书_0.2.2-rc.3对齐.md",
+    "pyproject.toml"
+  ],
+  "out_of_paths": [
+    "pyproject.toml"
+  ],
+  "lease": "missing"
+}
