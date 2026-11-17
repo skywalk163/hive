@@ -9,6 +9,11 @@
 
 set -eu
 
+# daemon(8) 经 rc.subr su -m 降权后，继承的 PATH 往往只有 /usr/bin:/bin，
+# 而 git / python3 在 /usr/local/bin。不补上这一行，cluster 进程里的
+# archive / coordinator(sync-repos) 会每轮报 FileNotFoundError: 'git'。
+export PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:${PATH:-}"
+
 CHDIR="${hive_cluster_chdir:-/home/skywalk/dswork/hive}"
 STATE="${hive_cluster_state:-$HOME/.hive/cluster}"
 PORT="${hive_cluster_port:-8788}"
@@ -31,7 +36,7 @@ set -- cluster serve \
 
 case "${hive_cluster_mcp:-YES}" in
 [Nn][Oo]) set -- "$@" --no-mcp ;;
-*) set -- "$@" --mcp --mcp-port "$MCP_PORT" --mcp-bind 127.0.0.1 ;;
+*) set -- "$@" --mcp --mcp-port "$MCP_PORT" --mcp-bind 0.0.0.0 ;;
 esac
 
 case "${hive_cluster_store:-YES}" in
