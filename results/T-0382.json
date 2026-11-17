@@ -1,0 +1,37 @@
+{
+  "task": "T-0382",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0382",
+  "base": "main",
+  "head": "1958a491f6f0c09165ddd12085709ad86f8e3d78",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-17T21:42:38+08:00",
+  "finished_at": "2026-11-17T22:11:29+08:00",
+  "duration_s": 1731.0,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python3 -m pytest -q -o addopts= tests/test_cli_json.py",
+      "code": 0,
+      "tail": [
+        ".........................                                                [100%]",
+        "25 passed in 32.71s"
+      ]
+    }
+  ],
+  "summary": "# T-0382 · R222-接线：cli/light.py 唯一 owner，接 A/B/C/D 的 --json 开关\n\n## 结论\n\nA/B/C/D 四个纯模块已全部接上 CLI，每条命令都能用一条命令拿到、都能 `--json`，\nstdout 只吐一个 JSON 对象；既有开关默认行为逐字未变。\n\n| 命令 | 新增/改动 | 薄转发到 |\n| --- | --- | --- |\n| `light spec [--json] [--check]` | 新增子命令 | `spec/build_spec.py`（`--check` 只比对、不写文件） |\n| `light ast --json` | 新增 `--json` | `src/patch_engine.ast_to_json` |\n| `light check --json [--partial]` | 新增 `--json` / `--partial` | `src/diagnostics.format_diagnostic`（`explain()` 归因） |\n| `light ai check --json` | 补顶层 `stage` / `fix_suggestions` | 原有 T-0318 路径 |\n| `light symbols [--json]` | 新增子命令 | `src/patch_engine.symbols_json` |\n| `light patch [--json] <file> --edits <json>` | 新增子命令（stdin 也可） | `src/patch_engine.patch` + `diff_summary` |\n\n改动文件只有两个（与卡面 paths 一致）：`cli/light.py`（+724 行，纯接线）、\n`tests/test_cli_json.py`（新，25 条用例）。未动 `src/parser_*.py`、`stdlib/`、\n`src/linter/light_linter.py`，也未把 A/B/C/D 的实现逻辑搬进 CLI。\n\n## 退出码口径（所有 --json 一致）\n\n- `0`：成功，或只有 `warning` / `info` 级诊断；\n- `1`：有 `error` 级诊断，或补丁引擎拒绝（越界 / 交叠 / 不闭合）；\n- `2`：用法或文件错误（路径不存在、stdin 冲突、产物模块缺失）。\n\n`check --partial` 对未闭合输入返回 `partial: true` + `partial_from_line`，\n未闭合尾巴只记 `warning`，因此 rc=0、不抛栈；默认 `check`（不带 `--partial`）仍是\n原来的文本输出与 rc（有错 exit 1），已用基线用例钉住。\n\n## 判据实测\n\n### 1) 卡面 verify（Windows 本机，经 hive_compat 垫片执行 POSIX 写法）\n\n```\n> python hive_compat.py run \"PYTHONPATH=src python3 -m pytest -q -o addopts= tests/test_cli_json.py\"\n.........................                                                [100%]\n25 passed in 44.82s\nrc=0\n```\n\n### 2) 回归（Windows 本机）\n\n```\ntests/test_ai_check_json.py tests/test_ai_feedback_loop.py   25 passed in 40.27s\ntests/test_type_checker_cli.py tests/test_lightc_cli.py      16 passed in 18.05s\n```\n\n### 3) 0.88（FreeBSD 15.1）远端 CI\n\n```\npython tools/remote_ci.py --repo . --tag T-0382-CLI --env-file G:\\dswork\\duan-light-merge\\.env \\\n    -- -k cli_json --ignore=tests/dogfood\n[4/4] rc=0 ｜ 现场：192.168.0.88:/tmp/lp-ci/run-20261117-220445-T-0382-CLI ｜ 槽位 slot-1 已释放\n25 passed, 6 warnings in 143.28s\n```\n\n现场注意（不是产物问题）：按卡面原命令（不带 `--ignore=tests/dogfood`）跑，\n结果是 `25 skipped, rc=0`，skip 原因写着「未找到 lightharness，跳过（不是通过）」——\n`tests/dogfood/conftest.py` 找不到同级 `lightharness` 仓时会把整个 session 打 skip，\nrc 仍是 0 但不算通过。排除该目录后同一现场 25 passed（并额外用 `-o addopts=`\n串行复跑一次，25 passed in 13.31s），故判绿。\n\n## 手工冒烟（四条，均为 stdout 前 200 字符）\n\n```\n$ python cli/light.py spec --json | head -c 200        # Windows 用 Select-Object 截断\n{\"spec\": \"light.spec.json\", \"schema_version\": 1, \"version\": \"0.4.2\", \"generated_by\": \"spec/build_spec.py\", \"generated_from\": {\"说明\": \"按文件内容取 sha256[:16]；不存 commit，合并后内容不变则 --check 仍绿\", \"文件\": {\"src/keyw\nrc=0\n\n$ python cli/light.py ast --json examples/basic.light\n{\"schema_version\": 1, \"ok\": true, \"file\": \"...\\\\examples\\\\basic.light\", \"producer\": \"src/patch_engine.ast_to_json\", \"ast\": {\"file\": \"...\nrc=0\n\n$ python cli/light.py check --json examples/basic.light\n{\"schema_version\": 1, \"ok\": true, \"file\": \"...\\\\examples\\\\basic.light\", \"backend\": \"src\", \"partial\": false, \"partial_from_line\": 0, \"type_c\nrc=0\n\n$ python cli/light.py ai check --json examples/basic.light\n{\"schema_version\": 1, \"ok\": true, \"file\": \"...\\\\examples\\\\basic.light\", \"backend_hints\": [], \"diagnostics\": [], \"duration_ms\": 10168, \"stage\": \"语法\", \"fix_suggestions\": []}\nrc=0\n```\n\n坏文件对照（`设 甲 为 (\\n打印(甲)`）：`check --json` rc=1，首条诊断\n`code=L0000 severity=error stage=语法 line=2 column=5`（真实行列，不是 0）；\n`--partial` 同一输入 rc=0、`partial_from_line=2`、只有 warning。\n\n## 设计取舍（留给后继卡）\n\n1. **未归因就用 `L0000`**：`check --json` 的诊断先走 `src.diagnostics.explain()`\n   归因，命中才 `format_diagnostic` 出规范码；命中不上时落 `L0000` +\n   `provisional=true`（与 `ai check --json` 同一口径），绝不臆造具体错误码。\n   想让更多文本变成具体码，扩的是 `src/diagnostics` 的规则表，不是 CLI。\n2. **诊断字段是 ai-check 超集**：`code/severity/stage/line/column/message/hint/\n   fixes/candidates/provisional` + `anchor`/`file`/`detail`，一个 Agent 只学一遍。\n3. **`--partial` 是「最长可解析前缀」**：从后往前逐行回退（上限 200 次解析），\n   找到能整块闭合的前缀再送检；找不到就返回空前缀并把未闭合尾巴记成 warning。\n   它只对 src 后端做闭合判定，不改 `--backend antlr` 的既有语义。\n4. **不写文件**：`patch` 只把结果吐 stdout（`--json` 带 `diff_summary`），\n   `spec --json` 只读权威表，`spec --check` 只比对；没有任何新增落盘副作用。",
+  "error": "",
+  "declared_paths": [
+    "cli/light.py",
+    "tests/test_cli_json.py"
+  ],
+  "changed_files": [
+    "cli/light.py",
+    "tests/test_cli_json.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "4a1728324960488d9498f7c37ac09ed1",
+  "store_write_error": "T-0382 结果写入 leader store 失败（已尝试 4 次）：T-0382 的租约已过期，结果被拒（lease lost）"
+}
