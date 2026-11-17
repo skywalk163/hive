@@ -1,0 +1,61 @@
+{
+  "task": "T-0386",
+  "agent": "fb88-dsh",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0386",
+  "base": "main",
+  "head": "76184d9539950fab0a78053fa695a6cc370b2efb",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-17T17:54:25+08:00",
+  "finished_at": "2026-11-17T11:29:22+00:00",
+  "duration_s": 5697.4,
+  "verify": [
+    {
+      "cmd": "cd lightplugin && python3 运行.py 插件/jet-hub/测试_网关JetHub.light",
+      "code": 0,
+      "tail": [
+        "测试_网关JetHub 全部通过"
+      ]
+    },
+    {
+      "cmd": "cd lightplugin && python3 运行.py 插件/jet-hub/测试_jet-hub.light",
+      "code": 0,
+      "tail": [
+        "测试_jet-hub 全部通过"
+      ]
+    }
+  ],
+  "summary": "# T-0386 jet-hub 插件 MVP 测试与登记\n\n## 结论\nJet Hub 网关 MVP **代码完整、核心链路测试全通**，但**从未 commit**，\n也**未登记**进插件清单/工具总表/生产挂载。本卡把 MVP 落库、修通两个测试、\n并明确\"暂不纳入生产挂载\"的登记口径。\n\n## MVP 范围（来自 说明.md）\n| 能力 | 实现 |\n|---|---|\n| 多 provider 账号池 | 添加账号/移除账号/停用账号/启用账号 + 模块级 账号池 |\n| 选号轮换 | 选号(渠道)：启用 → 跳冷却 → 连续失败最少 |\n| 限流记账 | 标记限流(标识, 冷却次数, 原因)（冷却 N 次请求后恢复） |\n| OpenAI 兼容网关 | 网关转发(渠道, 模型, 提示词)：选号 → 注入转发器 → 记账 |\n| 宿主工具 | 账号池 / 网关转发 两个工具，经 挂载(注册表, 转发器=空) |\n\n未纳入（后续批次）：凭据静默续期、积分领取、Web 面板、22 家 provider 适配器、\nstate.json 持久化、聚合 provider 临期折算。\n\n## 本卡改动\n1. **删除** `插件/jet-hub/jet-hub.light`（旧版，有 L-166 影子变量缺陷 + 连字符\n   模块名导致其测试跑不通，且除测试外无人引用）；\n2. **修通** `插件/jet-hub/测试_jet-hub.light`：\n   - 导入 `从 jet-hub` → `从 网关JetHub`（连字符模块名坑）；\n   - 补 `从 字符串处理 导入 子串位置`（缺导入）；\n3. 修订版 `网关JetHub.light` 成为唯一实现（补了 `全局 请求计数。`）；\n4. `codearts转发器.light` / `标准HMAC.py` / `真HMAC.py` 保留\n   （接真实上游的准备，不在 MVP 主链路）。\n\n## 验证\n- `python3 运行.py 插件/jet-hub/测试_网关JetHub.light` → **全部通过**\n- `python3 运行.py 插件/jet-hub/测试_jet-hub.light` → **全部通过**（修导入后）\n\n## 登记口径（暂不纳入生产挂载）\n- **插件清单.json**：jet-hub 不在原 75 条内（它是 MVP，非上游对标包清单项）。\n  本卡不新增清单条目（清单管理\"对标上游包\"的粒度，jet-hub 属自研 MVP），\n  改由本卡 + 工具总表 记录。\n- **集成/工具总表.json**：由 `集成/生成全量挂载.py` 自动扫描\n  `<目录名>/<目录名>.light` 生成。jet-hub 目录名含连字符，\n  生成器会产 `导入 jet-hub` → 光明语法错误（`-` 分词成减号），\n  **无法纳入自动挂载体系**。故工具总表保持 75 条不变。\n- **集成/生产挂载.light**：同上，jet-hub 模块名不可导入，**不纳入生产挂载**。\n  使用方式：宿主手动 `从 网关JetHub 导入 挂载` 后 `挂载(注册表, 转发器)`，\n  与 MCP桥接（故意不挂、走直连双路径）类似的\"面板可见不挂 agent 工具表\"待遇。\n\n## 后续路线（若要把 jet-hub 挂进生产）\n1. 目录改名 `插件/jet-hub` → `插件/网关JetHub`（模块名无连字符）；\n2. 重跑 `集成/生成全量挂载.py` 让它进入工具总表 + 全量挂载；\n3. 核对 `账号池`/`网关转发` 工具名是否与现有 75 插件撞车；\n4. 生产挂载是否纳入看与 MCP桥接 的撞车关系。\n\n## 遗留 / 风险\n- `codearts转发器.light` 当前有解析错误（注释里 `=` 触发，疑似编译器\n  注释行号定位偏移），不影响 MVP 主链路；接真实 codearts 上游时再修。\n- jet-hub 未 commit 前只有本机一份，本卡落库后才有远端备份。",
+  "error": null,
+  "adjudication": "verify 原记 127（/bin/sh: 测试_网关JetHub: not found）是 hive 把 --verify 描述文字当 shell 命令执行的假红；真实判据两条 python3 运行.py 插件/jet-hub/测试_*.light 均「全部通过」，人工裁决改 done（对齐 doctor 同类人工判绿处理），附真实 tail。out_of_paths 5 个文件（_probe_hash/codearts转发器/标准HMAC/真HMAC/说明.md）属 jet-hub 目录内 MVP 配套，非越界改动，随目录整体落库。",
+  "declared_paths": [
+    "插件/jet-hub/网关JetHub.light",
+    "插件/jet-hub/转发器JetHub.light",
+    "插件/jet-hub/测试_网关JetHub.light",
+    "插件/jet-hub/测试_jet-hub.light",
+    "插件清单.json",
+    "集成/工具总表.json",
+    "集成/生产挂载.light"
+  ],
+  "changed_files": [
+    "插件/jet-hub/_probe_hash.light",
+    "插件/jet-hub/codearts转发器.light",
+    "插件/jet-hub/标准HMAC.py",
+    "插件/jet-hub/测试_jet-hub.light",
+    "插件/jet-hub/测试_网关JetHub.light",
+    "插件/jet-hub/真HMAC.py",
+    "插件/jet-hub/网关JetHub.light",
+    "插件/jet-hub/说明.md"
+  ],
+  "out_of_paths": [
+    "插件/jet-hub/_probe_hash.light",
+    "插件/jet-hub/codearts转发器.light",
+    "插件/jet-hub/标准HMAC.py",
+    "插件/jet-hub/真HMAC.py",
+    "插件/jet-hub/说明.md"
+  ],
+  "lease_id": "bd69fa34f9674fd7af63110e662c8fe5",
+  "store_write_error": "T-0386 结果写入 leader store 失败（已尝试 4 次）：没有主节点"
+}
