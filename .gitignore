@@ -26,3 +26,7 @@ dashboard/.demo-*.json
 node_modules/
 # add config file .json
 config.json
+# workbuddy 外部工具落在仓根的状态快照（运行时导出、频繁覆盖，不入库）
+._wb_status.json
+._wb_status.err
+._wb_status.*
