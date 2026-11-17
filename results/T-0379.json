@@ -1,0 +1,37 @@
+{
+  "task": "T-0379",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0379",
+  "base": "main",
+  "head": "f9fa5df89afa9002512bf148bff32eb7dff9b137",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-17T11:46:45+08:00",
+  "finished_at": "2026-11-17T13:25:34+08:00",
+  "duration_s": 5929.3,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python3 -m pytest -q -o addopts= tests/test_patch_engine.py",
+      "code": 0,
+      "tail": [
+        "....................................................                     [100%]",
+        "52 passed in 0.75s"
+      ]
+    }
+  ],
+  "summary": "## T-0379 C 线交付：`src/patch_engine.py`（AST 序列化 / 符号表 / span 级补丁）\n\n**做了什么**\n- 新建纯模块 `src/patch_engine.py`（不 import `cli`，AST 走 `light_parser_v3.LightParser`，与 `cli/light.py::_ast_src` 同一后端）：\n  - `ast_to_json(source, file_label=None)`：`kind` / `span`(1 起、半开区间) / `value` / `fields` / `children` + 规模统计，输出可直接 `json.dumps`。\n  - `symbols_json(...)`：定义（函数/类/方法/属性/变量/形参/导入）、导入、导出、作用域树、按 canonical 聚合的引用次数与 unresolved；canonical 用 NFKC（与 D 线「同语义一个名字」口径一致，规则集中在一处便于 T-0380 接管）。\n  - `patch(source, edits)`：按 span 确定性替换，支持多点/相邻/插入/删除，拒绝交叠、越界、起止颠倒（不闭合）、同位置多插入、字段/类型错误，全部抛中文 `PatchError`。\n  - `diff_summary(old, new)`：行级变更块 + 受影响定义 + 文本涉及的符号 + 引用次数变化；任一版本语法非法时降级为行级 diff（不抛异常）。\n- 新增 `tests/test_patch_engine.py` 52 条：三类 API 契约、8 个 `benchmarks/programs/*.light` 真实文件全量冒烟、CRLF、NFKC、成员引用消歧、无 `cli` 依赖。\n\n**改动的文件**：`src/patch_engine.py`（新增）、`tests/test_patch_engine.py`（新增）；未碰 `cli/light.py`、`src/parser_*.py`、`src/linter/`、`stdlib/`。\n\n**验证**\n- 本机：`PYTHONPATH=src python3 -m pytest -q -o addopts= tests/test_patch_engine.py` → `52 passed`。\n- 0.88（FreeBSD 15.1 / Python 3.12.13）：`[4/4] rc=0 ｜ 现场：192.168.0.88:/tmp/lp-ci/run-20261117-132206-T-0379-C线-v2 ｜ 槽位 slot-1 已释放`（52 passed，134s）。\n\n**已知边界（留给 T-0382 接线时注意）**\n- 解析器只给语句/定义级节点记录 `line`，表达式叶子与多数类成员没有位置：`span.start_line == 0` 表示未知，未伪造行号；`patch` 的 span 需由语句级位置或调用方自行给出。\n- 作用域按模块/函数/类粒度；`令`（block_scoped）仍记在所属函数作用域，仅用字段标注。\n- `己.宽`（点号）能解析为类成员引用；`己宽`（无点号）解析器产出普通标识符，静态无法判定，按 unresolved 报告。",
+  "error": "",
+  "declared_paths": [
+    "src/patch_engine.py",
+    "tests/test_patch_engine.py"
+  ],
+  "changed_files": [
+    "src/patch_engine.py",
+    "tests/test_patch_engine.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "aba349a855354e04bd2a480e34356640",
+  "store_write_error": "T-0379 结果写入 leader store 失败（已尝试 4 次）：T-0379 的租约已过期，结果被拒（lease lost）"
+}
