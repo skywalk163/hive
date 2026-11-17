@@ -667,7 +667,7 @@ def refresh_loop(status_path, interval):
     T-0354：落盘节流——`sync_health.lsdb_seq` 没变就不重写整份快照（20~30s 一次的
     全量序列化在多机看板上会同时落盘），只 touch 心跳文件供 /api/status 判活。
     """
-    argv = hive_argv("status", "--json")
+    argv = hive_argv("status", "--json", "--sync-health")
     while True:
         try:
             proc = subprocess.run(argv, capture_output=True, text=True,

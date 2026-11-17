@@ -196,7 +196,11 @@ def test_clean_diverged_no_merge_and_manual_banner(repos, capsys):
 
 
 def test_dirty_worktree_zero_writes(repos, capsys, monkeypatch, tmp_path):
-    """**本卡最重要回归**：脏工作区只读不改，porcelain 前后字节级一致。"""
+    """**本卡最重要回归**：脏工作区只读不改，porcelain 前后字节级一致。
+
+    L5 验收口径，不能因为「想自动更新」就默认改掉：需要自愈的入口是
+    `hive autoupdate`（显式 allow_dirty_ff），status 保持保守。
+    """
     tracked = _git(["ls-files"], repos.a).stdout.splitlines()[0]
     target = repos.a / tracked
     original = target.read_text(encoding="utf-8")
@@ -233,6 +237,7 @@ def test_dirty_worktree_zero_writes(repos, capsys, monkeypatch, tmp_path):
         assert health["action"] == "skip-dirty"
         assert "自动同步已跳过" in health["reason"]
         assert "自动同步已跳过" in health["banner"]
+        assert health["blocked"] is False
 
     # 零写：连一次 ls-remote / fetch / merge / reset / stash 都不许有
     assert remote_probes == [], f"脏工作区不该探测远端：{remote_probes}"
@@ -244,8 +249,83 @@ def test_dirty_worktree_zero_writes(repos, capsys, monkeypatch, tmp_path):
     assert _git(["rev-parse", "origin/main"], repos.a).stdout.strip() == remote_before
     assert target.read_text(encoding="utf-8") == original + "\n# 别人的在途改动\n"
 
-    hive.Hive(repos.a).cmd_status()
-    assert "本地有未提交改动，自动同步已跳过" in capsys.readouterr().out
+
+def test_dirty_disjoint_worktree_fast_forwards(repos, capsys, monkeypatch):
+    """**显式 opt-in**（HIVE_SYNC_DIRTY_FF=1）：脏但不重叠时允许 ff。
+
+    这是 `hive autoupdate` 走的路：远端只加了新卡、本地改的是别的文件时，
+    ff 不会碰到本地改动，没有理由让整台机器卡在旧 HEAD 上等人手动 pull。
+    """
+    monkeypatch.setenv(hive_repos.SYNC_ENV_DIRTY_FF, "1")
+    target = repos.a / "tasks" / "T-9000.md"
+    original = target.read_text(encoding="utf-8")
+    target.write_text(original + "\n<!-- 别人的在途改动 -->\n", encoding="utf-8")
+    (repos.a / "untracked-note.txt").write_text("in flight\n", encoding="utf-8")
+    repos.push_card("T-9003")
+
+    before = _porcelain(repos.a)
+    remote_before = _git(["rev-parse", "origin/main"], repos.a).stdout.strip()
+
+    rows = _status_json(hive.Hive(repos.a), capsys)
+    for row in rows:
+        health = _health(row)
+        # 快进成功后按**合并后的真实状态**记账：已与远端一致、不再 behind
+        assert health["state"] == hive_repos.UP_TO_DATE
+        assert health["autosynced"] is True
+        assert health["behind"] is False
+        assert health["overlap_files"] == []
+        assert health["blocked"] is False
+        assert health["dirty_files"], "仍然是脏工作区：dirty_files 要如实列出"
+
+    assert _head(repos.a) == _git(["rev-parse", "origin/main"],
+                                  repos.a).stdout.strip(), \
+        "不重叠的脏工作区应当自动快进到最新 origin/main"
+    assert _porcelain(repos.a) == before, "本地改动前后必须逐字节一致"
+    assert target.read_text(encoding="utf-8") == original + "\n<!-- 别人的在途改动 -->\n"
+
+
+def test_dirty_overlapping_worktree_zero_writes(repos, capsys, monkeypatch):
+    """**显式 opt-in** 下的真重叠：只 fetch 探明重叠，绝不 merge/reset/stash。
+
+    真重叠时 ff 会覆盖手头改动，必须停下：结果里要带上重叠文件名和 blocked
+    标记，人和 agent 才知道该提交还是该 stash。
+    """
+    monkeypatch.setenv(hive_repos.SYNC_ENV_DIRTY_FF, "1")
+    target = repos.a / "tasks" / "T-9000.md"
+    original = target.read_text(encoding="utf-8")
+    target.write_text(original + "\n<!-- 本地未提交改动 -->\n", encoding="utf-8")
+    # 远端也改同一个文件 → 传入提交与本地改动重叠
+    (repos.seed / "tasks" / "T-9000.md").write_text(
+        original + "\n<!-- 远端也改了 -->\n", encoding="utf-8")
+    _git(["add", "-A"], repos.seed)
+    _git(["commit", "-q", "-m", "touch same card"], repos.seed)
+    sh(["git", "-C", str(repos.seed), "push", "-q", "origin", "main"], env=GIT_ENV)
+
+    before = _porcelain(repos.a)
+    head_before = _head(repos.a)
+
+    git_writes = []
+    real_git = hive.git
+
+    def spy_git(args, cwd, check=True, input=None):
+        if args and args[0] in (WRITE_VERBS - {"fetch"}):
+            git_writes.append(list(args))
+        return real_git(args, cwd, check=check, input=input)
+
+    monkeypatch.setattr(hive, "git", spy_git)
+    rows = _status_json(hive.Hive(repos.a), capsys)
+    for row in rows:
+        health = _health(row)
+        assert health["state"] == hive_repos.DIRTY_WORKTREE
+        assert health["action"] == "skip-dirty"
+        assert health["blocked"] is True
+        assert health["overlap_files"] == ["tasks/T-9000.md"]
+        assert "重叠" in health["banner"]
+
+    assert git_writes == [], f"重叠时不该有任何写操作：{git_writes}"
+    assert _porcelain(repos.a) == before, "git status --porcelain 前后必须完全一致"
+    assert _head(repos.a) == head_before
+    assert target.read_text(encoding="utf-8") == original + "\n<!-- 本地未提交改动 -->\n"
 
 
 # --------------------------------------------------------------------------- #

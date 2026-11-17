@@ -67,6 +67,23 @@ pid_of() {
     echo "$pid"
 }
 
+# 清掉「不在 PID 文件里」的残留：serve.py 按端口匹配，刷新循环按本仓脚本绝对
+# 路径匹配（forked subshell 的 argv 仍是脚本路径，孤儿也跑不掉）。
+# 没有这一步时，每次 restart 漏下的 `( while ) &` 会一直抢写 status.json，
+# 还会与别的 hive/git 进程抢 index.lock —— 陈旧锁就是这么来的。
+sweep_leftovers() {
+    killed=""
+    if command -v pkill >/dev/null 2>&1; then
+        if pkill -f "[s]erve.py --status .*--port $PORT" 2>/dev/null; then
+            killed="serve.py"
+        fi
+        if pkill -f "$SERVE" 2>/dev/null; then
+            killed="${killed:+$killed、}serve-dashboard.sh"
+        fi
+    fi
+    printf '%s' "$killed"
+}
+
 do_start() {
     if pid="$(pid_of)"; then
         echo "看板已在运行（pid=${pid}），端口 $PORT"
@@ -98,6 +115,8 @@ do_start() {
         fi
     fi
     cd "$DIR" || return 1
+    # 起新实例前清一遍孤儿循环：它们不监听端口，但会抢 status.json 和 git 锁。
+    sweep_leftovers >/dev/null 2>&1 || true
     # setsid 不是 POSIX：Linux 有，macOS/FreeBSD 默认没有。有就用来脱离会话
     # （停止时可以整组回收），没有就退回 nohup，靠 stop 里的兜底清理子进程。
     if command -v setsid >/dev/null 2>&1; then
@@ -134,8 +153,15 @@ do_start() {
 
 do_stop() {
     if ! pid="$(pid_of)"; then
+        # 没有记录在案的 pid 也可能留着孤儿刷新循环（历史 restart 漏下的）。
+        # 照样按路径/端口扫一遍，避免「stop 说已停、status.json 还在被写」。
+        swept="$(sweep_leftovers)"
         rm -f "$PID_FILE"
-        echo "看板未在运行"
+        if [ -n "$swept" ]; then
+            echo "看板未记录在运行，已清理残留进程：$swept"
+        else
+            echo "看板未在运行"
+        fi
         return 0
     fi
     # 先整组回收（setsid 起过时 pid 即 pgid）；负 pid 在部分 shell/OS 上不支持，
@@ -152,13 +178,12 @@ do_stop() {
         kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
         sleep 1
     fi
-    # 兜底：serve.py 是子进程，父脚本被杀后它可能变孤儿继续占端口（restart 就必失败）。
-    # 按端口匹配清理；用 [s]erve.py 括号技巧，避免 pkill 匹配到本脚本自身。
-    if command -v pkill >/dev/null 2>&1; then
-        pkill -f "[s]erve.py --status .*--port $PORT" 2>/dev/null || true
-    fi
+    # 兜底：serve.py 与刷新循环都是子进程，父脚本被 KILL 时会变孤儿。
+    # 按端口清 serve.py、按本仓脚本绝对路径清刷新循环（`( while ) &` 的
+    # subshell argv 仍是脚本路径），否则每次 restart 漏一个，越积越多。
+    swept="$(sweep_leftovers)"
     rm -f "$PID_FILE"
-    echo "看板已停止"
+    echo "看板已停止${swept:+（同时清理残留：$swept）}"
 }
 
 do_status() {

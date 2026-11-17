@@ -86,7 +86,7 @@ refresh() {
     # A 写完、B 的失败分支把它 rm 掉、A 再去 mv 就报「stat 失败: 没有那个文件或目录」，
     # 这种错误会以每秒上百行的速度灌进日志（实测灌到 338MB）。各写各的 tmp 就没有竞争。
     tmp="$STATUS.tmp.$$"
-    if ! python3 "$HIVE/hive.py" --dir "$HIVE" status --json >"$tmp" 2>"$DASH/status.err"; then
+    if ! python3 "$HIVE/hive.py" --dir "$HIVE" status --json --sync-health >"$tmp" 2>"$DASH/status.err"; then
         rm -f "$tmp"
         return 0
     fi
@@ -118,7 +118,41 @@ refresh || true
 # 先让 serve.py 能起来，再补 CI 状态：ci-check.sh 最长要 15s（python 的 urlopen
 # timeout），放在 serve.py 启动之前会把"服务就绪"拖过 dashboard-service.sh 的等待窗口。
 [ -n "$CI_REPOS" ] && refresh_ci || true
+
+# --- 单实例闸 ------------------------------------------------------------ #
+# 同一端口只允许一份刷新循环。历史上 restart 漏掉的孤儿循环会一直抢写
+# status.json，还会和别的 hive 进程抢 git index.lock（陈旧锁的来源之一）。
+STATE_DIR="${HIVE_STATE:-$HOME/.hive}"
+RUN_DIR="$STATE_DIR/run"
+LOCK_DIR="$RUN_DIR/dashboard.$PORT.lock"
+mkdir -p "$RUN_DIR" 2>/dev/null || true
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    OLD_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+        echo "本端口($PORT)已有一份刷新循环在跑（pid=$OLD_PID），本实例退出" >&2
+        exit 0
+    fi
+    # 陈旧锁（上个实例被 SIGKILL）：清掉再抢一次
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo "无法获取刷新循环锁 $LOCK_DIR，本实例退出" >&2
+        exit 0
+    fi
+fi
+printf '%s\n' "$$" >"$LOCK_DIR/pid" 2>/dev/null || true
+
 TICKS=0
+LOOP=""
+SERVE_PID=""
+cleanup() {
+    trap - INT TERM EXIT
+    [ -n "$SERVE_PID" ] && kill "$SERVE_PID" 2>/dev/null
+    [ -n "$LOOP" ] && kill "$LOOP" 2>/dev/null
+    [ -n "$LOOP" ] && wait "$LOOP" 2>/dev/null
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+}
+trap cleanup INT TERM EXIT
+
 (
     while :; do
         sleep "$(jitter_seconds "$INTERVAL")"
@@ -131,11 +165,14 @@ TICKS=0
 ) &
 LOOP=$!
 
-cleanup() {
-    kill "$LOOP" 2>/dev/null || true
-    wait "$LOOP" 2>/dev/null || true
-}
-trap cleanup INT TERM EXIT
-
 cd "$DASH" || exit 1
-python3 serve.py --status "$STATUS" --port "$PORT" --host "$HOST"
+# serve.py 放后台再 wait（**不要**改成前台直跑）：POSIX sh 会等前台命令结束才执行
+# trap，dashboard-service.sh 的 TERM 会被前台 python 阻塞 → 10s 后 SIGKILL →
+# EXIT trap 不执行 → 刷新循环被孤儿化（实测漏了 4 个，从周日跑到今天）。
+# 后台 + wait 时 TERM 能立刻进 trap，把 serve.py 与循环一起收干净。
+python3 serve.py --status "$STATUS" --port "$PORT" --host "$HOST" &
+SERVE_PID=$!
+wait "$SERVE_PID"
+rc=$?
+SERVE_PID=""
+exit "$rc"

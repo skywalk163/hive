@@ -99,6 +99,13 @@ try:
 except ImportError:  # pragma: no cover - 只在残缺部署上走到
     hive_repos = None  # type: ignore[assignment]
 
+# 自愈式自动更新（修陈旧锁 → 快进 → 需要时重启看板 → 装定时任务）。
+# 同样是可选依赖：只拷了 hive.py 的部署仍能跑其它命令。
+try:
+    import hive_autoupdate as _autoupdate
+except ImportError:  # pragma: no cover - 只在残缺部署上走到
+    _autoupdate = None  # type: ignore[assignment]
+
 DEFAULT_MAX_PER_REPO = 1
 # 一张卡最多被看门狗**自动**回收几次；超了就转 blocked 退出流水线，不再无限重派。
 # 0 = 一次都不许自动重派（首次判死即 blocked）。人工显式 `hive retry` 不受此限。
@@ -3807,15 +3814,23 @@ class Hive:
                         "reason": "本地与 %s 分叉，需人工裁决；已跳过自动合并"
                                   % remote_ref}
 
-        p = git(["merge", "--ff-only", remote], path, check=False)
-        if p.returncode == 0:
+        # 撞锁（被中断的 git 留下 index.lock）时先自愈再重试一次：
+        # 代码仓和协调仓一样会被「重启/断电打断在写索引半路」卡死。
+        if hive_repos is not None:
+            rc, _out, merge_err = hive_repos.git_write(
+                path, ["merge", "--ff-only", remote], timeout=120.0)
+            p_stderr = merge_err or ""
+        else:
+            p = git(["merge", "--ff-only", remote], path, check=False)
+            rc, p_stderr = p.returncode, (p.stderr or "")
+        if rc == 0:
             return {"repo": name, "path": str(path), "status": "fast-forwarded",
                     "sha": rev_parse(path, "HEAD") or remote}
 
         # ff 失败：本地分叉，或未提交改动与传入提交重叠。绝不自动解冲突。
         dirty = git(["status", "--porcelain", "--untracked-files=no"], path,
                     check=False).stdout.strip()
-        err_lines = (p.stderr or "").strip().splitlines()
+        err_lines = (p_stderr or "").strip().splitlines()
         reason = err_lines[0] if err_lines else "无法快进合并"
         out = {"repo": name, "path": str(path), "status": "diverged",
                "reason": reason}
@@ -5441,31 +5456,50 @@ class Hive:
             }
             return assess, decision, health
 
-        assess = hive_repos.assess_sync_state(self.dir)
+        allow_dirty_ff = hive_repos.dirty_ff_enabled()
+        assess = hive_repos.assess_sync_state(self.dir,
+                                              allow_dirty_ff=allow_dirty_ff)
         gate = self._sync_gate("status", local_remote_sha=assess["remote_sha"])
         throttle, decision = gate["throttle"], gate["decision"]
         autosynced = False
         state = None
+        sync_error = ""
+        lock_repaired: list[str] = []
 
-        # 脏工作区：跳过一切写操作，也不写节流状态文件（HIVE_SYNC_NO_AUTOSYNC
-        # 与 T2 窗口内的情况已由 _sync_gate 把 due 置 False，同样零写）。
-        if not assess["clean"]:
+        # 脏工作区：与传入提交不重叠（DIRTY_FF）时允许 ff；真重叠才零写跳过。
+        # 其它脏情形（不可快进 / 算不出重叠）保持老契约：跳过、不写。
+        if assess["state"] == hive_repos.DIRTY_WORKTREE:
             decision["due"] = False
             decision["ask_remote"] = False
             decision["reason"] = assess["reason"]
         elif decision["due"] and decision["ask_remote"]:
+            # 写之前先自愈陈旧锁：被中断的 fetch/merge 留下的 index.lock
+            # 会让之后每一次 merge 都失败，而 status 里完全看不出这回事。
+            rep = hive_repos.repair_stale_locks(self.dir)
+            lock_repaired = [Path(x["path"]).name
+                             for x in (rep.get("repaired") or [])]
             # 只有 T2 到点 / T0 事件 / T1 head_sha 变化才走到这里；
             # fetch_if_changed() 仍做 ls-remote 前置比对 + 10s TTL 缓存。
             if fetch_if_changed(self.dir):
                 self.fetch()
-            assess = hive_repos.assess_sync_state(self.dir)
-            if assess["state"] == hive_repos.CLEAN_FF:
-                # 唯一的写操作：干净且可快进时追平，git 保证不丢任何改动。
-                p = git(["merge", "--ff-only", "origin/main"], self.dir,
-                        check=False)
-                if p.returncode == 0:
+            assess = hive_repos.assess_sync_state(
+                self.dir, allow_dirty_ff=allow_dirty_ff)
+            if assess["state"] in (hive_repos.CLEAN_FF, hive_repos.DIRTY_FF):
+                # 唯一的写操作：可快进时追平。git 保证不覆盖/丢弃未提交改动
+                # （不重叠的原样保留，重叠的 git 自己拒绝）。
+                rc, _out, err = hive_repos.git_write(
+                    self.dir, ["merge", "--ff-only", "origin/main"],
+                    timeout=120.0)
+                if rc == 0:
                     autosynced = True
-                    assess = hive_repos.assess_sync_state(self.dir)
+                    assess = hive_repos.assess_sync_state(
+                        self.dir, allow_dirty_ff=allow_dirty_ff)
+                else:
+                    # 以前这里 check=False 静默吞掉：人只看到「一直落后」。
+                    sync_error = (err or "").strip()[:600]
+                    decision["reason"] = (
+                        "快进合并失败：" +
+                        (sync_error.splitlines()[0] if sync_error else "未知原因"))
             elif assess["state"] == hive_repos.CLEAN_DIVERGED:
                 # 分叉：只 fetch 更新远端 ref，绝不 merge。
                 decision["reason"] = assess["reason"]
@@ -5478,11 +5512,13 @@ class Hive:
                 decision, head_sha=assess["head_sha"],
                 remote_sha=assess["remote_sha"], reason=decision["reason"])
         else:
-            assess = hive_repos.assess_sync_state(self.dir)
+            assess = hive_repos.assess_sync_state(
+                self.dir, allow_dirty_ff=allow_dirty_ff)
 
         health = hive_repos.build_sync_health(
             assess, decision, state, autosynced=autosynced,
-            throttled=bool(assess["clean"] and not decision["due"]))
+            throttled=bool(assess["clean"] and not decision["due"]),
+            sync_error=sync_error, lock_repaired=lock_repaired)
         return assess, decision, health
 
     def cmd_status(self, as_json: bool = False, with_board: bool = False,
@@ -8533,6 +8569,54 @@ def cmd_sync_repos(args) -> None:
                                   prompt=not getattr(args, "no_prompt", False))
 
 
+def cmd_autoupdate(args) -> int:
+    """自愈式自动更新的 CLI 入口。
+
+    退出码契约（cron / 外部 agent 依赖它，别改语义）：
+      0 = 已最新或已同步；2 = 需要人或 agent 介入（blocked）；1 = 出错。
+    注意返回 int：main() 只在拿到 int 时才把它当退出码。
+    """
+    if _autoupdate is None:
+        print("错误: 缺少 hive_autoupdate.py（残缺部署），无法自动更新",
+              file=sys.stderr)
+        return 1
+    if args.install_cron or args.uninstall_cron:
+        res = (_autoupdate.install_cron(Path(args.dir),
+                                        every_min=args.every_min,
+                                        dry_run=bool(args.dry_run))
+               if args.install_cron else
+               _autoupdate.uninstall_cron(dry_run=bool(args.dry_run)))
+        if args.json:
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        elif res.get("ok"):
+            if args.install_cron:
+                print("[hive] 已装 autoupdate 定时任务（每 %d 分钟）：%s"
+                      % (args.every_min, res.get("line", "")))
+                print("[hive] 先手动跑一次验证：hive autoupdate --restart")
+            else:
+                print("[hive] 已删除 autoupdate 定时任务")
+        else:
+            print("错误: %s" % (res.get("reason") or "crontab 不可用"),
+                  file=sys.stderr)
+        return 0 if res.get("ok") else 1
+    if args.status:
+        st = _autoupdate.read_state()
+        if args.json:
+            print(json.dumps(st, ensure_ascii=False, indent=2))
+        elif st:
+            print(_autoupdate.summary_text(st))
+        else:
+            print("还没有 autoupdate 记录（先跑一次 hive autoupdate）")
+        return 0
+    res = _autoupdate.run(Path(args.dir), restart=bool(args.restart),
+                          dry_run=bool(args.dry_run))
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+    else:
+        print(_autoupdate.summary_text(res))
+    return int(res.get("exit_code") or 0)
+
+
 def cmd_llm(args) -> None:
     from llm_controller import run_llm
     run_llm(args)
@@ -8704,7 +8788,8 @@ def cmd_cluster(args) -> int:
 # 想换绑定地址：HIVE_DASHBOARD_HOST（默认 0.0.0.0；收回本机写 127.0.0.1）
 # --------------------------------------------------------------------------- #
 DASH_DEFAULT_PORT = _PORT_DASHBOARD
-DASH_AUTOSTART_SKIP = {"dash", "dashboard", "init", "cluster", "ports"}
+DASH_AUTOSTART_SKIP = {"dash", "dashboard", "init", "cluster", "ports",
+                       "autoupdate"}
 
 
 def dashboard_port() -> int:
@@ -9453,6 +9538,24 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-prompt", action="store_true",
                    help="即使终端也不问路径（脚本/定时任务用）")
     s.set_defaults(func=cmd_sync_repos)
+
+    s = sub.add_parser(
+        "autoupdate",
+        help="自愈式自动更新：修陈旧 git 锁 → 快进 → 需要时重启看板（可装定时任务）")
+    s.add_argument("--json", action="store_true", help="输出结构化 JSON")
+    s.add_argument("--restart", action="store_true",
+                   help="看板运行时代码比进程新（或没在跑）时，后台独立会话重启它")
+    s.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="只预演：不修锁、不快进、不重启、不写状态")
+    s.add_argument("--status", action="store_true",
+                   help="只打印上一次 autoupdate 的结果，不干活")
+    s.add_argument("--install-cron", dest="install_cron", action="store_true",
+                   help="装成用户级 cron 定时任务（每 --every-min 分钟一次）")
+    s.add_argument("--uninstall-cron", dest="uninstall_cron",
+                   action="store_true", help="删掉 autoupdate 的 cron 行")
+    s.add_argument("--every-min", dest="every_min", type=int,
+                   default=5, help="定时任务间隔分钟（默认 5）")
+    s.set_defaults(func=cmd_autoupdate)
 
     s = sub.add_parser("claim", help="手工领取")
     s.add_argument("task")

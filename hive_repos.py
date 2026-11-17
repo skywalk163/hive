@@ -584,9 +584,23 @@ SYNC_ENV_EVENT = "HIVE_SYNC_EVENT"          # 收到 T0 触发 LSA
 SYNC_ENV_FORCE = "HIVE_SYNC_FORCE"          # 人工/显式强制本轮对账
 SYNC_ENV_STATE = "HIVE_SYNC_STATE_FILE"     # 覆盖节流状态文件路径（测试隔离）
 SYNC_ENV_DISABLE = "HIVE_SYNC_NO_AUTOSYNC"  # 紧急回退阀：关掉自动同步
+SYNC_ENV_DIRTY_FF = "HIVE_SYNC_DIRTY_FF"    # 脏但无重叠时仍允许 ff（默认开）
+
+
+def dirty_ff_enabled() -> bool:
+    """**显式** opt-in：脏工作区里「改动与传入文件不重叠」时是否允许 ff 追平。
+
+    默认关闭（``HIVE_SYNC_DIRTY_FF=1`` 才开）。原因：`hive status` 的
+    「脏工作区零写 / 字节级不动」是 L5 验收口径，不能因为想自动更新就默认
+    改掉它。需要自愈的入口（`hive autoupdate`）**自己**传 allow_dirty_ff=True，
+    于是策略跟着入口走：status 保守、autoupdate 自愈，两边口径都说得清。
+    """
+    return (os.environ.get(SYNC_ENV_DIRTY_FF) or "0").strip().lower() in (
+        "1", "true", "yes", "on")
 
 # 三态 + 两个无害态
 CLEAN_FF = "clean-ff"                # 干净且落后、可 ff-only → autosync
+DIRTY_FF = "dirty-ff-safe"           # 脏，但改动与传入文件不重叠 → 仍可安全 ff
 CLEAN_DIVERGED = "clean-diverged"    # 干净但分叉 → 人工裁决，不 merge
 DIRTY_WORKTREE = "dirty"             # 脏 → 零写操作
 UP_TO_DATE = "up-to-date"            # 已最新或本地领先
@@ -598,6 +612,9 @@ BANNER_DIRTY = (
 BANNER_DIVERGED = (
     "本地与 origin/main 分叉，需人工裁决；已跳过自动合并，"
     "卡面状态可能不是最新")
+BANNER_OVERLAP = (
+    "本地未提交改动与 origin/main 传入的提交重叠，自动同步已跳过；"
+    "先提交或 stash 这些文件，再执行 git pull（或 hive sync-repos）")
 BANNER_THROTTLED = (
     "本地协调仓落后 origin/main；将在下一次同步窗口自动更新，"
     "也可手动执行 git pull（或 hive sync-repos）后立即刷新")
@@ -625,7 +642,245 @@ def _git_live(args: list[str], cwd, timeout: float = 10.0) -> tuple[int, str, st
     return p.returncode, (p.stdout or ""), (p.stderr or "")
 
 
-def assess_sync_state(repo, *, remote_ref: str = "origin/main") -> dict:
+# --------------------------------------------------------------------------- #
+# 陈旧 git 锁：识别 + 归档（自动更新自愈）
+#
+# 为什么必须做：index.lock 是 git 的互斥闸。一个进程被 SIGKILL / 断电 /
+# 「重启看板」打断在写索引的半路，就会留下一个 0 字节锁文件。此后所有**写
+# 索引**的操作（merge / checkout / add / reset）全部报
+#   「无法创建 .git/index.lock：文件已存在」/「另一 git 进程似乎正在此仓库中运行」
+# 而 fetch / ls-remote 照旧成功 —— 于是自动同步看起来「在跑」，实际每次
+# merge 都失败；掉队的节点再也不会自己追上来，人只看到一句吓人的锁提示。
+#
+# 安全边界（宁可不动，也不误删正在用的锁）：
+#   * 只看已知的写锁：index.lock / HEAD.lock / shallow.lock；
+#   * 「无人持有」且「年龄 ≥ HIVE_LOCK_STALE_S（默认 120s）」两条同时成立；
+#   * 有持有者且进程还活着 → 一律不动；查不清持有者时把门槛抬到 600s；
+#   * 从不 unlink：改名成 <name>.stale-<epoch> 留证据，可回溯、可统计；
+#   * HIVE_NO_LOCK_REPAIR=1 一键关掉（应急阀）。
+# --------------------------------------------------------------------------- #
+
+LOCK_NAMES = ("index.lock", "HEAD.lock", "shallow.lock")
+LOCK_STALE_AFTER_S = 120.0
+LOCK_STALE_UNKNOWN_HOLDER_S = 600.0     # 查不清持有者时的保守门槛
+LOCK_ENV_STALE_S = "HIVE_LOCK_STALE_S"
+LOCK_ENV_NO_REPAIR = "HIVE_NO_LOCK_REPAIR"
+# git 的锁冲突文案：中英文都要认（FreeBSD 上是中文 gettext，CI 上是英文）
+LOCK_ERROR_TOKENS = (
+    "index.lock", "head.lock", "shallow.lock",
+    "another git process", "另一 git 进程", "无法创建", "unable to create",
+)
+
+
+def git_dir_of(repo) -> Path:
+    """仓库的 git 目录（工作树里也对；.git 文件 / worktree 都由 git 自己答）。"""
+    rc, out, _ = _git_live(["rev-parse", "--absolute-git-dir"], repo)
+    if rc == 0 and out.strip():
+        return Path(out.strip())
+    return Path(repo) / ".git"
+
+
+def lock_holders(lock_path) -> tuple[list[int], bool]:
+    """谁正持有这个文件：返回 ``(pids, 是否查得清)``。
+
+    普通用户只能看到自己（及同组）进程打开的 fd，所以「查得清」只是尽力而为：
+    查不清时调用方必须用更保守的年龄门槛，绝不因为「我没看见」就当无人持有。
+    """
+    path = str(lock_path)
+    if not os.path.exists(path):
+        return [], True
+    # FreeBSD：`procstat -a -f` 按进程列 fd 全路径。注意不能用 `fstat -f`：
+    # 它的 -f 是「限定在同一个文件系统」，不是「这个文件」，会把整盘进程都列出来。
+    if os.path.exists("/usr/bin/procstat"):
+        try:
+            p = subprocess.run(["procstat", "-a", "-f"], capture_output=True,
+                               text=True, timeout=15.0)
+        except (OSError, subprocess.SubprocessError):
+            return [], False
+        if p.returncode != 0:
+            return [], False
+        pids = []
+        for line in (p.stdout or "").splitlines():
+            line = line.rstrip()
+            if not line or not line.endswith(path):
+                continue
+            parts = line.split(None, 1)
+            if parts and parts[0].isdigit():
+                pids.append(int(parts[0]))
+        return sorted(set(pids)), True
+    # Linux：扫 /proc/<pid>/fd
+    if os.path.isdir("/proc"):
+        pids = []
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            return [], False
+        for name in names:
+            if not name.isdigit():
+                continue
+            fd_dir = "/proc/%s/fd" % name
+            try:
+                for fd in os.listdir(fd_dir):
+                    try:
+                        if os.readlink(os.path.join(fd_dir, fd)) == path:
+                            pids.append(int(name))
+                            break
+                    except OSError:
+                        continue
+            except OSError:
+                continue
+        return sorted(set(pids)), True
+    return [], False
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:      # 别人的进程：活着，只是看不见
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def inspect_locks(repo, *, now: float | None = None,
+                  stale_after: float | None = None) -> dict:
+    """只读巡锁：每个锁的年龄、持有者、判定（stale / busy / young / unknown）。
+
+    不做任何写操作；给 ``hive doctor`` / 看板 / 自愈入口共用一个口径。
+    """
+    now = float(time.time() if now is None else now)
+    try:
+        stale_after = float(os.environ.get(LOCK_ENV_STALE_S)
+                            or LOCK_STALE_AFTER_S)
+    except ValueError:
+        stale_after = LOCK_STALE_AFTER_S
+    if stale_after <= 0:
+        stale_after = LOCK_STALE_AFTER_S
+    if stale_after is None:
+        stale_after = LOCK_STALE_AFTER_S
+
+    gdir = git_dir_of(repo)
+    locks = []
+    for name in LOCK_NAMES:
+        p = gdir / name
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        age = max(0.0, now - st.st_mtime)
+        pids, known = lock_holders(p)
+        alive = [pid for pid in pids if _pid_alive(pid)]
+        if alive:
+            verdict = "busy"
+            reason = "有存活进程正持有：%s" % ",".join(str(x) for x in alive)
+        elif not known:
+            verdict = "stale" if age >= max(stale_after,
+                                            LOCK_STALE_UNKNOWN_HOLDER_S) else "unknown"
+            reason = "查不清持有者，按更保守的门槛判定"
+        else:
+            verdict = "stale" if age >= stale_after else "young"
+            reason = ("无持有者且已 %ds 未动" % int(age) if verdict == "stale"
+                      else "刚创建 %ds，可能有人正在写" % int(age))
+        locks.append({
+            "name": name, "path": str(p), "age_s": age,
+            "size": st.st_size, "holders": alive, "holders_known": known,
+            "verdict": verdict, "reason": reason,
+        })
+    return {"git_dir": str(gdir), "stale_after_s": stale_after,
+            "locks": locks,
+            "stale": [lk["name"] for lk in locks if lk["verdict"] == "stale"]}
+
+
+def repair_stale_locks(repo, *, now: float | None = None,
+                       dry_run: bool = False) -> dict:
+    """把判定为 stale 的锁**改名归档**（不是删除），返回结构化结果。
+
+    调用方拿 ``repaired`` 判断是否需要重试一次 git 写操作。任何异常都不抛，
+    只记在 ``error`` 里 —— 自愈失败绝不能把 status / 定期任务拖崩。
+    """
+    if (os.environ.get(LOCK_ENV_NO_REPAIR) or "").strip() in ("1", "true", "yes"):
+        return {"git_dir": str(git_dir_of(repo)), "found": [], "repaired": [],
+                "skipped": "HIVE_NO_LOCK_REPAIR=1，锁自愈已关闭", "error": ""}
+    try:
+        scan = inspect_locks(repo, now=now)
+    except Exception as e:                      # noqa: BLE001 - 自愈要兜底
+        return {"git_dir": "", "found": [], "repaired": [], "skipped": "",
+                "error": "%s: %s" % (type(e).__name__, e)}
+    found = [lk for lk in scan["locks"] if lk["verdict"] == "stale"]
+    repaired, skipped = [], []
+    for lk in found:
+        if dry_run:
+            repaired.append({**lk, "archived_as": ""})
+            continue
+        src = Path(lk["path"])
+        dst = src.with_name("%s.stale-%d" % (src.name, int(now or time.time())))
+        try:
+            os.replace(src, dst)
+        except OSError as e:
+            skipped.append({**lk, "error": str(e)})
+            continue
+        repaired.append({**lk, "archived_as": str(dst)})
+    return {"git_dir": scan["git_dir"], "found": [lk["path"] for lk in found],
+            "repaired": repaired, "skipped": skipped, "error": ""}
+
+
+def is_lock_error(text: str) -> bool:
+    """这段 git 输出是不是「被锁挡住」（而不是真的合并冲突）。"""
+    low = (text or "").lower()
+    return any(tok.lower() in low for tok in LOCK_ERROR_TOKENS)
+
+
+def git_write(repo, args: list[str], *, timeout: float = 60.0,
+              retries: int = 1) -> tuple[int, str, str]:
+    """执行**写**类 git 命令；撞锁时先自愈再重试一次。
+
+    只对「锁」这一类失败重试：真正的 ff 失败 / 冲突原样返回给调用方，
+    绝不用重试把真实错误吞掉。返回 ``(rc, stdout, stderr)``。
+    """
+    out_rc, out, err = _git_live(args, repo, timeout=timeout)
+    if out_rc == 0 or not is_lock_error(err):
+        return out_rc, out, err
+    for _ in range(max(0, retries)):
+        rep = repair_stale_locks(repo)
+        if not rep["repaired"]:
+            break
+        out_rc, out, err = _git_live(args, repo, timeout=timeout)
+        if out_rc == 0 or not is_lock_error(err):
+            break
+    return out_rc, out, err
+
+
+def _lines(text: str) -> list[str]:
+    return [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+
+
+def dirty_paths(repo) -> list[str]:
+    """工作区里**会被 merge 撞到**的路径：已跟踪改动 + 未跟踪新文件。
+
+    未跟踪文件一般不会被 ff 改动，但远端**新增**同名文件时 git 会拒绝合并
+    （untracked working tree files would be overwritten），所以也要参与重叠判定。
+    """
+    rc, out, _ = _git_live(["diff", "--name-only", "HEAD"], repo)
+    tracked = _lines(out) if rc == 0 else []
+    rc2, out2, _ = _git_live(
+        ["ls-files", "-o", "--exclude-standard"], repo)
+    untracked = _lines(out2) if rc2 == 0 else []
+    return sorted(set(tracked) | set(untracked))
+
+
+def incoming_paths(repo, remote_ref: str = "origin/main") -> list[str]:
+    """``HEAD..remote`` 之间会被快进带进来的文件（相对仓库根）。"""
+    rc, out, _ = _git_live(["diff", "--name-only", "HEAD", remote_ref], repo)
+    return sorted(set(_lines(out))) if rc == 0 else []
+
+
+def assess_sync_state(repo, *, remote_ref: str = "origin/main",
+                      allow_dirty_ff: bool = False) -> dict:
     """只读三态判定：**绝不执行任何写操作**。
 
     返回 dict（字段同时也是 ``sync_health`` 的诊断来源）::
@@ -659,10 +914,31 @@ def assess_sync_state(repo, *, remote_ref: str = "origin/main") -> dict:
                   and rc_ahead != 0)
     diverged = bool(behind and not ff_possible)
 
+    dirty_files: list[str] = []
+    overlap: list[str] = []
     if not clean:
-        state, action = DIRTY_WORKTREE, "skip-dirty"
-        reason = "本地有未提交改动，自动同步已跳过"
-        banner = BANNER_DIRTY
+        dirty_files = dirty_paths(path)
+        if allow_dirty_ff and not behind:
+            # 脏，但远端没有新提交：没什么可同步的，别报「允许自动同步」
+            state, action = UP_TO_DATE, "none"
+            reason = "工作区有未提交改动，但已与 origin/main 一致，无需同步"
+            banner = ""
+        elif allow_dirty_ff and ff_possible and remote_sha:
+            overlap = sorted(set(dirty_files) & set(incoming_paths(path, remote_ref)))
+            if not overlap:
+                state, action = DIRTY_FF, "autosync"
+                reason = ("工作区有 %d 个未提交/未跟踪文件，但都不在本次快进带入的"
+                          "文件里，ff 不会碰到它们，允许自动同步" % len(dirty_files))
+                banner = ""
+            else:
+                state, action = DIRTY_WORKTREE, "skip-dirty"
+                reason = ("本地未提交改动与 origin/main 传入的提交重叠（%d 个文件），"
+                          "为避免覆盖手头改动，自动同步已跳过" % len(overlap))
+                banner = BANNER_OVERLAP
+        else:
+            state, action = DIRTY_WORKTREE, "skip-dirty"
+            reason = "本地有未提交改动，自动同步已跳过"
+            banner = BANNER_DIRTY
     elif not remote_sha:
         state, action = NO_REMOTE, "none"
         reason = "找不到 origin/main，无法对账"
@@ -692,6 +968,10 @@ def assess_sync_state(repo, *, remote_ref: str = "origin/main") -> dict:
         "action": action,
         "reason": reason,
         "banner": banner,
+        # —— 脏工作区的可操作细节（看板/agent 据此决定是「等」还是「动手」）——
+        "dirty_files": dirty_files,
+        "overlap_files": overlap,
+        "dirty_ff": state == DIRTY_FF,
     }
 
 
@@ -872,7 +1152,8 @@ class SyncThrottle:
 
 def build_sync_health(assess: dict, decision: dict, state: dict | None = None,
                       *, autosynced: bool = False,
-                      throttled: bool = False) -> dict:
+                      throttled: bool = False, sync_error: str = "",
+                      lock_repaired: list | None = None) -> dict:
     """``status --json`` 的 ``sync_health`` 结构化对象。
 
     七个契约字段：lsdb_seq / last_sync_at / head_sha / remote_sha /
@@ -891,8 +1172,8 @@ def build_sync_health(assess: dict, decision: dict, state: dict | None = None,
     if tier not in ("T0", "T1", "T2"):
         tier = "T2"
     reason = str(decision.get("reason") or assess.get("reason") or "")
-    if assess["state"] == DIRTY_WORKTREE:
-        reason = assess["reason"]          # 脏：明确写「自动同步已跳过」
+    if assess["state"] in (DIRTY_WORKTREE, DIRTY_FF):
+        reason = assess["reason"]          # 脏：明确写出「跳过」还是「不重叠可同步」
     elif assess["state"] == CLEAN_DIVERGED:
         reason = assess["reason"]          # 分叉：明确写「需人工裁决」
     return {
@@ -917,4 +1198,14 @@ def build_sync_health(assess: dict, decision: dict, state: dict | None = None,
         "min_interval_s": float(decision.get("min_interval_s")
                                 or SYNC_MIN_INTERVAL_S),
         "banner": assess["banner"],
+        # —— 脏工作区细节：看板/agent 据此区分「等一下」与「必须人工介入」——
+        "dirty_ff": bool(assess.get("dirty_ff")),
+        "dirty_files": list(assess.get("dirty_files") or []),
+        "overlap_files": list(assess.get("overlap_files") or []),
+        # 合并失败的真实原因（以前被 `check=False` 静默吞掉，人只看到「一直落后」）
+        "sync_error": str(sync_error or ""),
+        "lock_repaired": list(lock_repaired or []),
+        # 需要人工/agent 介入：脏改动与传入提交重叠，光等不会自己好
+        "blocked": bool(assess["state"] == DIRTY_WORKTREE
+                        and assess.get("overlap_files")),
     }
