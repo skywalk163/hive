@@ -1,0 +1,43 @@
+{
+  "task": "T-0376",
+  "agent": "teleagent-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0376",
+  "base": "main",
+  "head": "8699b3cfc46d276309e7e2153d75f8ac27fe479a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-17T11:09:14+08:00",
+  "finished_at": "2026-11-17T11:09:55+08:00",
+  "duration_s": 41.6,
+  "verify": [
+    {
+      "cmd": "python tools/remote_ci.py --help",
+      "code": 0,
+      "tail": [
+        "                        等槽位的最长秒数",
+        "  --timeout TIMEOUT     远端命令超时秒数",
+        "  --list                只看排队/占用情况，不跑测试",
+        "  --no-clean            保留本次 tar（排障用）",
+        "  --no-addopts          用 -o addopts= 清空仓库 addopts（仓库 addopts 硬依赖某个插件而远端没装时用）"
+      ]
+    }
+  ],
+  "summary": "# T-0376 交付：0.88 排队跑测工具与基线入库\n\n做了什么：把 R222 前置的 0.88 排队跑测工具与基线固化进 light 仓（基线 main 9b19d433c，分支 task/T-0376）。\n\n改动（4 个文件，均在允许路径内）：\n- tools/remote_ci.py：拷自 duan-light-merge/_tools/remote_ci.py，SHA256 与源逐字节一致；paramiko 懒加载（--help 不依赖它），凭据按候选顺序找 .env、无写死路径。\n- tools/README_remote_ci.md：同源拷入并按本仓路径改写（`python tools/remote_ci.py --repo .` 口径，与 R222 总纲一致）；补凭据候选查找顺序、worktree 场景用 --env-file、默认 --repo 面向 duan-light-merge 布局的提示。\n- tools/baseline_0_88_light_merge.md：18 条已知红基线 + 耗时特征，原样入库。\n- docs/测试分级与远程跑测.md：新增闸门文档（L1 本地窄测 → L2 0.88 定向窄测 → L3 0.88 全量；判红相对 18 条基线而非 0 failed；排队红线；常见报错速查；0.88 环境速览）。\n\n验证（Windows，全部通过）：\n- `python tools/remote_ci.py --help` 打印用法，rc=0（argparse 在 import paramiko 之前完成）。\n- `ast.parse(tools/remote_ci.py)` 通过。\n- 基线自检：18/18 条失败用例的文件路径在仓内全部命中（自检脚本放 .temp，未入仓）。\n\nREMOTE_CI: unavailable(本机已装 Python（3.10/3.11/3.12/3.13/3.14）均无 paramiko；临时 venv 经默认源与清华镜像安装均超时，疑似本机外网受限)。本卡无测试改动，0.88 跑测由后续卡按 docs/测试分级与远程跑测.md 执行。\n\n风险/备注：工具 `--repo` 默认值按 duan-light-merge 目录布局写，仓内使用须显式 `--repo .`（README 已注明）；未动 src/、cli/、stdlib/、tests/；零第三方依赖；无凭据/口令入仓。\n\n> AI生成\n\n\n## 结果未落 store（T-0296）\n\n- Git 侧已完成：res/T-0376 分支、task/T-0376（head 8699b3cfc46d276309e7e2153d75f8ac27fe479a）\n- store 侧**未写入**：T-0376 结果写入 leader store 失败（已尝试 4 次）：T-0376 的租约已过期，结果被拒（lease lost）\n- 影响：看板/claim 的 store 视图看不到结果，租约过期后这张卡可能被重新派发；Git 结果不会丢，`hive land` 读的是Git 侧 res/T-0376，可以照常合入。\n- 下一步：**不要直接重跑 `hive submit T-0376`**（`result_info` 会报「已经有结果」把重跑挡住）；要让 store 视图一致，先删 res/T-0376 分支再重跑，或用 `hive doctor` 体检 / `hive repair --apply` 对齐状态。",
+  "error": "",
+  "declared_paths": [
+    "tools/remote_ci.py",
+    "tools/README_remote_ci.md",
+    "tools/baseline_0_88_light_merge.md",
+    "docs/测试分级与远程跑测.md"
+  ],
+  "changed_files": [
+    "docs/测试分级与远程跑测.md",
+    "tools/README_remote_ci.md",
+    "tools/baseline_0_88_light_merge.md",
+    "tools/remote_ci.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "8f3765396e4b4329bbff70fb204a3c8c"
+}
