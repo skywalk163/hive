@@ -23,7 +23,7 @@
     { key: 'ready', title: '待领取', hint: 'state = ready 且无人抢锁' },
     { key: 'running', title: '进行中', hint: '已抢锁 / assigned / running，暂无结果' },
     { key: 'merging', title: '待合入', hint: '结果 done、代码分支已核验到位（land_ready），可跑 hive land；分支缺失的卡会进异常列' },
-    { key: 'abnormal', title: '异常', hint: 'failed / blocked / 租约过期 / 不可合入；卡片上带责任 agent 与时间预算' },
+    { key: 'abnormal', title: '异常', hint: 'failed / env-failed（判据在本机跑不动）/ blocked / 租约过期 / 不可合入；卡片上带责任 agent 与时间预算' },
     { key: 'recent', title: '最近完成', hint: '已完成中按完成时间倒序的前 N 个（数量可在设置里改）' },
     { key: 'closed', title: '已关闭', hint: '其余已完成的任务（默认折叠）', collapsible: true }
   ];
@@ -229,6 +229,12 @@
       stale: !!t.stale,
       depends_on: Array.isArray(t.depends_on) ? t.depends_on.slice() : [],
       result_status: t.result_status || '',
+      // —— 失败性质（T-0342 / T-0344）：normalize 是白名单，这几个不写就永远丢失 ——
+      failure_kind: t.failure_kind || '',
+      env_error_hint: t.env_error_hint || '',
+      verify_env_errors: Array.isArray(t.verify_env_errors) ? t.verify_env_errors.slice() : [],
+      result_error: t.result_error || '',
+      verdict_mismatch: !!t.verdict_mismatch,
       finished_at: t.finished_at || '',
       duration_s: Number(t.duration_s) || 0,
       head: t.head || '',
@@ -493,7 +499,22 @@
   function resultBadge(t) {
     var rs = t.result_status;
     if (rs === 'done') return '<span class="badge ok">done</span>';
-    if (rs === 'failed') return '<span class="badge danger">failed</span>';
+    if (rs === 'failed') {
+      // T-0342 / T-0344：判据在交付机上根本跑不起来（缺依赖 / 平台专有模块 /
+      // pytest 收集为空），和「产物真失败」不是一回事。换徽标 + 悬停写清处置，
+      // 但仍留在异常列、仍显示 failed，绝不伪装成通过。
+      if (t.failure_kind === 'environment' || t.failure_kind === 'mixed') {
+        return '<span class="badge warn" title="' +
+          esc(t.env_error_hint || '验收命令在本机不可执行，结果仍按 failed 归档') +
+          '">env-failed</span>';
+      }
+      // 人工判绿后结果台账原文保留 failed（项目纪律：不订正事实账）。
+      // 不点明的话，done 卡上挂一枚 failed 会被误读成「还有活没干完」。
+      if (t.verdict_mismatch) {
+        return '<span class="badge warn" title="人工判绿：卡面 done，结果台账原文保留 failed 不订正，属人工裁决">人工判绿·台账 failed</span>';
+      }
+      return '<span class="badge danger">failed</span>';
+    }
     return '';
   }
 
@@ -1912,6 +1933,25 @@
         ? '<pre class="summary">' + esc(t.result_summary) + '</pre>'
         : '<p class="muted">（worker 还没有写摘要）</p>') +
       '</section>';
+
+    // 环境性假红 / 人工判绿，把「为什么卡面与结果对不上」直接写在详情里，
+    // 不用靠人去翻卡面附注（近几天 T-0342 / T-0344 都靠附注解释）。
+    if (t.failure_kind === 'environment' || t.failure_kind === 'mixed') {
+      var envRows = (t.verify_env_errors || []).map(function (e) {
+        return '<li><code>' + esc(e.cmd || '') + '</code>（rc=' + esc(String(e.code)) +
+          '）：' + esc(e.reason || e.kind || '') + '</li>';
+      }).join('');
+      h += '<section class="block"><h3>环境性假红（未自动判绿）</h3>' +
+        '<p class="muted">判据在本机不可执行，结果仍按 failed 归档、仍挡 land。</p>' +
+        (envRows ? '<ul class="verify">' + envRows + '</ul>' : '') +
+        '<pre class="summary">' + esc(t.env_error_hint || '') + '</pre></section>';
+    } else if (t.verdict_mismatch) {
+      h += '<section class="block"><h3>人工判绿</h3>' +
+        '<p class="muted">卡面已是 done，结果台账原文保留 failed 不订正；' +
+        '这是人工裁决，不是漏关的失败任务。</p>' +
+        (t.result_error ? '<pre class="summary">' + esc(t.result_error) + '</pre>' : '') +
+        '</section>';
+    }
 
     h += '<section class="block"><h3>验收命令（' + t.verify.length + '）</h3>';
     if (!t.verify.length) {

@@ -96,10 +96,22 @@ ssh -L 8787:127.0.0.1:8787 skywalk@192.168.0.88
 id, title, repo, priority(P1/P2/P3),
 state(ready|assigned|running|done|blocked|shelved|...),
 owner, claim_agent, claimed_at, lease_until, stale, depends_on[],
-result_status(done|failed|""), duration_s, head, verify[{cmd, code, tail[]}],
+result_status(done|failed|""), duration_s, head, verify[{cmd, code, tail[], env_error?}],
 result_summary, summary（旧字段，仅用于搜索）
 shelved_at, shelved_from, shelve_reason（搁置卡才有；旧快照缺字段时显示「未填原因」）
+land_ready(true|false|null), land_block（结果 done 且卡面未关时的可合入性探测）
+failure_kind(environment|mixed|""), verify_env_errors[{cmd, code, kind, reason}],
+env_error_hint, result_error, verdict_mismatch(bool)
 ```
+
+后两行是 T-0342 / T-0344 之后新增的「失败性质」字段：
+
+- `failure_kind=environment` 表示判据在交付机上跑不动（缺依赖 / 平台专有模块 /
+  pytest 收集为空），**结果仍是 failed、仍挡 land**，看板改用 `env-failed` 徽标并在详情
+  里给出复跑建议，绝不当成通过。历史结果没有该字段时，后端按 `verify[].tail` 回溯判读。
+- `verdict_mismatch=true` 表示人工判绿（`close --as-done`）后卡面是 `done`、结果台账
+  原文仍保留 `failed`（项目纪律：不订正事实账）。看板显示「人工判绿·台账 failed」，
+  避免被误读成还有一张失败任务没关。
 
 所有时间均为 ISO 8601 带时区。
 
