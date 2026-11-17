@@ -18,14 +18,14 @@
   "repos": {
     "hive": "/home/skywalk/dswork/hive",
     "lightharness": "/home/skywalk/dswork/lightharness",
-    "lightmem": "/home/skywalk/dswork/lightmem",
     "light": "/home/skywalk/dswork/light",
     "lighthive": "/home/skywalk/dswork/lighthive",
     "lightplugin": "/home/skywalk/dswork/lightplugin",
-    "lightprism": "/home/skywalk/dswork/lightprism"
+    "lightprism": "/home/skywalk/dswork/lightprism",
+    "dsh-freebsd": "/home/skywalk/github/deepseek-harness"
   },
   "launch": "",
-  "worktrees": "/home/skywalk/.hive/wt/workbuddy",
+  "worktrees": "/home/skywalk/.hive/wt",
   "max_concurrency": 1,
   "created": "2026-10-23T13:43:47+08:00"
 }

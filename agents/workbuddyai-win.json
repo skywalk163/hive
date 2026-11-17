@@ -18,10 +18,12 @@
     "hive": "G:/dswork/duan-light-merge/hive",
     "lightharness": "G:/dswork/duan-light-merge/lightharness",
     "light": "G:/dswork/duan-light-merge/light-merge",
-    "lightmem": "G:/dswork/duan-light-merge/lightmem"
+    "lightmem": "G:/dswork/duan-light-merge/lightmem",
+    "lightplugin": "G:/dswork/duan-light-merge/lightplugin",
+    "lightprism": "G:/dswork/duan-light-merge/lightprism"
   },
   "launch": "",
-  "worktrees": "C:/Users/skywalk/.hive/wt/workbuddyai-win",
+  "worktrees": "G:/dswork/duan-light-merge/.worktrees/workbuddyai-win",
   "max_concurrency": 1,
   "created": "2026-10-26T11:34:35+08:00",
   "accept_window_minutes": 180

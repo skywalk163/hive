@@ -11,10 +11,15 @@
   ],
   "repos": {
     "hive": "/home/skywalk/dswork/hive",
-    "lightharness": "/home/skywalk/dswork/lightharness"
+    "lightharness": "/home/skywalk/dswork/lightharness",
+    "light": "/home/skywalk/dswork/light",
+    "lighthive": "/home/skywalk/dswork/lighthive",
+    "lightplugin": "/home/skywalk/dswork/lightplugin",
+    "lightprism": "/home/skywalk/dswork/lightprism",
+    "dsh-freebsd": "/home/skywalk/github/deepseek-harness"
   },
   "launch": "",
-  "worktrees": "/home/skywalk/.hive/wt/raccoon",
+  "worktrees": "/home/skywalk/.hive/wt",
   "max_concurrency": 1,
   "created": "2026-10-23T13:43:45+08:00"
 }

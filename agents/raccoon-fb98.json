@@ -17,10 +17,16 @@
     "pytest"
   ],
   "repos": {
-    "lightprism": "/home/skywalk/dswork/lightprism"
+    "hive": "/home/skywalk/dswork/hive",
+    "lightharness": "/home/skywalk/dswork/lightharness",
+    "light": "/home/skywalk/dswork/light",
+    "lighthive": "/home/skywalk/dswork/lighthive",
+    "lightplugin": "/home/skywalk/dswork/lightplugin",
+    "lightprism": "/home/skywalk/dswork/lightprism",
+    "dsh-freebsd": "/home/skywalk/github/deepseek-harness"
   },
   "launch": "",
-  "worktrees": "",
+  "worktrees": "/home/skywalk/.hive/wt",
   "max_concurrency": 1,
   "created": "2026-11-13T13:34:33+00:00"
 }

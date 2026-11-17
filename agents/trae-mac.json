@@ -20,7 +20,7 @@
     "lightharness": "/Users/skywalk/dswork/lightharness"
   },
   "launch": "",
-  "worktrees": "",
+  "worktrees": "/Users/skywalk/.hive/wt/mac-trae",
   "max_concurrency": 1,
   "created": "2026-11-03T11:04:47+00:00"
 }
