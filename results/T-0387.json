@@ -1,0 +1,39 @@
+{
+  "task": "T-0387",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0387",
+  "base": "main",
+  "head": "c1da89b55f54333463103fb25a46676e4e39b7ca",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-18T07:38:55+08:00",
+  "finished_at": "2026-11-18T09:11:08+08:00",
+  "duration_s": 5533.3,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python3 -m pytest -q -o addopts= tests/dogfood/ -rs",
+      "code": 0,
+      "tail": [
+        "=========================== short test summary info ===========================",
+        "SKIPPED [2] tests\\dogfood\\test_lightharness_smoke.py: 未找到 lightharness，跳过（不是通过）",
+        "SKIPPED [1] tests\\dogfood\\test_lightharness_smoke.py:49: got empty parameter set for (rel)",
+        "SKIPPED [5] tests\\dogfood\\test_lightharness_smoke.py:70: 未找到 lightharness，跳过（不是通过）",
+        "1 passed, 8 skipped in 2.97s"
+      ]
+    }
+  ],
+  "summary": "# T-0387 完成总结：dogfood conftest 的 skip 收口到 tests/dogfood/\n\n## 根因（复现确认）\n\n`tests/dogfood/conftest.py::pytest_collection_modifyitems` 拿到的 `items` 是整个\nsession 的收集结果，T-0322 直接 `for item in items: add_marker(skip)`。验收现场\n（`/tmp/lp-ci`）没有同级 `lightharness`，于是**全仓每一条用例都被打上 skip**，\nrc=0 → 全量假绿。\n\n最小复现（本机实测，修前）：\n\n```\nPYTHONPATH=src python -m pytest -q -o addopts= tests/test_spec_lockstep.py tests/dogfood/ -rs\n→ SKIPPED [20] tests/test_spec_lockstep.py ...、SKIPPED [8] tests/test_spec_lockstep.py:385 ...\n  36 skipped，0 passed\n```\n\n28 条 `test_spec_lockstep` 全被连坐，真正的 dogfood 只有 8 条。\n\n## 改法（只动 tests/dogfood/）\n\n1. `tests/dogfood/conftest.py`\n   - 新增 `_in_dogfood(item)`：用 `item.path`/`item.fspath` 解析绝对路径，判\n     `HERE == p or HERE in p.parents`（py3.8 也成立，没用 `is_relative_to`）。\n   - `pytest_collection_modifyitems` 只对**本目录**的 item 加 skip；非本目录的\n     一条都不碰。全量/混跑时打印「只跳过本目录 N 条；另外 M 条不受影响」。\n   - 新增 `ALWAYS_RUN = {\"test_dogfood_scope.py\"}`：回归守卫自己不参与目录级 skip，\n     否则「缺 lightharness 时 skip 越界」的场景里守卫永远不跑，等于没有守卫。\n     `SKIP_TEXT` 文案、`find_lightharness()` 候选顺序均未改。\n2. `tests/dogfood/test_dogfood_scope.py`（新增回归）\n   把真实的 conftest/_dogfood/baseline/用例拷进临时仓，放一条同 session 的兄弟用例，\n   用 `LIGHTHARNESS_DIR=<不存在>` 强制走 skip 分支跑混跑，断言：\n   - 兄弟用例真的跑出 passed（不被连坐）；\n   - skip 记录全部来自 tests/dogfood（不越界），且目录自己仍是 skip 而非报错。\n\n## 验收（全部实跑）\n\n| # | 命令 | 实测 |\n|---|---|---|\n| 1 | 88 全量 `tools/remote_ci.py --repo . --tag T-0387-final`（FreeBSD 15.1 / py3.12.13 / -n 6） | **12 failed, 10311 passed, 156 skipped, 10 xfailed in 1533.79s**（口径与「修前 10531 skipped, 0 passed, 145s」直接对照） |\n| 2 | `PYTHONPATH=src python3 -m pytest -q -o addopts= tests/dogfood/ -rs` | **1 passed, 8 skipped**，skip reason 含「未找到 lightharness」，rc=0 |\n| 3 | 混跑 `tests/test_spec_lockstep.py tests/dogfood/` | **29 passed, 8 skipped**（28 条 spec + 1 条守卫都真跑），修前是 36 skipped |\n\n全量现场：`192.168.0.88:/tmp/lp-ci/run-20261118-084104-T-0387-final`；\n另两次复跑（`-T-0387-full` 1458s、`-T-0387-count` 1482s）失败集合与本次逐条一致，\n说明结果稳定可复现。注意 `remote_ci.py` 自带一个 `-q`，命令行再补 `-q` 会变成\n`-qq` 把 pytest 最终统计行压掉（前两次就是这样丢了计数，第三次只留一个 `-q` 才看到）。\n\n## 注意：全量现在会露出 12 条真失败\n\n去掉假绿后，之前被 10531 skipped 掩盖的 12 条失败第一次可见（本次全量 `12 failed`），\n**全部在 tests/dogfood 之外，与本卡改动无关**：\n\n1. `tests/test_pure_light_hook.py::test_magic_number_in_first_two_lines`（`进程` 未在首两行）\n2. `tests/test_spec_lockstep.py::test_spec_is_rebuildable_byte_for_byte`（spec 指纹与源码不一致）\n3. `tests/unit/test_native_leg_capability.py::test_运行时符号清单与代码一致`（`dv_json_serialize_safe` 未入 JSON）\n4. `tests/unit/test_doc_examples_gate.py::TestDocExamplesGate::test_不许新增ROT`（归档文档 ROT）\n5. `tests/lightpub/test_R155_Socket顶层路由.py::...导入面一致`（Socket 常量未在 lightpub 导出）\n6. `tests/test_iterator_protocol.py::test_custom_iterator_for_loop`（`_light_attr_set` 未定义）\n7. `tests/unit/test_R159_E3_容器布尔repr.py::test_双腿对拍_容器内布尔repr收敛`\n8. `tests/unit/test_runtime_residual_O0.py::test_转文本_字典序列化`\n9. `tests/test_context_manager.py::TestJueyiOOP成员赋值目标::test_自之属性带索引赋值`\n10. `tests/test_lpd_002_import_hint.py::TestLpd002ImportHint::test_dict_keys_import`\n11. `tests/e2e/test_e2e_chain.py::test_duan_run[mvp/02_http_json.light]`（需本机 8765 服务）\n12. `tests/e2e/test_e2e_chain.py::test_duan_compile_and_run_product[mvp/02_http_json.light]`（同上）\n\n这正是本卡要的效果：绿要真绿。这 12 条要不要另开卡由 M 线决定（本卡 paths 只到\n`tests/dogfood`，修它们会越界）。\n\n## 红线遵守\n\n- dogfood 没有被从收集里删掉：有 lightharness 的机器上 `LIGHTHARNESS_DIR.is_dir()`\n  仍走原路径真跑。\n- `SKIP_TEXT` 文案未改；`find_lightharness()` 候选顺序未改；\n  改动全部落在 `tests/dogfood/`。",
+  "error": "",
+  "declared_paths": [
+    "tests/dogfood"
+  ],
+  "changed_files": [
+    "tests/dogfood/conftest.py",
+    "tests/dogfood/test_dogfood_scope.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "6d06e0a66af042c0b53f637012221650",
+  "store_write_error": "T-0387 结果写入 leader store 失败（已尝试 4 次）：T-0387 的租约已过期，结果被拒（lease lost）"
+}
