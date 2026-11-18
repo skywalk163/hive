@@ -1178,6 +1178,19 @@ def cluster_state() -> dict | None:
 
 CLAIM_BACKEND_ENV = "HIVE_CLAIM_BACKEND"
 STORE_LEASE_MINUTES = 10
+
+
+def store_lease_minutes_of(card: dict) -> int:
+    """store 后端的租约时长：与 git 后端同口径读卡面 lease_minutes。
+
+    T-0387：之前 claim/续租硬编码 STORE_LEASE_MINUTES（10 分钟），卡面的
+    lease_minutes 形同虚设——没有常驻心跳的 GUI/manual agent 领卡 10 分钟
+    必被判超时（doubao-win 领 T-0387 的租约恰好 600s，续租一次都没发生）。
+    卡面没写时才退回 STORE_LEASE_MINUTES 兜底。
+    """
+    return int((card or {}).get("lease_minutes") or STORE_LEASE_MINUTES)
+
+
 _STORE_CACHE: dict[str, object] = {}
 _CLAIM_BACKEND_CACHE: str | None = None
 _STORE_PATH_CACHE: Path | None = None
@@ -6970,7 +6983,8 @@ class Worker:
                 return False
             for attempt in (1, 2):
                 try:
-                    out = store_claim(tid, self.name, STORE_LEASE_MINUTES)
+                    out = store_claim(tid, self.name,
+                                      store_lease_minutes_of(self.h.card(tid)))
                     log(f"{tid} store 领取成功（lease {out.get('claim', {}).get('lease_id', '')[:8]}）")
                     self.last_claim_error = None
                     return True
@@ -7106,7 +7120,8 @@ class Worker:
         （否则健康的长任务会被错杀）。best-effort：刷新失败只 log，不打断任务。
         """
         stop = threading.Event()
-        lease = (STORE_LEASE_MINUTES if claim_backend() == "store"
+        lease = (store_lease_minutes_of(self.h.card(tid))
+                 if claim_backend() == "store"
                  else int(self.h.card(tid).get("lease_minutes") or 180))
         interval = max(5, lease // 3) * 60  # 秒
         t = threading.Thread(target=self._heartbeat_loop, args=(tid, interval, stop),
@@ -7144,7 +7159,7 @@ class Worker:
                 return
             try:
                 store_lease(tid, self.name, str(info.get("lease_id") or ""),
-                            STORE_LEASE_MINUTES)
+                            store_lease_minutes_of(self.h.card(tid)))
             except HiveError as exc:
                 log(f"{tid} store 续租失败（忽略）: {exc}")
             return

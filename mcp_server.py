@@ -33,8 +33,8 @@ from hive import (  # noqa: E402
     DEFAULT_STATE, HANDOFF_STATES, IDENT, PRIORITY_ORDER, SHELVED_STATE,
     VERSION, Hive,
     HiveError, StoreCallError, Worker,
-    _claim_holder, _verify_verdict, claim_backend, commit_file_to_ref, git, iso, now,
-    parse_iso, rev_parse,
+    _claim_holder, _verify_verdict, claim_backend, commit_file_to_ref, git, iso,
+    lease_until_iso, now, parse_iso, rev_parse, store_lease,
 )
 try:  # T-0186 的纯逻辑模块；残缺部署（只拷 hive.py）时该工具报错而非整体崩
     import pending_matcher as pm  # noqa: E402
@@ -855,6 +855,19 @@ class HiveMcp:
             return err(f"{tid} 的租约属于 {claim.get('agent')}，不能替别人续期")
         if h.result_info(tid):
             return err(f"{tid} 已经有结果，不需要续租")
+        if claim_backend() == "store":
+            # T-0387：store 后端的租约在 leader store 里，续租必须走 store_renew；
+            # 只写 git 的 claim/<tid> 分支对看板和回收无效（它们读的都是 store）。
+            # 语义与 git 分支一致：从原到期时间累加 minutes（store 的 renew 就是
+            # max(now, lease_until) + minutes*60；已过期会被拒绝续租）。
+            try:
+                out = store_lease(tid, self.agent,
+                                  str(claim.get("lease_id") or ""), minutes)
+            except HiveError as e:
+                return err(f"续租失败：{e}")
+            new_until = lease_until_iso((out.get("claim") or {}).get("lease_until"))
+            return ok(f"{tid} 租约加了 {minutes} 分钟，新的到期时间 {new_until}",
+                      task_id=tid, lease_until=new_until, added_minutes=minutes)
         # 从「原到期时间」往后加，不是从现在：原租约 180 分钟、续 60 分钟，
         # 从现在算反而会把到期时间提前，等于没续
         until = parse_iso(claim["lease_until"]) if claim.get("lease_until") else now()
