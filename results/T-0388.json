@@ -1,0 +1,42 @@
+{
+  "task": "T-0388",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0388",
+  "base": "main",
+  "head": "e185cdc51c82a18a80b65da441428f201af8ebaa",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-18T10:42:19+08:00",
+  "finished_at": "2026-11-18T10:43:04+08:00",
+  "duration_s": 45.3,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python3 -m pytest -q -o addopts= tests/test_spec_lockstep.py",
+      "code": 0,
+      "tail": [
+        "  /home/workbuddy/t0388-verify/src/parser_stmt.py:527: DeprecationWarning: 语法「段落 名 接收 参数」已废弃，请改用「函数 名(参数)」或「段落 名(参数)」。在未来的版本中将移除「接收」关键字。",
+        "    return self._parse_paragraph_v2()",
+        "",
+        "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+        "30 passed, 1 warning in 1.78s"
+      ]
+    }
+  ],
+  "summary": "# T-0388 完成总结：spec 门禁指纹行尾归一 + stdlib 排序键显式化\n\n## 根因（两处，都在「生成物只依赖仓内文件内容」这个承诺上破了个口）\n\n### 1. 指纹对行尾敏感（任务卡主诉）\n\n`spec/build_spec.py` 的 `_stdlib_digest()` 与 `build()` 的 `FINGERPRINT_FILES` 直接对\n**磁盘原始字节**取 sha256。仓库 `core.autocrlf=true`：Windows 检出把文本落成 CRLF，\ngit blob 与 FreeBSD/Linux 干净检出是 LF，同一份提交算出不同的指纹 → 非 Windows 检出必红\n（T-0383 的 M2/M3/M4 三轮）。原来只归一了**输出 JSON** 的行尾，归一的对象错了——该归一的是**输入文件**。\n\n### 2. stdlib 文件顺序随平台变（0.88 复跑时暴露的第二处）\n\n`sorted(Path)` 在 Windows 上按**大小写不敏感**（pathlib 用 casefold 比较），POSIX 按码点。\n同一棵树在 Windows 上把 `__init__.py` 排在 `Base64.light` 前，FreeBSD 正好相反：\n\n```\nWindows: __init__.py, Base64.light, CSV.light, ...\nFreeBSD: Base64.light, CSV.light, ..., __init__.py\n```\n\n于是 `_stdlib_digest()` 的拼接顺序、以及 spec JSON 里 `stdlib.模块` 的数组顺序，两边都不同。\n仅修行尾归一后，0.88 仍然红——第一次复跑实测 `文件: 393f4ca8c98d1559 / 重建: d2318dc662cbb1aa`\n（Windows 与 0.88 同一棵树、同一份代码，只因顺序不同而分叉）。这一条不修，改多少行尾都白搭。\n\n## 改法\n\n`spec/build_spec.py`（改一处覆盖全部）：\n\n1. 新增 `_sha256_normalized(path)`：`read_bytes().replace(b\"\\r\\n\", b\"\\n\")` 后 sha256；\n   `_stdlib_digest()` 与 11 个 `FINGERPRINT_FILES` 全部改用它。\n2. 新增 `_stdlib_sort_key(path)` = `(_rel(path).casefold(), _rel(path))`；\n   `_stdlib_digest()` 与 `build_stdlib()` 的 `sorted(stdlib.glob(\"*.light\"))` 全部显式用它。\n   这两个平台顺序一致（Windows 的 `sorted(Path)` 本来就是这个顺序，所以表里已有顺序不变、无重排），\n   casefold 相同时用原串定序，保证是全序而不是依赖 glob 返回次序。\n3. 顺带修 diff 标签写反：`仓内:` / `现状:` → `文件:` / `重建:`（T-0383 排查时被带偏过一次）。\n\n`spec/light.spec.json` 重新生成一次，`generated_from` 全部落到「行尾 + 顺序都无关」的值：\n\n| 字段 | 旧（CRLF 检出） | 新 |\n|---|---|---|\n| `stdlib_汇总` | `5168681cc08ed6d5` | **`393f4ca8c98d1559`** |\n| `src/keywords.py` | `29be57fdeb53b820` | `897deee0b468ad5a`（该文件 blob 本身是 CRLF，两种检出字节相同） |\n| `src/lexer.py` | `cd21c941ed352de8` | `9957b09afd79730e` |\n| 其余 9 个 | — | 同规则换值 |\n\n数组结构与条目没动（模块顺序仍是原表顺序）。\n\n`tests/test_spec_lockstep.py` **只新增、未放宽**：\n\n- `test_stdlib_digest_ignores_line_endings`：仓内 stdlib 拷进临时树算一次指纹，再把每个文件\n  整体翻成另一种行尾形态算第二次——必须逐字相同（任务书「反证」的常驻版本）。\n- `test_stdlib_modules_are_ordered_by_codepoint`（名沿用初始命名）：模块顺序必须等于\n  `sorted(names, key=(casefold, 原串))`，在 POSIX 上就能抓住「又退回 sorted(Path)」。\n- `test_spec_is_rebuildable_byte_for_byte` **原样保留**，断言一字未改。\n\n未改 `.gitattributes`：备选方案（158 个 stdlib + 11 个源文件加 `-text`）会让已有 CRLF 工作树\n显示为全文件改动，Windows 编辑器保存仍可能写回 CRLF，治标不治本；按任务书推荐走首选方案。\n\n## 验收（全部实跑）\n\n| # | 环境 | 命令 | 实测 |\n|---|---|---|---|\n| 1 | Windows（CRLF 检出，worktree） | `python -m spec.build_spec --check` | **rc=0** |\n| 2 | Windows（CRLF 检出，worktree） | `pytest -q -o addopts= tests/test_spec_lockstep.py` | **30 passed** |\n| 3 | 干净 LF 树（`git checkout-index -a` + `core.autocrlf=false`，逐文件核对字节 == git blob） | `--check` / `pytest` | **rc=0** / **30 passed**，`stdlib_汇总=393f4ca8c98d1559` |\n| 4 | 0.88 FreeBSD 15.1（LF 树经 `tools/remote_ci.py`，Python 3.12.13） | `PYTHONPATH=src python3 -m pytest -q -o addopts= tests/test_spec_lockstep.py` | **30 passed, 1 warning, rc=0** |\n| 5 | 0.88 FreeBSD 15.1（同一现场） | `PYTHONPATH=src python3 -m spec.build_spec --check` | **rc=0**；`stdlib_汇总=393f4ca8c98d1559`、`keywords.py=897deee0b468ad5a`、`lexer.py=9957b09afd79730e`，与 Windows **逐字相同** |\n\n现场：\n\n- 0.88 首次（只修了行尾、未修顺序）：`/tmp/lp-ci/run-20261118-103436-T-0388-spec` → **1 failed**（`stdlib_汇总` 不一致），即第二处根因的现场。\n- 0.88 最终：`/tmp/lp-ci/run-20261118-103951-T-0388-spec2` → **30 passed**；同目录 `--check` rc=0。\n- 最终判据另在 0.88 的干净 clone（`/home/workbuddy/t0388-verify`，origin=内网 Gitea）里对\n  已推送的 `task/T-0388` 跑过，见提交结果里的 verify。\n\n## 红线遵守\n\n- `test_spec_is_rebuildable_byte_for_byte` 没删、没弱化，仍是逐字节门禁。\n- 没有把「跑一遍 build_spec 覆盖 spec」当修复：改的是指纹算法（行尾归一 + 排序键）,\n  spec 只是随之刷新；刷完后任何检出形态算出的都是同一个值，红不会再推给下一个非 Windows 环境。\n  证据就是 0.88 与 Windows 现在算出**同一个** `stdlib_汇总`。\n- `spec/light.spec.json` 已 `git add -f` 后随提交入库（该文件原本已被跟踪，仍显式 -f 防漏）。\n- 改动只有 `spec/` 与 `tests/test_spec_lockstep.py`，未越界。\n- 本机以 CLI `hive take T-0388 --agent doubao-win` 领取（store 后端，lease `07c80b67`）；\n  提交走 hive 原生 `cmd_submit`，只把 run_verify 的原样命令搬到 0.88 执行（POSIX 判据在\n  Windows cmd 下 255 假失败），判据字符串与判据本身一字未改。",
+  "error": "",
+  "declared_paths": [
+    "spec",
+    "src/diagnostics",
+    "tests/test_spec_lockstep.py",
+    ".gitattributes"
+  ],
+  "changed_files": [
+    "spec/build_spec.py",
+    "spec/light.spec.json",
+    "tests/test_spec_lockstep.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "a0a6bcbf81bb4ded98ff8fa6848621dc"
+}
