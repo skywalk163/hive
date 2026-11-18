@@ -1,0 +1,46 @@
+{
+  "task": "T-0390",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0390",
+  "base": "main",
+  "head": "b7d6db235a9b405ac76dd5ab129e3c3cfa60eae1",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-18T11:49:42+08:00",
+  "finished_at": "2026-11-18T14:37:18+08:00",
+  "duration_s": 10056.7,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python3 -m pytest -q -o addopts= tests/unit/test_R220_归约与段落体.py",
+      "code": 0,
+      "tail": [
+        "................                                                         [100%]",
+        "16 passed in 72.88s (0:01:12)"
+      ]
+    }
+  ],
+  "summary": "# T-0390 · 0.88 全量不可复现：把「踩线用例」这一类从 `--timeout=60` 边界上挪开\n\n## 结论（给下一个人看的版本）\n\n1. **根因不是「某 10 条用例脾气差」，是「一批用例的墙钟正好压在 60s 上」**。用 0.88\n   上 T-0383 三轮的 `lastfailed` 复核：M2=21 / M3=19 / M4=14，三轮回合交集 14、\n   并集 25，**来回翻 11 条**（卡面 10 条 + `test_a25_内层类继承顶层基类`）。\n   这 11 条的共性不是「哪个功能坏了」，而是「实测 52–61s」。\n2. **卡面的 10 条清单不全**。我改完这 10 条所在文件后连跑两轮（r1 / r2），\n   冒出第 11 条翻的用例：`test_R16x_L217_所有权收敛.py::test_P1字面量循环_修后零增长_反跑复原`\n   —— 它的 durations 是 **39.02s setup + 24.31s call ≈ 63s**，单跑一遍 54s\n   （26.19s setup + 24.20s call）。这是同一类，只是 T-0383 那三轮刚好没翻到它。\n   ⇒ 只补 10 条 = 治标；**必须按「这一类」处理**。\n3. 所以最终做了两层：\n   * **层一（治本）**：`slow` 用例的超时提限接线 —— 只有慢用例被提到 600s，\n     全局 `--timeout` 保留，快用例卡死照样被掐。这是把「慢」这件事显式建模。\n   * **层二（兜底）**：全局 `--timeout=60 → 120`。卡面「推荐做法 2」原文许可，\n     作用是把「还没被识别成 slow、却踩在 60s 上的用例」也纳进保护区（P1 就是这种）。\n4. 验证：改后 0.88 连跑两轮（v1 / v2），失败集合与基线**逐条相同**（12 条），\n   耗时 1535s vs 基线 1533s（+0.1%），最慢用例 355s 仍在预算内。\n\n## 改了什么\n\n| 文件 | 改动 |\n| --- | --- |\n| `tests/conftest.py` | 新增 `pytest_collection_modifyitems`：给每个 `slow` item 合成一条 `timeout` marker（默认 600s，`LIGHT_SLOW_TIMEOUT` 可覆盖）；已有 `timeout` marker 的让路 |\n| `pyproject.toml` | 全局 `--timeout=60 → 120`（兜底）+ 一大段说明为什么不是删掉超时 |\n| `tests/unit/test_R220_归约与段落体.py` | 整体 `pytest.mark.slow`（卡面 test_B5 / test_B7） |\n| `tests/unit/test_R143_L199_向量追加.py` | 整体 `pytest.mark.slow`（test_A5 / test_双腿对拍2参追加一致） |\n| `tests/unit/test_原生腿_R11A_通用工具.py` | 整体 `pytest.mark.slow`（test_断言工具_对拍Python） |\n| `tests/unit/test_原生腿_R11B_中文工具.py` | 在原有 pytestmark 列表里加 `slow`（test_中文分词 / test_拼音转换） |\n| `tests/e2e/test_e2e_chain.py` | 不用改，本来 `pytestmark = slow`（test_L075 / test_L076） |\n| `tests/unit/test_T0390_slow超时接线.py` | **新增护栏**：真跑子进程证明「slow 用例活过全局 1s、非 slow 用例被 1s 掐红」 |\n| `tools/remote_ci.py` | 起跑前读远端 1 分钟 load；超阈值在 `[3/4]` 行警告本轮失败集合不可复现，`--wait-load` 可改成等负载降下来 |\n| `tests/dogfood/conftest.py`、`tests/test_coverage_gate.py` | 两处注释里写死的 `--timeout=60` 跟着改成 120，免得下一个人照着注释去找一个已不存在的数 |\n\n## 为什么这么改（而不是别的做法）\n\n* **不删 `--timeout=60`**（卡面红线）：真卡死的用例会一路拖到 `remote_ci.py --timeout 5400s`\n  才失败，更难定位。所以提限只对 `slow` 生效，快用例的超时判据一条没动。\n* **不「多跑几遍取交集」**（卡面红线）：那是绕过。这条卡买的是「同样提交、两轮失败集合相同」，\n  下文是用两轮真跑 diff 出来的，不是挑出来的。\n* **不动断言**：全程没改任何一条用例的期望值。慢用例变慢是墙钟问题，不是判据问题。\n* **为什么秒数走环境变量不走 ini**：本卡只允许改 `tests` / `pyproject.toml` / `tools`，\n  自定义 ini 选项必须在 rootdir 的 conftest 用 `pytest_addoption` 注册，而仓库根\n  `conftest.py` 不在可改路径里；放 `tests/conftest.py` 注册已经太晚，pytest 会先报\n  `Unknown config option`（实测踩过）。\n\n## 现场与判据\n\n### 基线（改前）\n\n```\n2026-11-18 12:04:35 TAG=T-0390-base1 START\n12 failed, 10310 passed, 148 skipped, 10 xfailed in 1530.00s\n现场 /tmp/lp-ci/run-20261118-120431-T-0390-base1\n```\n\n12 条**全是既有语义红，一条超时都没有**——正好说明这批用例是「没赶上负载峰值就没红」，\n这就是「不可复现」的样子。\n\n### 中间轮（只改 slow 接线、未动全局 60s）—— 用来暴露「10 条清单不全」\n\n```\nr1: 13 failed（多出 test_P1 字面量循环），1731s\nr2: 12 failed，1688s\nr1 - r2 = { tests/unit/test_R16x_L217_所有权收敛.py::test_P1字面量循环_修后零增长_反跑复原 }\n```\n\nP1 单独复跑（`run-20261118-133319-T-0390-P1`）：`1 passed in 54.37s`\n（26.19s setup + 24.20s call）；全量里它的 durations 是 `39.02s setup` + `24.31s call`。\n⇒ 同一类，只是没人把它列进卡面。\n\n### 最终验证（`--timeout=120` 兜底 + slow 提限）\n\n```\nv1: 2026-11-18 13:35:33 START，12 failed, 10312 passed, 148 skipped, 10 xfailed，耗时 1535s，load 8.58 / 12\nv2: 2026-11-18 14:01:19 START，12 failed, 10312 passed, 148 skipped, 10 xfailed，耗时 1483s，load 6.73 / 12\n```\n\n**两轮失败集合逐条相同，且与基线（改前）逐条相同**（脚本比过）：\n\n```\nv1==v2 : True\nv1==base: True\n两轮差集: set()\n有无超时红: False\n```\n\n这 12 条是既有语义红（`test_pure_light_hook` / `test_spec_lockstep` /\n`test_native_leg_capability` / `test_e2e_chain[mvp/02_http_json]`×2 /\n`test_doc_examples_gate` / `test_R155_Socket顶层路由` / `test_iterator_protocol` /\n`test_R159_E3_容器布尔repr` / `test_runtime_residual_O0` / `test_context_manager` /\n`test_lpd_002_import_hint`），不是本卡要修的东西，也不随负载翻动。\n\n耗时：1535s / 1483s vs 基线 1533s —— 在 ±3% 噪声内，没有「显著恶化」。\n\n## 代价（写清楚，别让下一个人猜）\n\n* **PR 的 `-m \"not slow\"` 会跳过这 4 个文件的 38 条**（e2e_chain 那 194 条是本卡之前就标好的）。\n  全量门（main 推送 / `remote_ci.py`）照跑。这是卡面许可的取舍，且这批用例守的是\n  「真起子进程编译再跑」的联动契约，本来就不属于 PR 快速门。\n  实测：`pytest <5 文件> -m \"not slow\"` → `232 deselected`，其中 194 条是 e2e_chain\n  原有的，38 条是本次新增。\n* 全局 `--timeout=120` 让「真卡死」的用例多等 60s 才被掐。实测全量耗时 1535s vs\n  1533s（+0.1%），因为真正卡死的用例极少；最坏情况是「卡死一条」时多等 60s。\n* `slow` 提限到 600s 意味着慢用例若真卡死，要 600s 才红。这是刻意的：宁可慢用例\n  卡死多等，也不让它在 60s 边界上假红。\n\n## 怎么用（下一个人）\n\n```bash\n# 全量两轮，比失败集合（这才是本卡判据）\npython tools/remote_ci.py --repo . --tag X-r1 -- --ignore=tests/dogfood -rf --tb=no\npython tools/remote_ci.py --repo . --tag X-r2 -- --ignore=tests/dogfood -rf --tb=no\n# 看负载是否在可复现区间（[3/4] 行会自己打）\npython tools/remote_ci.py --repo . --tag X-r3 --wait-load -- --ignore=tests/dogfood -rf\n# 机器更慢时，单独放大 slow 用例的预算\nLIGHT_SLOW_TIMEOUT=1200 python -m pytest tests/unit/test_R220_归约与段落体.py -q -o addopts=\n```\n\n## 验证命令（卡片 verify）\n\n```\nPYTHONPATH=src python3 -m pytest -q -o addopts= tests/unit/test_R220_归约与段落体.py\n→ 16 passed in 68.69s（改前 16 passed in 94.52s，纯粹是机器负载差异）\n```\n\n## 改动没碰到的既有红（供对照，不是本卡引入）\n\n* `tests/test_coverage_gate.py::test_malformed_input_is_rc2[*]` 等 10 条：**改前就红**\n  （`git stash` 后同一条红，已核）。\n* `tests/unit/test_stdlib_import_consistency.py` 在本机（Windows）collect 报\n  `FileNotFoundError`：**改前就红**（stash 后同样报），且 0.88 全量里它不红。\n* 0.88 全量那 12 条既有语义红：改前改后逐条相同，详见上表。\n\n## 附：怎么判断「一条红是真红还是踩线假红」\n\n看 durations——**60–130s 之间、且单跑明显更短（小几十秒）**的，是踩线；\n单跑也一百多秒还红的，大概率是真问题。v1 里最慢 355s（`test_llvm_stdlib_readiness`，\n自带 `@pytest.mark.timeout(900)`），其次 148s（`test_R153_顶层collect门禁`，自带 600），\n这两条都早就有自己的提限，不在本卡范围。",
+  "error": "",
+  "declared_paths": [
+    "tests",
+    "pyproject.toml",
+    "tools"
+  ],
+  "changed_files": [
+    "pyproject.toml",
+    "tests/conftest.py",
+    "tests/dogfood/conftest.py",
+    "tests/test_coverage_gate.py",
+    "tests/unit/test_R143_L199_向量追加.py",
+    "tests/unit/test_R220_归约与段落体.py",
+    "tests/unit/test_原生腿_R11A_通用工具.py",
+    "tests/unit/test_原生腿_R11B_中文工具.py",
+    "tools/remote_ci.py",
+    "tests/unit/test_T0390_slow超时接线.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "e5fba2db597b451bad3fb57511c57923",
+  "store_write_error": "T-0390 结果写入 leader store 失败（已尝试 4 次）：T-0390 的租约已过期，结果被拒（lease lost）"
+}
