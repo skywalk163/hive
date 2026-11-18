@@ -1,0 +1,35 @@
+{
+  "task": "T-0391",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0391",
+  "base": "main",
+  "head": "09837d9f2c5dd1bd9827f3408d5c77e57912cb48",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-18T14:13:07+08:00",
+  "finished_at": "2026-11-18T14:20:08+08:00",
+  "duration_s": 421.8,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python3 -m pytest -q -o addopts= tests/test_linter_canonical.py",
+      "code": 0,
+      "tail": [
+        "...................                                                      [100%]",
+        "19 passed in 4.39s"
+      ]
+    }
+  ],
+  "summary": "# T-0391：`_run_cli` 没给 encoding（Windows 假红）\n\n## 根因（已复现，非产物问题）\n\n`tests/test_linter_canonical.py` 的 `_run_cli()` 用 `-X utf8` 把**子进程**的输出强制成 UTF-8，\n但 `subprocess.run(..., text=True)` 没给 `encoding`，**父进程**按 `locale.getpreferredencoding(False)`\n解码 —— Windows 上是 cp936/GBK。中文输出在 subprocess 内部的读线程里抛\n\n```\nUnicodeDecodeError: 'gbk' codec can't decode byte 0x93 in position 100: illegal multibyte sequence\n```\n\n该异常被 pytest 记为 `PytestUnhandledThreadExceptionWarning`，主线程拿到的 `proc.stdout` 是 `None`，\n于是 `assert 'L5001' in proc.stdout` 变成 `TypeError: argument of type 'NoneType' is not a\ncontainer or iterable` —— 真正的原因（编码）被 TypeError 盖住，看起来像\"linter 没输出\"。\n\n## 改动（1 处，仅限卡面 paths）\n\n`tests/test_linter_canonical.py::_run_cli()`：补 `encoding='utf-8'`（与子进程 `-X utf8` 对齐）\n+ `errors='replace'`（兜底，保证 `proc.stdout` 永不为 `None`，断言失败时报真实输出差异）。\n口径与仓里已有的 `tests/test_cli_json.py:65-68` 一致。\n\n- 没有加 skip、没有删用例、没有 `errors='ignore'`；\n- 没有用\"verify 前面加 `PYTHONUTF8=1`\"绕过；\n- 子进程的 `-X utf8` 保留（它保证 CLI 输出口径确定，父进程的 encoding 才是缺的那一半）。\n\n## 证据\n\n| 环境 | 命令 | 结果 |\n| --- | --- | --- |\n| Windows / Python 3.12，`env -u PYTHONUTF8 -u PYTHONIOENCODING`（改前） | `PYTHONPATH=src python -m pytest -q -o addopts= tests/test_linter_canonical.py` | **2 failed / 17 passed**（UnicodeDecodeError gbk，proc.stdout=None） |\n| 同上（改后） | 同上 | **19 passed** |\n| 0.88（FreeBSD 15.1，UTF-8 locale，改后） | `python tools/remote_ci.py --repo . --env-file C:/dswork/.env --tag T-0391-lint -- tests/test_linter_canonical.py` | **19 passed**（rc=0，6.02s） |\n\n断言不是\"永远通过\"：`--help` 解码后 `--canonical` / `--apply` / `归一` / `报告` 均真实出现、\n无替换字符（`'\\ufffd' in stdout == False`）；`--canonical --dry-run` 的 `L5001` 也是真输出。\n\n## 注意（给主控 / 后继卡）\n\n1. **本机 WorkBuddy 会话的 shell 默认带 `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8`**，\n   直接跑 pytest 会**假绿**（我第一次跑就是 19 passed）。复现/验收必须\n   `env -u PYTHONUTF8 -u PYTHONIOENCODING ...`，否则结论不可信。\n2. `hive_claim` 不可用过一次：MCP 独占 clone\n   `~/.hive/clones/mcp-workbuddy-win11` 的 `agents/workbuddy-win11.json` 带着 skip-worktree 位，\n   导致 `git reset --hard origin/main` 报 `Entry ... not uptodate. Cannot merge.`，MCP server 启动即退出。\n   已用 `git update-index --no-skip-worktree agents/workbuddy-win11.json` 修好，server 可正常 initialize。\n   同一次 `hive.py take` 被信号打断留下了半成品 worktree（2716 个 staged 删除 + index.lock），\n   已在 worktree 里 `git reset --hard HEAD` 修复；**这不是本卡产物**。\n3. 同类隐患仍在：`grep -rn \"text=True\" tests/ --include=*.py | grep -v \"encoding=\"` 还有 61 处\n   （`tests/e2e/`、`tests/test_agent_tools_light.py`、`tests/dogfood/` 等）。按卡面约束本卡只改\n   `tests/test_linter_canonical.py`，其余未动——是否统一收口（例如 `tests/conftest.py` 里的\n   `run_py()` 助手）建议另开一张卡。",
+  "error": "",
+  "declared_paths": [
+    "tests/test_linter_canonical.py"
+  ],
+  "changed_files": [
+    "tests/test_linter_canonical.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "10a8d8aca1f2451a941477d995facd2c",
+  "fence": 1
+}
