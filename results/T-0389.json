@@ -1,0 +1,36 @@
+{
+  "task": "T-0389",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0389",
+  "base": "main",
+  "head": "777329cf4cc807a3abe9b009e26aef72b2e44c76",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-18T11:19:19+08:00",
+  "finished_at": "2026-11-18T12:02:56+08:00",
+  "duration_s": 2617.8,
+  "verify": [
+    {
+      "cmd": "PYTHONPATH=src python3 -m pytest -q -o addopts= tests/e2e/test_e2e_chain.py",
+      "code": 0,
+      "tail": [
+        ".....s...........................s.ss.s................................. [ 36%]",
+        ".s............................s...........................s.ss.s........ [ 73%]",
+        "..........................s........................                      [100%]",
+        "183 passed, 12 skipped in 1237.00s (0:20:36)"
+      ]
+    }
+  ],
+  "summary": "# T-0389 交付摘要\n\n## 做了什么（方案 A 的保守实现）\n\n`tests/e2e/test_e2e_chain.py`：\n\n1. 新增 `E2E_NEEDS_EXTERNAL_SERVICE = {'mvp/02_http_json.light': '…原因…'}`，并在\n   `test_duan_run` / `test_duan_compile_and_run_product` 开头调用\n   `_skip_if_needs_external_service(rel_path)` → 该示例按 reason 显式 skip。\n2. 新增守卫用例 `test_external_service_examples_still_enumerated`：断言登记过的示例\n   仍在 `EXAMPLE_CANDIDATES` 中、源文件仍在 `examples/` 下。\n\n**为什么不是直接塞进 `E2E_EXCLUDED`**：塞进去等于把这条从候选集里摘掉，验收第 1 条点名的\n`…[mvp/02_http_json.light]` 两个 node id 会直接「不存在」（pytest 收集不到、按 node id\n选中会报 not found 并 rc=5）。改用「保留全量枚举 + skip(reason)」后，两个 node id 仍然\n存在、报告里能看到 `2 skipped` 和具体原因，覆盖面也没有被缩——正好对上验收里写的\n「方案 A：2 skipped（reason 说明是外部服务）」，同时不触「缩小枚举范围」这条红线。\n\n## 证据（Windows 本机，PowerShell，`$env:PYTHONPATH='src'`）\n\n改前（复现，确认不是环境问题）：\n\n```\ntests/e2e/test_e2e_chain.py::test_duan_run[mvp/02_http_json.light] FAILED\ntests/e2e/test_e2e_chain.py::test_duan_compile_and_run_product[mvp/02_http_json.light] FAILED\n2 failed in 21.75s\n    ConnectionError: 无法连接到 http://127.0.0.1:8765/mvp: [WinError 10061] 目标计算机积极拒绝\n```\n\n改后（验收第 1 条的两条 node id + 守卫）：\n\n```\n1 passed, 2 skipped in 0.84s\nSKIPPED [2] tests/e2e/test_e2e_chain.py:… 需要外部 HTTP 服务：示例默认请求 http://127.0.0.1:8765/mvp … \n```\n\n验收第 3 条（整文件全量）：\n\n```\nPYTHONPATH=src python -m pytest -q -o addopts= tests/e2e/test_e2e_chain.py\n183 passed, 12 skipped in 1122.15s (0:18:42)\n```\n\n0 failed；另一条同类跳过（12 skipped）全部是既有的「缺第三方库 / 本卡登记」口径，\n无新增红。\n\n## 红线合规\n\n- `examples/mvp/02_http_json.light` **一个字节未动**（`git diff` 只有\n  `tests/e2e/test_e2e_chain.py`，+42 行）。\n- `EXAMPLE_CANDIDATES` 的全量 rglob 枚举**未缩小**、未引入白名单；新增守卫用例把这一点\n  钉死（真有人再往白名单缩，会直接打红）。\n- 未改 `E2E_EXCLUDED` 现有条目，未碰 `src/`、`stdlib/`、`docs/`。\n\n## 平台说明\n\n卡片 verify 是 POSIX 写法，本机 PowerShell 直跑等价（`$env:PYTHONPATH='src'`）。\nhive 侧 `verify_command()` → `hive_compat` 已支持 `VAR=value python3 …` 前缀在 Windows\n上解析 env 后 exec，所以 submit 时不会出现「python 还没启动就 rc=1」的假失败，\n未使用任何 `.bat` 垫片。0.88 与 Windows 走同一份 skip 逻辑（无平台分支），\n其全量回归仍归 M 线闸门（`tools/remote_ci.py --ignore=tests/dogfood`）。\n\n## 留给后续卡（B 方案，不在本卡范围）\n\n起随机端口的本地 HTTP 服务 fixture + `_run_cli` 透传 `-- <地址>`，并覆盖\n`test_duan_compile_and_run_product`（产物用 `sys.executable` 直跑，`cwd=REPO_ROOT`，\n需要单独把地址作为 argv 传进去）。两条链都要覆盖，做成了可以把这条 skip 摘掉。",
+  "error": "",
+  "declared_paths": [
+    "tests/e2e"
+  ],
+  "changed_files": [
+    "tests/e2e/test_e2e_chain.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "c78ef1c37b914ae28ba2d07933e86410"
+}
