@@ -1,0 +1,58 @@
+{
+  "task": "T-0397",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "failed",
+  "branch": "task/T-0397",
+  "base": "main",
+  "head": "2999db0e73c56595f54c8127fa0dde0192478a28",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-19T14:11:58+08:00",
+  "finished_at": "2026-11-19T17:48:41+08:00",
+  "duration_s": 13003.8,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_T0397_会话模式权限.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        ".......                                                                  [100%]",
+        "7 passed in 77.41s (0:01:17)"
+      ]
+    },
+    {
+      "cmd": "node --check webui/app.js",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -m pytest -q tests/test_回归.py -o addopts=''",
+      "code": 1,
+      "tail": [
+        "FAILED tests/test_回归.py::test_example_exit_code[test_预设挂载对话内切换.light]",
+        "FAILED tests/test_回归.py::test_example_exit_code[端到端demo.light] - Asserti...",
+        "FAILED tests/test_回归.py::test_example_exit_code[端到端demo_多轮.light] - As...",
+        "FAILED tests/test_回归.py::test_example_exit_code[运行CLI.light] - AssertionE...",
+        "41 failed, 602 passed, 1 skipped in 1123.26s (0:18:43)"
+      ]
+    }
+  ],
+  "summary": "# T-0397 会话级模式与权限：切换恢复，审批按会话预设判定 —— 工作说明\n\n## 做了什么\n把「模式 / 权限预设」从进程级全局量改成会话属性：会话索引/头信息可选记录 `模式`、`权限预设`；\n每轮把实际生效值写回会话；切回/刷新按会话恢复；权限检查按会话预设判定，**同一进程两会话并发隔离**。\n没有会话级设置时仍回退「standard + 按类别」；`POST /api/permissions` 只改默认，不碰已绑定会话。\n\n## 改了哪些文件（正好 5 个，全在卡面 paths 内）\n- `src/权限.light`：`检查(工具名,参数,预设=空)` 第三参为会话覆盖（只在本调用生效，不改 `己.预设`）；\n  新增 `是权限预设()` 与 `权限管理器.副本()`；导出 `是权限预设`。四预设语义/危险命令分类一字未动。\n- `src/agent.light`：新增 `会话审批钩`、`会话权限闸门`（显式携带会话预设，注入 `选项[\"审批管理器\"]`，\n  不改全局管理器）；审批队列协议与帧形状不变。\n- `src/web服务器.light`：新增 `session-modes.json` 懒加载（会话 id → {模式,权限预设}，空表=无设置回退默认）；\n  `取会话模式设置/设会话模式设置/取会话权限预设/检查会话权限/取会话权限闸门`；\n  每轮对话把 preset/权限预设写回会话表与头信息；同步+流式两条路径都注入会话闸门；\n  `GET /api/sessions/current`、`GET /api/sessions/:id` 只增 `模式`/`权限预设` 两键；\n  `POST /api/sessions` 支持创建时预选；`POST /api/sessions/:id/模式权限` 会话内切换只写本会话。\n- `webui/app.js`：切会话 `selectSession` 从详情回填 mode-select/perm-preset；空状态回全局默认；\n  会话内切换下拉走 `/api/sessions/:id/模式权限`（不再裸改全局）；每条消息带 `权限预设`；\n  localStorage 只作「无会话时」兜底；首条消息绑定后回填下拉。\n- `tests/test_T0397_会话模式权限.py`：7 条判据（6 后端 + 1 前端静态契约）。\n\n## 三个 verify 结果\n1. `python3 -m pytest -q tests/test_T0397_会话模式权限.py -o addopts=''` → **7 passed** ✅\n2. `node --check webui/app.js` → **exit 0** ✅\n3. `python3 -m pytest -q tests/test_回归.py -o addopts=''` →\n   - 本机首次（worker 同款无 sibling 环境）：41 failed / 602 passed，全部 `No module named 生产挂载`（env 缺 LIGHTPLUGIN，见 T-0396 同款假红）。\n   - 显式给 `LIGHTPLUGIN/LIGHT_MERGE` 后：**6 failed / 637 passed / 1 skipped**。\n   - 这 6 条全部在 **pristine base（32fca17，无任何本卡改动）** 上以同样命令复现 **6 failed**（43s）——\n     确认为**既有红，非本卡引入**：\n     `_probe_hive_mcp`, `test_mcp_prod`, `test_mcp接线`（mcp 相关）、\n     `test_agentE5钩子`（`'聊天v1' object has no attribute '调用'`，example 自身缺方法，本卡只加类不动 运行智能体/注册默认钩子）、\n     `test_会话持久化用户目录`, `test_工作目录设置`（Windows 路径分隔符 `/tmp/...` vs `C:\\tmp\\...`）。\n     卡面 `verify_requires: freebsd`，正式验收在 FreeBSD（路径口径一致）跑，本机 Windows 这 6 条红与本卡产物无关。\n   - 抽样反证：web路由/web服务器E5/审批API/会话模型选择 4 条在无 env 时红、给 env 后 **4 passed**，确认 41→6 全是环境假红。\n\n## 反证（旧实现必红，已实测）\n用旧口径 `权限管理器.检查()`（只认全局单例、不传会话预设）跑同一进程两会话：\n- 旧：`旧甲写=审批`、`旧乙读=放行`（两会话都吃全局「按类别」）→ 必有一个方向错。\n- 新：`新甲写=放行`、`新乙读=拒绝`（全放行/全拒绝各自正确）。\n证明 7 条判据里的并发隔离用例不是空判据。\n\n## 切换恢复断言（DOM/接口形状）\n- `test_前端会话切换恢复与按会话落库接线` 断言源码含\n  `applySessionMode(data[\"模式\"], data[\"权限预设\"])`（切会话回填）、\n  `body.权限预设`（每轮写回）、`/模式权限`（会话内切换端点）、\n  `savePermission → persistSessionMode`（不再裸写全局）、mode change → persistSessionMode。\n- 后端用例 2 断言 `GET /api/sessions/current` 与 `/api/sessions/:id` 都返回 `模式`/`权限预设` 两键；\n  用例 4 断言重启后详情仍返回 `cordis`/`全拒绝`。\n\n## 遗留说明\n- 本卡基线是 T-0395（含 32fca17 补丁），尚未合入 main；合入顺序仍应 T-0395 → T-0396 → T-0397。\n- 审批队列协议/事件帧形状、`examples/` 期望、四预设语义与危险命令分类均未改。",
+  "error": "verify 未通过",
+  "declared_paths": [
+    "src/web服务器.light",
+    "src/权限.light",
+    "src/agent.light",
+    "webui/app.js",
+    "tests/test_T0397_会话模式权限.py"
+  ],
+  "changed_files": [
+    "src/agent.light",
+    "src/web服务器.light",
+    "src/权限.light",
+    "webui/app.js",
+    "tests/test_T0397_会话模式权限.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "f56d160c5f324c3abcdebf47a10d06a9"
+}
