@@ -1,0 +1,54 @@
+{
+  "task": "T-0396",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0396",
+  "base": "main",
+  "head": "f388745c76093b155b058f96844cc8a0bb2887fd",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-19T13:16:41+08:00",
+  "finished_at": "2026-11-19T13:19:14+08:00",
+  "duration_s": 153.9,
+  "verify": [
+    {
+      "cmd": "node --check webui/app.js",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "node --check webui/new-session.js",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -m pytest -q tests/test_T0396_新建会话目录选择.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        ".....                                                                    [100%]",
+        "5 passed in 40.15s"
+      ]
+    }
+  ],
+  "summary": "# T-0396 新会话面板：目录选择器 + 模式/权限预选 —— 工作说明\n\n**做了什么**：把「目录/模式/权限」搬到开聊之前。输入区左下新增目录 chip（未选显示「默认」），点开的弹层\n里有手输绝对路径、最近 5 条目录（`localStorage` 键 `lh.recentCwd`，只存路径）、只读校验、以及「设为全局默认」\n（走既有 `POST /api/cwd`，面板里明写「全局生效」）。「＋ 新会话」改为只进空状态、不再 `POST /api/sessions`。\n后端新增 `GET /api/cwd/check?工作目录=`，返回 `{存在,是目录,可读,绝对路径,错误}`，**绝不 chdir、绝不写 settings.json**。\n\n**改了哪些文件**（正好 6 个，全在卡面 paths 内，`git show --stat HEAD` 已核对）：\n`src/web服务器.light`（check 端点 + `/api/cwd/check` 与 `/new-session.js` 静态路由）、`webui/new-session.js`（新文件，\n全部面板逻辑，零依赖）、`webui/app.js`（接线：首条消息带 `工作目录`、400 时 chip 标红不丢目录、接管「＋新会话」）、\n`webui/index.html`（只**新增** `cwd-chip`/`cwd-chip-name`/`cwd-chip-error`/`cwd-popover` 与一行 script，既有 id 一个未动）、\n`webui/style.css`（`.cwd-chip` / `.cwd-popover` 跟随既有 token）、`tests/test_T0396_新建会话目录选择.py`（5 条判据）。\n\n**跑了什么验证**：①`node --check webui/app.js` ✅ ②`node --check webui/new-session.js` ✅\n③`python3 -m pytest -q tests/test_T0396_新建会话目录选择.py -o addopts=''` → **5 passed**。\n反证已做两条：撤掉路由登记后 3 条红；把 check 错接到 `处理保存工作目录` 上 → 「cwd 没变 / 文件没变」两条红\n（`cwd没变=False`、`文件没变=False`），确认不是空判据。\n\n**verify 首轮失败（环境假红，已修）**：第一次 `hive_submit` 的第三条命令红了 3 条。根因不是产物：我本机跑时\nshell 里预置了 `LIGHTPLUGIN`/`LIGHT_MERGE`，而 worker 的 verify 环境没有；我的 `_find_sibling` 又写死了 `../..`\n层数，在 worker 的 worktree 深度下找不到兄弟仓，`Web服务端 → 总入口 → 生产挂载` 报 `No module named 生产挂载`。\n已改成**沿祖先逐级探测**，并且按仓选判据标记（`light` 看 `src/`，`lightplugin` 看 `插件/` —— 它**没有** `src/`，\n用 `src` 判它永远找不到；编译器仓在别的机器上还可能叫 `light-merge`）。修完后用 `python3`、清空\n`LIGHTPLUGIN`/`LIGHT_MERGE`/`HARNESS_ROOT`/`HARNESS_CWD` 复现 worker 环境，**5 passed**，与 verify 口径一致。\n\n**浏览器冒烟（jsdom 驱动真实 index.html + 真实 HTTP 服务，20/20 通过）**：空态 chip=「默认」→ 选目录后\n「本会话：…」→ 首条消息 body 带 `工作目录` → 注入 400 后 chip 加 `is-error` 且**目录仍在** → 非法目录理由来自\n服务端（`路径不存在: …`）→ 新 DOM 重建后 chip 仍显示该目录。另测「不选目录」时请求体只有 `messages,stream,preset`，\n**既无 `工作目录` 也无 `权限预设`**（老用户零感知）。服务端实测：存在/不存在/是文件/相对路径/缺参数五态正确，\n连打三次后 `settings.json` 不存在、进程 cwd 未变。\n\n**遗留风险 / 需要下一张卡接手的两件事**：\n1. **T-0395 还没合进 `main`**（只在 `origin/task/T-0395`）。所以本卡基线里首条消息带的 `工作目录` 目前**没有消费方**——\n   chip 能选、能校验、能随请求发出，但「会话 cwd 真正落到索引/头信息」要等 T-0395 合入。已把本卡 cherry-pick 到\n   T-0395 顶端做过端到端：两会话分别 `_proj_alpha`/`_proj_beta`、`GET /api/sessions` 与详情 cwd 正确、重启后不丢、\n   非法目录 400 且不新增会话——全部符合预期。**合入顺序必须是 T-0395 先于 T-0396。**\n2. `tests/test_T0395_会话工作目录.py::test_对话首条消息带目录写入新会话头信息` 在 **T-0395 自己的顶端**（不含本卡改动）\n   就红：`处理对话异常: decoding str is not supported`。根因是该用例用 `编码()`（返回 str）当请求体，而 `处理对话`\n   内部走 `字符串(体字节,\"utf-8\")`，在 Windows/Py3.14 下炸；T-0395 当时在 FreeBSD 上验的，与此无关。**不是本卡引入**，\n   但会挡住 T-0395 的合入门禁，建议由 T-0395 的返修单处理（把驱动脚本的 `编码` 换成真正的 bytes）。\n3. 权限下拉本卡只做 UI 暂存 + 随请求携带 `权限预设`，**没有**落库也没有按会话生效——这是卡面明确划给 T-0397 的范围，\n   面板里标了「全局默认」态和「未落库是诚实状态」的说明，没有假装已生效。",
+  "error": "",
+  "declared_paths": [
+    "webui/index.html",
+    "webui/app.js",
+    "webui/style.css",
+    "webui/new-session.js",
+    "src/web服务器.light",
+    "tests/test_T0396_新建会话目录选择.py"
+  ],
+  "changed_files": [
+    "src/web服务器.light",
+    "tests/test_T0396_新建会话目录选择.py",
+    "webui/app.js",
+    "webui/index.html",
+    "webui/new-session.js",
+    "webui/style.css"
+  ],
+  "out_of_paths": [],
+  "lease_id": "c2d1d3fcafff4baa80fc736cab91ebda"
+}
