@@ -1,0 +1,54 @@
+{
+  "task": "T-0398",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0398",
+  "base": "main",
+  "head": "92007efee12d681dc7a54d1ceaa9563903774eee",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-19T21:14:12+08:00",
+  "finished_at": "2026-11-19T21:33:26+08:00",
+  "duration_s": 1154.2,
+  "verify": [
+    {
+      "cmd": "node --check webui/app.js",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "node --check webui/messages.js",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -m pytest -q tests/test_T0398_附件暂存契约.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        "......                                                                   [100%]",
+        "6 passed in 18.74s"
+      ]
+    }
+  ],
+  "summary": "# T-0398 输入区增强：空会话附件暂存 + 上下文用量/一键压缩入口\n\n## 做了什么\n- 附件暂存：`newChatState()`（「＋ 新会话」/删当前会话回空态）不再清空未发送附件，并补「已保留 N 个待发附件」提示；只有首条消息被服务端受理（`resp.ok`）后才清 chips，4xx/网络失败一律保留可重试。\n- 切会话：`selectSession` 载入**另一个**已有会话时清空待发附件并给中文提示；同会话重选/刷新不清（附件只在内存，未写 localStorage）。\n- 上限：前端 20 个 / 单文件 10MB，超限中文提示并跳过该文件（数量判定放在 `FileReader.onload`，多选异步也不会超）。\n- 压缩：输入区新增「上下文 xx%」+「压缩」按钮，点击弹确认（说明保留最近 N 条、旧消息进摘要），确认后走**既有** `/compact` 通道（`sendMessage(\"/compact\")`，同一条 POST /v1/chat/completions）；斜杠面板 /compact 双入口保留、文案一致；`种类===\"压缩\"` 帧到达时刷新用量 + 走 messages.js 的 `.sys.compaction` 提示。\n\n## 改了哪些文件\n`webui/app.js`（主逻辑）；`webui/index.html`（ctx-usage / compact-btn + composer-right 分组，既有 id 未动）；`webui/style.css`（.ctx-usage/.compact-btn/.sys.compaction/.composer-right）；`webui/messages.js`（新增 `addCompaction` 导出，未动既有渲染契约）；`webui/slash-palette.js`（/compact 文案）；`tests/test_T0398_附件暂存契约.py`（新增）。\n\n## 验证（Windows 本机，全部按卡面原命令）\n`node --check webui/app.js` → 0；`node --check webui/messages.js` → 0；`python3 -m pytest -q tests/test_T0398_附件暂存契约.py -o addopts=''` → 6 passed（24s）。\n6 项覆盖：服务端对 7 种 attachments 形状稳健接收（不 5xx、不绕过 messages 必填）、上送协议只投影 name/type/dataUrl、上限与「受理后才清 chips」、暂存/切会话语义、压缩入口与双入口文案、两个 js 可解析。反跑自检：用 HEAD 版文件复核，7 条静态判据在改动前全不满足（判据有效）。\n\n## 遗留风险\n1. 服务端**目前不读** `body.attachments`（`web服务器.light` 无该字段处理、无体积上限），所以「服务端超限 400」在现状里不存在；本卡红线不许改服务端，限额只能落前端。卡面「服务端已有附件归一」与现状不符，建议单开卡补 attachments 接收/归一与 400。\n2. `种类=压缩` 帧服务端也未推送（只发 统计/会话/工具/审批），压缩控件走的是 /compact 文本通道，压缩提示需服务端补帧才可见（未自造前端压缩）。\n3. T-0397 同样改了 `app.js` 的 `selectSession`/`sendMessage` 附近，合入 land 时可能冲突；本卡已尽量小面改动，冲突应两侧都保留。\n4. 前端交互未做真机 GUI 冒烟（无浏览器会话），手工清单：① 空白页挂 2 个文件 →「＋ 新会话」→ chips 仍在且提示保留 2 个 → 发送成功后清空；② 会话 A 挂附件 → 切到 B → chips 清空 + 「已切换到别的会话，清空了 N 个未发送的附件」，再点当前会话不清；③ 选 21 个或 1 个 >10MB 文件 → 中文提示并跳过；④ 有会话时点「压缩」→ 确认框 → 发出 /compact → 用量刷新或压缩提示出现，斜杠 /compact 同效；⑤ 断网发送 → 报错且 chips 保留，重发成功。",
+  "error": "",
+  "declared_paths": [
+    "webui/app.js",
+    "webui/index.html",
+    "webui/style.css",
+    "webui/messages.js",
+    "webui/slash-palette.js",
+    "tests/test_T0398_附件暂存契约.py"
+  ],
+  "changed_files": [
+    "tests/test_T0398_附件暂存契约.py",
+    "webui/app.js",
+    "webui/index.html",
+    "webui/messages.js",
+    "webui/slash-palette.js",
+    "webui/style.css"
+  ],
+  "out_of_paths": [],
+  "lease_id": "2a39ec82e70e42f48586f29c2b59ab87"
+}
