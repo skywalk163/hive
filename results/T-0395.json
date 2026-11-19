@@ -1,0 +1,48 @@
+{
+  "task": "T-0395",
+  "agent": "lightharness-fb98",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0395",
+  "base": "main",
+  "head": "adc17c1b4a585149d1865914d89e881da1394c70",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-19T12:01:49+08:00",
+  "finished_at": "2026-11-19T12:03:10+08:00",
+  "duration_s": 81.8,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_T0395_会话工作目录.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        ".....                                                                    [100%]",
+        "5 passed in 46.45s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest -q tests/test_T0180_工作目录集中化.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        ".....                                                                    [100%]",
+        "5 passed in 2.73s"
+      ]
+    }
+  ],
+  "summary": "# T-0395 会话级工作目录（后端）工作说明\n\n会话 cwd 从全局降为会话属性：`POST /api/sessions` 与 `POST /v1/chat/completions` 都接受可选 `工作目录`，相对路径/不存在/文件/不可读一律 400 且不写索引；`取会话` 按「请求目录（仅新会话）→ 索引元数据 → 全局设置 → HARNESS_CWD → 当前目录」解析，已有会话以磁盘首行 cwd / 索引为准，全局不再覆盖。\n\n改动仅在允许路径：`src/会话存储.light`（`新建会话(标题, 工作目录=\"\")` + `登记会话(标识, 标题, 工作目录)`，索引元数据写 `工作目录`；旧调用形状不变）、`src/web服务器.light`（新增请求目录校验/会话目录解析；两条建会话路径接工作目录；列表/详情只增 `工作目录` 键；对话持久化改用实际会话 id）、`tests/test_T0395_会话工作目录.py`（5 条端到端判据，含双会话各根反证）。未改 `持久化.light`/`会话.light`，首行 cwd 还原沿用既有 `读入会话`。\n\n反证：临时 stash 掉两个源文件后，`test_两条会话不同目录并发存在且路径安全各按各根` 红（旧实现下两会话 cwd 都是 tmp 根），恢复后绿；不是空判据。\n\n实测证据（`python3 运行.py /tmp/t0395-evidence/ev.light`）：甲详情cwd=/tmp/t0395-evidence/甲项目；乙详情cwd=/tmp/t0395-evidence/乙项目；重启后cwd=/tmp/t0395-evidence/甲项目；非法目录状态=400；非法目录体=工作目录不存在或不是目录: /tmp/t0395-evidence/不存在。\n\n验证：`python3 -m pytest -q tests/test_T0395_会话工作目录.py -o addopts=''` → 5 passed（分两批跑以避开 30s 工具超时：2+3 全绿）；`python3 -m pytest -q tests/test_T0180_工作目录集中化.py -o addopts=''` → 5 passed。回归 `test_会话导入导出.light` 11 断言通过、`test_会话模型选择.light` PASS、`tests/unit/test_会话存储.py` 17 passed。两条会话 GET /api/sessions/:id 的 cwd 与重启后 cwd 见上。\n\n遗留风险：`POST /api/sessions` 创建的空 JSONL 仍无首行 header（历史行为），重启后消息历史为空但 cwd 从索引保留；UI 改动与目录浏览 API 不在本卡。未改 POST /api/cwd、CLI/MCP/子代理 cwd、HARNESS_ROOT/CWD 优先级、examples 与无关文件。\n\n\n## 结果未落 store（T-0296）\n\n- Git 侧已完成：res/T-0395 分支、task/T-0395（head c05080caf807f1f0aca911462b041bdf21a98529）\n- store 侧**未写入**：T-0395 结果写入 leader store 失败（已尝试 4 次）：T-0395 的租约已过期，结果被拒（lease lost）\n- 影响：看板/claim 的 store 视图看不到结果，租约过期后这张卡可能被重新派发；Git 结果不会丢，`hive land` 读的是Git 侧 res/T-0395，可以照常合入。\n- 下一步：**不要直接重跑 `hive submit T-0395`**（`result_info` 会报「已经有结果」把重跑挡住）；要让 store 视图一致，先删 res/T-0395 分支再重跑，或用 `hive doctor` 体检 / `hive repair --apply` 对齐状态。\n\n提交首轮 worker verify 5 failed 是环境假红：worker 的 worktree 在 `.hive/wt`，没有 `../lightplugin`，`Web服务端 → 总入口 → 生产挂载` 在 Light 侧报 `No module named 生产挂载`；本地 shell 预先导出了 `LIGHTPLUGIN`，掩盖了该缺口。已在测试 `_run()` 里按与运行器一致的候选顺序显式探测并设置 `LIGHTPLUGIN`/`LIGHT_MERGE`，使用例自包含；用 debug 日志抓到根因，未改判据、未跳过任何用例。",
+  "error": "",
+  "declared_paths": [
+    "src/web服务器.light",
+    "src/会话存储.light",
+    "src/持久化.light",
+    "src/会话.light",
+    "tests/test_T0395_会话工作目录.py"
+  ],
+  "changed_files": [
+    "src/web服务器.light",
+    "src/会话存储.light",
+    "tests/test_T0395_会话工作目录.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "4b014eaad7a94cf68ea9f1ac40fe0256"
+}
