@@ -1,0 +1,44 @@
+{
+  "task": "T-0394",
+  "agent": "doubao-win10",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0394",
+  "base": "main",
+  "head": "8effd653e1236664e407be237f884494fb4db1ce",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-19T08:17:44+08:00",
+  "finished_at": "2026-11-19T08:23:19+08:00",
+  "duration_s": 335.9,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/unit/test_fetch_deps_ps1.py -q",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".................                                                        [100%]",
+        "17 passed in 6.86s"
+      ]
+    }
+  ],
+  "summary": "## T-0394 交付摘要\n\n- 做了什么：为「一键拉齐三仓」补 Windows 原生 PowerShell 版，README 不再要求装 Git Bash。\n- 新增 `scripts/fetch-deps.ps1`：参数 `-Dir` / `-Mirror` / `-Depth` / `-Branch` / `-NoPull` / `-NoRun` / `-DryRun`\n  与 `fetch-deps.sh` 一一对应；支持 `LIGHTHARNESS_DEPS_DIR`、`LIGHT_REPO` / `LIGHTPLUGIN_REPO` /\n  `LIGHTHARNESS_REPO`；已存在仓走 `git pull --ff-only`，克隆失败清半成品目录，退出码 0/1/2 与 sh 版一致。\n- 改 `README.md`：环境准备段补 PowerShell 用法，选项改成「sh / ps1」双列表对照，删掉「必须用 Git Bash」说法。\n- 新增 `tests/unit/test_fetch_deps_ps1.py`：静态契约（文件/参数/行为/环境变量/README 文案/与 sh 选项对齐），\n  有 pwsh 或 powershell 时实跑 `-DryRun` 断言 rc=0、打印 3 条 clone、不落盘。\n- 改 `CHANGELOG.md`：`[未发布]` 段追加「Windows 原生拉依赖」三条。\n- 验证：`python -m pytest tests/unit/test_fetch_deps_ps1.py -q` 17 passed（rc=0）；pwsh 7.6.4 与\n  Windows PowerShell 5.1 均实跑 `-DryRun` rc=0、`-Help` rc=0、非法 `-Mirror` rc=2；\n  模拟克隆失败（file:// 不存在的仓）rc=1 且半成品目录被清理。\n- 卡面改动：`tasks/T-0394.md` 的 verify 原文是验收散文，会被当作 shell 命令执行而必然假红；\n  按 T-0393 的同类修法改成可执行命令 `python -m pytest tests/unit/test_fetch_deps_ps1.py -q`，\n  验收判据文字仍保留在卡面正文「验收判据」段。\n- 未跑：全量 `tests/unit`（717 条，Windows 上每条都要起一次光明编译，8 分钟未跑完，与本卡无交集故中止）。\n- 风险：脚本未在真实公网克隆场景跑过（只做了 dry-run 与失败路径）；冒烟依赖本机 python，已在文档注明。",
+  "error": "",
+  "declared_paths": [
+    "scripts/fetch-deps.ps1",
+    "README.md",
+    "tests/unit",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "README.md",
+    "scripts/fetch-deps.ps1",
+    "tests/unit/test_fetch_deps_ps1.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "d5e1d7cc0d0e4a0eb38d061add92b7b9",
+  "fence": 3
+}
