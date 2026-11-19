@@ -1,0 +1,53 @@
+{
+  "task": "T-0401",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0401",
+  "base": "main",
+  "head": "bf2a5b2982ec4692690186021ade1e88eacd9aa5",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T07:21:14+08:00",
+  "finished_at": "2026-11-20T07:33:42+08:00",
+  "duration_s": 748.8,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_T0401_目标续跑.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        ".........                                                                [100%]",
+        "9 passed in 31.59s"
+      ]
+    },
+    {
+      "cmd": "python3 运行.py examples/test_目标轮驱动.light",
+      "code": 0,
+      "tail": [
+        "===== 第 13 轮任务 3：goal 轮驱动（纯逻辑面）=====",
+        "test_目标轮驱动 PASS"
+      ]
+    },
+    {
+      "cmd": "python3 运行.py examples/test_目标折叠.light",
+      "code": 0,
+      "tail": [
+        "--- 目标折叠子系统（模块35）测试通过 ---"
+      ]
+    }
+  ],
+  "summary": "# T-0401 目标续跑（goal round driver 接线前置）\n\n## 做了什么\n只交付「决策函数 + 工具规格」，不接线（外层 `当` 循环留给 T-0407）。新增两个纯逻辑模块 + 一个子进程判据。\n\n- `src/目标续跑.light`（新增，零 IO / 零线程 / 不导入 代理·web服务器·总入口）\n  段落：`续建续跑状态` `续记账` `续停止状态` `续续跑决策` `续合并目标变更` `续当前目标` `续有效目标` `续目标工具规格` `续执行目标工具`（内部 `续整数` `续复制字典` `续造决策` `续预约文本`）\n  **不重造完成判定**：轮次预算/相位/授权/轮号 + 提示文案一律委托 `目标轮驱动.推进一轮` 与 `渲染目标轮文本`；max-tokens/aborted 走 `目标轮驱动.轮次结束栅栏`。\n- `src/目标工具.light`（新增）：`挂目标台账` `取目标台账` `目标工具处理` `注册目标工具`，形状照抄 `核心工具.light`（`工具注册表.注册(造工具定义(...))`）。\n- `tests/test_T0401_目标续跑.py`（新增，9 条用例，全部子进程驱动真实模块）。\n\n## 决策表（输入 → 输出）\n| 状态/轮次结果 | 动作 / 理由 |\n|---|---|\n| 已停 | 停止 / stopped |\n| 种类 max-tokens | 停止 / max-tokens（栅栏 disarm） |\n| 种类 aborted | 停止 / aborted（栅栏 keep-attempt 或 disarm，附 原因） |\n| 种类 error / max-steps | 停止 / error、max-steps（理由互相可区分） |\n| 种类 其它 | 停止 / unknown-kind |\n| completed 且 phase=complete | 完成 / goal-complete |\n| completed 且 轮次 ≥ 最大轮数 | 停止 / round-limit |\n| completed 且 连续无进展 ≥ 阈值(2) | 停止 / no-progress |\n| completed 且 推进一轮=reserve | 续跑 / round-advance（提示文本=渲染目标轮文本） |\n| completed 且 推进一轮=block | 停止 / round-limit |\n| completed 且 推进一轮=wait | 停止 / not-drivable |\n\n## verify（全绿）\n```\npython -m pytest -q tests/test_T0401_目标续跑.py -o addopts=''  → 9 passed in 66.33s\npython 运行.py examples/test_目标轮驱动.light                  → test_目标轮驱动 PASS，rc=0\npython 运行.py examples/test_目标折叠.light                    → 目标折叠子系统测试通过，rc=0\n```\n（Windows 本地直跑，未用到 head/grep/awk，无 POSIX 判据；无需转 192.168.0.88。）\n\n## 反证（阈值 2 → 1，再改回）\n`续默认无进展阈值` 改 1 后：\n```\nFAILED test_连续两轮无进展才停\n  一轮动作=停止（期望 续跑）  二轮动作=停止/no-progress  二轮连续=2\nFAILED test_完成一轮未标目标时自动续跑（阈值断言 == 2 变 1）\n2 failed, 7 deselected in 15.66s\n```\n改回 2 复绿：`9 passed in 66.33s`。\n\n## T-0407 需要在 总入口.light 加的那一行（精确）\n文件 `src/总入口.light`，段落 `工具名到叶子`（第 158 行起）。在**第 164 行**（`    返回 [\"tool-fs-search\"]`）之后、**第 165 行**注释（`  # lightplugin / MCP 工具…`）之前插入两行：\n```\n  如果 名字 == \"目标\":\n    返回 [\"tool-goal\"]\n```\n依据：`src/预设组合.light` 的 standard(90) / ptc(119) / cordis(165) 预设均已带 `{\"id\": \"tool-goal\", …, \"disabled\": 假}`，映射命中后在 standard/ptc 下不会被 `预设保留工具` 注销；minimal 无该叶子，维持「未映射即不挂载」现状。\n另：宿主侧接线点写在两模块文件头——每轮结束把 `续执行目标工具` 的 `变更` 载荷落成 `goal/change` 事件，再把 `新状态` 挂回 `挂目标台账`，外层按 `续续跑决策` 的 `提示文本` 再驱动一轮。\n\n## 遗留风险\n1. 台账槽 `目标台账` 是进程内单会话投影（同 `目标折叠` 的「激活不持久化」口径），多会话并发时 T-0407 需按 session 分槽后再挂。\n2. 零 IO 意味着时间不取系统时钟：`update/complete/pause` 的 `updatedAt` 默认 `上次时间+1`，宿主可经参数 `现在` 注入真实时间戳。\n3. `目标续跑.续执行目标工具` 不预校验 objective 的首尾空白归一，交 `目标折叠.解码目标变更` fail-loud（与既有复刻件一致）。\n4. 未改动任何热点/复刻件；`git status` 仅三条本卡路径（两个新模块 + 一个测试）。",
+  "error": "",
+  "declared_paths": [
+    "src/目标续跑.light",
+    "src/目标工具.light",
+    "tests/test_T0401_目标续跑.py"
+  ],
+  "changed_files": [
+    "src/目标工具.light",
+    "src/目标续跑.light",
+    "tests/test_T0401_目标续跑.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "47a9fdc8729e4eee8606f2beb5663425"
+}
