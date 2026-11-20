@@ -1,0 +1,47 @@
+{
+  "task": "T-0423",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0423",
+  "base": "main",
+  "head": "7204bd315d72fa2f56e7746af0d078dd4d5e5519",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T19:33:47+08:00",
+  "finished_at": "2026-11-20T20:31:26+08:00",
+  "duration_s": 3459.8,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_store_lease_ingest.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        "...........                                                              [100%]",
+        "11 passed in 45.03s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest -q tests/test_claim_backoff.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        ".........                                                                [100%]",
+        "9 passed in 247.36s (0:04:07)"
+      ]
+    }
+  ],
+  "summary": "# T-0423 store 后端新卡首领租约兜底 10 分钟修复\n\n## 结论（先看这条）\n\n**根因不在 store，在首领本机那份 Git 卡面。**\n\n`Worker.claim` 的 store 分支取租约用的是 `store_lease_minutes_of(self.h.card(tid))`，\n而 `Hive.card()` 读的是**工作区里的文件**，不是 git 里的卡。`sync_main` 为了不抹掉人\n未提交的改动，有两条「原地不动」的路径（本地领先 origin/main → 直接返回；落后但工作区\n有已跟踪改动 → 拒绝 reset），fetch 失败也只是 log。于是「卡面写了 `lease_minutes: 300`、\n工作区还是上一版没有这个字段」完全成立 → 取到空 → 退回 `STORE_LEASE_MINUTES = 10`。\n\n顺便证伪了卡面上的猜测：**store 的 `tasks` 表根本没有 `lease_minutes` 列**\n（`id/state/owner/retries/payload_json/def_hash/updated`），`store/claim` 的时长也不从\n表里读，而是用 follower 请求里带上来的 `lease_minutes`\n（`hive_cluster._store_op_for`：`int(body.get(\"lease_minutes\") or 10)`）。\n所以「store 没摄入这个字段」不可能是 10 分钟的原因。\n\n## 取证（隔离 db + 临时 git 仓，不碰 0.88）\n\n修复前，同一套脚本跑三种局面：\n\n| 局面 | 本机卡面 | origin/main | 拿到的租约 |\n|---|---|---|---|\n| A | `lease_minutes: 300` | 同左 | 300.0 分钟 ✅ |\n| B | 无该字段（旧版） | `lease_minutes: 300` | **10.0 分钟** ❌ 复现 |\n| C | 无该字段 | 无该字段 | 10.0 分钟 ✅ 兜底 |\n\n修复后：A=300.0、**B=300.0**、C=10.0 —— B 补齐，A/C 语义不变。\n\n## 改动（hive.py，四处）\n\n1. `parse_card` 拆出 `parse_card_text(text, source)`：origin 上的卡面没有本地文件可读。\n2. 新增 `card_from_origin(repo, tid)`：`git show origin/main:tasks/<tid>.md` 解析卡面。\n3. 新增 `store_lease_minutes_for(repo, tid, card=None)`：取值顺序\n   **工作区卡面 → origin/main 卡面 → STORE_LEASE_MINUTES**。卡面有值仍以卡面为准\n   （T-0387 的主逻辑一字未动），只有「本地确实没写/写了 0」才回读 origin，\n   正常路径零额外 git 调用。`claim` / `lease_heartbeat` / `_refresh_lease` 三处统一走它\n   （否则 claim 拿 300、心跳按 10 续，任务照样被提前判死）。\n4. `_confirm_store_lease`：领取成功后比对 `claims.lease_until` 与卡面分钟数，\n   短了 10% 以上就按**差额**续租补回（`Store.renew` 是累加的，补 290 而不是 300，\n   否则一次纠正变 600），并打日志留痕。\n5. `_ingest_missing_card` 补登记时优先送 origin 的完整卡面，\n   避免把「缺 lease_minutes」也一起补进 store。\n\n红线核对：`STORE_LEASE_MINUTES = 10` 常量保留且仍是「卡面确实没写」时的兜底；\nGit 后端租约语义（180 缺省、`claim/<tid>` 分支）一行未动；看板未动；线上 0.88 store 数据未动。\n\n## 测试（新增 tests/test_store_lease_ingest.py，11 个）\n\n- `test_lease_minutes_prefers_local_card` / `_reads_origin_when_worktree_is_stale` /\n  `_keeps_ten_minute_fallback` / `_tolerates_missing_card`\n- `test_card_from_origin_parses_card_text`\n- `test_claim_uses_card_lease_minutes`（真实 `Store` 落在 tmp db，租约 300）\n- **`test_claim_reads_origin_card_when_worktree_stale`** —— 反证用例\n- `test_claim_keeps_ten_minutes_when_card_is_silent`（兜底语义）\n- `test_claim_corrects_lease_clamped_by_leader`（leader 只给 10 → 当场纠正到 300）\n- `test_claim_does_not_double_extend_lease`（一致时不动，不能变 600）\n- `test_ingest_missing_card_prefers_origin_card`\n\n测试全部在临时 db / 临时 git 仓里做（`Store(tmp_path/\"hive.db\")` + `_cluster_http` 桩），\n不连集群、不碰线上 store。\n\n### 反证（贴输出）\n\n把 claim 那行换回旧逻辑 `store_lease_minutes_of(local_card)`：\n\n```\nFAILED tests/test_store_lease_ingest.py::test_claim_reads_origin_card_when_worktree_stale\nE       AssertionError: 本机卡面落后于 origin/main，租约掉回 10 分钟了（T-0410 复发）\nE       assert 9.997724378108979 == 300 ± 2\n1 failed, 10 passed\n```\n\n旧逻辑下另外三项（A/C 局面、纠正、补登记）仍然绿 —— 说明红的正是本次修的那条。\n\n## 验证\n\n见下方 verify 结果。\n\n## 文档\n\n新增 `docs/租约与摄入须知.md`：两个后端的租约真相源、T-0410 的三组取证表、\n怎么查（`hive show` / `hive status --json` 看 claimed_at→lease_until、`local_stale`）、\n怎么规避（新卡 push 后给 follower 追 main 的时间窗、协调仓别长期脏着、\nleader 启动后新增卡靠缺卡自愈补登记、长任务卡必须写 lease_minutes）。\n\n## 遗留 / 风险\n\n- 心跳与 claim 都统一走 `store_lease_minutes_for`，每次取不到卡面值时多一次\n  `git show`（只在异常路径发生，正常路径无开销）。\n- 修复只覆盖「本机卡面陈旧」。若 leader 侧自己把时长截短（旧版节点），\n  `_confirm_store_lease` 会当场纠正并留日志，但要根治仍应升级 leader。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/test_store_lease_ingest.py",
+    "docs/租约与摄入须知.md"
+  ],
+  "changed_files": [
+    "hive.py",
+    "docs/租约与摄入须知.md",
+    "tests/test_store_lease_ingest.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "29b701e85e9145b8b64a8797fd9ef803",
+  "fence": 1
+}
