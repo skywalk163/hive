@@ -1,0 +1,46 @@
+{
+  "task": "T-0411",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0411",
+  "base": "main",
+  "head": "1f25082500310e979daf89f32f9339f37aa08444",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T18:55:33+08:00",
+  "finished_at": "2026-11-20T18:56:29+08:00",
+  "duration_s": 56.8,
+  "verify": [
+    {
+      "cmd": "bash -n integrations/quickstart/install.sh",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "bash integrations/quickstart/install.sh --profile solo --systemd --dry-run",
+      "code": 0,
+      "tail": [
+        "  停止服务： kill $(cat /g/dswork/duan-light-merge/.worktrees/doubao-win/T-0411/_lightmem_run/lightmem.pid) $(cat /g/dswork/duan-light-merge/.worktrees/doubao-win/T-0411/_lightmem_run/lightmem-mcp.pid)",
+        "  数据位置： /g/dswork/duan-light-merge/.worktrees/doubao-win/T-0411/_lightmem_run/data/lims.sqlite （solo 档）",
+        "  日志：     /g/dswork/duan-light-merge/.worktrees/doubao-win/T-0411/_lightmem_run/lightmem.log  /  /g/dswork/duan-light-merge/.worktrees/doubao-win/T-0411/_lightmem_run/lightmem-mcp.log",
+        "",
+        "  ⚠️  /g/dswork/duan-light-merge/.worktrees/doubao-win/T-0411/_lightmem_run/agent-tokens.json 含明文凭据 —— 请勿提交进 git，生产环境请换发正式 token。"
+      ]
+    }
+  ],
+  "summary": "# T-0411 工作总结 · systemd 双服务单元 + install.sh --systemd 健全化\n\n## ✅ 提交状态：产物完成，卡面判据已按业主要求改成 bash\n`hive_submit` 首轮在 Windows worker 上用 `cmd.exe` 跑判据，本机没有 `sh`（Git for Windows 只把 `git.exe` 放进 PATH，`sh.exe` 还在安装目录；`hive_compat.py` 只垫 `bash`/`python3`/`test`，不垫 `sh`），于是两条判据都报 `'sh' 不是内部或外部命令`。**业主已把卡面判据改为 `bash -n …` / `bash … --systemd --dry-run`**（bash 在垫片覆盖范围内），产物未改，仅重跑判据。\n判据在 **Windows Git bash、FreeBSD 15.1（192.168.0.88 真仓库真分支）** 都真跑过且 exit 0，0.88 还做了非 dry-run 全链实装（证据见下）。\n\n## 做了什么\n1. `deploy/lightmem.service`：单 kernel unit 补成双服务之一。端口由 rc.d 口径 `:18443` 改回 systemd/quickstart `:7443`；补 `User/Group=lightmem`、`WorkingDirectory=/opt/lightmem`（lm_prefix 口径）、`EnvironmentFile=-/opt/lightmem/lightmem.env`（凭据不进 unit）、加固白名单（`NoNewPrivileges`/`PrivateTmp`/`PrivateDevices`/`ProtectSystem=strict`+`ReadWritePaths`/`ProtectHome`/`ProtectKernel*`/`RestrictAddressFamilies`/`RestrictNamespaces`/`LockPersonality`/`UMask`）。\n2. 实测踩到两处坑并修掉：`StartLimitIntervalSec/Burst` 放 `[Service]` 会被忽略（systemd≥230 属 `[Unit]`，`systemd-analyze` 直接报 `Unknown key`）；unit 指令**行尾**注释不被支持（`Failed to parse boolean value`），全部改成独立注释行。\n3. 新增 `deploy/lightmem-mcp.service`：MCP/HTTP `:7444`，`ExecStart=<prefix>/lightmem-mcp -transport http -listen <bind>:7444 -rest-base http://<bind>:7443`，`After/Wants=lightmem.service` 保证依赖有序，加固项与 kernel 对齐（仅 logs 可写）。\n4. `install.sh`：`--systemd` 装**两个** unit（优先复用 T0 `deploy/platform.sh` 的 `lm_service_install <src> <name>`，缺失时降级为等价 cp），以 `deploy/*.service` 为唯一模板渲染到 `_lightmem_run` 布局（prefix/端口/User/ReadWritePaths/ProtectHome），装前先撤第 5 步 nohup 裸进程（否则 bind 冲突、健康检查命中旧进程=假成功），再 `daemon-reload` + `enable --now` 双服务并做就绪探测。\n5. 新增 `--uninstall-systemd`（停 MCP→停 kernel→删两 unit→reload→reset-failed，幂等、单段提前退出，不触发编译/起进程）与 `--service-user`（默认 `SUDO_USER`/当前用户）；FreeBSD 上只提示走 rc.d（`:18443/:18444`）**不动手**，失败提示里显式区分两套端口口径；`--dry-run` 缺 Go 不再 `die`（只出计划不编译，CI 容器常见）。\n\n## 验证（都真跑过，证据）\n- **0.88 真机（FreeBSD 15.1，真仓库真分支）**：`git fetch origin task/T-0411` + `git worktree add /tmp/t0411-repo`（HEAD=`1f25082`）后，在仓库内跑两条判据 → `sh -n` = 0、`--profile solo --systemd --dry-run` = 0。\n- **0.88 真机全链实装（非 dry-run）**：`sh install.sh --profile solo --systemd` → `REAL_RC=0`；`go build` 两个二进制（version=1f25082…）、profile 落盘、token 签发、`✓ REST 就绪 {\"status\":\"ok\",\"backend\":\"sqlite\"…}`、`✓ MCP 就绪 {\"status\":\"ok\",\"upstream_status\":\"ok\"}`；systemd 段按设计打印 `! 检测到 FreeBSD…` + `✓ 已跳过 systemd 安装`，未碰任何 rc.d 文件。测完已停进程、删 `_lightmem_run`、移除 worktree（`:7443/:7444` 已释放）。\n- `sh -n integrations/quickstart/install.sh` → `SYNTAX=0`（Windows `C:\\Program Files\\Git\\bin\\sh.exe` 同样通过）。\n- `sh … --profile solo --systemd --dry-run` → `exit=0`（Windows/FreeBSD 两平台）。\n- 放 stub `deploy/platform.sh` 后路径切到 `lm_service_install(dry) src -> name`，`LM_DRY_RUN=1` 生效（证明 T0 合入后会自动改走 platform.sh）。\n- `systemd-analyze verify`（Ubuntu / systemd 249）：两块模板 + install.sh 渲染产物（ExecStart 换 `/bin/true` 校验）**无任何解析错误**；模板原样校验只剩「二进制未安装」这一条预期报错。\n- 附加：`--no-mcp --systemd --dry-run`（只启用 kernel unit）、`--uninstall-systemd --dry-run`、`-h` 均 exit 0；`git show --stat` 仅覆盖 3 个允许路径（`out_of_paths: []`）。\n\n## 遗留 / 风险\n- T0 `deploy/platform.sh` 尚未合入本基线，本次走降级 cp 分支；接口签名按其卡片冻结值 `lm_service_install <src> <name>`，接线已用 stub 验过。\n- 未做「真 root + 真 systemd」Linux 实装（本 Windows 机无 Go、云主机无 pid1）：`DRY=0` 的渲染/安装/自启动只在 Linux 上用等价 sed 管线离线验证，建议 T-0417 真机验收补一次 sudo 实装并贴 `systemctl status` 两行。\n- `deploy/*.service` 未在 `.gitattributes` 钉 LF（该文件归 T0/他线）；Linux 侧检出本就是 LF，仅 Windows 工作区有 CRLF 警告。\n- 常规 60–90 分钟内完成，无卡点。",
+  "error": "",
+  "declared_paths": [
+    "deploy/lightmem.service",
+    "deploy/lightmem-mcp.service",
+    "integrations/quickstart/install.sh"
+  ],
+  "changed_files": [
+    "deploy/lightmem-mcp.service",
+    "deploy/lightmem.service",
+    "integrations/quickstart/install.sh"
+  ],
+  "out_of_paths": [],
+  "lease_id": "d43ddaaf67e04c14b831efb81e72687f"
+}
