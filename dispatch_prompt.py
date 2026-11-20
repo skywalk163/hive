@@ -74,7 +74,7 @@ _FALLBACK_PLATFORM = "判据在本机跑不了就去 192.168.0.88 跑（详见 d
 _PLATFORM_HINT = [
     "Windows 上 head/grep/awk 与 ! / $() 不可用，POSIX 判据会 exit 255 假失败——先别怀疑产物",
     "确实跑不了就换 192.168.0.88（FreeBSD 15.1）跑：ssh workbuddy@192.168.0.88，"
-    "密码取 .env 的 SSH_PASS_WORKBUDDY（尾部带空格，取值先 strip）",
+    "密码取 .env 的 SSH_PASS_WORKBUDDY",
 ]
 
 #: 失败策略的后半句（前半句带分钟数，卡上没写分钟数时整句降级成 `_FALLBACK_FAILURE`）。
