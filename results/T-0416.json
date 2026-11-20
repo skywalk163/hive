@@ -1,0 +1,35 @@
+{
+  "task": "T-0416",
+  "agent": "lightharness-fb98",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0416",
+  "base": "main",
+  "head": "8aa81c2ea94275206d1427d18e9a8844cf0f0a13",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T22:33:44+08:00",
+  "finished_at": "2026-11-20T22:43:11+08:00",
+  "duration_s": 567.8,
+  "verify": [
+    {
+      "cmd": "grep -q 'Linux' README.md && grep -q 'FreeBSD' README.md",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0416 工作总结 · lightmem Linux 适配 F：README/GETTING_STARTED 平台口径修正\n\n## 结论\n按「Linux 是加法、不是替换」完成三份文档修正：README 平台优先级改为 Linux 与 FreeBSD 并列一等（保留 2026-11-20 前用户拍板的历史口径并加时间戳注记）；GETTING_STARTED 补 Linux 快速路径、systemd 排障命令与 FreeBSD 对照；档位矩阵新增 Linux solo/family 行，D 线未合入部分标 TODO 占位。未改任何部署脚本，未删 FreeBSD 说明。改动严格限定 `README.md`、`GETTING_STARTED.md`、`docs/档位能力矩阵.md` 三条允许路径。\n\n## 先证伪（改动前现状，2026-11-20 本 worktree 实测）\n- `grep -n '运行平台优先级' README.md` → `README.md:407`：`运行平台优先级：**FreeBSD > Linux > Windows**（用户拍板）`，确与「Linux 需求量更大」新决策冲突。\n- `grep -n 'FreeBSD\\|sockstat\\|rc.d' GETTING_STARTED.md` → 排障/守护段仅 FreeBSD 口径（`:180/:190/:198/:208`），无 Linux 命令。\n- `grep -n 'Family' docs/档位能力矩阵.md` → 档位总览仅 FreeBSD + jail（`:14`），无 Linux 档位。\n- A/T0 已落地（本基线 HEAD `9220590` 含 `1684e7f`、`1f25082`）：`deploy/platform.sh`（lm_prefix linux=/opt/lightmem、freebsd=/usr/local/lightmem；lm_probe_port ss→sockstat→lsof；lm_logrotate_install linux=/etc/logrotate.d/lightmem）、`deploy/lightmem.service` / `lightmem-mcp.service`（双 unit、7443/7444、Restart=on-failure / RestartSec=2 / StartLimitBurst=5）。故文档引用这些数字/路径有据。\n- D/T-0414 状态 `assigned`（owner=workbuddy-win11）；本基线 main 无 `profiles/lims-linux-*.profile.yaml` / `manuals/linux-setup.md`（`ls` 报 No such file），仅远端分支 `origin/task/T-0414` 有。故 Linux 档位字段标「待 D 线合入」+TODO，不写死。\n\n## 措辞修正清单（文件:行 → 改前 → 改后）\n行号为改动后文件当前行号（原行号另注）。\n\n| 文件:行 | 改前 | 改后 |\n|---|---|---|\n| `README.md:407`（原 407） | `运行平台优先级：**FreeBSD > Linux > Windows**（用户拍板）；Windows 仅文档编辑与传输，不装 Go` | `运行平台优先级（2026-11-20 更新）：**Linux 与 FreeBSD 并列一等**…Linux 主流发行版（Ubuntu 24.04 / Debian 12 / Rocky 9）与 FreeBSD 0.88 均为 production 验证平台…` + 两条子项：历史口径保留（注明 2026-11-20 前用户拍板）、端口口径 7443/7444 ↔ 18443/18444 不得混改 |\n| `GETTING_STARTED.md:22`（原 22） | `18444 端口，原生 MCP` | `原生 MCP：Linux/quickstart 7444 或 FreeBSD rc.d 18444` |\n| `GETTING_STARTED.md:77-88`（新增） | 无 Linux 快速路径 | 新增 `install.sh --systemd --service-user lightmem` 快速路径 + `manuals/linux-setup.md` 引用（TODO 随 D 线）+ 声明 FreeBSD rc.d 路径保持原样、两套端口不混改 |\n| `GETTING_STARTED.md:193-201`（原 180） | `# 按你的启动方式重启 MCP 服务；rc.d 方式：` + 仅 `service lightmem_mcp restart` | 分列 Linux `systemctl restart lightmem-mcp lightmem` / FreeBSD `service lightmem_mcp restart` / 手工通用 |\n| `GETTING_STARTED.md:207`（原 190） | `## 六·五、守护与自愈（FreeBSD 真机）` | `## 六·五、守护与自愈（FreeBSD 与 Linux 各自口径）`，说明文补 Linux 主流发行版并列一等 |\n| `GETTING_STARTED.md:209-217`（原 196-198） | 两层自愈表单列 rc.d `daemon -R/-C` 与看门狗 cron | 改为 FreeBSD / Linux 双列；Linux 列写 T-0411 已落地 unit 的 Restart 参数，timer 标 TODO（B 线 T-0412 未合入） |\n| `GETTING_STARTED.md:227`（原 208） | `否则 rc.d 健康检查与监控探针会吃到 401` | `否则 FreeBSD rc.d 健康检查与 Linux systemd/监控探针会吃到 401` |\n| `GETTING_STARTED.md:231-243`（原 210-216） | 仅 FreeBSD 的看门狗 + newsyslog 安装命令 | 保留 FreeBSD 命令块并标注「原义保留」；新增 Linux 段（`/etc/logrotate.d/lightmem` 由 `lm_logrotate_install` 口径，配置文件随 C 线 T-0413 TODO；timer 随 B 线 TODO；前缀 `/opt/lightmem` vs `/usr/local/lightmem`） |\n| `GETTING_STARTED.md:292-305`（原 266-268） | 排障表仅 FreeBSD-less 通用项 | 端口占用行补 Linux `ss -ltnp` / FreeBSD `sockstat -4l`；healthz 行补 `journalctl`；新增两行 Linux/FreeBSD 起不来排障 + 6 行命令对照表 |\n| `GETTING_STARTED.md:315-318`（原 276） | 文件索引仅列 install.sh | install.sh 用途补 `--systemd`/FreeBSD 跳过；新增 `deploy/platform.sh`、`manuals/linux-setup.md`（TODO 随 D 线）、`manuals/p1-freebsd-zfs-setup.md`（原义保留）三行 |\n| `docs/档位能力矩阵.md:3` | 版本 v1.1 / 2026-10-19 | 版本 v1.2 / 2026-11-20，对应任务补 T-0416 |\n| `docs/档位能力矩阵.md:15-16`（新增） | 档位总览只 4 档，Family=单机 FreeBSD + jail | 新增 Linux Solo / Linux Family 两行（`/opt/lightmem`、无 jail、无 ZFS；标注「待 D 线合入」）；表下补平台口径注记（并列一等、TODO、端口不混改） |\n| `docs/档位能力矩阵.md:155-157`（原 147） | `Family（PG + pgvector 单库，FreeBSD + jail）` | `Family（PG + pgvector 单库；FreeBSD + jail 原义保留，Linux 侧为 systemd + 单机 PG 无 jail）` + Linux 路线 TODO 行 |\n| `docs/档位能力矩阵.md:182-183`（新增） | 实测支撑索引无 Linux 项 | 新增两行：Linux 双服务端口口径（T-0411 已落地，附 grep 命令）；Linux 档位 profile/手册（TODO：D 线 T-0414 未合入，附校验命令） |\n\n## 保留 FreeBSD 原义清单（未删、未替换）\n| 文件:行 | 保留内容 | 理由 |\n|---|---|---|\n| `README.md:145` | 运行手册 `manuals/p1-freebsd-zfs-setup.md`（FreeBSD + ZFS + jail + pf + PG 18 + ZFS 快照容灾） | FreeBSD 部署手册仍在，Linux 手册是加法 |\n| `README.md:192` | S5 FreeBSD jail vnet（0.88 实机）已交付 | 历史交付记录，不抹除 |\n| `README.md:219`/`:230` | 验证环境 192.168.0.88（FreeBSD 15.1 / go1.25.14 / PG 18.6） | 真机证据，原样保留 |\n| `README.md:302-303` | 目录说明 checklists/ FreeBSD 安全加固清单、manuals/ FreeBSD+ZFS 手册 + pf 规则 | 保留原义；Linux 手册/清单是 D 线新增 |\n| `README.md:408-409`（新子项） | 历史口径「FreeBSD > Linux > Windows（用户拍板）」原文保留并标注 2026-11-20 前 | 任务明确要求保留历史决策时间戳注记 |\n| `GETTING_STARTED.md:193-201` | FreeBSD rc.d `service lightmem_mcp restart` 命令原样保留 | 与新增 Linux systemctl 命令并列，不替换 |\n| `GETTING_STARTED.md:209-217` | rc.d `daemon -R 5 -C 24 -H`、看门狗 cron 每 2 分钟、120s 冷却防抖 | FreeBSD 机制原义保留，仅改为双列表述 |\n| `GETTING_STARTED.md:231-237` | FreeBSD 看门狗 + newsyslog 三条 `install` 命令整块保留 | 未改任何部署脚本；仅标注为 FreeBSD 口径 |\n| `GETTING_STARTED.md:292/296/317` | FreeBSD `sockstat -4l` 排障、`service lightmem status`、`/usr/local/lightmem` 前缀、18443/18444 端口 | 命令对照表中 FreeBSD 列如实保留 |\n| `docs/档位能力矩阵.md:14` | Solo/Family 两行原义（Family=单机 FreeBSD + jail）未改 | Linux 档位为新增行，不替换原行 |\n| `docs/档位能力矩阵.md:155` | 升级路径中 `FreeBSD + jail` 保留并注「原义保留」 | 不删 FreeBSD 升级路线 |\n\n## 验证\n- `grep -q 'Linux' README.md && grep -q 'FreeBSD' README.md` → exit 0（卡面 verify 判据）。\n- `git diff --stat` → 仅 `README.md`、`GETTING_STARTED.md`、`docs/档位能力矩阵.md` 三个允许路径，共 3 files changed。\n- 全仓 grep `FreeBSD`、`/usr/local/lightmem`、`sockstat`、`rc.d` 已逐条核对：三份目标文档内所有 FreeBSD 专属措辞均已分类进上面两张表，无「唯一/仅 FreeBSD」残留（唯一一处 `FreeBSD 真机` 标题已改为双平台口径）。\n- 端口/路径一致性：systemd/quickstart=7443/7444（对照 `deploy/lightmem*.service`、`install.sh`），rc.d=18443/18444；安装前缀 linux=/opt/lightmem、freebsd=/usr/local/lightmem（对照 T-0410 `deploy/platform.sh:lm_prefix`）；均未混改。\n\n## 遗留 / 风险\n- D 线 T-0414（Linux profile + 手册 + 安全清单）与 B 线 T-0412（看门狗 timer）、C 线 T-0413（logrotate 配置）截至本卡未合入 main；对应位置均已标 TODO，合入后需回填并核对矩阵字段与实测依据。\n- 未在任何平台执行实际部署（本卡只改文档，红线禁止改部署脚本）；Linux 命令口径依据 A/T0 已落地 unit/platform.sh 与任务书，真机全链验收归 G 线 T-0417。\n- README 中 `manuals/linux-setup.md` 引用随 D 线合入才可用，已用 TODO 标注，未写死为已存在。",
+  "error": "",
+  "declared_paths": [
+    "README.md",
+    "GETTING_STARTED.md",
+    "docs/档位能力矩阵.md"
+  ],
+  "changed_files": [
+    "GETTING_STARTED.md",
+    "README.md",
+    "docs/档位能力矩阵.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "6b419f4ad0f940c99491bea99aee38f8"
+}
