@@ -1,0 +1,51 @@
+{
+  "task": "T-0421",
+  "agent": "main-agent",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0421",
+  "base": "main",
+  "head": "525471d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T18:05:00+08:00",
+  "finished_at": "2026-11-20T18:14:00+08:00",
+  "duration_s": 540,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0408_会话读取三个缺陷.py tests/test_T0399_新会话对齐.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        "11 passed"
+      ]
+    },
+    {
+      "cmd": "git grep -n test_T0410",
+      "code": 0,
+      "tail": [
+        "仅 CHANGELOG.md 历史条目一处（T-0408 当时记录，按卡面允许保留）"
+      ]
+    }
+  ],
+  "summary": "git mv tests/test_T0410_会话读取三个缺陷.py → tests/test_T0408_会话读取三个缺陷.py（保留历史）；文件头卡号说明改为 T-0408；同步修正 docs/API参考.md 两处、tests/test_T0399_新会话对齐.py 三处、docs/功能对标/对标清单.json 两处（T-0408 证据路径）；CHANGELOG 补改名条目。用例/断言/fixture/src/webui/examples 均未动。合入 main 525471d，三远端已推。",
+  "error": "",
+  "declared_paths": [
+    "tests/test_T0410_会话读取三个缺陷.py",
+    "tests/test_T0408_会话读取三个缺陷.py",
+    "docs/API参考.md",
+    "tests/test_T0399_新会话对齐.py",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/API参考.md",
+    "docs/功能对标/对标清单.json",
+    "tests/test_T0399_新会话对齐.py",
+    "tests/test_T0408_会话读取三个缺陷.py"
+  ],
+  "out_of_paths": [
+    "docs/功能对标/对标清单.json"
+  ],
+  "backfilled": false,
+  "lease_id": ""
+}
