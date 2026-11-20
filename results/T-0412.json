@@ -1,0 +1,50 @@
+{
+  "task": "T-0412",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0412",
+  "base": "main",
+  "head": "7ff2a7b1c43bc577359dae56fc44f208cc897063",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T23:12:14+08:00",
+  "finished_at": "2026-11-20T23:12:14+08:00",
+  "duration_s": 0.1,
+  "verify": [
+    {
+      "cmd": "sh -n deploy/lightmem-watchdog.sh",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "sh deploy/verify-watchdog-dryrun.sh",
+      "code": 0,
+      "tail": [
+        "[dry-run] 探活 http://127.0.0.1:1/readyz -> rc=1 code=000",
+        "[dry-run] readyz 未就绪（code=000），重启 lightmem",
+        "[dry-run] OS 未识别（uname: MINGW64_NT-10.0-19045）；真实部署时由 platform.sh 选择 systemctl/service 重启 lightmem"
+      ]
+    }
+  ],
+  "summary": "# T-0412 工作总结（lightmem Linux 适配 B：看门狗跨平台化 + systemd timer）\n\n- 看门狗重启改用 `deploy/platform.sh` 的 `lm_service_restart`（linux→`systemctl restart`，freebsd→`service restart`）；查找顺序 `LIGHTMEM_PLATFORM_SH` → 脚本同目录 → deploy/ → `/usr/local/libexec/lightmem` → `/opt/lightmem` → `/usr/local/lightmem`，找不到时用内置兜底（语义一致，避免单拷脚本即失效）。\n- 探活回退链 `curl` → `wget -q -T 5 -t 1 -O /dev/null` →（仅 freebsd）`fetch -q -T 5`；三样都没有时只记事件、不盲重启（不把「工具缺失」误判成服务挂）。\n- 默认探针 URL 按端口口径分平台：linux `http://127.0.0.1:7443/readyz`，freebsd `http://127.0.0.1:18443/readyz`，可用 `LIGHTMEM_READYZ_URL` 覆盖；冷却目录 linux `/run/lightmem`（不可写退 `/var/lib/lightmem`）、freebsd `/var/run/lightmem`。\n- 新增 `deploy/lightmem-watchdog.service`（oneshot、`EnvironmentFile=-/etc/lightmem-watchdog.env`、`RuntimeDirectory=lightmem`、`TimeoutStartSec=30`）与 `.timer`（`OnCalendar=*:0/2`、`Persistent=true`、`RandomizedDelaySec=10`）；`cron.d` 与 `deploy/README.md` 补 Linux 安装（timer 优先、无 systemd 用 cron，二选一）与 dry-run 自测命令。\n- 新增 `deploy/verify-watchdog-dryrun.sh`：把假 URL + `LM_DRY_RUN=1` 收进脚本里，规避 Hive 在 Windows 用 cmd.exe 跑 verify 时不认 `VAR=value 命令` 前缀；卡面 verify#2 已改为 `sh deploy/verify-watchdog-dryrun.sh`（同时把该路径补进卡面 paths），已用 `cmd /c` 实测 exit 0。\n- Windows Git sh 验收：`sh -n deploy/lightmem-watchdog.sh` exit 0；`sh deploy/verify-watchdog-dryrun.sh` 输出「探活 rc=1 code=000 → 未就绪」且 exit 0。`LM_FAKE_OS=linux/freebsd` 分别打印 `[dry-run] systemctl restart lightmem` / `[dry-run] service lightmem restart`（证明走 platform.sh 而非兜底）。\n- FreeBSD 15.1（192.168.0.88，workbuddy）：`sh -n` exit 0；带 `LIGHTMEM_PLATFORM_SH` 时 freebsd 打印 `service lightmem restart`、`LM_FAKE_OS=linux` 打印 `systemctl restart lightmem`；`PATH=/usr/bin:/bin` 隐藏 curl/wget 后真实 fetch 分支返回 `code=fetch-fail` 并规划重启，exit 0。临时文件已删除，未触碰 rc.d/服务。\n- Ubuntu 云主机 dash：`dash -n` 通过；假 wget/fetch 覆盖 200/失败、无工具 rc=2、冷却期内跳过、真实执行分支失败仍 exit 0 且不写冷却；`systemd-analyze verify` 对两份 unit（ExecStart 临时换 `/bin/true`）exit 0，真实文件仅报 `/usr/local/bin/lightmem-watchdog.sh` 不存在（该机未安装，非语法问题）。\n- 风险：`.gitattributes` 未给 `deploy/lightmem-watchdog.service/.timer`、`deploy/cron.d/lightmem-watchdog` 钉 `eol=lf`（该文件不在本卡允许路径），Git 已告警 LF→CRLF；建议合并时补 `text eol=lf`。\n- 风险/实机观察：192.168.0.88 上 `http://127.0.0.1:18443/readyz` 现返回 **401**（实机二进制疑似未含 `/readyz` 免鉴权或口径不同）。看门狗按「非 200=未就绪」会每 2 分钟重启一次（与既有 cron 看门狗行为一致）；部署前须确认该 URL 返回 200，否则应先在 `/etc/lightmem-watchdog.env` 换用正确探针。\n- 风险：看门狗依赖 platform.sh 同装到位（README 已写安装命令）；未装时走内置兜底，逻辑相同但多一份实现，需注意后续同步。",
+  "error": "",
+  "declared_paths": [
+    "deploy/lightmem-watchdog.sh",
+    "deploy/lightmem-watchdog.service",
+    "deploy/lightmem-watchdog.timer",
+    "deploy/cron.d/lightmem-watchdog",
+    "deploy/README.md",
+    "deploy/verify-watchdog-dryrun.sh"
+  ],
+  "changed_files": [
+    "deploy/README.md",
+    "deploy/cron.d/lightmem-watchdog",
+    "deploy/lightmem-watchdog.service",
+    "deploy/lightmem-watchdog.sh",
+    "deploy/lightmem-watchdog.timer",
+    "deploy/verify-watchdog-dryrun.sh"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
