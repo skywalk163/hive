@@ -1,0 +1,26 @@
+{
+  "task": "T-0418",
+  "agent": "main-agent",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0418",
+  "base": "main",
+  "head": "325245f",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T00:00:00+08:00",
+  "finished_at": "2026-11-20T17:00:00+08:00",
+  "duration_s": 0,
+  "verify": [
+    {"cmd": "python -m pytest -q tests/test_T0399_新会话对齐.py -o addopts=''", "code": 0, "tail": ["8 passed"]},
+    {"cmd": "python -m pytest -q tests/test_T0406_模式规格文档.py -o addopts=''", "code": 0, "tail": ["10 passed"]},
+    {"cmd": "python -m pytest -q tests/test_T0418_文档收口.py -o addopts=''", "code": 0, "tail": ["7 passed"]}
+  ],
+  "summary": "文档收口 + T-0399 判据修正：判据改为按编号存在性（#366~#370 + 各自登记），不再用 nums[-5:]；T-0406 第4组测试与接线落地后的实际冲突改名为「接线落地后371至375必须写done」；对标清单 372 条、末号 #378（#369 去待合入、#371~375 翻 done、新增 #377/#378）；API/配置/快速开始/README/模式规格/CHANGELOG 补齐。合入 main 325245f，三远端已推（myrepo 追平 88aec3d）。",
+  "error": "",
+  "declared_paths": ["docs/API参考.md", "docs/配置参考.md", "docs/快速开始.md", "docs/README.md", "docs/功能对标/模式规格.md", "docs/功能对标/对标清单.json", "CHANGELOG.md", "tests/test_T0399_新会话对齐.py", "tests/test_T0406_模式规格文档.py", "tests/test_T0418_文档收口.py"],
+  "changed_files": ["CHANGELOG.md", "docs/API参考.md", "docs/README.md", "docs/功能对标/对标清单.json", "docs/功能对标/模式规格.md", "docs/快速开始.md", "docs/配置参考.md", "tests/test_T0399_新会话对齐.py", "tests/test_T0406_模式规格文档.py", "tests/test_T0418_文档收口.py"],
+  "out_of_paths": [],
+  "backfilled": false,
+  "lease_id": ""
+}

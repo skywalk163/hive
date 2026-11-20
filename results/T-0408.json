@@ -13,7 +13,7 @@
   "duration_s": 22731,
   "verify": [
     {
-      "cmd": "python3 -m pytest -q tests/test_T0410_会话读取三个缺陷.py -o addopts=''",
+      "cmd": "python3 -m pytest -q tests/test_T0408_会话读取三个缺陷.py -o addopts=''",
       "code": 0,
       "tail": [
         "...",
@@ -34,20 +34,20 @@
   "declared_paths": [
     "src/web服务器.light",
     "src/会话存储.light",
-    "tests/test_T0410_会话读取三个缺陷.py"
+    "tests/test_T0408_会话读取三个缺陷.py"
   ],
   "changed_files": [
     "docs/API参考.md",
     "src/会话存储.light",
     "src/web服务器.light",
     "tests/test_T0399_新会话对齐.py",
-    "tests/test_T0410_会话读取三个缺陷.py"
+    "tests/test_T0408_会话读取三个缺陷.py"
   ],
   "out_of_paths": [
     "docs/API参考.md",
     "tests/test_T0399_新会话对齐.py"
   ],
   "backfilled": true,
-  "backfill_source": "tasks/T-0408.md 完成关闭注记",
+  "backfill_source": "tasks/T-0408.md 完成关闭注记（判据文件已由 T-0421 改名为 tests/test_T0408_会话读取三个缺陷.py）",
   "lease_id": ""
 }
