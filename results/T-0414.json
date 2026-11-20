@@ -1,0 +1,48 @@
+{
+  "task": "T-0414",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0414",
+  "base": "main",
+  "head": "daf39399a8b89eea15bc841f4961a1ef8eacb110",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T21:59:59+08:00",
+  "finished_at": "2026-11-20T22:25:08+08:00",
+  "duration_s": 1509.8,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import yaml,glob; [yaml.safe_load(open(f,encoding='utf-8')) for f in glob.glob('profiles/*.yaml')]\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "grep -c 'jail: false' profiles/lims-linux-solo.profile.yaml profiles/lims-linux-family.profile.yaml",
+      "code": 0,
+      "tail": [
+        "profiles/lims-linux-solo.profile.yaml:1",
+        "profiles/lims-linux-family.profile.yaml:1"
+      ]
+    }
+  ],
+  "summary": "# T-0414 工作说明 — lightmem Linux 适配 D\n\n## 做了什么\n\n1. **新增两份 Linux 档位**（沿用现有 schema，未改 schema 与 kernel/profile.go）：\n   - `profiles/lims-linux-solo.profile.yaml`：`profile: solo` + `storage_backend: sqlite`，库文件 `/opt/lightmem/data/lims.sqlite`，`jail: false`，无 PG / 无 ZFS。\n   - `profiles/lims-linux-family.profile.yaml`：`profile: family` + `pgvector`，`storage.pg.host: 127.0.0.1`、`user: lightmem_app`（非超级用户，配合 `deploy/init-roles.sql` 与内核 pg_superuser_check），`storage.zfs.enabled: false`、`jail: false`；`cache`/`mq` 取 `none`（能力矩阵里 Family 的 Redis 为「可选」，单机版零额外中间件）。\n2. **新增 `manuals/linux-setup.md`**：Ubuntu 24.04 / Debian 12 / Rocky 9 三平台 — Go 1.25（tarball，非 apt/dnf）、PG 18 + pgvector（apt 走 PGDG `postgresql-18-pgvector`；dnf 走 `pgvector_18` 且须先 `module disable postgresql`）、lightmem 系统用户与 `/opt/lightmem` 布局、ext4/xfs + LUKS/fscrypt（替代 ZFS）、systemd 双服务 7443/7444、ufw/firewalld、TLS 反代、冒烟、排障、升级回滚、与 FreeBSD 逐项对照。\n3. **新增 `checklists/linux-security-checklist.md`**：对照 FreeBSD 版逐节给 Linux 对应（jail→systemd 沙箱、ZFS 加密→LUKS/fscrypt、MAC→SELinux/AppArmor、pf→ufw/firewalld、pkg audit→apt/dnf+auditd、sysctl security.bsd.*→kernel.*），含收尾验证表与「沙箱≠jail」边界声明。\n4. **`profiles/README.md` 升 v1.1**：新增 Linux 档位表、四条差异、`platform` 字段为何不加、schema 漂移实测、验收命令。\n\n## 关键判断（都有实测依据）\n\n- **不加 `platform: linux`**：schema 顶层 `additionalProperties: false` 且无此属性，`LoadProfile` 也不解析；实测用 jsonschema 4.26 严格校验，六份 profile **全都**报 `auth` 不在 schema、两份 family 多报 `storage.pg.user` —— schema 本来就不是加载闸门，再加 `platform` 只会变成第三个漂移点。schema 与 kernel 解析代码均未改。\n- **未改现有四份 profile**：`git status` 只有 5 个允许路径（4 新增 + README 修改）。\n\n## 验证（全部实跑）\n\n- `python3 -c \"import yaml,glob; ...\"` → exit 0（六份 profile 全解析通过）。\n- `grep -c 'jail: false'` → solo 1 / family 1（各只有真实字段一行，注释里不再出现该字面量）。\n- **Solo 冒烟**：`GOOS=linux GOARCH=amd64` 静态二进制在 Ubuntu 24.04 userland 启动 → `[boot] profile=solo backend=sqlite`，`/healthz` 200，`/opt/lightmem/data/` 生成 `lims.sqlite(+wal/shm)`。\n- **Family 冒烟**：同环境连真 PG 18.4 + pgvector 0.8.2 → `profile=family backend=pgvector`、`[pg-superuser-check] 通过`、`/healthz` 200、`POST /memories` 201、`/tools/memory/recall` 能召回。\n- 内核现有测试 `go test -run \"Profile|Auth\" ./...` → ok。\n\n## 遗留与风险\n\n- **apt/dnf/systemctl 未在 Linux 真机实测**（本机 WSL 被安全策略禁用，无 Linux 主机）；手册 §0.2 已按【实测】/【未实测】分级标注，未把装包与 systemd 写成既成事实。\n- 88 上留下冒烟痕迹：PG 库 `lims` 的角色 `lightmem_app` 及其自建表（走 `deploy/init-roles.sql` 官方路径，幂等），测试行已删；`/opt/lightmem/data` 目录与二进制在 `/tmp/t0414`。\n- 88 为 FreeBSD 宿主 + Linux 兼容层，**systemd 单元与 SELinux 打标仍需 Linux 真机复核**（手册 §13.7/§13.8 已写判据）。",
+  "error": "",
+  "declared_paths": [
+    "profiles/lims-linux-solo.profile.yaml",
+    "profiles/lims-linux-family.profile.yaml",
+    "manuals/linux-setup.md",
+    "checklists/linux-security-checklist.md",
+    "profiles/README.md"
+  ],
+  "changed_files": [
+    "profiles/README.md",
+    "checklists/linux-security-checklist.md",
+    "manuals/linux-setup.md",
+    "profiles/lims-linux-family.profile.yaml",
+    "profiles/lims-linux-solo.profile.yaml"
+  ],
+  "out_of_paths": [],
+  "lease_id": "62579bff8b7847d3964347ed0e0934f5",
+  "fence": 1
+}
