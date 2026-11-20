@@ -1,0 +1,38 @@
+{
+  "task": "T-0409",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0409",
+  "base": "main",
+  "head": "b53fef06eceb260ba3ebcce98000274cd6e34b6e",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T12:59:12+08:00",
+  "finished_at": "2026-11-20T13:19:17+08:00",
+  "duration_s": 1205.8,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_compat.py tests/test_verify_command_quotes.py",
+      "code": 0,
+      "tail": [
+        "........................................................................ [ 50%]",
+        ".........................................................s.............  [100%]",
+        "142 passed, 1 skipped in 85.59s (0:01:25)"
+      ]
+    }
+  ],
+  "summary": "# T-0409 工作说明\n\n- **根因**：`hive_compat.rewrite()` 用「原文裹一层引号」传递，含双引号时选 `\"` 包裹且不转义；cmd.exe 只认引号开/关、不认 `\\\"`，在内层第一个 `\"` 处截断，`run` 只剩 `python3 -c import`。\n- **修法**：原文**含双引号**（或含会被 `main()` 的 `\" \".join(argv)` 折叠的连续空白）时改走不依赖引号的载荷通道并逐字节还原：`run --b64 <base64>`，载荷超过 `MAX_B64_PAYLOAD=4000`（cmd 单行 8191 上限余量）时落盘走 `run --file \"<path>\"`（按内容 sha1 取名，幂等）。不含双引号的命令仍走原单引号包装，行为一字不改。纯标准库（base64/hashlib/tempfile），无 msys/git-bash/WSL 依赖。\n- **改动文件**：`hive_compat.py`（模块头登记「为什么不能靠嵌套双引号传递」+ `_needs_payload`/`_payload_path`/`_write_payload_file`/`payload_text`/`_read_payload` + `rewrite()` + `main()` 载荷分支）、`tests/test_verify_command_quotes.py`（12 条新用例）。未动 `_win_single_quote_fix()` / `HIVE_COMPAT` / 非 Windows 分支 / `_verify_verdict` / `hive.py`。\n- **复现（修复前）**：`python3 -c \"import json;d=json.load(open('<tmp>/t0409b.json'));print(d['tag'])\"` → `verify_command()` 产出 `... run \"python3 -c \"import json;…\"\"` → cmd.exe 截断 → **rc=1**，`SyntaxError: Expected one or more names after 'import'`。\n- **修复后**：同一命令产出 `... run --b64 …`（整行只剩 4 个引号，即两个绝对路径）→ **rc=0**，stdout `t0409`。\n- **反证**：把 `rewrite()` 还原成旧写法后，新用例 `test_rewrite_carries_quote_free_payload`（断言引号数=4）与 `test_windows_verify_with_both_quote_kinds_really_runs`（断言 rc=0+stdout）立红；旧写法实测 rc=1、引号数 8。\n- **验证**：`python3 -m pytest -q tests/test_compat.py tests/test_verify_command_quotes.py` → **142 passed, 1 skipped**（约 101s，基线 129 passed/1 skipped + 13 条新增）。旁证回归 `tests/test_run_stdin.py test_verify_env_failure.py test_no_window.py` → 46 passed、1 failed，红的是 `test_no_window.py::test_every_subprocess_call_is_guarded`（断言 `hive_autoupdate.py` / `hive_repos.py` 的 subprocess 未走 `no_window_kwargs`），**基线既有红**：这两个文件本卡一个字节没动（`git status` 只有 hive_compat.py、tests/test_verify_command_quotes.py），且不在允许修改路径内，未处理。\n- **遗留风险**：① 只有「含双引号/连续空白」的原文换通道，其它写法仍按老包装，字节级还原的边界由 `_needs_payload` 决定；② `--file` 通道写到 `%TEMP%`（可用 `HIVE_COMPAT_PAYLOAD_DIR` 覆盖），文件不自动清理（同原文同名，幂等覆盖），temp 目录不可写时会抛 OSError（宁可响，不静默假红）；③ `payload_text()` 仅供排障/测试，正式解析在 `main()`。",
+  "error": "",
+  "declared_paths": [
+    "hive_compat.py",
+    "tests/test_compat.py",
+    "tests/test_verify_command_quotes.py"
+  ],
+  "changed_files": [
+    "hive_compat.py",
+    "tests/test_verify_command_quotes.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "4a1d98640cfc4c199a64cb0214d23ba2"
+}
