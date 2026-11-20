@@ -36,6 +36,7 @@ import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import random
 import re
@@ -1191,6 +1192,66 @@ def store_lease_minutes_of(card: dict) -> int:
     return int((card or {}).get("lease_minutes") or STORE_LEASE_MINUTES)
 
 
+def card_from_origin(repo: Path, tid: str) -> dict | None:
+    """直接读 ``origin/main`` 上的卡面，绕过可能陈旧的本机工作区副本。
+
+    T-0423 的现场根因就在这里：`Worker.claim` 读的是**工作区文件**，而
+    `sync_main` 出于保人改动的考虑，落后且脏时不 reset、本地领先时也不动，
+    fetch 失败还会被吞掉——于是「卡面写了 300、工作区还是 10 分钟之前那一版」
+    完全可能。读不到（新卡还没推/没 fetch）一律返回 None，由调用方兜底。
+    """
+    rel = f"tasks/{tid}.md"
+    text = read_ref_file(repo, "origin/main", rel)
+    if not isinstance(text, str) or not text.strip():
+        return None
+    try:
+        data, body = parse_card_text(text, f"origin/main:{rel}")
+    except HiveError:
+        return None           # 远端卡面坏掉不该让领卡整体崩掉
+    data["_body"] = body
+    return data
+
+
+def store_lease_minutes_for(repo: Path, tid: str, card: dict | None = None) -> int:
+    """T-0423：store 后端 claim / 心跳 / 续租统一用这个取租约分钟数。
+
+    取值的优先级（**卡面有值必须以卡面为准**，这是 T-0387 的主逻辑，不动）：
+
+    1. 调用方给的本机卡面（通常就是 Git 工作区那份）里有 ``lease_minutes``；
+    2. 本机卡面没写 → **回读 ``origin/main`` 的卡面**再取一次（T-0423 新增，
+       挡住「工作区落后于 main」导致的 10 分钟兜底）；
+    3. 两处都没写 → ``STORE_LEASE_MINUTES``（10 分钟）兜底，语义保持不变。
+
+    只有第 2 步会多一次 `git show`，正常路径（卡面已写）零额外开销。
+    """
+    local = card if card is not None else (
+        local_card_file(repo, tid) if repo is not None else None)
+    # 缺失和写 0 一样算「没写」：0 分钟的租约本来也不成立，一律往上一层找。
+    if int((local or {}).get("lease_minutes") or 0) > 0:
+        return store_lease_minutes_of(local)
+    if repo is None:              # 拿不到协调仓路径（纯单元桩）：只能按兜底走
+        return STORE_LEASE_MINUTES
+    fresh = card_from_origin(repo, tid)
+    if int((fresh or {}).get("lease_minutes") or 0) > 0:
+        log(f"{tid} 本机卡面缺 lease_minutes，已回读 origin/main 卡面取 "
+            f"{store_lease_minutes_of(fresh)} 分钟")
+        return store_lease_minutes_of(fresh)
+    return STORE_LEASE_MINUTES
+
+
+def local_card_file(repo: Path, tid: str) -> dict | None:
+    """只读工作区里的 ``tasks/<tid>.md``（不做 store 状态覆盖）；没有就 None。"""
+    p = Path(repo) / "tasks" / f"{tid}.md"
+    if not p.exists():
+        return None
+    try:
+        data, body = parse_card(p)
+    except HiveError:
+        return None
+    data["_body"], data["_path"] = body, p
+    return data
+
+
 _STORE_CACHE: dict[str, object] = {}
 _CLAIM_BACKEND_CACHE: str | None = None
 _STORE_PATH_CACHE: Path | None = None
@@ -2034,7 +2095,15 @@ def _scalar(v: str):
 
 
 def parse_card(path: Path):
-    text = path.read_text(encoding="utf-8")
+    return parse_card_text(path.read_text(encoding="utf-8"), str(path))
+
+
+def parse_card_text(text: str, source: str = "<card>"):
+    """从**文本**解析卡面（T-0423：origin/main 上的卡面没有本地文件可读）。
+
+    `source` 只用于报错定位，行为与旧的 `parse_card(path)` 逐字一致。
+    """
+    path = source
     if not text.startswith("---\n"):
         raise HiveError(f"{path} 缺少 frontmatter")
     end = text.find("\n---\n", 4)
@@ -6934,9 +7003,15 @@ class Worker:
 
         数据来自 follower（它的协调仓已是最新），写入与复制由 leader 完成，
         所以所有副本会一起补齐，而不是只改本机副本。
+
+        T-0423：优先用 ``origin/main`` 的卡面。补登记是为了让 leader 拿到
+        **完整**定义（lease_minutes / timeout_minutes 等），拿工作区里那份
+        陈旧的卡去补，等于把「缺字段」也一起补进 store。
         """
         try:
-            card = self.h.card(tid)
+            repo = getattr(self, "dir", None)
+            card = (card_from_origin(repo, tid) if repo is not None else None) \
+                or self.h.card(tid)
         except HiveError as exc:
             log(f"{tid} 补摄入失败：读不到卡面 {exc}")
             return False
@@ -6962,6 +7037,36 @@ class Worker:
             log(f"{tid} 补登记失败：{exc}")
             return False
 
+    def _confirm_store_lease(self, tid: str, out: dict, minutes: int) -> None:
+        """T-0423：领到租约后回写确认 store 的 lease_until 与卡面一致。
+
+        leader 侧 `store/claim` 对**缺省的** lease_minutes 有 10 分钟默认值
+        （`hive_cluster._store_op_for`），旧版 leader 还可能只认自己的口径。
+        与其等十分钟后被看板判成跑飞，这里当场比对：明显短了就用续租把差额
+        补回去，并把这件事写进日志——「卡面 300、实际 10」必须留痕。
+
+        续租是**从当前到期时间往前加**（`Store.renew`），所以补的是差额而不是
+        整个分钟数，否则一次纠正就变成 300+10。
+        """
+        claim = (out or {}).get("claim") or {}
+        lease_id = str(claim.get("lease_id") or "")
+        try:
+            until = float(claim.get("lease_until"))
+        except (TypeError, ValueError):
+            return                      # 老 leader 不回 lease_until：无从比对
+        got = (until - time.time()) / 60.0
+        if got >= minutes * 0.9:        # 减去网络与时钟抖动，别为几秒反复纠正
+            return
+        deficit = max(1, int(math.ceil(minutes - got)))
+        log(f"{tid} 租约不一致：卡面 {minutes} 分钟，store 实际 {got:.0f} 分钟；"
+            f"按卡面补 {deficit} 分钟")
+        if not lease_id:
+            return
+        try:
+            store_lease(tid, self.name, lease_id, deficit)
+        except HiveError as exc:
+            log(f"{tid} 租约纠正失败（不阻断领卡）: {exc}")
+
     def claim(self, tid: str) -> bool:
         """抢 claim/<tid> 锁：失败后带抖动指数退避，区分「被抢」和「暂时失败」。
 
@@ -6981,12 +7086,23 @@ class Worker:
                 self.last_claim_error = StoreCallError(
                     f"{tid} 已被 {holder} 领取", kind="taken", code="E_TAKEN")
                 return False
+            # T-0423：租约分钟数不能只看工作区那份卡面——本机协调仓落后于
+            # main 时卡面还是旧的一版（没有 lease_minutes），会静默退回 10 分钟
+            # 兜底，然后「卡面 300、实际 10」被看板判成跑飞。这里按
+            # 「工作区卡面 → origin/main 卡面 → STORE_LEASE_MINUTES」取值。
+            # 卡面读不到（新卡本机还没有）不算失败：交给 store 的缺卡自愈去补。
+            try:
+                local_card = self.h.card(tid)
+            except HiveError:
+                local_card = None
+            minutes = store_lease_minutes_for(getattr(self.h, "dir", None),
+                                              tid, local_card)
             for attempt in (1, 2):
                 try:
-                    out = store_claim(tid, self.name,
-                                      store_lease_minutes_of(self.h.card(tid)))
+                    out = store_claim(tid, self.name, minutes)
                     log(f"{tid} store 领取成功（lease {out.get('claim', {}).get('lease_id', '')[:8]}）")
                     self.last_claim_error = None
+                    self._confirm_store_lease(tid, out, minutes)
                     return True
                 except HiveError as exc:
                     log(f"{tid} store 领取失败：{exc}")
@@ -7120,7 +7236,11 @@ class Worker:
         （否则健康的长任务会被错杀）。best-effort：刷新失败只 log，不打断任务。
         """
         stop = threading.Event()
-        lease = (store_lease_minutes_of(self.h.card(tid))
+        # T-0423：续租口径与 claim 一致（卡面 → origin/main → 兜底）。否则本机
+        # 卡面陈旧时，claim 拿到 300 分钟、第一次心跳又按 10 分钟续，任务照样被
+        # 提前判死——两处必须是同一个取值函数。
+        lease = (store_lease_minutes_for(getattr(self.h, "dir", None), tid,
+                                         self.h.card(tid))
                  if claim_backend() == "store"
                  else int(self.h.card(tid).get("lease_minutes") or 180))
         interval = max(5, lease // 3) * 60  # 秒
@@ -7159,7 +7279,9 @@ class Worker:
                 return
             try:
                 store_lease(tid, self.name, str(info.get("lease_id") or ""),
-                            store_lease_minutes_of(self.h.card(tid)))
+                            store_lease_minutes_for(
+                                getattr(self.h, "dir", None), tid,
+                                self.h.card(tid)))
             except HiveError as exc:
                 log(f"{tid} store 续租失败（忽略）: {exc}")
             return
