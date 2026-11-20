@@ -20,9 +20,11 @@ git 报 `fatal: unable to resolve revision: =`，exit 128。
 from __future__ import annotations
 
 import os
+import subprocess
 
 import pytest
 
+import hive_compat
 from hive import _win_single_quote_fix, verify_command
 
 
@@ -133,3 +135,107 @@ def test_non_windows_verify_command_untouched():
     """非 Windows 上 `verify_command` 一个字节都不该动（FreeBSD/Linux 口径）。"""
     cmd = "git grep -qE 'v4|v7' -- CHANGELOG.md"
     assert verify_command(cmd) == cmd
+
+
+# --------------------------------------------------------------------------- #
+# T-0409：原文同时含单双引号时，包装层不能靠嵌套双引号传递
+#
+# 事故：T-0406 的判据
+#     python3 -c "import json;json.load(open('docs/功能对标/对标清单.json'))"
+# 经 `hive.verify_command()` 改写后命令行是
+#     "...python.exe" "...hive_compat.py" run "python3 -c "import json;…""
+# cmd.exe 只认「开/关」两态、不认 `\"`，在内层第一个 `"` 处就截断，
+# `run` 收到 `python3 -c import` → `SyntaxError: import` rc=1，
+# 与「产物真坏了」长得一模一样（假红）。
+#
+# 修法：原文含双引号时改走不依赖引号的载荷通道（`--b64` / 超长时 `--file`），
+# 验收口径是「run 收到的文本与入参逐字节相等」，不是「看起来像」。
+# --------------------------------------------------------------------------- #
+
+BOTH_QUOTES_CMD = 'python3 -c "import json;json.load(open(\'tests/x.json\'))"'
+
+
+def test_rewrite_carries_quote_free_payload():
+    """含双引号的原文不再裹外层双引号：命令行只剩两个带引号的绝对路径。"""
+    out = hive_compat.rewrite(BOTH_QUOTES_CMD)
+    assert "hive_compat.py" in out and " run " in out
+    # 反证：改回「原文裹一层双引号」时这里是 6 个（原文里那 2 个也进来了）→ 立红
+    assert out.count('"') == 4, out
+    # 还原性：载荷逐字节还原原文，不是「看起来像」
+    assert hive_compat.payload_text(out) == BOTH_QUOTES_CMD
+    # 幂等：包过的不再套娃
+    assert hive_compat.should_wrap(out) is False
+
+
+@pytest.mark.parametrize("text", [
+    BOTH_QUOTES_CMD,
+    'python3 -c "print(\'a b\')"',
+    'git grep -q "x\'y" -- f',
+    'python3 -c "print(1)"\t--flag',
+    "python3 -c \"print('多字节 文本')\"",     # 非 ASCII：base64 走 UTF-8，绕开代码页
+])
+def test_payload_roundtrips_byte_exact(text):
+    """任何引号组合/空白/非 ASCII 都逐字节还原（载荷通道不吃字节）。"""
+    out = hive_compat.rewrite(text)
+    assert hive_compat.payload_text(out) == text
+
+
+def test_plain_command_keeps_legacy_single_quote_wrapper():
+    """没有双引号的命令仍走老包装（T-0225/T-0228 的既有行为一字不变）。"""
+    out = hive_compat.rewrite("test -f docs/ok.md")
+    assert out.endswith("run 'test -f docs/ok.md'"), out
+    # 含单引号但不含双引号：仍用 `"` 包一层（与历史行为一致）
+    assert hive_compat.rewrite("bash tests/x.sh --flag 'a b'").endswith(
+        'run "bash tests/x.sh --flag \'a b\'"')
+
+
+def test_long_command_falls_back_to_file_channel(tmp_path, monkeypatch):
+    """base64 会顶到 cmd 单行上限时落盘：仍是逐字节还原，不是截断。"""
+    monkeypatch.setenv(hive_compat.PAYLOAD_DIR_ENV, str(tmp_path))
+    text = 'python3 -c "print(\'' + "x" * (hive_compat.MAX_B64_PAYLOAD + 100) + "')\""
+    out = hive_compat.rewrite(text)
+    assert " run --file " in out, out[:120]
+    assert hive_compat.payload_text(out) == text
+    # 同一条原文重复改写落到同一个文件（按内容哈希取名，幂等）
+    assert hive_compat.rewrite(text) == out
+
+
+def test_missing_payload_file_fails_explicitly(tmp_path, monkeypatch, capsys):
+    """载荷文件读不到：明确失败（rc=2），绝不悄悄当成成功。"""
+    monkeypatch.setenv(hive_compat.PAYLOAD_DIR_ENV, str(tmp_path))
+    text = 'python3 -c "print(\'' + "y" * (hive_compat.MAX_B64_PAYLOAD + 100) + "')\""
+    out = hive_compat.rewrite(text)
+    assert hive_compat.payload_text(out) == text
+    path = hive_compat._payload_path(text)
+    os.unlink(path)
+    assert hive_compat.main(["run", "--file", path]) == 2
+    assert "--file" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [
+    ["run", "--b64", "!!!not-base64!!!"],
+    ["run", "--b64"],
+    ["run", "--b64", "AAAA", "extra"],
+])
+def test_bad_payload_args_fail_explicitly(argv, capsys):
+    assert hive_compat.main(argv) == 2, argv
+    assert capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 专用回归：真过 cmd.exe")
+def test_windows_verify_with_both_quote_kinds_really_runs(tmp_path):
+    """端到端钉住 T-0406 的假红：改写后经 cmd.exe 真跑，rc=0 且 stdout 是预期片段。
+
+    反证：把 `rewrite()` 改回「原文裹一层双引号」，这条立刻回到
+    `SyntaxError: import` / rc=1（本卡提交前实测）。
+    """
+    data = tmp_path / "quote_probe.json"
+    data.write_text('{"tag": "t0409"}', encoding="utf-8")
+    cmd = ('python3 -c "import json;d=json.load(open(\'%s\'));print(d[\'tag\'])"'
+           % data.as_posix())
+    wrapped = verify_command(cmd)
+    p = subprocess.run(wrapped, shell=True, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    assert p.returncode == 0, (wrapped, p.stdout, p.stderr)
+    assert "t0409" in p.stdout
+

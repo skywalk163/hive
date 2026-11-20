@@ -44,6 +44,7 @@ Git for Windows 常见安装位置；`python3` 直接映射到 `sys.executable`�
 
     should_wrap(cmd)     -> bool   是否需要垫片
     rewrite(cmd)         -> str    `cmd` 或 `python hive_compat.py run "<cmd>"`
+    payload_text(cmdline)-> str|None  从 `rewrite()` 的产出里取回原文（`--b64` / `--file`）
     run(cmd, cwd)         -> 退出码
     interpreter_command(cmd) -> ("bash"|"python3"|"python", rest) | None
     env_prefix_command(cmd)  -> ({"VAR": "value", ...}, rest) | None
@@ -70,6 +71,26 @@ Git for Windows 常见安装位置；`python3` 直接映射到 `sys.executable`�
 
     no_window_kwargs()   -> dict   Windows: {"creationflags": CREATE_NO_WINDOW}
 
+原文怎么传给垫片（T-0409，**别再改回嵌套双引号**）
+--------------------------------------------------
+`rewrite()` 产出的命令行最终由 cmd.exe 执行，cmd 对引号只有「开/关」两态，
+**不认 `\"` 转义**，把原文再裹一层双引号时，原文里的第一个 `"` 就把引号态关掉了：
+`run "python3 -c "import json;…""` 到 Python 只剩 `run python3 -c import`，
+python 报 `SyntaxError: import`——和「产物真坏了」长得一模一样（T-0406 首次提交被判 failed 的成因）。
+`""` 也不能替代转义（CRT 会把它当成空串，字节仍然丢）。
+
+所以原文里**只要出现双引号**（或会被 `main()` 的 `" ".join(argv)` 折叠的连续空白），
+就改走**不依赖引号的载荷通道**，逐字节还原，二选一：
+
+* `run --b64 <base64>`：载荷只用 `A-Za-z0-9+/=`，cmd 既不会截断也不会当元字符；
+* `run --file "<path>"`：原文过长（base64 会顶到 cmd 单行 8191 字节上限）时落盘再读回，
+  路径本身没有引号，仍然安全。
+
+两条通道都**纯标准库**、Windows 原生可跑（不需要 msys / git-bash / WSL），
+还原口径是 `run` 收到的文本与 `rewrite()` 入参**逐字节相等**，不是「看起来像」。
+不含双引号的命令仍走原来的单引号包装（原文有 `'` 时改用 `"` 包一层，此时原文里
+没有 `"`，所以安全），一个字节不变。
+
 单独调试::
 
     python hive_compat.py run "test -f docs/ok.md"
@@ -77,14 +98,29 @@ Git for Windows 常见安装位置；`python3` 直接映射到 `sys.executable`�
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 
 MARK = "hive_compat.py run"
+
+# ---- 原文载荷通道（T-0409）------------------------------------------------- #
+# 见模块头「原文怎么传给垫片」：原文含双引号时不能再靠外层引号传递，
+# 改用下面两条不依赖引号的通道之一，`run` 收到后逐字节还原。
+PAYLOAD_B64 = "--b64"
+PAYLOAD_FILE = "--file"
+# 载荷文件落哪个目录：默认系统 temp。调试/测试可用这个环境变量指定，
+# 免得跟别的进程（或并行跑的用例）抢同一个目录。
+PAYLOAD_DIR_ENV = "HIVE_COMPAT_PAYLOAD_DIR"
+# cmd.exe 单行上限 8191 字节；base64 是原文的 4/3，留出解释器/脚本路径的余量，
+# 超过就落盘走 `--file`（宁可多一次 IO，也不能让截断变成「假红」）。
+MAX_B64_PAYLOAD = 4000
 
 # `HIVE_BASH` 显式指定 bash.exe（PATH 里没有、又不在下面几个默认位置时装）。
 BASH_ENV = "HIVE_BASH"
@@ -379,19 +415,111 @@ def _split_arg(arg: str) -> str:
     return parts[0] if parts else arg
 
 
+def _needs_payload(text: str) -> bool:
+    """原文能不能安全地裹进外层引号交给 cmd.exe；不能就得走载荷通道。
+
+    两类不能用外层引号的情况（T-0409）：
+
+    * 原文里出现 `"`：cmd 只有「开/关」两态、不认 `\"`，第一个内层 `"` 就把引号
+      关掉，后半段被当成新参数甚至新命令 —— T-0406 的 `python3 -c "…open('…')…"`
+      就这样被截成 `python3 -c import`。
+    * 原文里有会被空白折叠吃掉的字节：`main()` 是用 `" ".join(argv)` 拼回原文的，
+      连续空白 / 制表符 / 换行到那儿只剩一个空格，就不再逐字节相等。
+      （引号内的连续空格本来由 CRT 保护，但那是另一条通道的语义，这里不赌。）
+    """
+    if not text:
+        return False
+    if '"' in text:
+        return True
+    return bool(re.search(r"[ \t\n\r]{2,}|\t|\n|\r", text))
+
+
+def _payload_path(text: str) -> str:
+    """原文落盘用的路径：按内容哈希取名，同一原文永远同一个文件（幂等、可覆盖）。"""
+    base = (os.environ.get(PAYLOAD_DIR_ENV) or "").strip() or tempfile.gettempdir()
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+    return os.path.join(base, f"hive_cmd_{digest}.txt")
+
+
+def _write_payload_file(text: str) -> str:
+    """把原文按 utf-8 原字节落盘，返回文件路径（写不进去就抛 OSError 让调用方暴露）。"""
+    path = _payload_path(text)
+    with open(path, "wb") as fh:
+        fh.write(text.encode("utf-8"))
+    return path
+
+
 def rewrite(cmd: str) -> str:
-    """把单条 POSIX 惯用法改写成 `python hive_compat.py run "<cmd>"`。"""
+    """把单条 POSIX 惯用法改写成 `python hive_compat.py run "<cmd>"`。
+
+    原文里出现双引号时改走载荷通道（`--b64` / `--file`）：外层再裹一层引号会被
+    cmd.exe 在内层第一个 `"` 处截断，`run` 拿到的是原文的前半截（T-0409 / T-0406）。
+    不带双引号的命令仍走原来的单引号包装，一个字节不变。
+    """
     text = str(cmd or "")
-    quote = "'" if "'" not in text else '"'
     # sys.executable 必须与脚本路径一样带引号：用户名带空格的 Windows 机器上
     # （`C:\Users\PCbeta Tester\...\python.exe`），cmd.exe 会在空格处截断，
     # 把 `C:\Users\PCbeta` 当可执行程序去找，verify 于是无条件假红（T-0287）。
-    return f'"{sys.executable}" "{_self_path()}" run {quote}{text}{quote}'
+    head = f'"{sys.executable}" "{_self_path()}" run'
+    if _needs_payload(text):
+        payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        if len(payload) <= MAX_B64_PAYLOAD:
+            return f"{head} {PAYLOAD_B64} {payload}"
+        return f'{head} {PAYLOAD_FILE} "{_write_payload_file(text)}"'
+    quote = "'" if "'" not in text else '"'
+    return f'{head} {quote}{text}{quote}'
 
 
 def _self_path() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(here, "hive_compat.py")
+
+
+_PAYLOAD_B64_RX = re.compile(r"\srun\s+--b64\s+([A-Za-z0-9+/=]+)\s*$")
+_PAYLOAD_FILE_RX = re.compile(r'\srun\s+--file\s+"([^"]*)"\s*$')
+
+
+def payload_text(cmdline: str) -> str | None:
+    """从 `rewrite()` 产出的命令行里取回原文（`--b64` / `--file` 通道），取不到返回 None。
+
+    只给排障和测试用：载荷本身限定在 `A-Za-z0-9+/=`（或一条没有引号的绝对路径），
+    格式上无歧义，所以这里可以就地解析；正式执行走 :func:`main` 的 argv 分支。
+    """
+    text = str(cmdline or "")
+    if "hive_compat.py" not in text or " run " not in text:
+        return None
+    m = _PAYLOAD_B64_RX.search(text)
+    if m:
+        return _decode_b64(m.group(1))
+    m = _PAYLOAD_FILE_RX.search(text)
+    if m:
+        return _read_payload_file(m.group(1))
+    return None
+
+
+def _decode_b64(token: str) -> str | None:
+    try:
+        return base64.b64decode(token.encode("ascii"), validate=True).decode("utf-8")
+    except (ValueError, UnicodeError) as exc:
+        print(f"hive_compat: --b64 载荷还原不了（{exc}）", file=sys.stderr)
+        return None
+
+
+def _read_payload_file(path: str) -> str | None:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        print(f"hive_compat: --file 载荷读不了（{exc}）：{path}", file=sys.stderr)
+        return None
+
+
+def _read_payload(kind: str, tokens: list[str]) -> str | None:
+    """`run --b64 <token>` / `run --file "<path>"` → 原文；坏载荷打日志并返回 None。"""
+    if len(tokens) != 1:
+        print(f"hive_compat: {kind} 只收一个参数，实际收到 {len(tokens)} 个", file=sys.stderr)
+        return None
+    return _decode_b64(tokens[0]) if kind == PAYLOAD_B64 else _read_payload_file(tokens[0])
 
 
 def _unquote(text: str) -> str:
@@ -657,7 +785,16 @@ def main(argv: list[str] | None = None) -> int:
     if not args or args[0] != "run":
         print(f"用法: {MARK} \"<POSIX 命令>\"", file=sys.stderr)
         return 2
-    cmd = " ".join(args[1:])
+    rest = args[1:]
+    cmd: str | None
+    if rest and rest[0] in (PAYLOAD_B64, PAYLOAD_FILE):
+        # T-0409：原文含双引号时走载荷通道，cmd.exe 已经把载荷原样送到这里，
+        # 这里只负责逐字节还原，不做任何引号处理。
+        cmd = _read_payload(rest[0], rest[1:])
+        if cmd is None:
+            return 2
+    else:
+        cmd = " ".join(rest)
     rc = evaluate(cmd)
     # 解释器前缀自己会打印更具体的错（引号不成对等），别在这里补一句误导的「不支持」
     if rc == 2 and parse_command(cmd) is None:
