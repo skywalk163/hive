@@ -52,7 +52,7 @@ EXPECTED = "\n".join([
     "执行契约：",
     "- 允许修改路径：dispatch_prompt.py、tests/test_dispatch_prompt.py",
     "- 预期输出：python -m pytest -q tests/test_dispatch_prompt.py",
-    "- 平台与判据：Windows 上 head/grep/awk 与 ! / $() 不可用，POSIX 判据会 exit 255 假失败——先别怀疑产物；确实跑不了就换 192.168.0.88（FreeBSD 15.1）跑：ssh workbuddy@192.168.0.88，密码取 .env 的 SSH_PASS_WORKBUDDY（尾部带空格，取值先 strip）",
+    "- 平台与判据：Windows 上 head/grep/awk 与 ! / $() 不可用，POSIX 判据会 exit 255 假失败——先别怀疑产物；确实跑不了就换 192.168.0.88（FreeBSD 15.1）跑：ssh workbuddy@192.168.0.88，密码取 .env 的 SSH_PASS_WORKBUDDY",
     "- 失败策略：90 分钟内未完成即放弃；失败时把卡住的位置写进 .hive/summary.md "
     "并回 hive_submit，不要硬凑",
     "- 禁止行为：不修改 hive.py；不加 CLI 参数",
