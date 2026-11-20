@@ -1,0 +1,46 @@
+{
+  "task": "T-0422",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0422",
+  "base": "main",
+  "head": "71009878b5e6d9d96b667683675a91b3ff9fb134",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T22:14:21+08:00",
+  "finished_at": "2026-11-20T22:22:16+08:00",
+  "duration_s": 475.1,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_T0421_流式切换会话.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        ".......                                                                  [100%]",
+        "7 passed in 0.60s"
+      ]
+    },
+    {
+      "cmd": "node --check webui/app.js",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "node --check webui/messages.js",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "## T-0422 流式输出时允许切换会话（先中止当前流，再切换）\n\n**做了什么**\n- `selectSession` 删掉「streaming → 弹提示 return」的拦人逻辑；改为先 `abortActiveTurnForSwitch()`（同步收口本轮）再走原来的「拉历史 + 回放」路径。同会话仍早返回，不误伤正在跑的同会话。\n- 新增 `abortActiveTurnForSwitch()`：`turnEpoch += 1` → 摘掉并清空 `localQueue`（文本放回输入框，不静默吞字）→ `finalizeTurn()`（保留已渲染内容）+ `setStreaming(false)`（去 streaming class、停本地计时、放开按钮）→ `controller.abort()`。`new-session-btn` 的 streaming 分支复用同一套，不再「请稍后再新建会话」。\n- **竞态处理方式（世代号 epoch）**：切走时 `turnEpoch` 自增；`sendMessage` 发起时快照 `myEpoch`，`resp.ok` 判定、`then`、`catch`（含 AbortError）、`finally`（`setStreaming(false)`/`controller=null`）全部先比对 `isTurnAlive(myEpoch)`，对不上就静默放弃——AbortError 晚到也不会 finalize/关流新会话；`readStream(resp, epoch)` 在 `handleFrame`/`pump` 里同样校验，切走后残留 SSE 帧一律丢弃，不往新会话追加文本。\n- **队列取舍**：切走时整队清空——老会话的排队消息不应发到新会话，因此放弃「自动发送」语义；但把文本拼回输入框（输入框为空时），避免丢失用户写的字，提示里说明「N 条排队消息已放回输入框」。\n- 提示「已停止当前输出并切换会话。」由 `announceStreamAborted()` 在**渲染完成之后**发出（`renderHistory`/`newChatState` 会清屏，提前发会被吃掉）。用户主动中止仍走原 `AbortError → finalizeTurn`，不碰 `rollbackTurn`。\n\n**改了哪些文件**：`webui/app.js`（+72/−12）、新增 `tests/test_T0421_流式切换会话.py`。未动 `src/*.light`、`sidebar.js`、`messages.js`、`index.html`。\n\n**验证**\n- `python3 -m pytest -q tests/test_T0421_流式切换会话.py -o addopts=''` → 7 passed（Windows 本机，未用 head/grep/awk）。\n- `node --check webui/app.js` / `node --check webui/messages.js` → 均通过。\n- 旁证回归：`test_T0396_新建会话目录选择.py` + `test_T0399_新会话对齐.py` → 13 passed；`test_T0398_附件暂存契约.py` → 6 passed。\n\n**反证（旧 app.js 下必红）**：暂存新文件 → `git checkout -- webui/app.js` → 跑同一测试 → `5 failed, 2 passed`（失败项：切换会话不再拦人 / 流式中切换先停流 / abort 竞态世代号 / 新建会话同样先停流 / 切会话清空本地队列）→ 还原后 `7 passed`。\n\n**遗留风险**：切会话时被中止的半截回复，服务端若已落库则回放可见、若未落库则只留在被切走的旧会话 UI（本次不回滚、不补写，符合「不丢已收到文本」）；排队消息只放回输入框、不保留「命令态」（`/compact` 之类恢复成普通文本，需用户再发一次）。",
+  "error": "",
+  "declared_paths": [
+    "webui/app.js",
+    "tests/test_T0421_流式切换会话.py"
+  ],
+  "changed_files": [
+    "webui/app.js",
+    "tests/test_T0421_流式切换会话.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "501fdb47e2364b9ebd533ce31399d63e"
+}
