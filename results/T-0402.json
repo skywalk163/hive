@@ -1,0 +1,58 @@
+{
+  "task": "T-0402",
+  "agent": "teleagent-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0402",
+  "base": "main",
+  "head": "50b35cbbff00a016c9414c3e747d87c3d6c9985a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T07:23:38+08:00",
+  "finished_at": "2026-11-20T08:11:08+08:00",
+  "duration_s": 2850.7,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_T0402_压缩升级.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        ".........                                                                [100%]",
+        "9 passed in 37.28s"
+      ]
+    },
+    {
+      "cmd": "python3 运行.py examples/test_压缩检查点.light",
+      "code": 0,
+      "tail": [
+        "=== 二、tool-pairing ===",
+        "=== 三、括号状态机 ===",
+        "=== 四、遮蔽序号表校验 ===",
+        "",
+        "test_压缩检查点 PASS"
+      ]
+    }
+  ],
+  "summary": "# T-0402 上下文压缩升级 —— 完成总结\n\n## 做了什么\n- **src/压缩.light**：`压缩到最近` 的摘要消息从裸 `造用户消息([造文本块])` 换成 `造检查点消息`（`<compacted-summary>` 框架三块 + `source`/「来源」双口径 `{\"kind\": \"compact-checkpoint\"}` 标记 + 源序号表照旧）；新增注入式摘要钩子 `压缩造摘要(会话对象, 尾号, 摘要器=空)`（空→退确定性拼接，本卡零网络/大模型依赖）；新增 token 口径 `压缩定尾号`（自后向前按 token 预算累计 + 切口左移到 tool-call/result 配对平衡边界，不切配对），条数口径降级为 `压缩条数尾号`；`压缩管理器` 默认改从 `压缩配置解析()` 取（窗口 128000→32768 统一）、新增 `摘要器/保留比例` 属性；新增 `检查并压缩详情`（`{压缩了,原因,裁剪条数,压缩前token,压缩后token}`），`检查并压缩` 保持返回布尔（**选了\"新段落\"方案**：examples/test_压缩自动:49 `断言等于(触发,真)` 是字面相等断言，返回字典必红，故布尔老契约不动）；顺带修 `取消息文本` 双键兼容（二次压缩读旧检查点中文键块曾抛键错误——冒烟实测抓到）。\n- **src/压缩E5.light**：新增单一配置解析入口 `压缩配置解析()`（读 `HARNESS_MODEL_CONTEXT_WINDOW`/`HARNESS_COMPACTION_THRESHOLD_RATIO`/`HARNESS_COMPACTION_KEEP_COUNT`，默认 32768/0.75/10）；`压缩配置` 新增 阈值比例/保留条数 从它取；旧键 `阈值token`/`保留轮数` 原样保留（agent.light:87 与 总入口 dump-config 是锁定消费者，examples/test_CLI命令面 断言它们）。\n- **src/压缩策略.light**（新）：`压判断触发(用量表, 配置)` → `{\"触发\",\"原因\",\"目标token\"}`，把 阈值/溢出/手动 三入口统一成纯函数决策出口，只判不做。\n- **tests/test_T0402_压缩升级.py**：9 条（checkpoint 形状/注入摘要+缺省退拼接/token 预算边界/tool 配对保护/条数降级/详情+布尔兼容/四原因/口径统一/造检查点消息 两参老契约）。\n\n## 验证（全绿）\n- `python3 -m pytest -q tests/test_T0402_压缩升级.py -o addopts=''` → **9 passed in 40.28s**（恢复后复跑 9 passed in 36.39s）\n- `python3 运行.py examples/test_压缩检查点.light` → **PASS rc=0**\n- 相关 examples 全 PASS（rc=0）：test_压缩自动 / test_溢出恢复 / test_交付（造检查点消息 两参契约）/ test_压缩E5 / test_压缩配套 / test_CLI命令面\n- 相关 pytest 对拍：test_T0398+流式推流+编辑日志 57 passed；test_T0399 6 passed 2 xfailed（与基线口径一致）\n- test_T0395/0396/0397 在本 worktree 有 6+ 红＝**基线假红**：实测把改动全部还原后同条同样红（`No module named '生产挂载'`，其 `_find_sibling` 探测够不到 .worktrees 3 层深度；T-0399 用沿祖先 6 级探测所以绿），与卡无关。\n\n## 反证（贴输出）\n把 `压缩到最近` 的摘要消息改回 `设 摘要文本 为 造摘要(会话对象, 尾号); 设 摘要消息 为 造用户消息([造文本块(摘要文本)])`（裸用户消息）后：\n```\nFAILED tests/test_T0402_压缩升级.py::test_压缩到最近产出检查点框架消息 - assert 1 == 0（1 failed in 9.33s）\n```\n（驱动读 `content[1]/content[2]` 越界 + 断言红，第 1 组立红成立）；改回后全量 **9 passed in 49.49s**。\n\n## checkpoint 消息真实结构（token 边界用例见 tests 3/4 组）\n`数据`＝消息本体：`{\"id\", \"role\": \"user\", \"content\": [ {类型:text,文本:前导+<compacted-summary>}, {type:text,text:摘要}, {类型:text,文本:</compacted-summary>} ], \"source\": {\"kind\": \"compact-checkpoint\"}, \"来源\": {\"kind\": \"compact-checkpoint\"}}`；事件带 `来源事件序号`（被折叠旧事件序号表）。注：`包摘要框架` 产中文键块（复刻件锁定），`客户端.映射网络消息` 只拼英文 `type=text` 块——前导/标签块不进模型请求是**既有形状**（test_交付:234 断言中文键），T-0407 如需下发前导可另行处理。\ntoken 口径两边界：预算 15/每条 5.67token → 保留 3 条（含达到预算那条，对齐 选择可压缩区 语义）；预算落在 call/result 之间 → 切口左移到 assistant，只折 user 旧。\n\n## 给 T-0407 的接线清单（本卡未动热点文件）\n1. `src/web服务器.light:570`（本轮选项）+ `:124`：把 `己.压缩管理器` 从 `压缩E5.压缩配置` 实例换成 `新建 压缩管理器(会话对象, [\"摘要器\": <LLM摘要段落>, ...])` 并**传给 跑一轮**；`处理对话`(:465) 识别 `content==\"/compact\"` 时调 `压判断触发([\"入口\": \"手动\", \"估算token\": 估算], 压缩配置解析())`，触发则走 `检查并压缩详情()`（不进模型上下文、不消耗轮次），LLM 摘要段落签名为 `(会话对象, 尾号) → 文本`，注入即生效。\n2. `src/web服务器.light:436`（生成统计事件旁）：`压缩了==真` 时推 `种类:\"压缩\"` 帧，载荷取 `检查并压缩详情()` 的 `{原因, 裁剪条数, 压缩前token, 压缩后token, \"上下文使用率\": 压缩后token/窗口}`——前端 `app.js:277 handleCompactionEvent` 已在读 `上下文使用率/使用率` 并落 `Messages.addCompaction`（messages.js:472）。\n3. step 前阈值检查走 `压判断触发([\"估算token\": 估算, \"入口\": \"阈值\"], 配置)`；溢出重试入口在 `代理.light:665/693` 旁判 `[\"入口\": \"溢出\"]`——决策统一出口即本卡 `压缩策略.light`。\n\n## 遗留风险\n- 确定性拼接摘要不省 token（二次压缩会嵌套标签）——上游靠注入 LLM 摘要器解决，本卡按契约不引入网络。\n- `保留token预算` 在窗口极小（保留>=阈值）时 `确定预算` 抛错 → 捕获降级条数口径（summary 已注明，examples/test_溢出恢复 窗口=1 实测走的就是这条降级路径且 PASS）。\n- 提交 534f653（4 文件 +664/-41）；.temp/ 冒烟脚本未提交。\n\n> AI生成",
+  "error": "",
+  "declared_paths": [
+    "src/压缩.light",
+    "src/压缩E5.light",
+    "src/压缩策略.light",
+    "tests/test_T0402_压缩升级.py"
+  ],
+  "changed_files": [
+    "src/压缩.light",
+    "src/压缩E5.light",
+    "src/压缩策略.light",
+    "tests/test_T0402_压缩升级.py",
+    ".temp/冒烟压缩.light",
+    ".temp/压缩.light.bak",
+    ".temp/压缩E5.light.bak"
+  ],
+  "out_of_paths": [
+    ".temp/冒烟压缩.light",
+    ".temp/压缩.light.bak",
+    ".temp/压缩E5.light.bak"
+  ],
+  "lease_id": "55027cd419b0454e93e0dff95baadf45"
+}
