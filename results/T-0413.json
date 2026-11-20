@@ -1,0 +1,35 @@
+{
+  "task": "T-0413",
+  "agent": "teleagent-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0413",
+  "base": "main",
+  "head": "e9f0bc7c35070529534d06a663a524af6d89297a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T23:53:57+08:00",
+  "finished_at": "2026-11-20T23:55:07+08:00",
+  "duration_s": 70.2,
+  "verify": [
+    {
+      "cmd": "grep -c -E 'daily|rotate 7|compress|missingok|notifempty|copytruncate' deploy/logrotate.d/lightmem",
+      "code": 0,
+      "tail": [
+        "10"
+      ]
+    }
+  ],
+  "summary": "# T-0413 工作总结 · lightmem Linux 适配 C：logrotate 日志轮转（Linux 侧）\n\n## 结论\nLinux 侧日志轮转补齐：新增 `deploy/logrotate.d/lightmem`（每日 + 保留 7 份 + gzip + copytruncate）\n与 `deploy/logrotate.d/README.md`（Linux vs FreeBSD 对照 + 安装 + 自检）。FreeBSD newsyslog\n配置未动，日志路径未动，改动仅覆盖卡面允许的两条路径。\n\n## 做了什么\n1. `deploy/logrotate.d/lightmem`：轮转 `/var/log/lightmem.log`、`/var/log/lightmem-mcp.log`，\n   `daily / rotate 7 / compress / delaycompress / missingok / notifempty / copytruncate`；\n   与 `newsyslog.d/lightmem.conf`（count=7、@T00、flags=Z）口径对齐；`copytruncate` 的理由是\n   服务未实现 SIGHUP 重开日志；`missingok` 的理由是 systemd 下日志可能走 journald、文件不存在。\n2. `deploy/logrotate.d/README.md`：两平台机制/安装位置/周期/保留/压缩/自检对照表，\n   `lm_logrotate_install` 与手工 `install -m 644` 两条安装路径，`logrotate -d` 自检法，\n   两文件并存互不覆盖说明，附真机实测记录。\n\n## 跑了什么验证（Linux 真机 192.168.0.86，Ubuntu + logrotate 3.21.0）\n- `logrotate -d`（真实 200 行日志）：无 `error:`，识别 `after 1 days (7 rotations)`；\n- `logrotate -f`：copytruncate 把主日志截成 0 字节并生成 `*.log.1`；\n- 再转一轮：`.1` 压成 `.2.gz`（delaycompress 生效），`gzip -t` 通过；\n- 空文件再转被 `notifempty` 跳过；`rotate 7` 保留份数生效；\n- 卡面判据 `grep -c -E ...` 在 Linux 真机 → 10（exit 0）；Windows 提交机把 Git 自带\n  `usr/bin`（含 grep.exe）加进 PATH 后同样 → 10（exit 0），非改判据、只补命令可用性；\n- 复刻 `scripts/ci-linux-smoke.sh` 的 logrotate 门禁：两个文件均 PASS。\n\n## 过程说明（两个坑，都不是产物问题）\n1. 首次提交被判「越界改动 3 个文件（GETTING_STARTED.md / README.md / docs/档位能力矩阵.md）」：\n   本机 `lightmem` 本地 `main` 停在 `8c2c0ff`，`origin/main` 已到 `78afe74`（T-0416 已 land），\n   take 建的 worktree 起点在 `78afe74`，hive 用本地 `main` 做三点差 → 把 T-0416 的内容算成本卡改动。\n   本机 main 工作树有他人未提交改动（`docs/档位能力矩阵.md`）不能快进，故把 task 分支重置到\n   `8c2c0ff` 后重新提交单条 commit，`git diff main...HEAD` 只剩本卡两个文件。\n2. 第二次提交 verify 报假红：Windows 上 PATH 里没有 grep（Git 只放 git.exe），exit 255。\n   按卡面「Windows 跑不了 POSIX 判据」的提示，不改判据，提交时把 `C:\\Program Files\\Git\\usr\\bin` 加进 PATH。\n\n## 遗留/风险\n- 本机（Windows）跑 `scripts/ci-linux-smoke.sh` 有 1 条 FAIL：`4/7 profile YAML 语法校验失败`，\n  与卡无关（未碰 profiles/），属 Windows/Git Bash 环境缺 YAML 校验依赖的既有假红。\n- 本机 `lightmem` 本地 main 落后 origin/main，建议有干净窗口时快进一次，否则后续卡还会撞同样的假越界。\n- `delaycompress` 让 `.1` 在下一拍才压（与 `platform.sh` 内置规则一致），按「立刻压缩」验收时注意这一拍差异。\n\n> AI生成",
+  "error": "",
+  "declared_paths": [
+    "deploy/logrotate.d/lightmem",
+    "deploy/logrotate.d/README.md"
+  ],
+  "changed_files": [
+    "deploy/logrotate.d/README.md",
+    "deploy/logrotate.d/lightmem"
+  ],
+  "out_of_paths": [],
+  "lease_id": "c712928f561c493fb6aa1e27325a5a2b"
+}
