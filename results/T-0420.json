@@ -1,0 +1,92 @@
+{
+  "task": "T-0420",
+  "agent": "main-agent",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0420",
+  "base": "main",
+  "head": "0de78dc",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T17:06:00+08:00",
+  "finished_at": "2026-11-20T18:05:00+08:00",
+  "duration_s": 3540,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0420_计划模式闭环.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        "4 passed"
+      ]
+    },
+    {
+      "cmd": "python 运行.py examples/test_计划模式.light",
+      "code": 0,
+      "tail": [
+        "计划模式纯逻辑核心子系统（模块39）测试通过"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0407_收口接线.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        "10 passed"
+      ]
+    },
+    {
+      "cmd": "node --check webui/app.js",
+      "code": 0,
+      "tail": [
+        "node check ok"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0399_新会话对齐.py tests/test_T0403_新模式预设.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        "18 passed"
+      ]
+    }
+  ],
+  "summary": "plan 闭环落地：新增 计划工具.light（exit_plan_mode 规格/校验/结果，concludesTurn=true）；计划模式.light 新增 折叠计划状态（兼容会话事件的 类型/数据 与 type/data 两种形状）；web服务器 新增 /plan、/plan on、/plan off（不调模型、不走轮次，忙 409），落 command/run/done + plan/mode，active 时只额外注册 exit_plan_mode，提交成功落 plan/mode(false) + plan/submitted，sessions 接口新增 计划 键（非流式 /plan 回执带 会话 id 便于首轮绑定）；与 topdown 解耦，代理对出口工具放行；系统提示前置注入 plan section；前端加「📋 计划中」角标 + 计划面板 + SSE 计划帧。合入 main 0de78dc，myrepo/origin 已推；github 推送网络 Reset，待重试。",
+  "error": "github push 两次 Recv failure: Connection was reset，未推上",
+  "declared_paths": [
+    "src/计划模式.light",
+    "src/计划工具.light",
+    "src/代理.light",
+    "src/web服务器.light",
+    "src/总入口.light",
+    "src/预设组合.light",
+    "webui/app.js",
+    "webui/index.html",
+    "webui/style.css",
+    "tests/test_T0420_计划模式闭环.py",
+    "tests/test_T0407_收口接线.py",
+    "examples/test_计划模式.light",
+    "docs/API参考.md",
+    "docs/功能对标/模式规格.md",
+    "CHANGELOG.md"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/API参考.md",
+    "docs/功能对标/模式规格.md",
+    "examples/test_计划模式.light",
+    "src/web服务器.light",
+    "src/代理.light",
+    "src/总入口.light",
+    "src/计划工具.light",
+    "src/计划模式.light",
+    "src/预设组合.light",
+    "tests/test_T0407_收口接线.py",
+    "tests/test_T0420_计划模式闭环.py",
+    "webui/app.js",
+    "webui/index.html",
+    "webui/style.css"
+  ],
+  "out_of_paths": [
+    "src/预设组合.light"
+  ],
+  "backfilled": false,
+  "lease_id": ""
+}
