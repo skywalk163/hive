@@ -1,0 +1,44 @@
+{
+  "task": "T-0415",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0415",
+  "base": "main",
+  "head": "67670c6d68ee7417ead959db0d2273f6ceabe355",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T22:22:56+08:00",
+  "finished_at": "2026-11-20T22:26:04+08:00",
+  "duration_s": 188.2,
+  "verify": [
+    {
+      "cmd": "sh -n scripts/ci-linux-smoke.sh",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "sh scripts/ci-linux-smoke.sh",
+      "code": 0,
+      "tail": [
+        "SKIP  T-0412 未合入：没有 deploy/*.timer（看门狗 timer 门禁跳过）",
+        "SKIP  T-0413 未合入：没有 deploy/logrotate.d/（logrotate 门禁跳过）",
+        "",
+        "===== 汇总：PASS=22 FAIL=0 SKIP=3 =====",
+        "RESULT: PASS exit=0"
+      ]
+    }
+  ],
+  "summary": "# T-0415 交付摘要：CI 增加 Linux 部署冒烟门禁\n\n## 改了什么\n\n1. **新增 `scripts/ci-linux-smoke.sh`**（POSIX sh，CI 友好）\n   - `sh -n` 覆盖 `integrations/quickstart/install.sh`、`deploy/*.sh`、`scripts/*.sh`；\n   - `install.sh --profile solo --dry-run`：断言退出 0、输出含 `[dry-run]`、不落 `_lightmem_run`；\n   - `install.sh --systemd --dry-run`（`LM_FAKE_OS=linux`）：断言双 unit 计划、`install -m 644`、`systemctl daemon-reload`；\n   - `profiles/*.yaml` 用 PyYAML `safe_load` 校验（含 `profile` / `storage_backend` 字段），并校验 `profiles/lims.profile.schema.json` 可解析；无 PyYAML 时明确 SKIP；\n   - T0 软开关：`deploy/platform_test.sh` 存在才跑（当前 35 passed / 0 failed）；\n   - A 项：systemd unit 静态结构 + 端口口径（kernel :7443、MCP :7444、rest-base 指 7443）；仅当 `/run/systemd/system` 存在才跑 `systemd-analyze verify`，容器/runner 明确 SKIP；\n   - B/C 软开关：`deploy/*.timer`（T-0412）、`deploy/logrotate.d/*`（T-0413）存在才测，未合入打印 SKIP；\n   - 输出统一 `PASS/FAIL/SKIP`，末行 `RESULT: PASS|FAIL exit=0|1`；仅 PASS/SKIP → 0，任一 FAIL → 1。\n2. **`.github/workflows/ci.yml`**：在 `go test ./...` 之后新增 `Run Linux deploy smoke` 步（`working-directory: .` 覆盖 job 默认的 `kernel/`），原 go 步骤全部保留。\n\n## 边界与口径\n\n- 未改 `release.yml`、未改端口口径、CI 内无 sudo / 无 /etc 写入，全部 dry-run 与静态检查。\n- 依赖 A–D 的检查全部为「存在才测」软开关，本卡先合入不会让 CI 变红。\n- 说明：macOS bash 3.2 在 UTF-8 locale 下会把紧邻 `$var` 的全角标点并进变量名（`set -u` 报 unbound variable）；脚本对子脚本统一用 `LC_ALL=C` 运行，Linux dash 下等价。\n\n## 实测\n\n```\n$ sh -n scripts/ci-linux-smoke.sh   # 通过\n$ sh scripts/ci-linux-smoke.sh\nPASS=22 FAIL=0 SKIP=3\nRESULT: PASS exit=0\n```\n\n关键 PASS：14 个脚本 `sh -n`、install dry-run（含无落盘断言）、systemd 双 unit 计划、4 个 profile + schema、platform_test（35/0）、unit 结构与端口口径。\nSKIP：systemd-analyze（本机无 systemd）、T-0412 timer、T-0413 logrotate（均未合入）。\n\n## 落盘范围\n\n`git status` 仅：`M .github/workflows/ci.yml`、`?? scripts/ci-linux-smoke.sh`，与契约允许路径一致。",
+  "error": "",
+  "declared_paths": [
+    "scripts/ci-linux-smoke.sh",
+    ".github/workflows/ci.yml"
+  ],
+  "changed_files": [
+    ".github/workflows/ci.yml",
+    "scripts/ci-linux-smoke.sh"
+  ],
+  "out_of_paths": [],
+  "lease_id": "6d1f7f215cb749d1b018cd5b474a4eb9"
+}
