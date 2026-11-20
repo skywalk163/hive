@@ -1,0 +1,49 @@
+{
+  "task": "T-0406",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0406",
+  "base": "main",
+  "head": "d7e5e89c0e091cbf569e72f9f5a413997a84e89d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-20T09:47:14+08:00",
+  "finished_at": "2026-11-20T09:48:59+08:00",
+  "duration_s": 105.6,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_T0406_模式规格文档.py -o addopts=''",
+      "code": 0,
+      "tail": [
+        "..........                                                               [100%]",
+        "10 passed in 0.36s"
+      ]
+    },
+    {
+      "cmd": "python3 -m json.tool docs/功能对标/对标清单.json",
+      "code": 0,
+      "tail": [
+        "            \"\\u53cd\\u8dd1\\u5224\\u636e\": \"\\u628a\\u4efb\\u4e00\\u6bb5\\u7684\\u300c\\u7ec8\\u6b62\\u6761\\u4ef6\\u300d\\u5c0f\\u8282\\u5220\\u6389\\u3001\\u6216\\u628a\\u65b0\\u589e\\u6761\\u76ee\\u7684\\u8bc1\\u636e\\u8def\\u5f84\\u6307\\u5411\\u4e0d\\u5b58\\u5728\\u7684\\u6587\\u4ef6 \\u5373\\u7ea2\",",
+        "            \"\\u8bed\\u8a00\\u7f3a\\u9677\": []",
+        "        }",
+        "    ]",
+        "}"
+      ]
+    }
+  ],
+  "summary": "## T-0406 交付：对标登记 + 《模式规格》文档（6 模式 × 7 小节契约）\n\n- 新增 `docs/功能对标/模式规格.md`（466 行）：0 号模式总表 + 6 个模式段（topdown / bottomup / brainstorm / lazy /\n  goal / plan），每段固定 7 小节（触发方式 / 进入条件 / 控制流向 / 人机介入点 / 输出形态 / 终止条件 / 实现要点），\n  另加「三条硬约束（判据，不是修辞）」与「组合与切换（不互斥 / 会话级不跨任务 / 嵌套不改顶层可见状态）」两节。\n  文中每条落点都写成「文件 + 段落名」（行号只作当前提交坐标），终止条件三类（正常 / 硬 / 预算）逐模式写全。\n- 模式契约全部对齐已落地的代码判据，没有自造：topdown 保留 tool-goal → 续跑预算 8 轮 / 无进展 2 生效；\n  bottomup 删 tool-goal + tool-ask-user；brainstorm 删 bash/pwsh/goal/delegation（整组 10 行）；lazy 只删 tool-ask-user，\n  开关 minimal_action/no_ask 默认真、需开源检索 < 20 行返回假；goal 走 续续跑决策 三值 + 目标轮驱动 委托；\n  plan 走 投影应用/投影视图 + plan-mode section（对话式认可不算批准）。\n- `docs/功能对标/对标清单.json`：**只增不改**——末尾追加 6 条 #371~#376（5 张功能卡 pure-logic 面 + 本文档），\n  说明数组追加 1 条 R222 记录；旧条目一条未动、未重排、未删号（`git diff --numstat` = 94 增 1 删，\n  那 1 删只是上一条说明末尾补逗号）。\n- 新增 `tests/test_T0406_模式规格文档.py`（10 例）：骨架 / 7 小节齐全与顺序 / 两种触发 + 三类终止 / 三条硬约束落位 /\n  编号是基线（1..370 去 263-268）超集且升序无重复 / 新增条目证据 `os.path.exists` 逐个真 / 未接线项不得写 done / 自检反证。\n- verify：`python3 -m pytest -q tests/test_T0406_模式规格文档.py -o addopts=''` → **10 passed in 0.33s**；\n  `python3 -c \"import json;json.load(...)\"` → **json ok**。\n- 反证（真删 lazy 的「终止条件」小节后重跑）：`3 failed, 7 passed`，其中\n  `test_第2组_每个模式7个小节齐全且顺序正确` 报 `lazy：缺小节 终止条件`、`test_第2组_触发方式两种都写_终止条件三类都写`\n  报 `AssertionError: lazy：终止条件没写正常终止 / assert '正常终止' in ''`；恢复后重新 10 passed。\n\n### 首次提交 failed 的真因（**环境性假失败，产物没坏；卡面已按授权修好并重提**）\n\nverify 第 1 条绿（10 passed），第 2 条 `python3 -c \"import json;json.load(open('docs/…'))\"` 报\n`SyntaxError: invalid syntax / import ^`。定位到 `hive/hive_compat.py` 的 `rewrite()`：\n这条命令同时含单引号与双引号，`quote` 选 `\"` 后**没有转义内层双引号**，包出来的实际命令是\n`\"py.exe\" \"hive_compat.py\" run \"python3 -c \"import json; …\"\"`，cmd 在第一个内层 `\"` 处截断，\npython 只收到 `import`。本机按同一改写复跑必现同样报错（rc=1，同一条 SyntaxError）。\n同一条命令**不经改写**（直接 `shell=True` / PowerShell）rc=0，本卡两次手跑都是 `json ok`。\n\n处置（经用户授权）：卡面 verify 第 2 条改为 `python3 -m json.tool docs/功能对标/对标清单.json`\n（走同一垫片改写后实测 rc=0，语义仍是「整份 JSON 能解析」，且该语义已由本卡\n`test_第4组_对标清单可解析且编号只增不改` 内的 `json.load` 覆盖）；`hive_compat.rewrite()` 的\n嵌套引号缺陷另开一张 hive 卡（repo=hive）跟踪，不在本卡里顺手改主控。\n\n### 遗留风险（范围外，未顺手改）\n\n1. **T-0399 的对接判据是位置型断言，被本卡追加打红**：`tests/test_T0399_新会话对齐.py::test_文档与对标登记到位`\n   断言 `entries[-5:]` 恰是 #366~#370 且含 T-0395~T-0399。任何后续追加都会红（本条已实测红：\n   `AssertionError: 对标清单新增条目没登记 T-0395`）。该文件属 T-0399 独占路径，本卡不改；建议 T-0407 收口把\n   「尾部连续 5 号」改成「按编号存在性 + 升序无重复」判据。\n2. brainstorm 只读约束在**注册表层**仍有 `tool-fs` 一个叶子同映读写（数据层已靠删 bash/pwsh 兜住），拆\n   tool-fs-read / tool-fs-write 归 T-0407。\n3. goal / plan 与其余 5 项的会话接线（总入口当循环、/plan 命令、exit_plan_mode、事件帧）一律未接，对标清单按\n   `partial` + 点名「接线在 T-0407」登记，未写 done。",
+  "error": "",
+  "declared_paths": [
+    "docs/功能对标/模式规格.md",
+    "docs/功能对标/对标清单.json",
+    "tests/test_T0406_模式规格文档.py"
+  ],
+  "changed_files": [
+    "docs/功能对标/对标清单.json",
+    "docs/功能对标/模式规格.md",
+    "tests/test_T0406_模式规格文档.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "32cb205a4453478793b9ec5420f408ca"
+}
