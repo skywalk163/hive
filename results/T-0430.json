@@ -1,0 +1,43 @@
+{
+  "task": "T-0430",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0430",
+  "base": "main",
+  "head": "b905ca71506205c9c85ee87b1a2544a1693a2e39",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-21T21:20:46+08:00",
+  "finished_at": "2026-11-21T21:25:59+08:00",
+  "duration_s": 313.7,
+  "verify": [
+    {
+      "cmd": "python 运行.py examples/test_mcp_prod.light",
+      "code": 0,
+      "tail": [
+        "MCP 挂载完成: 2 个工具 / 1 服务器 / 失败 0",
+        "test_mcp_prod PASS: ['mcp__prod__echo', 'mcp__prod__add']"
+      ]
+    },
+    {
+      "cmd": "python 运行.py examples/_probe_hive_mcp.light",
+      "code": 0,
+      "tail": [
+        "SKIP: 本机未配置 hive MCP（服务器数=0），跳过 hive 总线探测"
+      ]
+    }
+  ],
+  "summary": "# T-0430 完成摘要\n\n## 改了什么（仅两个允许路径）\n\n### examples/test_mcp_prod.light\n\n- 不再读宿主 cwd 的真实 `mcp.json`：在临时目录写一份隔离的 `mcp.json`（`name/command/args` 英文键，stdio 用 `examples/mcp_服务器.py`），用 `HARNESS_MCP_CONFIG` 注入；调用处仍不传路径，继续覆盖「无参取配置路径」的装配链路。\n- 断言从「服务器数 == 1」改为与环境无关的不变量：\n  - `跳过数 == 0`（真正要守的：没有服务器因配置/连接错误被静默跳过）；\n  - `服务器数 >= 1`（至少接上一台）；\n  - 按名字定位本用例注入的工具：`mcp__prod__echo`、`mcp__prod__add`（不再断言 `已注册` 总数 == 2）。\n- 用 `尝试/捕获` 恢复 `HARNESS_MCP_CONFIG` 并清理临时文件/目录。\n\n### examples/_probe_hive_mcp.light\n\n- 断言从「服务器数 == 1」改为：`跳过数 == 0` + 按名字定位 `mcp__hive__hive_whoami`。\n- 本机没有任何 `mcp.json`（或配了但没有 hive）时打印 `SKIP` 并正常退出，不再把「宿主碰巧配了几台」当成失败。\n- hive 工具存在时才做原来的三次只读调用；`客户端表` 做了存在性判断后再关闭客户端。\n\n## 验证证据（本机 macOS，worktree 内按卡面原始命令）\n\n```\n$ python 运行.py examples/test_mcp_prod.light\nMCP 挂载完成: 2 个工具 / 1 服务器 / 失败 0\ntest_mcp_prod PASS: ['mcp__prod__echo', 'mcp__prod__add']   (exit 0)\n\n$ python 运行.py examples/_probe_hive_mcp.light\nSKIP: 本机未配置 hive MCP（服务器数=0），跳过 hive 总线探测   (exit 0)\n```\n\n反跑（临时 fixture，未入库）：\n\n1. 配 2 台服务器 → `test_mcp_prod` 仍 PASS（`mcp__prod__echo/add` + `mcp__extra__echo/add` 全注册），`_probe_hive_mcp` 正常 SKIP —— 证明不依赖总数；\n2. 把其中一台改成坏指令（`/nonexistent/nope`）→ 两条都红，报「不应有跳过/有服务器被跳过」—— 证明 `跳过数 == 0` 这条真在守。\n\n## 环境备注\n\n- 判据命令在本机 worktree 下需要能找到光明编译器：`运行.py` 会探测 `../light`，已在本机 worktree 父目录建软链 `~/.hive/wt/mac-trae/light -> ~/dswork/light`（仓库外环境，不影响交付内容）。\n- 未改 `src/`、其它示例、任务卡与 agents 配置；未写入任何 token/密钥。",
+  "error": "",
+  "declared_paths": [
+    "examples/test_mcp_prod.light",
+    "examples/_probe_hive_mcp.light"
+  ],
+  "changed_files": [
+    "examples/_probe_hive_mcp.light",
+    "examples/test_mcp_prod.light"
+  ],
+  "out_of_paths": [],
+  "lease_id": "e8f195f2b5064a7b8d538aac3eb255ae"
+}
