@@ -1,0 +1,53 @@
+{
+  "task": "T-0424",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0424",
+  "base": "main",
+  "head": "b825adbf352e14832d6ba7af7def56673178f9de",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-21T09:50:38+08:00",
+  "finished_at": "2026-11-21T09:51:55+08:00",
+  "duration_s": 77.5,
+  "verify": [
+    {
+      "cmd": "bash -n integrations/quickstart/install.sh",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys; s=open('integrations/quickstart/install.sh',encoding='utf-8').read(); sys.exit(0 if 'json.dumps' in s or 'lm-env-compact' in s else 1)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "bash integrations/quickstart/envfile_test.sh",
+      "code": 0,
+      "tail": [
+        "  [v] python3 不可用 → install.sh 非 0 退出（没有静默写出会崩的 env）",
+        "  [v] python3 不可用：未落盘 lightmem.env",
+        "  [v] 失败提示里点了 python3（可操作）",
+        "",
+        "PASS: envfile_test 全绿（12 项判据，含 2 组反跑）"
+      ]
+    }
+  ],
+  "summary": "# T-0424 交付摘要\n\n- 根修：`install.sh` 的 systemd 分支不再 `printf \"$(cat tokens)\"`；新增 `lm_write_token_env <RUN_DIR>`，写 `lightmem.env` 前压成单行 JSON（仓库完整→调 `scripts/lm-env-compact.sh`；只有 `integrations/` 子集→内联 `python3 json.dumps(ensure_ascii=False,separators=(',',':'))`）。\n- 失败即停：`python3` 缺失明确 `exit 1`（不落盘会崩的 env）；写完自检「恰好 1 行 + 前缀 + 解析回来与源 JSON 等价 + 600」，任一不满足即失败。\n- 不变：`agent-tokens.json` 一个字节未改（测试用 sha256 前后一致断言）；端口口径、rc.d、kernel 语义均未动；`scripts/lm-env-compact.sh` 只被调用未修改。\n- 新增内部钩子 `install.sh --write-token-env <RUN_DIR>`（只走写入路径后退出），供回归零依赖复用同一实现；`--dry-run --systemd` 会打印「压平 ... → lightmem.env（单行 JSON，600）」。\n- 新增 `integrations/quickstart/envfile_test.sh`：12 项判据，含主路径、退化路径、反跑 A（旧写法 34 行 env 必须变红）、反跑 B（PATH 无 python3 必须失败且不落盘）。\n- 文档：`deploy/README.md` §6 改为「T-0424 已根修」并保留规避件为事后修；`_LM_Linux适配_验收报告.md` §5.2 标注根修、新增 §5.2.1 验证记录、§7 TODO#1 划掉。\n- 验证（FreeBSD 15.1 `fb98`，Python 3.12.13 / bash 5.3.15，干净 clone `task/T-0424`）：三条判据 rc 全 0；`envfile_test` 12/12 全绿；真机产出 `wc -l=1`、`150 bytes`、`-rw-------`、json 可解析。\n- 提交说明：本机 Windows 直接 submit 时判据 3 假红（python3 是 Store 占位符 rc=49、MSYS 无 POSIX 600 位）；按卡面允许，改用 .88 真机跑同一批判据命令（commit/push/结果落库仍走 Hive.cmd_submit 原生链路，判据未改写/跳过）。\n- 遗留风险：本轮**未**在 Linux systemd 真机（Ubuntu 0.86）重装服务复测，systemd 侧「不再出现 unexpected end of JSON input」待下次 Linux 真机回归确认；Windows/MSYS 上 mode 600 断言会假红（测试头已注明），验收请在 Linux/FreeBSD 跑。",
+  "error": "",
+  "declared_paths": [
+    "integrations/quickstart/install.sh",
+    "integrations/quickstart/envfile_test.sh",
+    "deploy/README.md",
+    "_LM_Linux适配_验收报告.md"
+  ],
+  "changed_files": [
+    "_LM_Linux适配_验收报告.md",
+    "deploy/README.md",
+    "integrations/quickstart/envfile_test.sh",
+    "integrations/quickstart/install.sh"
+  ],
+  "out_of_paths": [],
+  "lease_id": "e0c19f8545624776bb1115e99906d2dc"
+}
