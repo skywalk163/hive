@@ -1,0 +1,40 @@
+{
+  "task": "T-0425",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0425",
+  "base": "main",
+  "head": "0a95d133648b87aca1c0766ae79a111a4f31f303",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-21T10:51:38+08:00",
+  "finished_at": "2026-11-21T11:08:45+08:00",
+  "duration_s": 1027.8,
+  "verify": [
+    {
+      "cmd": "bash -n integrations/quickstart/install.sh",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys; s=open('integrations/quickstart/install.sh',encoding='utf-8').read(); sys.exit(0 if 'chown' in s else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0425 交付摘要（lightmem Linux 适配 A3：RUN_DIR 属主归一）\n\n## 做了什么\n- `integrations/quickstart/install.sh`：新增 `lm_own_run_dir`，在 `--systemd` 且 `uid=0`、`--service-user != root` 时、`systemctl enable --now` 之前把 `$RUN_DIR` 归一给服务用户。\n  顺序 **先 `mkdir -p data logs` → 再 `chown -R` → 再 `chmod 750`（RUN_DIR/data/logs）→ env 与 agent-tokens 600**（首版把 mkdir 放在 chown 后，0.86 真机发现 `logs/` 仍 `root:root`，已修）。\n  安全断言：RUN_DIR 非空、非 `/`、必须在 `$ROOT` 或 `/opt/lightmem` 前缀内、必须真实目录、`--service-user` 必须存在，任一不满足 `exit 1`；非 root 纯 quickstart 语义不变（打印跳过原因）。\n  新增 `--own-run-dir <DIR>` 内部钩子供回归模拟 root；未改 kernel/端口/rc.d/依赖。\n- `integrations/quickstart/envfile_test.sh`：第 5 节 13 项属主判据（共 25 项、3 组反跑），chown 垫片带**「chown 之前 data/logs 必须已存在」顺序断言**（`MISSING-` 标记 → 直接判红）。\n- `deploy/README.md`：新增「已知部署坑 §10 混跑 RUN_DIR 属主留 root」，含 sqlite 只读报错、healthz 假绿陷阱、事后修复命令、自查口径、固定一种顺序的建议。\n\n## 真机验收（Ubuntu 24.04.4 / 192.168.0.86 / workbuddy）\n- 顺序 A（`sudo --systemd` → 停服务 → workbuddy 重跑）：head `96e2bc4`，install rc=0，`_lightmem_run`/`data`/`logs` 全 `workbuddy:workbuddy 750`，env/tokens 600，`logs` 与 `data` 以 workbuddy `touch` 均成功（修复前 `logs` 是 `root:root`），healthz `version=96e2bc4…`，写记忆 `201`；非 root 重跑后仍 201。\n- 顺序 B（workbuddy 先跑 → 停 nohup → `sudo --systemd`）：install rc=0，RUN_DIR/data/logs 全 `workbuddy:workbuddy 750`、env/tokens 600，`logs`/`data` workbuddy 可写，healthz 201。\n- 判据（FreeBSD 15.1 / 0.88，head `0a95d13`）：`bash -n` rc=0、`chown` 关键字 rc=0、`envfile_test.sh` **25 项全绿**（含 3 组反跑）。\n- 0.86 已恢复：卸新 unit、回填备份 unit、`enable --now lightmem/lightmem-mcp` + watchdog timer，healthz `version=56df3c5…`、7443/7444 监听、写记忆 201。\n\n## 备注\n- 提交链：`6e787cb`（首版）→ `96e2bc4`（先建目录再 chown + 顺序断言）→ `0a95d13`（README §10）。\n- 留档：`/home/workbuddy/t0425-a3`（顺序 A）、`/home/workbuddy/t0425-b`（顺序 B）。",
+  "error": "",
+  "declared_paths": [
+    "integrations/quickstart/install.sh",
+    "integrations/quickstart/envfile_test.sh",
+    "deploy/README.md"
+  ],
+  "changed_files": [
+    "deploy/README.md",
+    "integrations/quickstart/envfile_test.sh",
+    "integrations/quickstart/install.sh"
+  ],
+  "out_of_paths": [],
+  "lease_id": "79185b6617414d93805263ff545fbb8d"
+}
