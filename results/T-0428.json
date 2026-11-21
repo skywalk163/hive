@@ -1,0 +1,51 @@
+{
+  "task": "T-0428",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0428",
+  "base": "main",
+  "head": "8a9d699be4dbb28373affee5e82890b883228be7",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-21T20:46:29+08:00",
+  "finished_at": "2026-11-21T21:14:25+08:00",
+  "duration_s": 1676.1,
+  "verify": [
+    {
+      "cmd": "bash -n integrations/lims-088-rc.d/lightmem",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys; s=open('integrations/lims-088-rc.d/lightmem',encoding='utf-8').read(); sys.exit(0 if 'lightmem_need_pg' in s else 1)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys; s=open('kernel/bootreport.go',encoding='utf-8').read(); sys.exit(0 if 'LIMS_BOOT_SELFCHECK' in s else 1)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys; s=open('kernel/boot_selfcheck_switch_test.go',encoding='utf-8').read(); sys.exit(0 if 'TestBootSelfCheckDefaultIsEnforced' in s else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0428 交付摘要（R30 遗留三项真机验证）\n\n## 结论\n- 卡面 4 条 verify 全 exit 0（bash -n + 3 条 python3 断言，Windows 本地实跑）。\n- kernel：`go build ./...` rc=0；`go test -run BootSelfCheck -v` 5 用例全绿（矩阵 14 子例 / 默认强制 / off 逃生 / 默认真自检 / sqlite 不受影响），另两条 BootSchemaCheck 用例也绿。\n- 根 module `go build ./...` rc=1（`missing go.sum entry for github.com/lightmem/kernel`，由 eval/benchmarks/bench 引入）；同命令在基线 452efc7 上同样 rc=1 → **先存在**，非本卡三提交引入。未改 go.mod/go.sum（不在允许路径，且在红线内）。\n- `scripts/gate.sh`：本卡树 PASS 8 / FAIL 7；基线 452efc7 同样 PASS 8 / FAIL 7，7 条 FAIL 原因逐条相同（[1b] 仅 kernel/auth_loopback_guard_test.go 未 gofmt；[2][3][4][9×2][12] 全是上述同一缺 go.sum）。→ **无新增 FAIL**，但门禁本身不绿，如实记。\n\n## L-260（本卡唯一未知项）实测成立\n- 隔离实例 :18445（用 /etc/rc.conf.d/lightmem 覆盖，未动现网 :18443），真实 cmdline：\n  `daemon: lightmem-listen-18445[19504] (daemon)`，与 `lightmem_sup_title_prefix` 完全吻合；`lightmem_list_sups` 正常返回 supervisor pid。\n- 真孤儿场景：手工再起第二个同标题 supervisor（pid 4007，不在 pidfile），list_sups 同时枚举 3059/4007；kill -9 主 child 后 supervisor 按 -R 5s 重建（child 4451）；`service lightmem stop` 后 +5s / +20s 均无残留，status NOT running。旧实现只会 TERM pidfile 里的那个，4007 会活下来并在 ~20s 复活。\n\n## L-259 实测\n- solo + pg_wait=0：start rc=0（旧实现在此场景 return 1 起不来）。\n- family + pg_wait=60（PG 可达）：start rc=0，health `backend=pgvector`。\n- family + pg_wait=0（显式不等）：start rc=0。\n\n## L-261 实测（真 PG 空库 t0428_scratch，无 memories 表）\n- 默认不设开关：exit 1，`pg startup self-check: boot self-check: table memories missing on pgvector backend` → fail-fast。\n- `LIMS_BOOT_SELFCHECK=off`：正常起；日志 `[boot] WARN: LIMS_BOOT_SELFCHECK 已显式关闭 …`；/healthz 返回 `schema_check=skipped(env)`、`schema_ok=skipped(env)`。\n- `LIMS_BOOT_SELFCHECK=maybe`（无法识别）：exit 1 → 仍强制。\n- 观察（非缺陷）：off 时 WARN 会打两次（newPgBackend 与 runBootSchemaCheck 各一处），排障时会看到重复行。\n\n## 一行小修（单独提交 8a9d699）\n- `tr -d ':'` → `echo \"${lightmem_listen#:}\" | tr ':' '_'`：`:18443` 标题仍为 lightmem-listen-18443（滚动升级不丢匹配），`127.0.0.1:18443` / `127.0.0.11:8443` 不再撞车；固定版在 0.88 隔离实例复跑 start/list_sups/stop 全部正常。\n\n## 现网状态（0.88）\n- 验收前：RUNNING :18443，supervisor 47985 / kernel 47987，health ok，安装位 rc.d sha256 71f3193b…。\n- 验收后：同上，pid 未变（现网从未重启）；rc.d 已还原（sha256 71f3193b…），`/etc/rc.conf.d/lightmem` 已删，scratch 库已 DROP。\n- 隔离实例与基线 clone 留档在 `/home/workbuddy/t0428/`（含各步骤日志）。\n\n## 遗留 / 建议另开卡\n- 根 module 缺 go.sum、kernel/auth_loopback_guard_test.go 未 gofmt：均为先存在问题，本卡按红线未动；建议另开一张「CI 卫生」卡收口。\n- 本卡 3 个提交未 push（按业主要求）；推送/合入需业主示意。",
+  "error": "",
+  "declared_paths": [
+    "integrations/lims-088-rc.d/lightmem",
+    "kernel/bootreport.go",
+    "kernel/backend_pg.go",
+    "kernel/boot_selfcheck_switch_test.go",
+    "docs/档位能力矩阵.md"
+  ],
+  "changed_files": [
+    "integrations/lims-088-rc.d/lightmem"
+  ],
+  "out_of_paths": [],
+  "lease_id": "68dfa4ba447f422abacdd896ef856b8b",
+  "fence": 1
+}
