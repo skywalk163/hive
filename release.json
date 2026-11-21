@@ -1,7 +1,7 @@
 {
-  "version": "0.16.06",
-  "commit": "550aeda1e125c8ca7f9e9c89bbefbc0920983075",
-  "published_at": "2026-11-13T02:06:11+00:00",
-  "published_by": "controller",
-  "notes": ""
+  "version": "0.16.07",
+  "commit": "b0e3d852ffd3d95f6b0ee7a3c45fc1c9680fea90",
+  "published_at": "2026-11-21T12:46:33+08:00",
+  "published_by": "WIN10",
+  "notes": "0.16.07 修合入受阻误判：land 探测按远端复核；分支未同步/依赖未关留在待合入，不再进异常"
 }
