@@ -1,0 +1,34 @@
+{
+  "task": "T-0431",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0431",
+  "base": "main",
+  "head": "97a6dcdcd4f587a2d5a90b380f9a91313fea2fbe",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-21T21:54:52+08:00",
+  "finished_at": "2026-11-21T22:03:54+08:00",
+  "duration_s": 542.5,
+  "verify": [
+    {
+      "cmd": "python 运行.py examples/test_agentE5钩子.light",
+      "code": 0,
+      "tail": [
+        "通过: 注册默认钩子通过: 修剪钩端到端通过: 压缩钩端到端--- E5 agent 钩子集成测试通过 ---"
+      ]
+    }
+  ],
+  "summary": "# T-0431 工作说明\n\n## 真因（不是「产物坏了」）\n报错 `'聊天v1' object has no attribute '调用'` 不是测试桩「少写了一个方法」——桩里本来就写了\n`段落 调用(消息, 工具, 模型)`。真正原因是光明的**方法定义名映射**：`light/src/code_generator.py`\n的 `_method_def_name_map` 把类内 `段落 调用` 按 R152-D1 编译成 Python 的 `__call__`\n（为了让「实例自身可调用」，如命名元组 `点(3,4)`）。所以实例上不存在名为「调用」的属性，\n`聊天.调用` 这种「取绑定方法再当回调传」的写法必然 AttributeError。\n注释里「全仓 `.调用(` 定义 0 处」的复核，恰好漏掉了本用例 —— 这就是它长期红的来源。\n\n## 改法（只动 examples/test_agentE5钩子.light）\n1. 两处调用点 `聊天.调用` → `聊天`（实例本身）。`运行智能体` 第 3 参数要的就是可调用对象\n   `聊天函数(消息, 工具表, 模型)`，实例经 `__call__` 正好满足签名，无需改名、无需包装函数。\n2. 在桩上方补 6 行注释，写清「为什么传实例」「__call__ 从哪来」，防止后人再把方法名改回去。\n3. 桩的行为、断言、用例结构一律未动：仍是「一轮工具调用 → post_tool 修剪」，无网络、无密钥。\n\n## 验证\n- `python 运行.py examples/test_agentE5钩子.light` → 三个用例全过，exit 0（Windows 本机）。\n- 反跑：把 `注册默认钩子(钩子)` 注释掉 → exit 1，报 `断言失败[工具结果已修剪]：文本不含片段 结果已截断`\n  说明用例确实在测「钩子注册 → 触发 → 收到事件」，不是空壳。\n- 同目录无别的用例引用 `聊天v1` / `聊天终止`（已 grep 确认）。\n\n## 风险\n- 该写法依赖 `调用→__call__` 这条映射；若将来映射表移除「调用」，本用例会重新变红（届时改方法名即可）。\n- 建议（不在本卡 paths 内，未做）：给 `_method_def_name_map` 的 `调用` 项补一条「类内定义后不可再按属性访问」的\n  语言缺陷登记，避免同类坑继续复发。",
+  "error": "",
+  "declared_paths": [
+    "examples/test_agentE5钩子.light"
+  ],
+  "changed_files": [
+    "examples/test_agentE5钩子.light"
+  ],
+  "out_of_paths": [],
+  "lease_id": "d8b26b27ca8b4ece8a560857bf918b9e",
+  "fence": 1
+}
