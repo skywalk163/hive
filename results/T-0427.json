@@ -1,0 +1,43 @@
+{
+  "task": "T-0427",
+  "agent": "teleagent-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0427",
+  "base": "main",
+  "head": "d077ec72f1024bc5ef016120f77806b72cb4c5b6",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-21T09:41:43+08:00",
+  "finished_at": "2026-11-21T10:50:32+08:00",
+  "duration_s": 4129.2,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import subprocess,sys; o=subprocess.run(['git','check-attr','eol','--','deploy/logrotate.d/lightmem'],capture_output=True,text=True).stdout; sys.exit(0 if 'eol: lf' in o else 1)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys; d=open('deploy/logrotate.d/lightmem','rb').read(); sys.exit(0 if d.endswith(bytes([10])) else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "## T-0427 完成摘要\n\n做了什么：\n1. `.gitattributes` 新增 deploy 路径级规则段（紧跟 rc.d 钉 LF 规则之后）：4 个具体 unit/timer 文件 + `deploy/logrotate.d/*`、`deploy/cron.d/*`、`deploy/newsyslog.d/*` 三个目录通配，全部 `text eol=lf`；未动任何已有扩展名规则（*.sh/*.go/*.md… 原样保留）。\n2. `deploy/logrotate.d/lightmem` 补末行换行（末字节 0x7d→0x0a，内容一字不改，diff 仅 `\\ No newline` 消失）。\n3. 新增 `scripts/check-eol-lf.sh`（选方案 B：独立脚本而非塞进 ci-linux-smoke，避免动 E 线文件）：POSIX sh 零依赖，对 7 个目标文件检查「无 CR + 末字节 0x0a」；`deploy/README.md` 末尾新增「EOL 门禁」一节说明用法与同步约定。\n\n验证（全在本机，判据为 python3+git，无 POSIX 假红风险）：\n- 卡面判据 1（check-attr 输出 `eol: lf`）：exit 0；判据 2（末字节 0x0a）：exit 0。\n- `git ls-files --eol` 改前→改后：7 个目标文件 `attr/text=auto w/crlf` → `attr/text eol=lf w/lf`（含 newsyslog.d/lightmem.conf）。\n- `git add --renormalize .` 波及范围恰好 4 个允许路径文件，无任何超范围 diff（无二进制/png 受影响）。\n- 脚本正跑（本机 Git Bash，MINGW64）：PASS=14 FAIL=0 exit=0；反跑：故意把 deploy/lightmem.service 改成 CRLF+去末换行 → FAIL=2 exit=1，git checkout 恢复后复绿 PASS=14 exit=0。反跑污染已清，工作树与改后预期一致。\n\n遗留与说明：\n- `.gitattributes` 自身仍是 `* text=auto w/crlf`（与改前一致，索引 LF，无回归；未加自身规则，遵循最小改动）。\n- 未来新增 deploy/*.service 等需同步 `.gitattributes` 规则与脚本 `TARGETS` 清单（README 已写明约定）。\n- 验证环境为本机 Git Bash（MSYS POSIX 工具链），未在 0.88/0.86 真机复跑——脚本只用 tr/cmp/tail/od，POSIX 基础工具，无平台特有语法。\n\n> AI生成",
+  "error": "",
+  "declared_paths": [
+    ".gitattributes",
+    "deploy/logrotate.d/lightmem",
+    "deploy/README.md",
+    "scripts/check-eol-lf.sh",
+    "scripts/ci-linux-smoke.sh"
+  ],
+  "changed_files": [
+    ".gitattributes",
+    "deploy/README.md",
+    "deploy/logrotate.d/lightmem",
+    "scripts/check-eol-lf.sh"
+  ],
+  "out_of_paths": [],
+  "lease_id": "d26cf6817fa94ca8a46a2044e5db16cd"
+}
