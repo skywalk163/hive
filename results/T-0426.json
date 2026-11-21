@@ -1,0 +1,44 @@
+{
+  "task": "T-0426",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0426",
+  "base": "main",
+  "head": "865e27fbf1cc2b9c64fde759b3da6477ec5ca519",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-21T09:37:19+08:00",
+  "finished_at": "2026-11-21T09:42:51+08:00",
+  "duration_s": 332.5,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import sys; s=open('deploy/lightmem.service',encoding='utf-8').read(); sys.exit(0 if 'StandardOutput' in s or 'SyslogIdentifier' in s else 1)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys; s=open('deploy/README.md',encoding='utf-8').read(); sys.exit(0 if 'SystemMaxUse' in s or 'StandardOutput' in s else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0426 summary — lightmem Linux 日志口径定夺（journald vs 文件）\n\n## 结论\n\n**选方案甲：两个 systemd unit 显式 `StandardOutput=/StandardError=append:` 到 `/var/log/lightmem.log`、`/var/log/lightmem-mcp.log`，由 logrotate 按日回收。**\n不选 journald 作为业务日志主通道。两个 unit 口径一致（都 append，不混 journald）。\n\n为什么：\n- 已交付的 `deploy/logrotate.d/lightmem` 之前是空转（文件不存在 + missingok 静默跳过），方案甲让它轮转真实日志；\n- 每服务独立配额（日切、保留 7 份、gzip），运维可直接 `ls/tail`，不依赖全局 journal 配额；\n- 实测 `append:`（O_APPEND）与 `copytruncate`（同 inode 原地截断）**不打架**：轮转后 fd 仍有效、继续写新末尾、无空洞。\n  真正会打架的是 `create`（rename+新建），所以配置必须保留 `copytruncate`。\n\n代价（已写进文档）：\n- 需要 systemd >= 240（`append:` 语法）；\n- systemd 的 `Started/Stopped` 等生命周期消息仍在 journald，业务行不再进 journalctl；\n- 文件由 systemd 以 `root:root` 创建（`lightmem.service` 受 `UMask=0027` 影响为 0640），\n  `User=lightmem` 不影响可写性，**不需要**把 `/var/log` 加进 `ReadWritePaths`。\n\n## 先量的事实（Ubuntu 24.04.4 / systemd 255，192.168.0.86）\n\n- 改前：`/var/log/lightmem*.log` 不存在（仅 T-0417 遗留的空文件/旧档）；业务日志只在 journald。\n- `journalctl --disk-usage` = **8.0M**；`/var/log/journal` 在根分区（8.7G），\n  `journald.conf` 无有效配置（全注释，仅 `ForwardToSyslog=yes`）\n  → 默认 `SystemMaxUse` = 10% × 8.7G ≈ **870MiB**（未触 4G 上限），默认 `MaxRetentionSec=0`（不按时间过期）。\n- 单服务量：`journalctl -u lightmem.service -o export | wc -c` ≈ **491,774 B / 13,170 条**；\n  `lightmem-mcp.service` ≈ **10,957 B**。\n- 改前 `systemctl is-active`：两个服务都 active；`/opt/lightmem` 不存在（该机是 quickstart 渲染的 `/home/workbuddy/lightmem/_lightmem_run` 布局）。\n\n## 重启后实测（真机，`systemctl daemon-reload && restart`）\n\n把仓库模板的三条指令按同样的渲染语义补到 86 上已安装的两个 unit（备份在 `/tmp/lmtest_lightmem*.service.bak`），\n`daemon-reload` 后重启两个服务（2026-11-21 01:41:37 起）：\n\n```\n--- active ---\nactive\nactive\n--- files right after restart ---\n-rw-r--r-- 1 root root 479 Nov 21 01:41 /var/log/lightmem-mcp.log\n-rw-r----- 1 root root 444 Nov 21 01:41 /var/log/lightmem.log\n--- generate traffic (/readyz x3, /healthz) ---\nreadyz=200 readyz=200 readyz=200 healthz=200\n--- files after traffic ---\n-rw-r--r-- 1 root root 479 /var/log/lightmem-mcp.log\n-rw-r----- 1 root root 875 /var/log/lightmem.log\n  10 /var/log/lightmem.log\n--- tail lightmem.log ---\n2026/11/21 01:41:41 [access] method=GET path=/readyz status=200 ...\n--- journal since restart (business [access] lines should be gone) ---\nNov 21 01:41:38 ub86 systemd[1]: Started lightmem.service - LightMem (LIMS) memory kernel (REST).\n（之后无新增 [access]；只剩 systemd 生命周期消息）\n```\n\n结论：服务仍 active，业务行落文件，journald 侧只剩生命周期消息。\n\n## logrotate 真轮转实测（`logrotate -f /etc/logrotate.d/lightmem`，装的是本卡改动后的规则）\n\n```\nBEFORE lightmem.log: bytes=875 inode=78687 lines=10\nBEFORE lightmem-mcp.log: bytes=479 inode=78737 lines=5\nlogrotate rc=0\nAFTER lightmem.log: bytes=0 inode=78687      # copytruncate，inode 不变\nAFTER lightmem-mcp.log: bytes=0 inode=78737\nlightmem.log.1 = 875B（内容完整，末行是轮转前的 [access]）\n再打流量 3s 后：lightmem.log bytes=431 inode=78687 du=431   # 继续写、无空洞（du == size）\n第二次 -f：lightmem.log.1 -> lightmem.log.2.gz（373B，gzip -t OK）\n           lightmem-mcp.log 为空被 notifempty 跳过（符合预期）\nservice still active: active active\n```\n\n`systemd-analyze verify`（已安装 unit 与仓库模板）均 **rc=0**，只有模板因本机没装 `/opt/lightmem` 的\n“Command ... is not executable” 环境告警，无新增 error。\n两条验收判据本地均为 `rc=0`。\n\n## 改动文件（仅卡内允许路径）\n\n- `deploy/lightmem.service`：加 `StandardOutput/StandardError=append:/var/log/lightmem.log`、`SyslogIdentifier=lightmem` + 口径注释\n- `deploy/lightmem-mcp.service`：同上，路径 `/var/log/lightmem-mcp.log`、`SyslogIdentifier=lightmem-mcp`\n- `deploy/logrotate.d/lightmem`：头部改为“真实在轮转”；写清 append+copytruncate 为什么兼容、为什么不能用 create；保留 `su root root`\n- `deploy/logrotate.d/README.md`：三行运维答案 + 30 天结论 + 新实测记录；标注 `lm_logrotate_install` 必须带 src\n- `deploy/README.md`：第 9 条由“登记不改”改为“已定夺”，补方案对比、三行答案、journald 残余治理（`SystemMaxUse`/`MaxRetentionSec`）\n\n## 30 天后一句话\n\n只剩最近 7 份（第 8 天起最旧一份被 logrotate 删除），体积约 `7 × 单日日志量`（旧档 gzip），删除者是 logrotate，不是 journald。\n\n## 遗留 / 未做（不硬凑）\n\n- `deploy/platform.sh` 的 `lm_logrotate_install` 无 src 时的内置规则**没有 `su root root`**，在 Debian/Ubuntu 会因父目录权限被整条跳过。\n  该文件不在本卡允许路径，只在两份 README 里标注“必须带 src 调用”，未改代码。\n- `/var/log/lightmem-watchdog.log` 不在这两个 unit 的日志口径内，也不在本卡允许路径，未纳入轮转。\n- 86 上为了真机验证改了 `/etc/systemd/system/lightmem*.service`（已备份到 `/tmp/lmtest_lightmem*.service.bak`），\n  旧测试日志移到 `/tmp/lm-prev-logs/`；仓库改动不含这些临时件。",
+  "error": "",
+  "declared_paths": [
+    "deploy/lightmem.service",
+    "deploy/lightmem-mcp.service",
+    "deploy/logrotate.d/lightmem",
+    "deploy/logrotate.d/README.md",
+    "deploy/README.md"
+  ],
+  "changed_files": [
+    "deploy/README.md",
+    "deploy/lightmem-mcp.service",
+    "deploy/lightmem.service",
+    "deploy/logrotate.d/README.md",
+    "deploy/logrotate.d/lightmem"
+  ],
+  "out_of_paths": [],
+  "lease_id": "da4c15f48b10417e8f7068bab66a8343"
+}
