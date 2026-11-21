@@ -1,0 +1,41 @@
+{
+  "task": "T-0434",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0434",
+  "base": "main",
+  "head": "1a05267a28b55f72a1a61575c33bed2106a9974d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-21T23:03:02+08:00",
+  "finished_at": "2026-11-21T23:08:29+08:00",
+  "duration_s": 327.4,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import subprocess,sys; d=subprocess.run(['git','diff','origin/main...HEAD','--','src/code_generator.py'],capture_output=True,text=True).stdout; bad=[l for l in d.splitlines()      if l[:1] in '+-' and not l.startswith(('+++','---'))      and l[1:].strip() and not l[1:].strip().startswith('#')]; sys.exit(0 if not bad else 1)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys; s=open('src/code_generator.py',encoding='utf-8').read(); ok = ('__call__' in s) and ('集合工具.light' in s or '3 处' in s)      and ('AttributeError' in s or '实例' in s); sys.exit(0 if ok else 1)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys,re; s=open('src/code_generator.py',encoding='utf-8').read(); m=re.search(r'`段落 调用/缺失/取属性` 定义 0 处', s); sys.exit(1 if m else 0)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0434 订正 code_generator.py 的过期注释\n\n## 做了什么\n\n- 只改 `src/code_generator.py` 中 `_method_def_name_map` 的注释（原 224-226 行）：把\n  「2026-10-15 复核、定义 0 处」的绝对断言改成带日期/口径的**快照说法**，并写明现状已漂移。\n- 新增事实：R152 收口（2026-10-16，`af3783192`）次日在 `stdlib/集合工具.light` 落地 3 处定义\n  —— 第 33 行 `段落 缺失(键):`、第 191 行 `段落 取属性(名):`、第 209 行 `段落 调用(*值们):`；\n  它们是本映射三键的**使用者/受益者**，属按设计生效；调用侧仍 0 处，无既有语义迁移。\n- 补最关键的坑：类内 `段落 调用` 编译成 `__call__` 后，实例上不存在名为 `调用` 的属性，\n  `实例.调用` 取属性会 `AttributeError`；要当回调传就传**实例本身**（T-0431 结论）。\n- 补重新核实口径（定义 / 调用两条 grep，及排除目录），便于下次复跑。\n\n**未改任何可执行代码**，未动 `_method_def_name_map` 的键值（`'缺失'/'取属性'/'调用'` 三行原样），\n未改 `stdlib/集合工具.light`，未对 light 仓做 rebase/push 等任何本地状态操作。\n\n## 验证\n\n实跑扫描（本 worktree，范围 `*.light`，排除 `.git`/`node_modules`/`__pycache__`/`_*_scratch`/`_archive`）：\n\n```\n定义处\nstdlib/集合工具.light:33: 段落 缺失(键):\nstdlib/集合工具.light:191: 段落 取属性(名):\nstdlib/集合工具.light:209: 段落 调用(*值们):\n\n调用处（`.调用(` / `.缺失(` / `.取属性(`）\n（无输出，0 处）\n```\n\n三条 verify 的本地等价实跑（Windows 用 `C:\\Python314\\python.exe`，`git diff origin/main` 含工作区改动）：\n\n```\n# 1) 变更行必须全是注释行\nBAD 0\nexit=0\n\n# 2) 三要素齐备（__call__ / 集合工具.light 或 3 处 / AttributeError 或 实例）\nok True\nexit=0\n\n# 3) 旧断言 '`段落 调用/缺失/取属性` 定义 0 处' 不再出现\nfound False\nexit=0\n```\n\ndiff 逐行核对：`src/code_generator.py` 的所有新增/删除行均以 `#` 开头，无空白改动、无代码改动。\n\n## 没做 / 风险\n\n- **未改** `src/code_generator.py:387` 附近另一条同类绝对断言：注释称「全仓 stdlib 无 `取可选`\n  定义/暴露，调用即 AttributeError」。实测 `stdlib/builtins.py:2179` 已有 `def 取可选(...)`；\n  「是否已暴露/映射是否仍悬空」需进一步判定，且涉及运行时语义，不在本卡（纯注释卡）内处理。\n  建议另开一张卡核实并订正该注释。\n- `src/code_generator.py:272` 的「全仓已确认无代码依赖名为 `正则` 的独立模块」是带 Day1 日期的\n  设计说明，本次未复核该断言，仅登记。\n- 本地未 push；commit/push 由 `hive_submit` 完成。",
+  "error": "",
+  "declared_paths": [
+    "src/code_generator.py"
+  ],
+  "changed_files": [
+    "src/code_generator.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "c8ac6fd156624be7923456e5a1077c15"
+}
