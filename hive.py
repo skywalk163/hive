@@ -59,7 +59,7 @@ from pathlib import Path
 # 版本号：MAJOR.MINOR.PATCH，**PATCH 固定两位**（0.16.00 / 0.16.01 …）。
 # 集群升级要跨机器比较版本，字符串比较会在 "0.16.10" vs "0.16.9" 上出错，
 # 所以统一解析成整数三元组再比（parse_version / compare_versions）。
-VERSION = "0.16.06"
+VERSION = "0.16.07"
 VERSION_RE = re.compile(r"^(\d+)\.(\d{1,2})\.(\d{1,2})$")
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
@@ -4500,7 +4500,7 @@ class Hive:
             if (st not in ("done", "closed") and res_d
                     and res_d.get("status") == "done"):
                 try:
-                    ready, block = self._land_probe(tid, c, res_d, cards)
+                    ready, block, _kind = self._land_probe(tid, c, res_d, cards)
                     if not ready:
                         warns.append(f"{tid}: 结果 done 但不能合入 —— {block}")
                 except Exception as exc:  # noqa: BLE001 —— 体检不能被单卡拖崩
@@ -5634,33 +5634,65 @@ class Hive:
         return rows
 
     def _land_probe(self, tid: str, card: dict, res: dict,
-                    cards: dict) -> tuple[bool, str]:
+                    cards: dict) -> tuple[bool, str, str]:
         """「结果 done」的卡到底能不能 land —— 看板不该只凭结果 JSON 就说待合入。
 
         以前 `result_status === 'done'` 就进「待合入」列，可结果可能只有 JSON、
         代码分支根本没推到协同服务器（T-0320 / 0324 / 0326）；人复制了合入
         指令，跑出来却是 blocked。这里按 land 的真实前置条件核一遍。
+
+        返回 (ready, block, kind)。kind 给看板分列用：
+          dep / branch / repo —— 只是「还没到齐」（依赖未关、分支未同步或未补推），
+                                属于待合入，不是异常；
+          self-check         —— 结果与分支不是同一棵树 / 零改动，才是要人看的异常。
+
+        T-0425：以前只查 `refs/remotes/<remote>/task/<tid>`（本机跟踪引用），
+        主控/看板机的克隆只要还没 fetch（sync-repos 有 1800s 节拍），就会把
+        已经推到 Gitea 的分支报成「没有分支，请交付机补推」，把待合入列刷成
+        异常列。现在本地没有就逐个远端 `git fetch` 这一个分支（顺带 base），
+        拿不到再 `ls-remote` 确认一次；远端确实没有才判 branch。
         """
         for dep in (card.get("depends_on") or []):
             if (cards.get(dep) or {}).get("state") != "done":
-                return False, f"依赖未 close: {dep}"
+                return False, f"依赖未 close: {dep}", "dep"
         try:
             repo = self.code_repo(card.get("repo") or "")
         except HiveError as e:
-            return False, str(e)
+            return False, str(e), "repo"
         remotes = code_remotes(repo)
         if not remotes:
-            return False, "代码仓没有配置远端"
+            return False, "代码仓没有配置远端", "repo"
+        base_name = card.get("base") or "main"
         ref = next((f"{n}/task/{tid}" for n in remotes
                     if rev_parse(repo, f"refs/remotes/{n}/task/{tid}")), None)
         if not ref:
-            return False, f"代码仓没有 task/{tid} 分支（请交付机补推）"
+            # 本机跟踪引用可能只是滞后：按远端真实情况再确认一次
+            for name in remotes:
+                try:
+                    git_net(["fetch", "--no-tags", name,
+                             f"+refs/heads/task/{tid}:"
+                             f"refs/remotes/{name}/task/{tid}",
+                             f"+refs/heads/{base_name}:"
+                             f"refs/remotes/{name}/{base_name}"], repo)
+                except HiveError:
+                    pass
+                if rev_parse(repo, f"refs/remotes/{name}/task/{tid}"):
+                    ref = f"{name}/task/{tid}"
+                    break
+                # fetch 失败（网络抖动/权限）时再用 ls-remote 判「远端到底有没有」
+                if remote_branch_head(repo, f"task/{tid}", name):
+                    return True, "", ""
+        if not ref:
+            return (False,
+                    f"远端（{', '.join(remotes)}）都没有 task/{tid} 分支"
+                    f"（交付机还没推，或本机还没同步；先 hive sync-repos 再核）",
+                    "branch")
         remote_name = ref.split("/", 1)[0]
-        base = f"{remote_name}/{card.get('base') or 'main'}"
+        base = f"{remote_name}/{base_name}"
         ok, err = guard_land_self_consistency(
             repo, tid, base, res, bool(card.get("allow_empty_diff")),
             task_ref=ref)
-        return (True, "") if ok else (False, err)
+        return (True, "", "") if ok else (False, err, "self-check")
 
     # -- T-0353：统一同步节拍（status / sync-repos 共用） -------------------- #
     def _sync_gate(self, purpose: str = "status", *, force: bool = False,
@@ -5871,8 +5903,10 @@ class Hive:
             # 避免对 200 张历史卡逐个访问代码仓。
             land_ready = None
             land_block = ""
+            land_block_kind = ""
             if res.get("status") == "done" and state not in ("done", "closed"):
-                land_ready, land_block = self._land_probe(tid, c, res, cards)
+                land_ready, land_block, land_block_kind = self._land_probe(
+                    tid, c, res, cards)
             # 失败性质：新结果读标注，历史结果按 verify 输出回溯（T-0342/0344）
             fk = result_failure_kind(res)
             rows.append({
@@ -5921,6 +5955,7 @@ class Hive:
                 # 看板靠这三个字段区分「结果交了」和「真的能合入」
                 "land_ready": land_ready,
                 "land_block": land_block,
+                "land_block_kind": land_block_kind,
                 # T-0353：旧布尔字段保留（旧看板 / MCP 缓存仍在读），
                 # 新结构化对象给 T-0354 看板读；两者同时存在。
                 "local_stale": local_stale,

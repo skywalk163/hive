@@ -441,6 +441,22 @@ def test_app_js_merge_button_for_merging_cards():
     assert "主控 agent" in copy
 
 
+def test_blocked_merging_card_stays_merging_but_copies_note():
+    """T-0425：分支未同步 / 依赖未关只是「还没到齐」，留在待合入列。
+
+    只有 self-check（结果与分支不是同一棵树 / 零改动）才进异常列；受阻的
+    待合入卡不给「复制合入指令」，改为「复制受阻说明」（含 sync-repos / 补推指引）。
+    """
+    cls = js_function("classify")
+    assert "land_block_kind === 'self-check'" in cls
+    assert "return 'merging'" in cls
+    card = js_function("cardInner")
+    assert "data-copy-blocked" in card
+    assert "复制受阻说明" in card
+    copy = js_function("copyDispatch")
+    assert "blockedMergeText" in copy
+
+
 def test_app_js_renders_stage_badge_and_dispatched_to():
     """stage 徽标 + dispatched 卡的 dispatched_to 都要渲染。"""
     badge = js_function("stageBadge")

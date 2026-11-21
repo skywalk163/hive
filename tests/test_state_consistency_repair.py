@@ -171,6 +171,7 @@ def test_status_exposes_land_probe_and_stale_fields(world):
     row = next(r for r in rows if r["id"] == "T-9006")
     assert "land_ready" in row
     assert "land_block" in row
+    assert "land_block_kind" in row
     assert "local_stale" in row
 
 
@@ -193,4 +194,54 @@ def test_status_marks_result_without_code_branch_as_unlandable(world):
     row = next(r for r in world.hive_json("status") if r["id"] == "T-9007")
     assert row["result_status"] == "done"
     assert row["land_ready"] is False
+    assert row["land_block_kind"] == "branch"
     assert "task/T-9007" in row["land_block"]
+
+
+def test_status_sees_remote_branch_even_if_local_clone_not_fetched(world):
+    """T-0425：主控机克隆没 fetch 时，不能把已推到远端的 task 分支报成「没分支」。
+
+    交付机（另一台机器）把 task/<tid> 推到 Gitea 后，看板机的本地
+    `refs/remotes/origin/task/<tid>` 要等下一次 sync-repos（1800s 节拍）才有。
+    旧实现只看这个本地引用，于是结果 done 的卡被刷成「请交付机补推」异常；
+    现在本地没有就按远端 fetch / ls-remote 复核，确认存在即视为可合入。
+    """
+    import json
+
+    world.add_agent("a1")
+    world.add_task("T-9008", title="远端有分支但本机没 fetch", paths=["x.py"])
+    world.sync()
+
+    # 用独立克隆造并推分支，不碰看板机解析到的代码仓（模拟跨机交付）
+    pusher = world.root / "pusher"
+    _git(world.root, "clone", "-q", str(world.code_origin), str(pusher))
+    _git(pusher, "config", "user.name", "t")
+    _git(pusher, "config", "user.email", "t@t")
+    _git(pusher, "checkout", "-q", "-b", "task/T-9008")
+    (pusher / "x.py").write_text("print('x')\n", encoding="utf-8")
+    _git(pusher, "add", "-A")
+    _git(pusher, "-c", "user.name=t", "-c", "user.email=t@t",
+         "commit", "-q", "-m", "x")
+    head = _git(pusher, "rev-parse", "HEAD")
+    _git(pusher, "push", "-q", "origin", "task/T-9008")
+
+    result = {
+        "task": "T-9008", "status": "done", "head": head,
+        "branch": "task/T-9008", "changed_files": ["x.py"],
+        "verify": [{"cmd": "python -m pytest -q", "code": 0}],
+    }
+    hive.commit_file_to_ref(
+        world.hive1, "results/T-9008.json", json.dumps(result),
+        "res/T-9008", "origin/main", "result T-9008", force=True)
+    world.sync()
+
+    # 前提：看板机解析到的代码仓确实还没有这条跟踪引用
+    repo = world.code_clone("a1")
+    assert _git(repo, "for-each-ref",
+                "refs/remotes/origin/task/T-9008") == ""
+
+    row = next(r for r in world.hive_json("status") if r["id"] == "T-9008")
+    assert row["result_status"] == "done"
+    assert row["land_ready"] is True
+    assert row["land_block"] == ""
+    assert row["land_block_kind"] == ""

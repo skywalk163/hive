@@ -22,8 +22,8 @@
   var COLUMNS = [
     { key: 'ready', title: '待领取', hint: 'state = ready 且无人抢锁' },
     { key: 'running', title: '进行中', hint: '已抢锁 / assigned / running，暂无结果' },
-    { key: 'merging', title: '待合入', hint: '结果 done、代码分支已核验到位（land_ready），可跑 hive land；分支缺失的卡会进异常列' },
-    { key: 'abnormal', title: '异常', hint: 'failed / env-failed（判据在本机跑不动）/ blocked / 租约过期 / 不可合入；卡片上带责任 agent 与时间预算' },
+    { key: 'merging', title: '待合入', hint: '结果 done 等合入；分支未同步 / 未补推、依赖未关闭也算待合入（卡片上写明受阻原因），只有结果与分支不是同一棵树才进异常' },
+    { key: 'abnormal', title: '异常', hint: 'failed / env-failed（判据在本机跑不动）/ blocked / 租约过期 / 交付质量不可合入；卡片上带责任 agent 与时间预算' },
     { key: 'recent', title: '最近完成', hint: '已完成中按完成时间倒序的前 N 个（数量可在设置里改）' },
     { key: 'closed', title: '已关闭', hint: '其余已完成的任务（默认折叠）', collapsible: true }
   ];
@@ -255,6 +255,8 @@
       land_ready: (t.land_ready === false) ? false
                   : (t.land_ready === true) ? true : null,
       land_block: t.land_block || '',
+      // 受阻性质：dep/branch/repo=还没到齐（待合入，不是异常）；self-check=交付质量问题
+      land_block_kind: t.land_block_kind || '',
       local_stale: !!t.local_stale,
       stale_suspected: !!t.stale_suspected,
       result_agent: t.result_agent || '',
@@ -298,10 +300,14 @@
     if (t.result_status === 'failed' || t.state === 'blocked' || isStale(t)) return 'abnormal';
     if (t.result_status === 'done') {
       // 「结果 JSON 写了 done」不等于「代码分支到了协同服务器」。后端
-      // land_ready=false 时若仍放进「待合入」，人会复制一条必然 blocked 的
-      // 合入指令（T-0320 / T-0324 / T-0326 反复踩过）。land_ready 为 undefined
-      // 表示老版本后端没给这个字段，按旧行为处理，避免整列消失。
-      if (t.land_ready === false) return 'abnormal';
+      // land_ready=false 时仍留在待合入列，但改成「复制受阻说明」，不给一条
+      // 必然 blocked 的合入指令（T-0320 / T-0324 / T-0326 的教训）。
+      // 只有 self-check（结果与分支不是同一棵树 / 零改动）才是真要人处理的
+      // 异常；依赖未关闭、分支未同步 / 未补推只是「还没到齐」，不该把待合入
+      // 的卡刷进异常列（T-0425：主控机 fetch 滞后导致老出现这种假异常）。
+      if (t.land_ready === false) {
+        return t.land_block_kind === 'self-check' ? 'abnormal' : 'merging';
+      }
       return 'merging';
     }
     if (t.claim_agent || t.state === 'assigned' || t.state === 'running') return 'running';
@@ -742,13 +748,19 @@
     // 待合入的卡复制的是「给主控 agent 的合入指令」（让它跑 hive land），
     // 其余状态复制派发指令 —— 文案跟着语义走，别再让主控收到一句「请领取任务」。
     var chatN = chatCountFor(t.id);
-    var isMerging = col === 'merging';
+    // 受阻的待合入卡不复制合入指令（那条命令必然 blocked），改为复制受阻说明。
+    var blockedMerge = col === 'merging' && t.land_ready === false;
+    var isMerging = col === 'merging' && !blockedMerge;
     h += '<div class="card-copy">' +
-      '<button type="button" class="act act-copy" data-copy="' + esc(t.id) +
-      '" title="' + (isMerging
-        ? '把合入指令复制到剪贴板，粘给主控 agent 执行 hive land 合入'
-        : '把这张卡的派发指令复制到剪贴板，粘到 agent 对话框即可') + '">' +
-      (isMerging ? '复制合入指令' : '复制派发指令') + '</button>' +
+      '<button type="button" class="act act-copy" data-copy="' + esc(t.id) + '"' +
+      (blockedMerge ? ' data-copy-blocked="1"' : '') +
+      ' title="' + (blockedMerge
+        ? '复制受阻说明：为什么还不能合入 + 下一步（同步 / 补推）'
+        : (isMerging
+          ? '把合入指令复制到剪贴板，粘给主控 agent 执行 hive land 合入'
+          : '把这张卡的派发指令复制到剪贴板，粘到 agent 对话框即可')) + '">' +
+      (blockedMerge ? '复制受阻说明' : (isMerging ? '复制合入指令' : '复制派发指令')) +
+      '</button>' +
       '<button type="button" class="act act-chat" data-chat="' + esc(t.id) +
       '" title="打开这张卡的留言线程：留提示 / 看 agent 的疑问">讨论' +
       (chatN ? '<span class="n">' + chatN + '</span>' : '') + '</button>' +
@@ -837,7 +849,23 @@
     }, 2000);
   }
 
+  /** 待合入但受阻（分支没同步 / 依赖没关）时复制的说明：不给合入命令，只给下一步 */
+  function blockedMergeText(t) {
+    return t.id + ' 结果已 done，暂不能合入：' + (t.land_block || '原因未知') + '\n' +
+      '下一步：主控机先跑 hive sync-repos 再刷新看板；确认分支确实缺失时，' +
+      '请交付机补推 git push <远端> HEAD:refs/heads/task/' + t.id + '。';
+  }
+
   function copyDispatch(tid, btn) {
+    if (btn && btn.getAttribute('data-copy-blocked')) {
+      var t = findTask(tid) || {};
+      return writeClipboard(blockedMergeText(t)).then(function () {
+        flashCopied(btn);
+        flash('已复制 ' + tid + ' 的受阻说明（含同步 / 补推指引）');
+      }).catch(function (e) {
+        flash('复制失败：' + ((e && e.message) ? e.message : e), true);
+      });
+    }
     fetch('/api/dispatch-prompt?task=' + encodeURIComponent(tid),
           { cache: 'no-store', headers: { Accept: 'application/json' } })
       .then(function (r) {
@@ -1877,9 +1905,12 @@
     h += '<div class="drawer-body">';
 
     h += '<div class="drawer-copy">' +
-      '<button type="button" class="act act-copy" data-copy="' + esc(t.id) + '">' +
+      '<button type="button" class="act act-copy" data-copy="' + esc(t.id) + '"' +
+      (col === 'merging' && t.land_ready === false ? ' data-copy-blocked="1"' : '') + '>' +
       (col === 'shelved' ? '复制搁置说明'
-        : (col === 'merging' ? '复制合入指令' : '复制派发指令')) + '</button>' +
+        : (col === 'merging'
+          ? (t.land_ready === false ? '复制受阻说明' : '复制合入指令')
+          : '复制派发指令')) + '</button>' +
       '<button type="button" class="act act-chat" data-chat="' + esc(t.id) + '">讨论' +
       (chatCountFor(t.id) ? '<span class="n">' + chatCountFor(t.id) + '</span>' : '') +
       '</button>' +

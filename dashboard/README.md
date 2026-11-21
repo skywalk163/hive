@@ -99,7 +99,9 @@ owner, claim_agent, claimed_at, lease_until, stale, depends_on[],
 result_status(done|failed|""), duration_s, head, verify[{cmd, code, tail[], env_error?}],
 result_summary, summary（旧字段，仅用于搜索）
 shelved_at, shelved_from, shelve_reason（搁置卡才有；旧快照缺字段时显示「未填原因」）
-land_ready(true|false|null), land_block（结果 done 且卡面未关时的可合入性探测）
+land_ready(true|false|null), land_block, land_block_kind(dep|branch|repo|self-check)
+（结果 done 且卡面未关时的可合入性探测；dep/branch/repo 只是还没到齐，
+  看板留在「待合入」并写明受阻原因，只有 self-check 才进异常列）
 failure_kind(environment|mixed|""), verify_env_errors[{cmd, code, kind, reason}],
 env_error_hint, result_error, verdict_mismatch(bool)
 ```

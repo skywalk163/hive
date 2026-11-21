@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.16.07 — 2026-11-21
+
+### Fixed
+
+- **「待合入」被误刷进「异常」列：看板只查本机跟踪引用，主控机没 fetch 就报
+  「代码仓没有 task/<tid> 分支（请交付机补推）」**（T-0425 现场）。
+  交付机把分支推到 Gitea 后，看板机（另一台机器）的
+  `refs/remotes/origin/task/<tid>` 要等下一次 `sync-repos`（T2 1800s 节拍）
+  才有；`_land_probe()` 只看这个本地引用，于是结果已 done 的卡被当成
+  「分支不存在」直接进异常列。0.88 实测：快照 11:27 里 T-0425 / T-0427
+  都报这条，而两分支早已在远端；该仓最后一次 fetch 是 10:49，早于两张卡
+  的完成时间（10:50、11:08）——纯粹是本地视图滞后。
+
+  修法两层：
+  - `_land_probe()` 本地找不到引用时，按 `code_remotes()` 逐个
+    `git fetch <remote> +refs/heads/task/<tid>:refs/remotes/<remote>/task/<tid>`
+    （顺带 base），fetch 不成再 `ls-remote` 复核；远端确实没有才判缺失。
+    返回 `kind`：`dep` / `branch` / `repo` 是「还没到齐」，`self-check` 才是
+    结果与分支不是同一棵树 / 零改动这类交付质量问题。
+  - `status` 新增 `land_block_kind`；看板据此分列：`dep`/`branch`/`repo`
+    留在「待合入」并写明受阻原因（复制按钮改为「复制受阻说明」，给
+    `hive sync-repos` / 补推指引，不再给一条必然 blocked 的 `hive land`），
+    只有 `self-check` 进「异常」列。与 `hive_tui` 的口径（结果 done 未关
+    就是待合入）对齐。
+
+  回归：`tests/test_state_consistency_repair.py` 新增
+  「远端有分支但本机没 fetch 时仍判可合入」，并钉住缺分支时
+  `land_block_kind == "branch"`。
+
 ## 0.16.06 — 2026-11-13
 
 ### Fixed
