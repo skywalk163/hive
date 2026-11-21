@@ -1,0 +1,51 @@
+{
+  "task": "T-0433",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0433",
+  "base": "main",
+  "head": "bb01945fa9e5e202461589dfdb03c5da61527a81",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-21T21:54:04+08:00",
+  "finished_at": "2026-11-21T22:18:31+08:00",
+  "duration_s": 1467.6,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import sys,os,re; gm=open('go.mod',encoding='utf-8').read() if os.path.exists('go.mod') else ''; gs=open('scripts/gate.sh',encoding='utf-8').read() if os.path.exists('scripts/gate.sh') else ''; has_replace = bool(re.search(r'^replace\\s+github\\.com/lightmem/kernel\\s*=>', gm, re.M)); has_skip = bool(re.search(r'SKIP_ROOT_MODULE|GATE_SKIP_ROOT|跳过根 module|skip_root', gs)); sys.exit(0 if (has_replace or has_skip) else 1)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys,re; s=open('scripts/gate.sh',encoding='utf-8').read(); m=re.search(r'GATE_FMT_MAX:-([0-9]+)', s); sys.exit(0 if (m is not None and m.group(1)=='0') else 1)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys,os; fs=[f for f in ['deploy/README.md','AGENTS.md'] if os.path.exists(f)]; ok=any(('两个 module' in open(f,encoding='utf-8').read()         and 'gate.sh' in open(f,encoding='utf-8').read()         and 'kernel' in open(f,encoding='utf-8').read()) for f in fs); sys.exit(0 if ok else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0433 交付摘要 —— CI 卫生：修根 module 的 kernel 依赖 + gofmt\n\n## 结论\n\n**方案甲（go.mod 加 `replace` 指向本地 kernel）**，`sh scripts/gate.sh` 从基线 **PASS 8 / FAIL 7**\n变为 **PASS 15 / FAIL 0 / SKIP 0（EXIT=0）**，真正全绿。\n\n- 改动仅 4 个文件：`go.mod`（+2 行）、`kernel/auth_loopback_guard_test.go`（gofmt 自动改 2 行）、\n  `CONTRIBUTING.md`、`AGENTS.md`（文档）。\n- **未动** `scripts/gate.sh`（判定逻辑与 module 发现范围均未改）、未动任何 Go 业务逻辑、\n  未动 `go.sum`、未用 `GATE_STRICT_FMT=0` / `GATE_FMT_MAX` 放水。\n- 根 module 真正跑起来后 **`go test ./...` 全 PASS**（2/2 module），\n  **没有**暴露被掩盖的既有测试失败——原本担心的「不可控工作量」没有发生。\n\n## 为什么选方案甲\n\n`require github.com/lightmem/kernel v0.0.0` 的 `v0.0.0` 是占位版本号，网络上永远拉不到；\nmonorepo 的标准做法就是 `replace` 到本地目录。方案乙（gate 跳过根 module）是掩盖：\n`eval/` 下约 12 个 import kernel 的文件将永远不被编译/测试。实测加 replace 后\n根 module 的 build / vet / test 全绿，说明修复成本就是这一行。\n\n## 基线（8a9d699，FreeBSD 15.1 / go1.25.14）\n\n```\n[0] go 版本 (要求 >= 1.25)                       PASS  (go1.25.14)\n[1] gofmt -l 本轮新增文件                      PASS  (0 文件待格式化)\n[1b] gofmt -l 全仓 (严格)                        FAIL  (1 文件待格式化（阈值 0）)\n       ./kernel/auth_loopback_guard_test.go\n[2] go vet ./... (逐 module)                        FAIL  (1/2 失败: .)\n[3] go build ./... (逐 module)                      FAIL  (1/2 失败: .)\n[4] go test -count=1 ./... (逐 module)              FAIL  (1/2 失败: .)\n[5] go test -count=1 -race (kernel)                  PASS  (无竞态)\n[6] 新增文件测试覆盖 (阈值 12)             PASS\n[7] 红线抽查 (只增不改白名单)             PASS  (未设 R15_BASELINE / R14_BASELINE，跳过)\n[7b] 受控修改审计 (kernel/writepolicy.go)      INFO  (无基线，跳过)\n[7b] 受控修改审计 (kernel/metrics.go)          INFO  (无基线，跳过)\n[7b] 受控修改审计 (eval/polaris/polaris_mergence.go) INFO  (无基线，跳过)\n[8] 投毒检测                                     PASS  (poison_detect_test.go 全 PASS)\n[9] 合并度激活                                  FAIL  (v3 评测失败或未产出报告)\n[9] 合并度激活 (v2 反向)                      FAIL  (v2 评测失败或未产出报告)\n[10] 接线默认关                                 PASS  (drift_pipeline / flush_pipeline 测试全 PASS)\n[11] PG 真机往返                                 PASS  (真机往返 13 项全 PASS（SKIP=0）)\n[12] PG 夹具残留检查                           FAIL  (测试残留非零或检查失败（详见记录）)\nPASS: 8     FAIL: 7     SKIP: 0    模块数: 2\nEXIT=1\n```\n\n7 条 FAIL 的真实原因（与 T-0428 的归类一致，实测订正如下）：\n\n| 门禁项 | 实测原因 |\n|---|---|\n| `[1b]` | `kernel/auth_loopback_guard_test.go` 行尾注释对齐不符合 gofmt（唯一 1 个文件） |\n| `[2] [3] [4]` | 根 module：`missing go.sum entry for module providing package github.com/lightmem/kernel` |\n| `[9] ×2` | 同上（`eval/polaris/polaris_mergence.go` 无法编译） |\n| `[12]` | 同上（`eval/e2e/pg` setup failed，并非真的残留非零） |\n\n> 订正点：`[12]` 基线的 FAIL 文案是「测试残留非零」，实测是 `[setup failed]`（同一缺 go.sum），\n> 不是残留脏数据。\n\n## 改动 1：根 go.mod 加 replace（方案甲）\n\n```diff\n@@ -32,3 +32,5 @@ require (\n \tmodernc.org/strutil v1.2.0 // indirect\n \tmodernc.org/token v1.1.0 // indirect\n )\n+\n+replace github.com/lightmem/kernel => ./kernel\n```\n\n`go.sum` 零改动（replace 到本地目录不需要 go.sum 条目，实测 build/vet/test 均通过）。\n\n## 改动 2：gofmt（`gofmt -w kernel/auth_loopback_guard_test.go`）\n\n```diff\n@@ -17,8 +17,8 @@\n \t\t\" 127.0.0.1:8080 \", // 前后空格\n \t}\n \t非回环 := []string{\n-\t\t\"\",                // 空串\n-\t\t\":8080\",           // 全省略接口 = 0.0.0.0\n+\t\t\"\",      // 空串\n+\t\t\":8080\", // 全省略接口 = 0.0.0.0\n \t\t\":18444\",\n \t\t\"0.0.0.0:8080\",\n \t\t\"[::]:8080\",       // IPv6 未指定地址\n```\n\n全仓 `gofmt -l` 改动后为 0：\n\n```\n$ gofmt -l $(find . -name '*.go' -not -path './vendor/*')\n（空输出）\n```\n\n## 改动 3/4：文档（「两个 module 事实」）\n\n`AGENTS.md` 开发约定新增：\n\n> **两个 module 事实（跑门禁前必读）**：本仓库有**两个** Go module——根 module `lightmem`\n> （`eval/` 等）和 `kernel/`（`github.com/lightmem/kernel`）。根 `go.mod` 里的\n> `require github.com/lightmem/kernel v0.0.0` 是永远拉不到的占位版本，靠\n> `replace github.com/lightmem/kernel => ./kernel` 指向本地。`sh scripts/gate.sh`\n> 会**自动发现全部 go.mod 并逐个跑** vet/build/test（两个 module 各一遍），\n> 所以根目录也能直接 `go build ./...`；内核单独的构建/测试仍可 `cd kernel && go test ./...`。\n\n`CONTRIBUTING.md` 的「构建」段落同步改写（原文「没有 replace、必须在 kernel/ 下跑」已过时），\n明确「两个 module」+ `replace` + `scripts/gate.sh` 自动逐 module、以及 `kernel/` 单独构建仍照旧。\n\n## 改动后门禁（完整输出，FreeBSD 15.1 / go1.25.14）\n\n```\n[0] go 版本 (要求 >= 1.25)                       PASS  (go1.25.14)\n[1] gofmt -l 本轮新增文件                      PASS  (0 文件待格式化)\n[1b] gofmt -l 全仓 (严格)                        PASS  (0 文件待格式化（阈值 0）)\n[2] go vet ./... (逐 module)                        PASS  (2/2 通过)\n[3] go build ./... (逐 module)                      PASS  (2/2 通过)\n[4] go test -count=1 ./... (逐 module)              PASS  (2/2 通过 (-count=1))\n[5] go test -count=1 -race (kernel)                  PASS  (无竞态)\n[6] 新增文件测试覆盖 (阈值 12)             PASS  (forgetting_drift,flush,edge_persist,edge_persist_pg,poison_detect,drift_pipeline,flush_pipeline,backend_qdrant:4,node_role:4,topology:3,connector_app:4,auth:12,mcp:12,workflow:12,lookup:12,reindex:12,access:12,refstore:12,sqlite_vector:15,visibility_tenant:4,pg_superuser_check:4,visindex:3,vector_cache:5,health_probe:6,scheduler:6,drain:6,scan_batched:8,bootreport:6,healthz_options:9（纯测试：edge_persist_pg,workflow,visibility_tenant）)\n[7] 红线抽查 (只增不改白名单)             PASS  (未设 R15_BASELINE / R14_BASELINE，跳过)\n[7b] 受控修改审计 (kernel/writepolicy.go)      INFO  (无基线，跳过)\n[7b] 受控修改审计 (kernel/metrics.go)          INFO  (无基线，跳过)\n[7b] 受控修改审计 (eval/polaris/polaris_mergence.go) INFO  (无基线，跳过)\n[8] 投毒检测                                     PASS  (poison_detect_test.go 全 PASS)\n[9] 合并度激活                                  PASS  (v3: l2=144 edges=10.125 groups=24)\n[9] 合并度激活 (v2 反向)                      PASS  (v2 上 l2_memories/mean_edges_per_memory/entity_groups 仍为 0)\n[10] 接线默认关                                 PASS  (drift_pipeline / flush_pipeline 测试全 PASS)\n[11] PG 真机往返                                 PASS  (真机往返 13 项全 PASS（SKIP=0）)\n[12] PG 夹具残留检查                           PASS  (测试残留为 0（1 项检查通过）)\n\n========== R15 门禁矩阵 ==========\nPASS: 15    FAIL: 0     SKIP: 0    模块数: 2\n[1b] 全仓 gofmt：硬门禁（默认；阈值 0；GATE_STRICT_FMT=0 可回退观测期）\n===================================\nEXIT=0\n```\n\n对照表：\n\n| | 本卡前（8a9d699） | 本卡后 |\n|---|---|---|\n| PASS | 8 | 15 |\n| FAIL | 7 | 0 |\n| SKIP | 0 | 0 |\n\n## 根 module 真正跑起来后的测试结果\n\n```\n$ cd <repo> && go test -count=1 ./...\nok / PASS：2/2 module（根 module 与 kernel 各一遍，详见 [4] 行）\n$ go build ./...\nrc=0（根 module 与 kernel）\n$ go vet ./...\nrc=0\n```\n\n未发现被掩盖的既有失败，无需开后续卡。\n\n## 复现方式（本卡实测机）\n\nFreeBSD 15.1（fb98，192.168.0.88），go1.25.14：\n\n```sh\nsh scripts/gate.sh        # PASS 15 / FAIL 0 / SKIP 0，EXIT=0\n```\n\nWindows 侧只做编辑与传输（无 go 工具链，POSIX 判据不可用），与仓库红线 2 一致。\n\n## 红线自查\n\n- 未改 kernel 业务代码、未改任何 `*.go` 逻辑（`auth_loopback_guard_test.go` 仅 gofmt 空白对齐）。\n- `go.mod` 仅 +1 条 `replace`；`go.sum` 零改动。\n- `scripts/gate.sh` **零改动**。\n- 未用 `GATE_STRICT_FMT=0`、未调 `GATE_FMT_MAX`。\n- 未触碰 FreeBSD 0.88 的现网服务；只在 `~/t0433` 临时工作树跑门禁。",
+  "error": "",
+  "declared_paths": [
+    "go.mod",
+    "go.sum",
+    "scripts/gate.sh",
+    "kernel/auth_loopback_guard_test.go",
+    "deploy/README.md",
+    "CONTRIBUTING.md",
+    "AGENTS.md"
+  ],
+  "changed_files": [
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "go.mod",
+    "kernel/auth_loopback_guard_test.go"
+  ],
+  "out_of_paths": [],
+  "lease_id": "30508c9da8bb4e38bfac82a2b4a8103a",
+  "fence": 1
+}
