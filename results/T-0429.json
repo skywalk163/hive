@@ -1,0 +1,59 @@
+{
+  "task": "T-0429",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0429",
+  "base": "main",
+  "head": "4a9c091dc212d871f0a2818cda60363565285b13",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-21T20:48:01+08:00",
+  "finished_at": "2026-11-21T21:08:43+08:00",
+  "duration_s": 1242.2,
+  "verify": [
+    {
+      "cmd": "python 运行.py examples/test_设置页.light",
+      "code": 0,
+      "tail": [
+        "test_设置页 通过 断言数=153",
+        "--- 测试设置页 通过 ---"
+      ]
+    },
+    {
+      "cmd": "python 运行.py examples/test_设置插件页.light",
+      "code": 0,
+      "tail": [
+        "全部通过！断言数=57"
+      ]
+    },
+    {
+      "cmd": "python 运行.py examples/test_预设切换.light",
+      "code": 0,
+      "tail": [
+        "===== 第 104 轮任务线 A：会话内切换 agent preset =====",
+        "test_预设切换 通过 断言数=68",
+        "--- 测试预设切换 通过 ---"
+      ]
+    }
+  ],
+  "summary": "# T-0429 操作说明：注册表规模断言改为不变量\n\n## 改了什么（仅 5 个允许文件）\n\n把「写死 33 / 29 / 150」换成从同一数据源实算的关系式或不变量，不再把「结果」当「约定」：\n\n- `examples/test_设置页.light`\n  - 4a~4d：`按模式[x]` 改为 `组合统计(x)[\"插件行\"] + [\"声明\"]`（展平后 = 声明行 + 插件行）。\n  - 4k：概览 minimal 展平后同上式。\n  - 5b：页面按模式与 `内置插件按模式()[\"standard\"]` 同源对比。\n- `examples/test_设置页深化.light`\n  - 2b2~2b5：概览展平后改为 `组合统计(x)` 实算。\n  - 2e：成员计数改为 `长度(挂扁平标识表(\"standard\", 空))`；2i minimal 同理。\n  - 新增 `从 预设挂载过滤 导入 挂扁平标识表`。\n- `examples/test_设置插件页.light`\n  - T15：行集条数 == 挂扁平标识表长度。\n  - T22~T25：叶子改为「非空 + 不超过插件行数」两条不变量（叶子是插件行子集）。\n  - T26：`标叶 != 展平后`，保留两口径不混算的对照。\n  - T29：会话计数 == 挂扁平标识表实算。\n- `examples/test_web路由.light`\n  - R107 叶子计数 == 挂扁平标识表实算。\n  - 顺带修同例里同源的 `R107_预设页_内置四卡`（写死 4，实际 8）→ `长度(预设清单())`；该断言原先被叶子失败挡住，修完才暴露。\n- `examples/test_预设切换.light`\n  - 删除 `长度(条目表)==150` 硬数；保留「条目表 == 注册表.名单()」自洽断言，另加「条目表非空」不变量。关键工具存在性仍由 10b~10b5 覆盖。\n\n## 验证（Windows，worktree base ff2950b）\n\n五条判据命令全部 rc=0：\n\n```\ntest_设置页.light      rc=0  断言数=153\ntest_设置页深化.light  rc=0  断言数=201\ntest_设置插件页.light  rc=0  断言数=57\ntest_预设切换.light    rc=0  断言数=68\ntest_web路由.light     rc=0  （仅清理 _w3_sess 目录时 WinError 145 非致命告警）\n```\n\n反跑（临时 detached worktree，跑完已删除，未进交付）：\n\n1. 按卡面口径在 `组装注册表` 多加一个工具（不映射任何预设叶子）：**5 条全绿**。\n2. 额外探针：在 `预设组合.标准/编码` 行表各加一行（模拟 patch 声明增长）：设置页/深化 的计数断言全绿；但 `4h standard≠cordis` 因只改了两种模式而相撞。该断言是「四模式数量互不相同」的产品约定，不属于本次要拆的硬数，故保留；完整增删（四模式同步增长或只动 registry）不会触发。\n\n## 环境与偏离\n\n- 本机 store 后端不可用（leader 租约 0 / `HTTP None`），claim / take / submit 均用 `HIVE_CLAIM_BACKEND=git` 走 Git 租约；未改任何集群/agent 配置。\n- 未改 `src/`、未动其它任务卡、未写入 token/密钥。\n- 判据是纯 `python 运行.py`，Windows 上无 POSIX 依赖，故未切 192.168.0.88 复跑。",
+  "error": "",
+  "declared_paths": [
+    "examples/test_设置页.light",
+    "examples/test_设置页深化.light",
+    "examples/test_设置插件页.light",
+    "examples/test_web路由.light",
+    "examples/test_预设切换.light"
+  ],
+  "changed_files": [
+    "examples/test_web路由.light",
+    "examples/test_设置插件页.light",
+    "examples/test_设置页.light",
+    "examples/test_设置页深化.light",
+    "examples/test_预设切换.light"
+  ],
+  "out_of_paths": [],
+  "lease_id": "9cc608b2f7ac4d3e8e9da910695b9e7b",
+  "fence": 1
+}
