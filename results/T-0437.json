@@ -1,0 +1,48 @@
+{
+  "task": "T-0437",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0437",
+  "base": "main",
+  "head": "bfda1d4fd304242490cff03b6ef3fc2847149770",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-22T07:49:58+08:00",
+  "finished_at": "2026-11-22T08:30:43+08:00",
+  "duration_s": 2446.0,
+  "verify": [
+    {
+      "cmd": "python3 -c \"import sys; s=open('hive.py',encoding='utf-8').read(); ok = ('MemoryError' in s) and ('--remote' in s) and      any(w in s for w in ['内存不足','内存耗尽','改用 --remote','试试 --remote']); sys.exit(0 if ok else 1)\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys,re; s=open('hive.py',encoding='utf-8').read(); m=re.search(r'def _pick_remote.*?(?=\\n    def )', s, re.S); sys.exit(1 if m is None else (0 if 'ls-remote' in m.group(0) or 'ls_remote' in m.group(0) else 1))\"",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys,re; s=open('hive.py',encoding='utf-8').read(); m=re.search(r'def _pick_remote.*?(?=\\n    def )', s, re.S); body=m.group(0) if m else ''; ok = ('if want:' in body) and ('没有远端' in body or 'raise HiveError' in body); sys.exit(0 if ok else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0437 交付说明（doubao-win）\n\n## 结论\n\n`_pick_remote()` 改成**惰性探测**（卡面方案甲）：先用 `ls-remote` 只取引用，命中后\n只对命中那一个远端做一次真正 `fetch`；并把 `MemoryError` / `RecursionError` 转成\n带「内存不足 + 现有远端清单 + 可照抄 `--remote` 命令」的 `HiveError`。\nland 的合并/推送/close 语义、`--remote` 的安全语义（打错即报错、不静默回落）均未改。\n\n## 选型：为什么是方案甲\n\n- 方案乙（缓存远端归属）要处理失效（分支删了/换远端/force-push），缓存脏了会\n  **静默选错远端**，风险比省下的时间大；而且首次仍要探测，救不了「第一次就崩」。\n- 方案丙（预算降级）会在「本来能合」的情况下退回首选远端，可能把分支在别的远端\n  的卡判成 blocked，属于改变结果。\n- 方案甲不引入新状态、不改判定结果，只是把「先搬对象再判断」换成「先判断再搬对象」：\n  `ls-remote` 的语义就是只列引用，天然满足「未命中的远端不承担对象传输」。\n\n## 改动\n\n| 文件 | 改动 |\n|---|---|\n| `hive.py` | `_pick_remote()` 惰性探测 + `_land_oom_hint()`（OOM 转可操作 `HiveError`） |\n| `tests/test_land_remote_lazy.py` | 新增 7 条 mock 回归（调用序列 / 显式 remote / typo / OOM / 探测失败跳过） |\n| `CHANGELOG.md` | 「未发版（随下一版发布） — 2026-11-22」条目，写清现场与修法 |\n| `docs/lessons.md` | 第五节补一条「现象 → 原因 → 以后怎么做」，让下一个人能搜到 |\n\n## 报错提示原文（改后）\n\n```\n合入失败：内存不足（fetch gitea 时耗尽）。这条仓有 3 个远端 / 32 个 worktree。\n请改用 --remote <名字> 指定远端以跳过多远端探测，例如：\nhive land <卡号> --remote gitea（现有远端：origin, gitcode, gitea）\n```\n\n（`where` 会写实际卡住的那一步：`ls-remote <name>` 或 `fetch <name>`；worktree 数\n用 `git worktree list` 现场统计，统计失败就不写这一段，不影响抛错。）\n\n## 复现：如实说明\n\n**本机没有复现出 MemoryError**：2026-11-22 本机可用内存比 11-21 现场宽裕；\nlight 仓是业务仓，按红线「不动任何业务仓」，我没有对它跑 `land` 来强行复现。\n因此**没有「旧实现崩掉」的现场输出可贴**，改用两条硬证据：\n\n1. **调用序列证据**（mock，不造大仓）：旧实现是「每个远端 fetch 一次」，\n   新实现是「命中前只 ls-remote，命中后只 fetch 一个」。\n   反跑（把探测临时改回「对每个远端都 fetch」）实测 4 条转红，见下。\n2. **真实仓端到端**：`tests/test_land_remote.py::test_land_auto_detects_remote_holding_branch`\n   用真实 git 裸仓 + 第二远端验证「不给 `--remote` 也能找到 gitcode 上的分支并合入」，\n   在 FreeBSD 15.1 上通过（10 passed 同批）。\n\n## 两种走法的实测输出\n\n同一批在 0.88（FreeBSD 15.1, Python 3.12.13）跑：\n\n```\n$ python3 -m pytest tests/test_land_remote_lazy.py tests/test_land_remote.py -q -o addopts=\n..........                                                               [100%]\n10 passed in 18.77s\n```\n\n- 不指定 remote（自动探测）：`test_land_auto_detects_remote_holding_branch` ——\n  dry-run `status=would-merge`、`remote=gitcode`；`--apply` 后 gitcode 的 main 前进、\n  origin 的 main 不动、卡变 done。\n- 指定 remote（`--remote gitcode`）：`test_land_explicit_remote_is_honored_and_typo_is_fatal`\n  —— 只推 gitcode，并提示 origin 怎么对齐；`--remote gtcode` 直接 blocked 且列出真实远端。\n\n## 新增回归（7 条，全绿）\n\n```\n$ python3 -m pytest tests/test_land_remote_lazy.py -q -o addopts=\n7 passed in 7.26s\n```\n\n- 3 远端、第 2 个命中：`fetch` 序列 == `[\"gitcode\"]`，`ls-remote` 序列 ==\n  `[\"origin\", \"gitcode\"]`，gitea 连探测都没有；\n- 第 1 个命中：调用序列恰好 `ls-remote origin` → `fetch origin`；\n- 显式 `--remote gitea`：调用序列恰好 `fetch gitea`，零 `ls-remote`；\n- 远端名打错：零网络调用，直接 `HiveError` 并列出现有远端；\n- `ls-remote`/`fetch` 阶段抛 `MemoryError`：转成 `HiveError`，含「内存不足」、\n  `--remote`、`hive land`、三个远端名；\n- 某远端 `HiveError`（断网）：跳过它，继续在下一个远端命中。\n\n## 反跑（故意改坏实现，证明测试真会红）\n\n把探测临时改成「先对每个远端 fetch 一遍，再 ls-remote 探测」：\n\n```\nFAILED tests/test_land_remote_lazy.py::test_probe_only_reads_refs_and_fetches_the_hit_remote\nFAILED tests/test_land_remote_lazy.py::test_first_remote_hit_never_touches_others\nFAILED tests/test_land_remote_lazy.py::test_fetch_memory_error_also_becomes_hint\nFAILED tests/test_land_remote_lazy.py::test_probe_network_error_skips_remote_and_continues\n4 failed, 3 passed in 7.09s\n```\n\n还原后 `7 passed in 7.26s`。失败信息里能直接看到多出来的\n`['fetch origin','fetch gitcode','fetch gitea']`。\n\n## 回归面\n\n在 0.88 上跑 land 相关与接口相关：\n\n```\n$ python3 -m pytest tests/test_land_remote_lazy.py tests/test_land_remote.py \\\n    tests/test_shelve.py tests/test_fence.py tests/test_state_consistency_repair.py \\\n    tests/test_docs.py tests/test_version_consistency.py -q -o addopts=\n44 passed in 76.50s\n```\n\n（Windows 本机同一批里两条 `test_land_remote.py` 集成用例会红：卡的 verify 用\nPOSIX `true`，Windows 没有 —— 卡面已提示的「平台判据假红」，不是产物问题；\n这两条在 0.88 上通过。）\n\n## 判据（三条）本机与 0.88 均 exit 0\n\n- `MemoryError` + `--remote` + 「内存不足」齐备；\n- `_pick_remote` 函数体内有 `ls-remote`；\n- `_pick_remote` 函数体内有 `if want:` 且 `raise HiveError`（/「没有远端」）。\n\n## 没做 / 风险\n\n- **没有做方案乙/丙**，理由见上；如果以后再出现「ls-remote 也很贵」的场景\n  （远端极多），再考虑加缓存，但要配「缓存失效可验证」的测试。\n- **没有对 light 仓跑真实 land**（红线：不动业务仓）。真实大仓的收益只能用\n  调用序列证据 + 真实裸仓集成测试间接证明。\n- 全量测试跑在 0.88 的后台日志：`/tmp/t0437_full.log`（结果附在提交后回报里）。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "tests/",
+    "CHANGELOG.md",
+    "docs/"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/lessons.md",
+    "hive.py",
+    "tests/test_land_remote_lazy.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "27ca39e977ed4663bc8eaeb76e7e24e6",
+  "fence": 1
+}
