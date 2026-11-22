@@ -1,5 +1,36 @@
 # Changelog
 
+## 未发版（随下一版发布） — 2026-11-22
+
+### Fixed
+
+- **`hive land` 在多远端大仓上裸抛 `MemoryError`，报错完全不指向真实原因，
+  且探测阶段把每个远端都 `fetch` 一遍**（T-0437，2026-11-21 合 T-0434 实测）。
+  light 仓 3 个远端（gitea / gitcode / origin）/ 32 个 worktree / 101.71 MiB
+  packs：`python hive.py land T-0434` 稳定崩 `MemoryError`；带 traceback 时直接
+  进程级退出（Windows `0xC0000409`）。加 `--remote gitea` 立刻就好 —— 因为
+  `--remote` 跳过 `_pick_remote()` 的探测循环，只 fetch 指定的那一个。
+
+  修法两层：
+  - **惰性探测**：`_pick_remote()` 不再对每个远端 `fetch --prune` 全量对象，改成
+    先 `git ls-remote --heads <remote> refs/heads/<branch>` **只取引用**判断分支
+    在不在；命中后只对**命中那一个**远端做一次真正的 `fetch --prune`。第 1 个就
+    命中时，其它远端连 `ls-remote` 都不会发。全都探测不到时退回首选远端，并只
+    对首选远端 fetch 一次（保持 base 引用不过期，与旧行为一致）。
+  - **失败可诊断**：探测/fetch 期间的 `MemoryError`（及其近亲 `RecursionError`）
+    不再裸抛，转成 `HiveError`：说明是「内存不足（探测远端时耗尽）」、带上
+    远端数与 worktree 数、**列出全部可用远端名**，并给出可直接照抄的
+    `hive land <卡号> --remote <名字>`。
+
+  安全语义不变：显式 `--remote` 仍只认它，名字不存在直接报错、不静默回落；
+  land 的合并/推送/close 语义一行未动。
+
+  回归：`tests/test_land_remote_lazy.py` 用 mock 记录 `git_net` 调用序列，钉住
+  「3 远端、第 2 个命中 → 只 fetch 命中那个」「显式 `--remote` 不进探测循环」
+  「打错远端名零网络请求直接报错」「OOM 转成带远端清单的提示」；反跑（把探测
+  改回对每个远端都 fetch）实测 4 条转红。FreeBSD 15.1 上
+  `tests/test_land_remote.py` + 新文件共 10 passed。
+
 ## 0.16.07 — 2026-11-21
 
 ### Fixed
