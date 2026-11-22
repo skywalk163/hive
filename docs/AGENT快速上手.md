@@ -334,6 +334,28 @@ python3 hive.py mcp --agent <名字> --dir /path/to/hive
 | `T-xxx 已经有结果或已关闭` | 重复领取/提交 | 要重跑找总控 `hive_retry` |
 | `verify` 红了 | 代码没改对，或验收命令本身写错 | 先手跑一遍命令，区分是哪种 |
 | `paths 越界` | 改了声明外的文件 | 回退越界改动，或找总控改卡 |
+| `集群进程在跑（PID 1556）但暂未响应`，可 8788 根本连不上 | pid 号码被别的程序复用了 | 看提示里的身份证据；新版会自动清理并继续启动，见 §6.1 |
+| `未结束进程：PID xxx 现属于 …` | `cluster.pid` 指向的已不是本节点 hived | 只清理了 pid 文件、没杀进程；用 `cluster status` 确认真进程，见 §6.1 |
+
+### 6.1 集群起不来 / 停不掉，先看 `cluster.pid` 里的身份
+
+`cluster.pid` 现在写的是 **JSON 身份**，不是裸号码：
+
+```json
+{"schema": 1, "pid": 1234, "started_at": 1795272875.6, "argv": ["hive.py", "cluster", "serve"],
+ "node_id": "DESKTOP-xxx-8a3bf94c", "version": "0.16.07"}
+```
+
+判活必须三层都过，任何一层不符都算「陈旧」：`/api/cluster/health` 短超时能回 → 命令行含
+`hive.py` 且是 `cluster`/`serve` → 进程创建时间与 `started_at` 相差 ≤5s。
+
+- 看到「检测到陈旧 pid：1556 现属于 msedge.exe …，已清理并继续启动」，说明 hived 早死了、
+  号码被浏览器之类复用。**不用手工删文件，更不要 `taskkill` 那个号码**，`start` 会自己清理并拉起。
+- 看到「集群进程在跑但暂未响应」，且提示里写了「身份校验通过」，才是真在跑只是这一拍没响应；
+  这时不要连拉第二个（会抢端口 + 抢 sqlite），确需重启用 `hive cluster restart`。
+- `stop` / `restart` 只对**身份校验通过**的 hived 发信号；校验不过时只删 pid 文件并打印证据，
+  **绝不 `os.kill`**。旧版留下的纯数字 pid 文件一律按「不可信」处理：若真有一台旧版 daemon 在跑，
+  需要人工结束它一次（或升级后重启节点），这是有意用「不误杀」换来的。
 
 ## 7. worker 还是 controller
 

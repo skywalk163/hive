@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import contextlib
 import hashlib
 import hmac
@@ -44,6 +45,7 @@ import json
 import os
 import random
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -1878,17 +1880,16 @@ class Cluster:
         return 0
 
     def _write_pid(self) -> None:
-        try:
-            self.config.pid_path.parent.mkdir(parents=True, exist_ok=True)
-            self.config.pid_path.write_text(str(os.getpid()), encoding="utf-8")
-        except OSError:
-            pass
+        # T-0440：写身份（pid/started_at/argv/node_id/version），不写裸号码。
+        # 裸号码一旦被系统复用，start 会误判「在跑」、stop 会误杀无关进程。
+        _write_pid_record(self.config, os.getpid(), node_id=self.node_id,
+                          argv=list(sys.argv))
 
     def _remove_pid(self) -> None:
         try:
-            if self.config.pid_path.exists():
-                if self.config.pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
-                    self.config.pid_path.unlink()
+            record = _read_pid_record(self.config)
+            if int(record.get("pid") or 0) == os.getpid():
+                self.config.pid_path.unlink()
         except OSError:
             pass
 
@@ -5871,10 +5872,19 @@ def _pid_alive(pid: int) -> bool:
         return False
     if os.name == "nt":
         try:
-            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"],
-                                 capture_output=True, text=True, timeout=3,
+            # text=True 用 locale 编码：UTF-8 模式（PYTHONUTF8=1）下 tasklist 的
+            # GBK 进程名会让 reader 线程解码报错，stdout 变成半截 —— 判活于是
+            # 对活进程返回 False（实测在本机 UTF-8 运行时复现）。改成 CSV 输出
+            # 用 csv 解析 PID 列，不再靠「输出里有没有这个数字」猜。
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}",
+                                  "/FO", "CSV", "/NH"],
+                                 capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", timeout=3,
                                  **no_window_kwargs())
-            return str(pid) in (out.stdout or "")
+            for row in csv.reader(io.StringIO(out.stdout or "")):
+                if len(row) >= 2 and row[1].strip().isdigit():
+                    return int(row[1].strip()) == int(pid)
+            return False
         except (OSError, subprocess.SubprocessError):
             return False
     try:
@@ -5884,25 +5894,303 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _read_pid(config: Config) -> int:
+# -- pid 文件：从「一个号码」升级为「进程身份」（T-0440） --------------------- #
+# 事故（2026-11-23 Windows 节点）：cluster.pid 里只剩 1556，hived 早在
+# `维护循环异常（继续）：MemoryError()` 后死掉，号码随后被 msedge.exe 复用。
+# 旧判活（`tasklist /FI "PID eq 1556"` 能查到就算活）于是：
+#   * `cluster start` 认为「进程在跑但暂未响应」，永不拉起；
+#   * `cluster stop` / `restart` 会对这个号码直接 os.kill —— 杀掉用户的浏览器。
+# 现在 pid 文件写 JSON 身份（pid/started_at/argv/node_id/version），判活必须
+# 三层都过：端口健康探活 → 命令行是 hive 的 cluster/serve → 进程创建时间与
+# 记录相差 ≤5s。旧格式（纯数字）一律按「不可信」处理：号码存在也不代表
+# 这个号码还是本节点的人。
+
+PID_FILE_SCHEMA = 1
+PID_START_TOLERANCE_S = 5.0
+
+
+def _looks_like_hived(command_line: str) -> bool:
+    """命令行是不是本节点 hived（`hive.py [--dir X] cluster serve`）。"""
+    text = str(command_line or "").lower().replace("\\", "/")
+    if not text:
+        return False
+    script = "hive.py" in text or "hive_cluster.py" in text
+    role = "cluster" in text or "hived" in text or "serve" in text
+    return script and role
+
+
+def _parse_wmic_creation(text: str) -> float:
+    """`20261123003659.004844+480` → epoch 秒（+480 = 东八区 480 分钟）。"""
+    m = re.match(r"^(\d{14})\.(\d{1,6})([+-]\d{1,4})$", str(text or "").strip())
+    if not m:
+        return 0.0
     try:
-        return int(config.pid_path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return 0
+        base = datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+        offset_minutes = int(m.group(3))
+    except ValueError:
+        return 0.0
+    frac = int(m.group(2).ljust(6, "0")) / 1_000_000.0
+    return base.replace(tzinfo=timezone.utc).timestamp() - offset_minutes * 60 + frac
+
+
+def _parse_wmic_list(text: str) -> dict | None:
+    """wmic `/format:list` 解析。
+
+    命令行里可能带换行（长 PowerShell 脚本），所以遇到「Key=」才算新字段，
+    其余行拼回上一个字段，不能逐行 `split("=")` 了事。
+    """
+    fields: dict[str, str] = {}
+    key = ""
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        m = re.match(r"^([A-Za-z]+)=(.*)$", stripped)
+        if m and m.group(1).lower() in ("processid", "name", "creationdate",
+                                        "commandline"):
+            key = m.group(1).lower()
+            fields[key] = m.group(2)
+        elif key and stripped:
+            fields[key] += "\n" + stripped
+    if "name" not in fields and "commandline" not in fields:
+        return None
+    started = _parse_wmic_creation(fields.get("creationdate", ""))
+    return {
+        "name": fields.get("name", ""),
+        "command_line": fields.get("commandline", ""),
+        "started_at": started,
+        "pid": int(fields.get("processid") or 0),
+    }
+
+
+def _powershell_exe() -> str:
+    for name in ("powershell", "pwsh"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return ""
+
+
+def _proc_info_powershell(pid: int) -> dict | None:
+    """Win11 24H2 起 wmic 被移除：用 CIM 兜底（JSON 输出，抗换行）。"""
+    exe = _powershell_exe()
+    if not exe:
+        return None
+    script = (
+        "$ErrorActionPreference='Stop';"
+        f"$p=Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}';"
+        "if($null -eq $p){exit 3};"
+        "$s=[double](($p.CreationDate.ToUniversalTime().Ticks"
+        "-621355968000000000)/10000000.0);"
+        "[pscustomobject]@{name=$p.Name;cmd=[string]$p.CommandLine;start=$s}"
+        "|ConvertTo-Json -Compress"
+    )
+    try:
+        out = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", script],
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=12, **no_window_kwargs())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        data = json.loads((out.stdout or "").strip() or "{}")
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not data.get("name"):
+        return None
+    try:
+        started = float(data.get("start") or 0.0)
+    except (TypeError, ValueError):
+        started = 0.0
+    return {"name": str(data.get("name") or ""),
+            "command_line": str(data.get("cmd") or ""),
+            "started_at": started, "pid": int(pid)}
+
+
+def _proc_info_windows(pid: int) -> dict | None:
+    try:
+        out = subprocess.run(
+            ["wmic", "process", "where", f"processid={int(pid)}",
+             "get", "Name,CreationDate,CommandLine", "/format:list"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=8, **no_window_kwargs())
+        info = _parse_wmic_list(out.stdout or "")
+        if info and (info.get("name") or info.get("command_line")):
+            return info
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return _proc_info_powershell(pid)
+
+
+def _proc_info_posix(pid: int) -> dict | None:
+    try:
+        out = subprocess.run(["ps", "-p", str(int(pid)), "-o", "lstart=", "-o", "args="],
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=5,
+                             **no_window_kwargs())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (out.stdout or "").strip()
+    if not text:
+        return None
+    m = re.match(r"^(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$",
+                 text, re.S)
+    if not m:
+        return None
+    try:
+        started = float(time.mktime(time.strptime(" ".join(m.group(1).split()),
+                                                 "%a %b %d %H:%M:%S %Y")))
+    except (ValueError, OverflowError):
+        started = 0.0
+    cmd = m.group(2).strip()
+    name = Path(cmd.split(" ")[0].strip("\"'")).name if cmd else ""
+    return {"name": name, "command_line": cmd, "started_at": started,
+            "pid": int(pid)}
+
+
+def _proc_info(pid: int) -> dict | None:
+    """探测进程身份：{name, command_line, started_at}；不存在/查不到返回 None。
+
+    只用标准库 + 系统自带命令（Windows: wmic / PowerShell CIM；POSIX: ps）。
+    子进程一律走 no_window_kwargs()（T-0206：不许闪窗）。
+    """
+    if not pid or int(pid) <= 0:
+        return None
+    if os.name == "nt":
+        return _proc_info_windows(int(pid))
+    return _proc_info_posix(int(pid))
+
+
+def _read_pid_record(config: Config) -> dict:
+    """读 cluster.pid：新格式返回身份 dict；旧格式返回 {"pid": N, "legacy": True}。
+
+    旧格式**只有号码**，按卡面要求一律不可信 —— 调用方看到 legacy 就必须
+    当作「进程不在」，不能因为号码还能查到就判定在跑。
+    """
+    try:
+        raw = config.pid_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return {}
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        try:
+            return {"pid": int(raw), "legacy": True}
+        except ValueError:
+            return {}
+    # 旧文件是纯数字（`1556`），它本身就是合法 JSON —— 必须按「旧格式」拦下，
+    # 不能掉进 `not isinstance(dict)` 那个「空记录」分支里当无事发生。
+    if isinstance(data, (int, float)) and not isinstance(data, bool):
+        return {"pid": int(data), "legacy": True}
+    if not isinstance(data, dict):
+        return {}
+    try:
+        pid = int(data.get("pid") or 0)
+    except (TypeError, ValueError):
+        return {}
+    if pid <= 0:
+        return {}
+    record = dict(data)
+    record["pid"] = pid
+    return record
+
+
+def _read_pid(config: Config) -> int:
+    return int(_read_pid_record(config).get("pid") or 0)
+
+
+def _clear_pid_file(config: Config) -> None:
+    try:
+        config.pid_path.unlink()
+    except OSError:
+        pass
+
+
+def _write_pid_record(config: Config, pid: int, node_id: str = "",
+                      argv=None) -> None:
+    """落盘进程身份。`started_at` 与判活读取的是同一个探测源，误差接近 0。"""
+    if not pid or int(pid) <= 0:
+        return
+    info = _proc_info(int(pid)) or {}
+    try:
+        started = float(info.get("started_at") or 0.0)
+    except (TypeError, ValueError):
+        started = 0.0
+    payload = {
+        "schema": PID_FILE_SCHEMA,
+        "pid": int(pid),
+        "started_at": round(started or _now(), 3),
+        "argv": [str(a) for a in (argv or [])][:32],
+        "node_id": str(node_id or ""),
+        "version": CLUSTER_VERSION,
+        "written_at": _iso(),
+    }
+    try:
+        config.pid_path.parent.mkdir(parents=True, exist_ok=True)
+        config.pid_path.write_text(json.dumps(payload, ensure_ascii=False),
+                                   encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _pid_identity(pid: int, record: dict,
+                  info: dict | None = None) -> tuple[bool, str, dict | None]:
+    """三层判活的第 2/3 层：(是否本节点 hived, 给人看的一行证据, 进程信息)。"""
+    if not pid or int(pid) <= 0:
+        return False, "pid 无有效号码", None
+    if not record:
+        return False, "pid 文件为空或不可解析", None
+    if record.get("legacy"):
+        return False, "是旧格式 pid 文件（只有号码、没有进程身份），不可信", None
+    if int(record.get("pid") or 0) != int(pid):
+        return False, f"记录与当前 pid 不一致（记录 {record.get('pid')}）", None
+    if info is None:
+        info = _proc_info(int(pid))
+    if not info:
+        return False, "已不存在", None
+    if not _looks_like_hived(str(info.get("command_line") or "")):
+        return False, (f"现属于 {info.get('name') or '未知进程'}，"
+                       "命令行不是本节点 hived"), info
+    try:
+        started = float(record.get("started_at") or 0.0)
+        actual = float(info.get("started_at") or 0.0)
+    except (TypeError, ValueError):
+        started = actual = 0.0
+    if not started or not actual:
+        return False, "缺少启动时间，无法核对身份", info
+    delta = abs(actual - started)
+    if delta > PID_START_TOLERANCE_S:
+        return False, (f"启动时间与记录相差 {delta:.1f}s"
+                       f"（容差 {PID_START_TOLERANCE_S:.0f}s）"), info
+    return True, f"命令行与启动时间均匹配（差异 {delta:.1f}s）", info
 
 
 def _spawn_background(config: Config, args) -> int:
     """脱离当前会话拉起 `hive.py cluster serve`。"""
     health = _local_health(config)
     if health is None:
-        # 进程还在、只是这一拍没响应：**绝不能**再拉一个。
-        # 再拉的那个抢不到端口（Address already in use），却会打开同一个 sqlite，
-        # 把正在为公司服务的节点拖进 database is locked，然后循环恶化。
-        pid = _read_pid(config)
-        if _pid_alive(pid):
-            print(f"集群进程在跑（PID {pid}）但暂未响应，不重复拉起。"
-                  f"\n若确实卡死：hive cluster restart", file=sys.stderr)
-            return 0
+        # 「进程还在、只是这一拍没响应」**绝不能**再拉一个：再拉的那个抢不到
+        # 端口（Address already in use），却会打开同一个 sqlite，把正在为公司
+        # 服务的节点拖进 database is locked，然后循环恶化。
+        # 但「pid 号码还在」不等于「还是本节点的人」——必须先过身份校验，
+        # 否则复用了号码的 msedge 会把整个节点挡在门外（T-0440 事故）。
+        record = _read_pid_record(config)
+        pid = int(record.get("pid") or 0)
+        if pid and _pid_alive(pid):
+            ok, reason, _info = _pid_identity(pid, record)
+            if ok:
+                print(f"集群进程在跑（PID {pid}）但暂未响应："
+                      f"127.0.0.1:{config.port}/api/cluster/health 在 "
+                      f"{_health_timeout():.1f}s 内无响应（连接被拒或超时）；"
+                      f"身份校验通过（{reason}）。\n"
+                      f"不重复拉起。若确实卡死：hive cluster restart", file=sys.stderr)
+                return 0
+            print(f"检测到陈旧 pid：{pid} {reason}，已清理并继续启动")
+            _clear_pid_file(config)
+        elif pid:
+            print(f"检测到陈旧 pid：{pid} 已不存在，已清理并继续启动")
+            _clear_pid_file(config)
     if health:
         want_store = config.store_enabled or config.claim_backend == "store"
         store = health.get("store") if isinstance(health.get("store"), dict) else {}
@@ -5994,12 +6282,10 @@ def _spawn_background(config: Config, args) -> int:
         health = _local_health(config)
         if health:
             # 起来了再补写一次 PID：子进程自己写的是权威值，这里兜住
-            # 「子进程还没来得及写、但端口已在服务」的窄窗口。
+            # 「子进程还没来得及写、但端口已在服务」的窄窗口。写的仍是身份
+            # 记录（T-0440），不是裸号码，否则下一次 stop 又失去校验依据。
             if proc.poll() is None:
-                try:
-                    config.pid_path.write_text(str(proc.pid), encoding="utf-8")
-                except OSError:
-                    pass
+                _write_pid_record(config, proc.pid, argv=[str(hive_py), "cluster", "serve"])
             print(f"集群已启动：{config.name} http://127.0.0.1:{config.port} "
                   f"（日志 {config.log_path}）")
             return 0
@@ -6062,7 +6348,8 @@ def _stop_background(config: Config) -> int:
                        "reason": "cli-stop"}, 0.8, config.token)
         except Exception:  # noqa: BLE001
             pass
-    pid = _read_pid(config)
+    record = _read_pid_record(config)
+    pid = int(record.get("pid") or 0)
     if not pid:
         if health:
             print("集群在运行，但找不到 pid 文件；请手动结束进程", file=sys.stderr)
@@ -6072,10 +6359,21 @@ def _stop_background(config: Config) -> int:
         return 0
     if not _pid_alive(pid):
         print("集群未运行（pid 文件已过期）")
-        try:
-            config.pid_path.unlink()
-        except OSError:
-            pass
+        _clear_pid_file(config)
+        _mark_stopped(config)
+        return 0
+    # 最高优先的安全项（T-0440）：号码活着不代表是本节点 hived。
+    # 身份校验不过就只删 pid 文件、**绝不 os.kill** —— 否则等于「随时可能
+    # 杀掉用户正在用的任意程序」（这次差一点就杀了 msedge）。
+    ok, reason, _info = _pid_identity(pid, record)
+    if not ok:
+        _clear_pid_file(config)
+        print(f"未结束进程：PID {pid} {reason}；已只清理 pid 文件，"
+              f"未向该进程发信号", file=sys.stderr)
+        if health:
+            print("集群仍在运行（health 可通），但 pid 文件与真实进程不一致；"
+                  "请用 `hive cluster status` 确认后再手工处理", file=sys.stderr)
+            return 1
         _mark_stopped(config)
         return 0
     try:
@@ -6089,14 +6387,16 @@ def _stop_background(config: Config) -> int:
             break
         time.sleep(0.15)
     if _pid_alive(pid):
-        try:
-            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-        except OSError:
-            pass
-    try:
-        config.pid_path.unlink()
-    except OSError:
-        pass
+        # 等待期间 pid 也可能被别的进程复用，强杀前再校验一次身份。
+        ok2, _reason2, _info2 = _pid_identity(pid, record)
+        if ok2:
+            try:
+                os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            except OSError:
+                pass
+        else:
+            print(f"PID {pid} 身份在停止过程中不再匹配，跳过强杀", file=sys.stderr)
+    _clear_pid_file(config)
     print(f"集群已停止（pid={pid}）")
     _mark_stopped(config)
     return 0
