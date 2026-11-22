@@ -140,3 +140,12 @@ digest + `hive doctor` 产出增补草稿（草稿走 `hive draft` 那套流程�
   两次都靠人工 ff + close 补救。→ 0.9.12（T-0136）已修：`_sync_for_commit`
   （落后试 ff，git 保证不碰脏文件）+ land 关卡失败报 `merged-not-closed`
   （明说"已合入、没关成"并给出收尾命令）。**别扭的绕步骤别手工绕第三次。**
+- **多远端大仓上 `hive land` 不给 `--remote` 会裸崩 `MemoryError`（T-0437）**。
+  现象：light 仓（3 远端 / 32 worktree / 101.71 MiB packs）`hive land T-0434`
+  稳定报 `MemoryError`，带 traceback 时直接进程级退出（Windows `0xC0000409`），
+  看起来像机器内存不够或仓库坏了；加 `--remote gitea` 立刻成功。
+  原因：`_pick_remote()` 对每个远端都 `git fetch --prune` 一遍再探测分支，
+  等于先把所有远端对象拉一遍 —— 探测阶段的成本与「远端数 × 对象量」成正比。
+  → 已改成 `ls-remote` 惰性探测（只取引用，命中才 fetch 那一个）；OOM 也会转成
+  带远端清单 + `--remote` 用法的提示。**急用时先 `--remote` 点名**，
+  别去怀疑机器或仓库数据。

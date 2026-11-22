@@ -3086,33 +3086,87 @@ class Hive:
 
         - `want` 给了就只认它（名字不存在直接报错，不静默回落 —— 手滑打错远端名
           却「成功了」，比失败更可怕）。
-        - 没给就按 `code_remotes()` 的顺序逐个 `fetch --prune` 再看 refs/remotes/
-          <remote>/<branch_ref>：第一个命中的就是它。全都探测不到时退回首选远端，
-          让上层照旧报「没有这个分支」，但报错里会带上真实远端清单。
+        - 没给就按 `code_remotes()` 的顺序**惰性探测**：先用 `git ls-remote` 只取
+          `refs/heads/<branch_ref>` 这一条引用（不搬任何对象）判断分支在不在；
+          命中后只对**这一个**远端做一次真正的 `fetch --prune`，其余远端到此为止。
+          旧实现是每个远端都 `fetch --prune` 一遍，多远端大仓（worktree 多、对象多）
+          会在探测阶段把内存吃光（T-0437：light 仓 3 远端 / 32 worktree /
+          101.71 MiB packs，`hive land` 裸抛 MemoryError）。
+        - 全都探测不到时退回首选远端，让上层照旧报「没有这个分支」，但报错里会带上
+          真实远端清单；仍只对首选远端做一次 fetch，保持 base 引用不过期。
         - 探测失败的远端跳过并记一条日志：某个远端断网/没权限时，不该把整次 land
           堵死在它身上。
+        - 探测/fetch 期间内存不足（`MemoryError` 及其近亲 `RecursionError`）不再裸抛：
+          转成带 `--remote` 用法的 `HiveError`，并列出可用远端名（T-0437）。
         """
         remotes = code_remotes(repo)
         if not remotes:
-            raise HiveError("代码仓没有配置任何远端（git remote 为空）")
+            raise HiveError(
+                "代码仓没有配置任何远端（git remote 为空）；请先 git remote add，"
+                "或在有多远端的仓里用 --remote <名字> 指定")
         if want:
             if want not in remotes:
                 raise HiveError(
                     f"代码仓没有远端 {want!r}；现有：{', '.join(remotes)}")
-            git_net(["fetch", "--prune", want], repo)
+            try:
+                git_net(["fetch", "--prune", want], repo)
+            except (MemoryError, RecursionError):
+                raise self._land_oom_hint(repo, remotes, f"fetch {want}") from None
             return want
         for name in remotes:
             try:
-                git_net(["fetch", "--prune", name], repo)
+                probe = git_net(["ls-remote", "--heads", name,
+                                 f"refs/heads/{branch_ref}"], repo, check=False)
             except HiveError as e:
                 log(f"探测远端 {name} 失败（跳过）：{e}")
                 continue
-            if rev_parse(repo, f"refs/remotes/{name}/{branch_ref}"):
-                if name != remotes[0]:
-                    log(f"{branch_ref} 在 {name} 上（不在 {remotes[0]}），"
-                        f"本次 land 用 {name}；要改就加 --remote")
-                return name
+            except (MemoryError, RecursionError):
+                raise self._land_oom_hint(
+                    repo, remotes, f"ls-remote {name}") from None
+            # 输出为空 = 命令跑通了但远端没有这条分支（ls-remote 的既定语义）；
+            # 有输出说明分支就在这个远端上，此时才值得搬对象。
+            if not (probe.stdout or "").strip():
+                continue
+            try:
+                git_net(["fetch", "--prune", name], repo)
+            except (MemoryError, RecursionError):
+                raise self._land_oom_hint(
+                    repo, remotes, f"fetch {name}") from None
+            if name != remotes[0]:
+                log(f"{branch_ref} 在 {name} 上（不在 {remotes[0]}），"
+                    f"本次 land 用 {name}；要改就加 --remote")
+            return name
+        # 哪个远端都没有：仍对首选远端做一次真正的 fetch（与旧行为一致，保证 base
+        # 引用不过期），再把「找不到分支」交回上层
+        try:
+            git_net(["fetch", "--prune", remotes[0]], repo)
+        except (HiveError, MemoryError, RecursionError):
+            pass
         return remotes[0]
+
+    def _land_oom_hint(self, repo: Path, remotes: list[str], where: str) -> HiveError:
+        """land 探测远端时内存不足：把裸 `MemoryError` 换成能照抄的 workaround。
+
+        `MemoryError` 三个字既不说是哪一步、也不提远端，排查者第一反应会是
+        「机器内存不够」或「仓库坏了」；而且真崩成进程级时连栈都拿不到
+        （T-0437 现场）。提示里必须给出远端数、worktree 数、现成远端名和一条
+        可直接照抄的 `--remote` 命令，否则下一个人还得再踩一次。
+        """
+        try:
+            n_wt = len([ln for ln in
+                        (git(["worktree", "list"], repo, check=False).stdout or "")
+                        .splitlines() if ln.strip()])
+        except Exception:  # noqa: BLE001 —— 提示用，统计失败不影响抛错
+            n_wt = 0
+        scale = f"这条仓有 {len(remotes)} 个远端"
+        if n_wt:
+            scale += f" / {n_wt} 个 worktree"
+        example = "gitea" if "gitea" in remotes else remotes[0]
+        return HiveError(
+            f"合入失败：内存不足（{where} 时耗尽）。{scale}。"
+            f"请改用 --remote <名字> 指定远端以跳过多远端探测，"
+            f"例如：hive land <卡号> --remote {example}"
+            f"（现有远端：{', '.join(remotes)}）")
 
     def land_one(self, tid: str, apply: bool = False, note: str = "",
                  remote: str | None = None) -> dict:
