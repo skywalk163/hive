@@ -1,0 +1,40 @@
+{
+  "task": "T-0438",
+  "agent": "fb98-dsh",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0438",
+  "base": "main",
+  "head": "7fc0233816d5bf3e3ffa0530fe9b11519927d881",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-22T23:29:06+08:00",
+  "finished_at": "2026-11-22T15:52:58+00:00",
+  "duration_s": 1432.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/test_task_list_result.py -q -k \"delivery_state_table or handoff_claim or mcp\"",
+      "code": 0,
+      "tail": [
+        "............                                                             [100%]",
+        "12 passed, 17 deselected in 272.32s (0:04:32)"
+      ]
+    }
+  ],
+  "summary": "# T-0438 显示态收口：display_state 租约白名单 + MCP 同源\n\n## 做了什么（4 个文件）\n\n1. **`hive.py` — `display_state()` 的租约白名单改用 `_DELIVERY_KEEP_STATES`**\n   ```diff\n   - if claim and not res and state not in (\"done\", \"blocked\", SHELVED_STATE):\n   + if claim and not res and state not in _DELIVERY_KEEP_STATES:\n   ```\n   `closed` / `conflict` / `needs_review` 不再被未过期租约翻成 `running`。\n   这条白名单是从旧 `cmd_status` 原样搬来的，T-0435 引入 `task list` 后变成新回归；\n   `_set_state()` 不释放 claim、`cmd_close` 删 claim 失败只记日志，都是可达路径。\n\n2. **`mcp_server.py` — `HiveMcp._rows()` 改用 `Hive.display_state()`**\n   ```diff\n   - state = c.get(\"state\")\n   - if claim and not res and state != \"done\":\n   -     state = \"running\"\n   + state = h.display_state(c, claim, res)\n   ```\n   旧逻辑比 status 还宽：`shelved`/`blocked` + 租约都会 running，已 submit 的卡在 MCP 里\n   仍显示 `assigned`。现在 MCP 与 CLI `task list` / `status` / 看板同一个内核。\n\n3. **`tests/test_task_list_result.py` — 新增 5 个用例（3 个参数化 + 2 个）**\n   - `test_handoff_card_state_survives_live_claim[closed/conflict/needs_review]`：\n     卡面交接态/终态 + 未过期 claim + 无结果 → `task list` 与 `status` 都显示卡面态；\n   - `test_shelved_with_live_claim_not_running_in_mcp`：MCP 不再把 shelved 翻成 running；\n   - `test_mcp_rows_use_display_state`：MCP 显示 `submitted` / `failed`，不再停在 assigned。\n\n4. **`docs/AGENT快速上手.md` §4.6**\n   - 表格补 `needs_review`；「有租约无结果 → running」限定为 ready/assigned/running 三态；\n   - MCP 那句「仍按卡面报 state」改成「T-0438 起与 CLI 同源」。\n\n## 验证\n\n```\npython -m pytest tests/test_task_list_result.py -q \\\n  -k \"handoff_card_state_survives_live_claim or mcp or live_lease\"\n→ 6 passed, 23 deselected in 411.40s\n```\n\n**反跑（把 hive.py / mcp_server.py 还原成改动前，同一组用例）**：\n\n```\nFAILED test_handoff_card_state_survives_live_claim[closed]\n       （旧代码显示 running，断言 closed 失败）\nFAILED test_mcp_rows_use_display_state\n       （MCP 返回 {'T-0001': 'ready', 'T-0002': 'ready'}，断言 submitted/failed 失败）\n→ 2 failed in 152.64s\n```\n\n即新用例确实钉住了这两处旧行为，不是空壳。\n\n`verify` 里还带 `delivery_state_table`（10 个纯函数边界，15s 级），\n用于保证「ready+租约仍 running、终态不被盖」这些既有契约没被改坏。\n\n## 没做的事（卡面标了「顺手可做」，本卡刻意不动）\n\n- `prime_ref_cache(kinds=(\"res\",\"claim\"))` 批读 claim：store 后端实测 0.0s，不是瓶颈；\n  git 后端每卡一次 `git show`，留待需要时再优化。\n- `Hive.result_state()` 死代码：删除属清理，与本卡语义无关。\n\n## 影响面\n\n- 只改显示态推导：**不写卡面**、不动 `STATES`、不动 land/close；\n- `status` 在 conflict + 租约下会从 running 变 conflict（与 docstring 一致，属于修对）；\n- MCP 的 `owner` 字段未改（仍取卡面 owner，客户端可用 `claim_agent`）。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_task_list_result.py",
+    "docs/AGENT快速上手.md"
+  ],
+  "changed_files": [
+    "docs/AGENT快速上手.md",
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_task_list_result.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "bf48fcaa2ee4483d9b27e7f2e864cec9"
+}
