@@ -1,0 +1,47 @@
+{
+  "task": "T-0440",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0440",
+  "base": "main",
+  "head": "8698337c5f8483587a898302ae22539fabf1aa09",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-23T00:34:07+08:00",
+  "finished_at": "2026-11-23T01:05:45+08:00",
+  "duration_s": 1898.8,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_cluster_pid_liveness.py",
+      "code": 0,
+      "tail": [
+        "......                                                                   [100%]",
+        "6 passed in 5.91s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_cluster.py -k \"stop or restart or startup\"",
+      "code": 0,
+      "tail": [
+        "......                                                                   [100%]",
+        "6 passed, 97 deselected in 7.26s"
+      ]
+    }
+  ],
+  "summary": "# T-0440 cluster.pid 身份化：不再被复用的 PID 挡住 start，也不再误杀无关进程\n\n## 做了什么\n\n- `cluster.pid` 从「裸号码」升级为 JSON 身份记录（`schema/pid/started_at/argv/node_id/version/written_at`）。\n  写入方：`Cluster._write_pid` 与 `_spawn_background` 起来后的补写，统一走 `_write_pid_record()`。\n- 判活改为三层，任一不符即「陈旧」：\n  1. `/api/cluster/health` 短超时（沿用 `_health_timeout()`，默认 3s，≤5s）；\n  2. 进程命令行含 `hive.py`（或 `hive_cluster.py`）且是 `cluster`/`serve`/`hived`；\n  3. 进程创建时间与 `started_at` 相差 ≤ `PID_START_TOLERANCE_S`（5s）。\n- `start` 自愈：health 不通且 pid 号码被无关进程复用时，打印一行证据\n  `检测到陈旧 pid：<pid> 现属于 <msedge.exe>，命令行不是本节点 hived，已清理并继续启动`，\n  清掉 pid 文件后照常拉起（不再 `return 0`）。真在跑只是不响应时仍不重复拉起，但提示里带端口/超时证据并指向 `hive cluster restart`。\n- `stop` / `restart` 安全：只对身份校验通过的 hived 发 SIGTERM；校验不过只删 pid 文件、打印证据，\n  **不调用 `os.kill`**；等待 5s 后强杀前再校验一次身份，防等待期间号码被复用。\n- 旧格式纯数字 pid 文件按卡面要求一律不可信（`{\"legacy\": true}`），不因号码存在判定在跑。\n- 顺带修 `_pid_alive`：Windows 上改用 `tasklist /FO CSV /NH` + `csv` 解析 PID 列，\n  不再 `text=True` 按 locale 解码（本机 UTF-8 模式下 GBK 进程名会让 reader 线程报错、对活进程误判 False）。\n- 身份探测只用标准库 + 系统自带命令：Windows 先 `wmic ... /format:list`（命令行可含换行，按 Key= 续行解析），\n  缺失时退 PowerShell CIM（Win11 24H2）；POSIX 用 `ps -p <pid> -o lstart= -o args=`；子进程全走 `no_window_kwargs()`。\n- 文档补 `docs/AGENT快速上手.md` §6.1：pid 身份格式、三句可读证据的含义、旧格式需人工结束一次、`stop` 不误杀的边界。\n\n## 验证\n\n- 卡面判据 1：`python -m pytest -q tests/test_cluster_pid_liveness.py` → **6 passed**（Windows 本机）。\n- 卡面判据 2：`python -m pytest -q tests/test_cluster.py -k \"stop or restart or startup\"` → **6 passed, 97 deselected**。\n- 换 192.168.0.88（FreeBSD 15.1-RELEASE-p1 amd64）同三文件跑同样两条：**6 passed / 6 passed, 97 deselected**（POSIX `ps` 身份探测实测可用）。\n- 附带回归：`tests/test_control_adapter.py` 12 passed；`tests/test_docs_handbook.py` 11 passed。\n- 全量 `tests/test_cluster.py`：102 passed / 1 failed。失败的是\n  `test_stronger_reachable_peer_blocks_self_election`（选举时序），在**未改动的 main 原样仓**同样复现，与本卡无关。\n- `tests/test_no_window.py`：24 passed / 1 failed。失败的是全局扫描\n  `test_every_subprocess_call_is_guarded`，点名 `hive_autoupdate.py` / `hive_repos.py`；main 原样仓同样红，\n  本卡改动的 `hive_cluster.py` 不在名单内，`_pid_alive` 与新增探测函数都带 `no_window_kwargs()`。\n- 现场只读核查（未改运行态）：本机 `C:\\Users\\skywalk\\.hive\\cluster\\cluster.pid` 仍是旧格式 `10900`，\n  health 可通、命令行确认是真 hived。按新逻辑该旧格式在 `stop` 时会被判「不可信」→ 只清文件不发信号。\n\n## 没做 / 风险\n\n- 没有在真实节点上执行 `cluster start` / `stop` / `restart`（不在任务里重启正在服务的节点）；\n  新代码的拉起/停止路径由 monkeypatch 的单测覆盖（桩只拦 daemon 那一次 Popen，探测仍走真命令）。\n- **升级边界**：旧格式 pid + 旧版 daemon 真在跑时，`stop` 会拒绝 kill 并返回 1（安全优先），\n  需要人工结束旧进程一次；新进程起来后 pid 文件即为身份格式。文档 §6.1 已写明。\n- 探测工具都不可用时（既无 wmic 也无 PowerShell），身份按「缺启动时间」判陈旧：\n  `start` 会清理并继续拉起，`stop` 不会 kill —— 宁可多拉一次也不误杀。\n- 未触碰选举 / quorum / 租约 / store 同步语义与 store schema；无第三方依赖；只改本卡 paths 内三个文件。",
+  "error": "",
+  "declared_paths": [
+    "hive_cluster.py",
+    "tests/test_cluster_pid_liveness.py",
+    "docs/AGENT快速上手.md"
+  ],
+  "changed_files": [
+    "docs/AGENT快速上手.md",
+    "hive_cluster.py",
+    "tests/test_cluster_pid_liveness.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "c33632efcfbc4efe8aabc361838b650f",
+  "fence": 1
+}
