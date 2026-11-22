@@ -2942,7 +2942,7 @@ class Hive:
         给出不同答案；现在都从这里出。
         """
         state = self.delivery_state(card.get("state"), res)
-        if claim and not res and state not in ("done", "blocked", SHELVED_STATE):
+        if claim and not res and state not in _DELIVERY_KEEP_STATES:
             # 搁置时已经把 claim 删了，但旧快照/多机同步窗口里可能还残留一份，
             # 绝不能让它把 shelved 推导回 running（那样卡又回到「进行中」了）。
             state = "running"  # 看板推导，不写回任务卡

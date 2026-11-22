@@ -252,8 +252,8 @@ T-0435 起 `hive task list` / `hive status` 都叠了结果，显示态是推导
 |---|---|---|
 | `assigned` / `ready` / `running` | 有 | **`submitted`**（已交付，等 land/close） |
 | 同上 | 结果 `failed` | **`failed`** |
-| 有未过期租约、还没有结果 | — | `running` |
-| `done` / `closed` / `blocked` / `shelved` / `conflict` | 随便 | 卡面原样（人的决定、终态不被盖） |
+| `ready` / `assigned` / `running` + 未过期租约、还没有结果 | — | `running` |
+| `done` / `closed` / `blocked` / `shelved` / `conflict` / `needs_review` | 随便 | 卡面原样（人的决定、终态不被盖；有租约也不翻成 running） |
 
 所以：
 
@@ -266,8 +266,9 @@ python3 hive.py result T-0429             # 最权威：结果 JSON 本身
 判据一句话：**`submitted` = 交了、没合入**（可以 `hive land`）；
 `assigned` 才是「真的还没交」。`task list --state submitted` 为空 = 没有待合入的活。
 
-> MCP 的 `hive_list_tasks` 目前仍按卡面报 state（这套推导先落 CLI：`task list` /
-> `status` / 看板三处同源）。走 MCP 的 agent 判断「交没交」仍以 `hive_result` 为准。
+> MCP 的 `hive_list_tasks` 从 T-0438 起也走同一套推导（`Hive.display_state`），
+> 与 CLI `task list` / `status` / 看板同源；老版本 hive 的 MCP 仍按卡面报，见到
+> `assigned` 时以 `hive_result` 为准。
 
 ### 4.7 新仓接入三件事
 

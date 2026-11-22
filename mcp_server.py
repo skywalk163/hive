@@ -450,9 +450,10 @@ class HiveMcp:
         for tid, c in h.cards().items():
             claim = h.claim_info(tid) or {}
             res = h.result_info(tid) or {}
-            state = c.get("state")
-            if claim and not res and state != "done":
-                state = "running"
+            # 与 CLI 同一套显示态推导（T-0438）：不许再自算一套。
+            # 旧逻辑 `state != "done"` 连 shelved/blocked 都会翻成 running，
+            # 已 submit 的卡也仍报 assigned。
+            state = h.display_state(c, claim, res)
             lease_until = claim.get("lease_until")
             rows.append({
                 "id": tid,

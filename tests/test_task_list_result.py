@@ -260,3 +260,61 @@ def test_batch_prime_reads_all_results_in_one_go(world):
     assert "origin/res/T-0001:results/T-0001.json" in h._ref_cache
     assert cards["T-0001"]["state"] == "ready", "cards() 本身不改卡面（也没人领）"
     assert h.result_info("T-0001")["status"] == "done"
+
+
+# --------------------------------------------------------------------------- #
+# 判据 8（T-0438）：交接态/终态 + 未过期租约，不许被翻成 running
+# --------------------------------------------------------------------------- #
+
+def _put_claim(world, tid: str, agent: str = "fb") -> None:
+    """往协调仓推一条未过期租约（等价于 agent 刚 take）。"""
+    h = hive.Hive(str(world.hive1))
+    h.fetch()
+    hive.commit_file_to_ref(
+        h.dir, f"claims/{tid}.json",
+        json.dumps({"agent": agent, "lease_id": "L1", "fence": 1,
+                    "lease_until": "2099-01-01T00:00:00+00:00"}),
+        f"claim/{tid}", "origin/main", f"fake claim {tid}")
+    world.sync()
+
+
+@pytest.mark.parametrize("card_state", ["closed", "conflict", "needs_review"])
+def test_handoff_card_state_survives_live_claim(world, card_state):
+    """T-0438：`_set_state`/关卡的残留租约不许把人的决定推回 running。"""
+    world.add_agent("fb", mode="manual")
+    world.add_task("T-0001")
+    _set_card_state(world, "T-0001", card_state)
+    _put_claim(world, "T-0001")
+
+    assert _task_row(world, "T-0001")["state"] == card_state
+    assert _status_row(world, "T-0001")["state"] == card_state
+
+
+def test_shelved_with_live_claim_not_running_in_mcp(world):
+    """T-0438：MCP 的 `_rows` 与 CLI 同源，搁置 + 租约也是 shelved，不是 running。"""
+    import mcp_server
+
+    world.add_agent("fb", mode="manual")
+    world.add_task("T-0001", title="搁置的")
+    _set_card_state(world, "T-0001", "shelved")
+    _put_claim(world, "T-0001")
+
+    mcp = mcp_server.HiveMcp(world.hive1, "fb")
+    rows = mcp._rows(hive.Hive(str(world.hive1)))
+    assert rows[0]["state"] == "shelved", rows
+
+
+def test_mcp_rows_use_display_state(world):
+    """T-0438：MCP 也要显示 submitted/failed，不能还停在卡面 assigned。"""
+    import mcp_server
+
+    world.add_agent("fb", mode="manual")
+    world.add_task("T-0001", title="交了的")
+    world.add_task("T-0002", title="失败的")
+    _put_result(world, "T-0001", "done")
+    _put_result(world, "T-0002", "failed")
+
+    mcp = mcp_server.HiveMcp(world.hive1, "fb")
+    states = {r["id"]: r["state"] for r in mcp._rows(hive.Hive(str(world.hive1)))}
+    assert states["T-0001"] == "submitted", states
+    assert states["T-0002"] == "failed", states
