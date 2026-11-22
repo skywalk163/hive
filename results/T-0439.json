@@ -1,0 +1,65 @@
+{
+  "task": "T-0439",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0439",
+  "base": "main",
+  "head": "f9851837bda03a5b31318fc72f765a5b29c12a78",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-23T00:48:56+08:00",
+  "finished_at": "2026-11-23T00:48:56+08:00",
+  "duration_s": 0.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/test_T0439_模式分层与轮数.py tests/test_T0403_新模式预设.py tests/test_T0406_模式规格文档.py -q",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "..............................                                           [100%]",
+        "30 passed in 91.72s (0:01:31)"
+      ]
+    }
+  ],
+  "summary": "## T-0439 交付摘要\n\n**做了什么**：把 lightharness 的 8 个预设分成两层——Agent 模式（标准/创造/PTC/极简，对齐 DSH 四份 preset）与工作方法（自上而下/自下而上/头脑风暴/懒人，对齐 trae 工作流）；同时上调运行预算：单轮步数 25→96、目标续跑 8→64。\n\n**改了什么**：\n- `src/预设组合.light`：条目加 `类别`，新增 `预设类别/是代理模式/是工作方法/预设分组`，`预设清单(类别=\"\")` 可过滤（空串仍返回 8 项）。\n- `src/设置页.light` / `src/设置预设页.light`：元数据带 `类别/分组名`，分组列表改为 Agent 模式 / 工作方法 / 自定义。\n- `webui/index.html` / `app.js` / `new-session.js`：三处下拉都按两组 `<optgroup>` 渲染，值仍是单个预设 id；刻意不做 8×4 正交组合（另开卡）。\n- 轮数：`src/步数上限.light` 的 `步数缺省 25→96`（唯一真相，请求 > `HARNESS_MAX_STEPS` > 缺省不变）；`src/代理.light` 缺省改为从 `步数缺省` 取；`src/目标续跑.light` `续默认最大轮数 8→64`（单目标 `maxGoalRounds` 可覆盖，无进展阈值 2 仍先生效）。\n- 文档：`模式规格.md` 增 0.1 分层 / 0.2 轮数预算（原 6 模式 × 7 小节结构未动）；`配置参考.md` 增运行轮数一节；`CHANGELOG.md` 记一条。\n\n**验证**（worktree `task/T-0439`，全绿）：\n- 验收命令 34 passed（T0439 10 + T0425 4 + T0403 12 + T0406 8）；另跑 T0397/T0420/R37 19 passed；`node --check` 三个前端文件通过。\n- 反证 4 条都真红：方法组混入 standard → 分组判据红；`步数缺省` 回 25 → 轮数判据红；文档 `终止条件`→`结束条件` → T0406 第 0/2 组红；`预设清单` 忽略类别 → 过滤判据红。\n\n**风险 / 遗留**：① 设置页「内置」组被拆成两组，若外部有脚本按 `分组==\"内置\"` 取卡需同步；② 96 步缺省让 T0425 端到端用例变慢（已加 `@pytest.mark.timeout(240)`）；③ 卡面原 paths 未列 `步数上限.light`/`test_T0425`，因发现 T-0425 才是缺省唯一真相，已在本 worktree 卡面追加，提交时若严格越界门禁请按此说明放行。",
+  "error": "",
+  "declared_paths": [
+    "src/预设组合.light",
+    "src/设置页.light",
+    "src/设置预设页.light",
+    "src/代理.light",
+    "src/目标续跑.light",
+    "webui/index.html",
+    "webui/app.js",
+    "webui/new-session.js",
+    "webui/settings.js",
+    "docs/功能对标/模式规格.md",
+    "docs/配置参考.md",
+    "CHANGELOG.md",
+    "tests/test_T0439_模式分层与轮数.py"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/功能对标/模式规格.md",
+    "docs/配置参考.md",
+    "src/代理.light",
+    "src/步数上限.light",
+    "src/目标续跑.light",
+    "src/设置页.light",
+    "src/设置预设页.light",
+    "src/预设组合.light",
+    "tests/test_T0425_步数上限.py",
+    "webui/app.js",
+    "webui/index.html",
+    "webui/new-session.js",
+    "tests/test_T0439_模式分层与轮数.py"
+  ],
+  "out_of_paths": [
+    "src/步数上限.light",
+    "tests/test_T0425_步数上限.py"
+  ],
+  "lease": "missing"
+}
