@@ -1,0 +1,46 @@
+{
+  "task": "T-0436",
+  "agent": "workbuddyai-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0436",
+  "base": "main",
+  "head": "f5d334fba6a6a52d55a51059dee81f8e59463205",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-22T08:15:04+08:00",
+  "finished_at": "2026-11-22T08:16:25+08:00",
+  "duration_s": 81.3,
+  "verify": [
+    {
+      "cmd": "grep -q GOPROXY CONTRIBUTING.md",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "grep -q GOPROXY AGENTS.md",
+      "code": 0,
+      "tail": []
+    },
+    {
+      "cmd": "python3 -c \"import sys; s=open('scripts/gate.sh',encoding='utf-8').read(); sys.exit(0 if ('GOPROXY' in s and 'timeout' in s) else 1)\"",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0436 交付摘要 —— gate.sh 遇 Go 模块下载超时的「假红」：提示 + 文档\n\n## 结论\n\n`sh scripts/gate.sh` 现在**只在** go 步骤失败且输出命中下载失败特征时，在汇总前多打一条\n可操作提示；正常路径一个字都不多打。文档（`CONTRIBUTING.md`、`AGENTS.md`）各记了一句\n「墙内/离线先配 `GOPROXY`，看到 `[setup failed]` 先怀疑网络」。\n\n改动仅 3 个文件、+49 行、零删除，**未改任何 go 步骤的判定**，**未在 gate.sh 里硬编码\n`GOPROXY`**（默认行为不变，CI 不会漂移）。\n\n## 改动清单（严格在卡面 paths 内）\n\n1. `scripts/gate.sh`\n   - 新增 `GO_NET_HINT` 标志 + `go_net_hint_check()`：匹配\n     `i/o timeout` / `proxy.golang.org` / `dial tcp` / `[setup failed]` 任一特征即置位。\n   - 在 `[2] vet`、`[3] build`、`[4] test`、`[5] race`（真失败分支）、`[8] 投毒检测`、\n     `[10] 接线默认关` 的失败分支各调用一次（只在失败时检查）。\n   - 汇总前（`========== R15 门禁矩阵 ==========` 之前）条件打印：\n     ```\n     ！ 检测到 Go 模块下载超时：这是网络/代理问题，不是代码问题。\n        墙内或离线环境请重试：GOPROXY=https://goproxy.cn,direct sh scripts/gate.sh\n        （看到 [setup failed] 先怀疑网络，别先怀疑这批改动）\n     ```\n   - 头部「用法」补一行 `GOPROXY=https://goproxy.cn,direct sh scripts/gate.sh`。\n2. `CONTRIBUTING.md`（「跑测试」→ `gate.sh` 段落）：说明超时/`[setup failed]` 的形态、\n   重试命令，并写明 gate.sh 不改默认 GOPROXY、只在命中时提示。\n3. `AGENTS.md`（「开发约定」）：同口径的一句约定。\n\n明确**没有**做的事：没把 go 步骤改成容忍失败；没动 `[5]` 的 cgo/gcc→SKIP 语义；\n没动退出码逻辑（仍为 `FAIL>0 → exit 1`）。\n\n## 验证证据（全部在 FreeBSD 15.1 门禁机 192.168.0.88 上实跑）\n\n### 1) 卡面正式判据（原样执行，3/3 通过）\n\n```\ngrep -q GOPROXY CONTRIBUTING.md                              rc=0\ngrep -q GOPROXY AGENTS.md                                    rc=0\npython3 -c \"...('GOPROXY' in s and 'timeout' in s)...\"         rc=0\nsh -n scripts/gate.sh                                        syntax ok\n```\n\n工作目录：`/home/workbuddy/t0436-verify`（sync 到 `task/T-0436` 头 `f5d334f`）。\n\n### 2) 正常网络：提示必须**不**出现（卡面判据 1）\n\n```\nsh scripts/gate.sh            # 完整跑（含 -race）\nPASS: 15    FAIL: 0     SKIP: 0    模块数: 2\ngrep -c '下载超时' /tmp/t0436_gate_normal.log  →  0\n```\n\n```\nsh scripts/gate.sh -n         # 跳过 -race 取退出码\nPASS: 15    FAIL: 0     SKIP: 1    模块数: 2\nRC=0                          # 提示计数 0\n```\n\n### 3) 反跑：构造「下载失败」必须**命中**提示且仍非零退出（卡面判据 3）\n\n用干净模块缓存 + 指向死端口的代理复现真实网络失败（不依赖墙的真实超时）：\n\n```sh\nGOMODCACHE=/tmp/t0436_empty GOPROXY=https://proxy.golang.org,direct \\\n  HTTPS_PROXY=http://127.0.0.1:9 sh scripts/gate.sh\n```\n\n输出（节选）：\n\n```\nkernel/backend_pg.go:22:2: github.com/jackc/pgx/v5@v5.6.0: Get\n  \"https://proxy.golang.org/github.com/jackc/pgx/v5/@v/v5.6.0.zip\":\n  proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused\n...\nFAIL\tlightmem/eval/e2e/pg [setup failed]\n\n！ 检测到 Go 模块下载超时：这是网络/代理问题，不是代码问题。\n   墙内或离线环境请重试：GOPROXY=https://goproxy.cn,direct sh scripts/gate.sh\n   （看到 [setup failed] 先怀疑网络，别先怀疑这批改动）\n\n========== R15 门禁矩阵 ==========\nPASS: 5     FAIL: 10    SKIP: 0    模块数: 2\nRC=1\n```\n\n提示出现 **1** 次（汇总之前），退出码 **1**（没有把网络失败洗成绿）。\n\n### 4) 提示函数的行为单测（Windows 侧 git-bash，与 gate.sh 同一段逻辑）\n\n| 输入 | 期望 | 实测 |\n|---|---|---|\n| T-0433 的真实超时样本（`i/o timeout` + `[setup failed]`） | 命中 | 命中 |\n| 普通真回归输出（`--- FAIL: TestLookupEmpty`） | 不命中 | 不命中 |\n| `dial tcp ... connection timed out` | 命中 | 命中 |\n\n即：**真回归不会被误判成网络问题**（只是不打印提示，FAIL 判定一如既往）。\n\n## 为什么这样改（而非别的做法）\n\n- **不改判定**：把 go 步骤改成「失败也继续」会让真回归变绿，与本卡「别做」一致。\n- **不硬编码 GOPROXY**：会改变默认行为、让 CI 行为漂移；只做提示 + 文档。\n- **只在命中时打印**：正常环境零噪音；`-q` 安静模式下提示也仍可见（它只在失败时出现）。\n\n## 红线自查\n\n- 只改了卡面 `paths` 内 3 个文件；未动其它任务卡、未动 `agents/*.json`、未动任何人配置。\n- 未写入任何 token / 密钥（0.88 上用现成 SSH 免密，未取 `.env` 口令）。\n- 未触碰 0.88 现网服务：只在 `~/t0436-verify`、`~/t0436-rev` 两个临时克隆里跑。\n- 未改 `go.mod` / `go.sum` / 任何 `*.go`。",
+  "error": "",
+  "declared_paths": [
+    "scripts/gate.sh",
+    "CONTRIBUTING.md",
+    "AGENTS.md"
+  ],
+  "changed_files": [
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "scripts/gate.sh"
+  ],
+  "out_of_paths": [],
+  "lease_id": "2cef42b5f4394591a064684dcb4a8b78",
+  "fence": 3
+}
