@@ -2589,6 +2589,25 @@ HANDOFF_STATES = ("needs_review", "conflict", "blocked", "shelved")
 ERROR_STATES = ("conflict",)
 SHELVED_STATE = "shelved"                    # 单一真源，别在各处写裸字符串
 
+# 交付态（T-0435）：submit 产出的结果落在 `res/<tid>` 上，**卡面 state 不跟着改**
+# （`cmd_submit` 只推 res 分支，done 归 land/close）。于是「已 Submit」和「从没
+# 交过」在卡面上长得一模一样，读卡面的人只能靠再跑一次 `hive result` 才能分辨。
+# 这里把「履历上确实交过货」派生成一个展示态，专门给读卡面的那几个入口用：
+#   * `Hive.delivery_state()` —— 读卡面 + 结果推导（卡面不动，只读）
+#   * `hive task list` / `hive status` 共用同一个推导，两条命令的 state 列
+#     不许再打架（2026-11-21 主控连合 T-0429/0430/0431 时被「已交货却一直显示
+#     assigned」骗了三次；MCP 的卡列表仍是卡面口径，另开卡跟进）。
+# **它不进 STATES**：谁都不能把一个展示态写进卡面，终态永远只有 done/closed。
+DELIVERED_STATE = "submitted"
+# 终态：结果怎么变都不许把它们翻回去（只认卡面）。
+_TERMINAL_STATES = ("done", "closed")
+# 推导时排除的卡面态：搁置/挂起是人做过的决定，有结果也不该被一个展示态盖掉。
+_DELIVERY_KEEP_STATES = (SHELVED_STATE, "blocked", "conflict", "needs_review") + \
+    _TERMINAL_STATES
+# 各类 ref 分支上 JSON 的目录：res/<tid> → results/<tid>.json 等。
+# 加新 ref 类型时只改这一处，`prime_ref_cache` 与 `cmd_status` 都从这里取。
+_REF_FILE_DIRS = {"claim": "claims", "res": "results", "status": "status"}
+
 
 def _pct(values, p: int) -> float:
     if not values:
@@ -2743,7 +2762,33 @@ class Hive:
             data, body = parse_card(p)
             data["_body"], data["_path"] = body, p
             out[data["id"]] = self._overlay_store_state(data)
+        try:
+            self.prime_ref_cache(out)
+        except Exception as e:  # noqa: BLE001  批量读只是加速器，失败退回逐个读
+            log(f"批量预读 res 结果失败（退回逐个读）: {e}")
+            self._ref_cache = {}
         return out
+
+    def prime_ref_cache(self, cards: dict, kinds: tuple[str, ...] = ("res",)) -> bool:
+        """一次 ``git cat-file --batch`` 把多张卡的 ref 文件读进 ``_ref_cache``。
+
+        ``cmd_status`` 早就在自己的循环里做这件事（T-0219 的性能修复），但
+        ``cards()`` 的其它调用方 —— 尤其 ``task list`` / ``_status_summary``——
+        过去只读卡面，看不到「已经 submit 但还没 close」的结果（T-0435）。
+        现在统一走这里：一次批量读，结果对全部调用方可见。
+
+        返回是否真的预热成功；失败时 ``_ref_cache`` 是空 dict，``_read_ref_cached``
+        会照旧逐个 ``read_ref_file``，行为不比以前差。
+        """
+        specs = []
+        for tid in cards:
+            for kind in kinds:
+                rel = _REF_FILE_DIRS.get(kind)
+                if rel:
+                    specs.append(f"origin/{kind}/{tid}:{rel}/{tid}.json")
+        batch = read_ref_files_batch(self.dir, specs)
+        self._ref_cache = dict(batch) if batch else {}
+        return bool(batch)
 
     def card(self, tid: str) -> dict:
         p = self.dir / "tasks" / f"{tid}.md"
@@ -2844,6 +2889,95 @@ class Hive:
         if state in ("done", "closed"):
             return read_ref_file(self.dir, "origin/main", f"results/{tid}.json")
         return None
+
+    def result_state(self, tid: str, res=None):
+        """这张卡现在该显示的 state：卡面 + 「交没交货」推导（T-0435）。
+
+        背景：submit 只推 `res/<tid>`、不改卡面，于是「已提交待合入」和「从没交过」
+        在卡面上是同一种模样。2026-11-21 主控连合 T-0429/0430/0431 时三次误判成
+        「agent 没提交」，每次都去手工复核 + 代关，把自动 land 那条链废掉了。
+
+        规则（先命中先返回）：
+          * 卡面已是终态 done/closed   → 原样（结果怎么变都不翻回去）
+          * 卡面是搁置/挂起/冲突/待审   → 原样（人做过的决定不该被展示态盖掉）
+          * 有结果且状态 failed         → failed（没有对应卡面态，只能是展示态；
+                                          看板/医嘱要能一眼看见它，不能显示 assigned）
+          * 有结果且 done / 租约过期被 fence 掉 → submitted（已交付，等 land/close）
+          * 其它                        → 卡面 state 原样
+
+        为什么 fence 掉的结果也算「交过货」：worker 的租约被回收后才把结果推上来，
+        内容不能合入（landable 会拒），但它确实交过 —— 不显示就更像「没交货」。
+        """
+        if res is None:
+            res = self.result_info(tid)
+        res = res if isinstance(res, dict) else {}
+        card_state = str(self.card(tid).get("state") or "").strip().lower()
+        return self.delivery_state(card_state, res)
+
+    @staticmethod
+    def delivery_state(card_state: str, res: dict | None) -> str:
+        """``result_state`` 的纯函数内核（卡面态 + 结果 → 该显示的态）。"""
+        state = str(card_state or "").strip().lower()
+        if state in _DELIVERY_KEEP_STATES:
+            return state
+        res = res if isinstance(res, dict) else {}
+        status = str(res.get("status") or "").strip().lower()
+        if status == "failed":
+            return "failed"
+        if status == "done":
+            return DELIVERED_STATE
+        return state
+
+    def display_state(self, card: dict, claim: dict | None = None,
+                      res: dict | None = None) -> str:
+        """`status` / `task list` **唯一**的显示态推导（T-0435）。
+
+        两条规则叠加，顺序固定：
+          1. 交付态：卡面 + 结果 → ready/assigned + 结果 done ⇒ submitted
+             （见 `delivery_state`，卡面永远不改）
+          2. 租约态：租约还在、还没有结果 —— 一律按 running 显示，因为
+             worker 的取活路径看的是 claim 而不是卡面（store 后端 assign
+             根本不写卡面 owner/state）。
+        以前 `status` 自己写了一版、`task list` 只读卡面，两条命令对同一张卡
+        给出不同答案；现在都从这里出。
+        """
+        state = self.delivery_state(card.get("state"), res)
+        if claim and not res and state not in ("done", "blocked", SHELVED_STATE):
+            # 搁置时已经把 claim 删了，但旧快照/多机同步窗口里可能还残留一份，
+            # 绝不能让它把 shelved 推导回 running（那样卡又回到「进行中」了）。
+            state = "running"  # 看板推导，不写回任务卡
+        return state
+
+    def task_row(self, tid: str, card: dict, res: dict | None = None,
+                 claim: dict | None = None) -> dict:
+        """`hive task list` 的一行：卡面 + 交付态（T-0435）。
+
+        ``card`` 必须是 ``cards()`` 里那一份（store overlay 已叠好）；``res`` /
+        ``claim`` 给了就用（调用方已批量读过），没给就自己读一次。
+
+        结果里记着交货人时回填 owner：store 后端下 assign 只落 store，卡面
+        owner 可能是空的，不补就看不出「谁交的」。
+        """
+        if res is None:
+            res = self.result_info(tid)
+        res = res if isinstance(res, dict) else {}
+        claim = claim or {}
+        # 显示态与 `hive status` 同一个内核：别的命令不许再自算一套（T-0435）
+        state = self.display_state(card, claim, res)
+        owner = card.get("owner") or claim.get("agent") or ""
+        if state in (DELIVERED_STATE, "failed") and not owner:
+            owner = str(res.get("agent") or "")
+        return {
+            "id": tid,
+            "state": state,
+            "card_state": str(card.get("state") or ""),
+            "owner": owner,
+            "result": str(res.get("status") or ""),
+            "finished_at": str(res.get("finished_at") or ""),
+            "title": str(card.get("title") or ""),
+            "repo": str(card.get("repo") or ""),
+            "priority": str(card.get("priority") or ""),
+        }
 
     # -- 命令 -------------------------------------------------------------- #
     def cmd_assign(self, tid: str, agent: str) -> None:
@@ -5918,13 +6052,17 @@ class Hive:
         # 逐卡 git show 是 status 的真正瓶颈（248 卡 × 3 类 ref × ~0.3s ≈ 200s+，
         # Windows 进程开销；fetch 本身只要 1s）。autosync 已完成、origin refs
         # 已定，这里一次 cat-file --batch 全读回；失败自动回退逐个读。
-        self._ref_cache = {}
+        # cards() 已经预热过 res（task list 也要读结果），这里再补
+        # claim + status 两类，合成一份完整缓存 —— 一次 subprocess 不多跑。
+        res_cache = dict(getattr(self, "_ref_cache", None) or {})
         specs = []
         for tid in cards:
             specs.append(f"origin/claim/{tid}:claims/{tid}.json")
-            specs.append(f"origin/res/{tid}:results/{tid}.json")
             specs.append(f"origin/status/{tid}:status/{tid}.json")
-        self._ref_cache = read_ref_files_batch(self.dir, specs)
+        if not res_cache:
+            specs = [f"origin/res/{tid}:results/{tid}.json" for tid in cards] + specs
+        batch = read_ref_files_batch(self.dir, specs)
+        self._ref_cache = {**batch, **res_cache} if batch else res_cache
         # 读视角滞后：不擅自替用户 merge 脏工作区，但必须把这件事显式标出来。
         # T-0353 起 local_stale 由三态判定的 behind 给出；干净 ff-only
         # 自动同步成功后 HEAD 追平远端，local_stale 自然转 false。
@@ -5934,11 +6072,11 @@ class Hive:
         for tid, c in cards.items():
             claim = self.claim_info(tid) or {}
             res = self.result_info(tid) or {}
-            state = c.get("state")
-            # 搁置时已经把 claim 删了，但旧快照/多机同步窗口里可能还残留一份，
-            # 绝不能让它把 shelved 推导回 running（那样卡又回到「进行中」了）。
-            if claim and not res and state not in ("done", "blocked", SHELVED_STATE):
-                state = "running"  # 看板推导，不写回任务卡
+            # 显示态统一从这里推导（T-0435）：`task list` 用的是同一个内核，
+            # 以前 status 自己写一版、task list 只读卡面，对同一张卡给出不同答案。
+            # 「租约还在、还没结果」仍是 running（看板推导，不写回任务卡）；
+            # 搁置时残留的旧 claim 不能把 shelved 翻回 running，这条原样保留。
+            state = self.display_state(c, claim, res)
             lease_until = claim.get("lease_until")
             st = self.status_info(tid) or {}   # agent 主动上报的进度（status/<tid>）
             stale = bool(lease_until and not res and parse_iso(lease_until) < now())
@@ -8337,8 +8475,24 @@ def cmd_repo(args) -> None:
 def cmd_task(args) -> None:
     h = Hive(args.dir)
     if args.action == "list":
-        for tid, c in h.cards().items():
-            print(f"{tid} {c.get('state'):<10} {c.get('owner') or '-':<12} {c.get('title')}")
+        # T-0435：卡面之外还要看 `res/<tid>` —— submit 只推结果分支、不改卡面，
+        # 只读卡面就会把「已交付待合入」显示成 assigned（主控因此误判过三回）。
+        # 批量读与 cmd_status 同源：一次 cat-file 读回，缺失的退回逐个 git show。
+        cards = h.cards()
+        rows = []
+        for tid, c in cards.items():
+            res = h.result_info(tid)
+            rows.append(h.task_row(tid, c, res=res, claim=h.claim_info(tid)))
+        wanted = {str(s).strip().lower() for s in (args.state or []) if str(s).strip()}
+        if wanted:
+            rows = [r for r in rows if r["state"] in wanted]
+        if args.json:
+            print(json.dumps(rows, ensure_ascii=False, indent=2))
+            return
+        width = max([9] + [len(r["state"]) for r in rows])
+        for r in rows:
+            print(f"{r['id']} {r['state']:<{width}} "
+                  f"{r['owner'] or '-':<12} {r['title']}")
         return
     if args.action == "retime":
         rows = h.retime_budgets(apply=bool(getattr(args, "apply", False)))
@@ -9611,6 +9765,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("task", help="任务卡")
     s.add_argument("action", choices=["new", "list", "retime"])
+    s.add_argument("--json", action="store_true",
+                   help="list 才用：输出 JSON（含 card_state / result / owner）")
+    s.add_argument("--state", nargs="*", metavar="STATE",
+                   help="list 才用：只列这些显示态，如 submitted failed（可多值）")
     s.add_argument("--apply", action="store_true",
                    help="retime 才用：真正写回卡面（默认只预演）")
     s.add_argument("--id")
