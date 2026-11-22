@@ -240,7 +240,36 @@ git -C <代码仓> worktree remove --force <worktree路径>
 git -C <代码仓> worktree prune
 ```
 
-### 4.6 新仓接入三件事
+### 4.6 判断「交没交」：看结果，别只看卡面
+
+`submit` 只把结果推到 `res/T-<id>`，**不改卡面 `state`**（`done` 归 land/close 写）。
+2026-11-21 主控连合 T-0429/0430/0431 时就是被这一点骗了三回：卡面一直是
+`assigned`，看着像「agent 推了分支没提交」，其实三张卡都正常交过。
+
+T-0435 起 `hive task list` / `hive status` 都叠了结果，显示态是推导出来的：
+
+| 卡面 state | 有 done 结果 | 显示 |
+|---|---|---|
+| `assigned` / `ready` / `running` | 有 | **`submitted`**（已交付，等 land/close） |
+| 同上 | 结果 `failed` | **`failed`** |
+| 有未过期租约、还没有结果 | — | `running` |
+| `done` / `closed` / `blocked` / `shelved` / `conflict` | 随便 | 卡面原样（人的决定、终态不被盖） |
+
+所以：
+
+```sh
+python3 hive.py task list                 # 看显示态（含 submitted/failed）
+python3 hive.py task list --state submitted   # 只剩「交了还没合入」的卡，专治「到底交没交」
+python3 hive.py result T-0429             # 最权威：结果 JSON 本身
+```
+
+判据一句话：**`submitted` = 交了、没合入**（可以 `hive land`）；
+`assigned` 才是「真的还没交」。`task list --state submitted` 为空 = 没有待合入的活。
+
+> MCP 的 `hive_list_tasks` 目前仍按卡面报 state（这套推导先落 CLI：`task list` /
+> `status` / 看板三处同源）。走 MCP 的 agent 判断「交没交」仍以 `hive_result` 为准。
+
+### 4.7 新仓接入三件事
 
 新开一个仓库（比如 `lighthive` / `lightplugin`）要让 hive 能把卡派出去，必须同时做三件事，
 缺任何一件卡都会永远卡在 `ready`：
@@ -418,6 +447,12 @@ stderr 的 `dir=`。详见 §5.1。
 用 `hive_extend_lease(task_id, minutes=60)` 续租，别等过期被 `gc` 回收——回收后你的 worktree 白干。
 详见 §3.2。
 
+**Q8. 我明明 `hive_submit` 过了，为什么卡面还是 `assigned`？**
+
+正常。`submit` 只推 `res/<id>` 结果分支，**不写卡面 `state`**（`done` 由 land/close 写）。
+`hive task list` 会显示推导出来的 `submitted`；`hive result T-xxxx` 能看到完整结果；
+`task list --state submitted` 只列「交了待合入」的卡。详见 §4.6。
+
 ## 术语表
 
 新人看的一屏黑话，按出现频率排。
@@ -430,6 +465,7 @@ stderr 的 `dir=`。详见 §5.1。
 | **worktree** | 领卡后你的独立工作目录（`~/.hive/wt/<agent>/<tid>`），不是协调仓本身，改它不影响别人 |
 | **lease（租期）** | 从领卡起计的时限（默认 180 分钟）；到期没续会被 `gc` 回收，可用 `hive_extend_lease` 续 |
 | **dispatch** | 总控的自动分派：按 `needs`/`repo`/`depends_on`/`paths` 冲突把 `ready` 卡派给空闲且能力匹配的 agent |
+| **提交（submit）** | 交活：commit + push `task/<id>` + 跑 verify + 写 `res/<id>`；**不改卡面 state**，所以卡面可能还是 `assigned`，看「交没交」看显示态 `submitted` / `hive result` |
 | **land** | 把 `done` 的卡合入 `main` 并 close；在临时 worktree 里真跑一遍 merge，冲突不自动解、不 force push |
 | **watchdog** | 自动回收死卡的看门狗：把 orphan / zombie / stale 的孤儿卡退回 `ready` 重派 |
 | **gc** | 回收过期租约（等价清理遗留的 `claim/<tid>` 分支），让卡重新可领 |
