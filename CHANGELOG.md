@@ -1,8 +1,22 @@
 # Changelog
 
-## 未发版（随下一版发布） — 2026-11-22
+## 0.16.08 — 2026-11-23
 
 ### Fixed
+
+- **`hive cluster start/stop` 被复用的 PID 挡住、陈旧 pid 不自愈、`stop` 可能误杀
+  无关进程**（T-0440）。`cluster.pid` 从「只记号码」升级为 schema 1 记录（pid +
+  启动时间 + argv + node_id + version），判活前先校验进程身份：号码被别的程序
+  复用时报「陈旧 pid」并自愈，不再把节点挡在门外；旧格式 pid 文件不再可信，
+  只清理文件、不向陌生进程发信号（`cluster restart` 会明确提示需人工处理）。
+  新增 `tests/test_cluster_pid_liveness.py` 钉住复用/陈旧/误杀三类场景。
+
+- **`hive task list` 不读 `res/` 结果，已 submit 的卡仍显示 assigned**（T-0435），
+  主控容易误判「没交货」。列表与状态展示改为同时读结果分支，已交付即显示 done。
+
+- **`display_state` 漏认 `closed`/`conflict`/`needs_review`，MCP 仍用旧推导**
+  （T-0438）：同一张卡在看板和 MCP 上状态不一致。收口到统一推导，四种终态不再
+  落进「异常/未知」。
 
 - **`hive land` 在多远端大仓上裸抛 `MemoryError`，报错完全不指向真实原因，
   且探测阶段把每个远端都 `fetch` 一遍**（T-0437，2026-11-21 合 T-0434 实测）。
