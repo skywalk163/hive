@@ -1,0 +1,41 @@
+{
+  "task": "T-0442",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0442",
+  "base": "main",
+  "head": "222616890635ddd5c75871e9d69f92e5c7e63442",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-23T20:34:56+08:00",
+  "finished_at": "2026-11-23T22:09:54+08:00",
+  "duration_s": 5698.7,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_T0442_工具层缺陷.py -o addopts=",
+      "code": 0,
+      "tail": [
+        "......                                                                   [100%]",
+        "6 passed in 20.14s"
+      ]
+    }
+  ],
+  "summary": "# T-0442 交付说明（工具层 5 处缺陷）\n\n1. 缺陷 1：`src/工具_搜索文件.light` 内容模式命中时按行定位，`匹配行` 返回「1 基行号: 原行文本」（长行截 200 字），文件名模式仍为空串。修复前 `\"匹配行\": \"\"` → 修复后 `\"2: needle-alpha b\"`。\n2. 缺陷 2：`stdlib/外部命令.py` 与 `src/工具_bash.light` 保持真实退出码透传（`sys.exit(7)` → 7）；新增 shell 层错误识别：退出码为 0 但 stderr 命中 cannot create/Permission denied/拒绝访问 等时按失败上报（退出码 -1 + `[工具层判定]` 前缀），普通 stderr 告警不误判。修复前 `rc=0` + 报错 stderr → 修复后 `rc=-1`。\n3. 缺陷 3：`stdlib/外部命令.py` 改为 Popen + 超时收整棵进程树（Windows taskkill /T；POSIX killpg SIGTERM→SIGKILL），停止后回收管道，返回值写明「命令超时被终止：执行超过 N 秒…」并带回被杀前的部分 stdout/stderr。修复前超时形同虚设（2s 超时要等 8s 命令自己结束）且无说明。\n4. 缺陷 4：子进程 stdin 置 `DEVNULL`（不再继承父进程 stdin），交互式提示立刻失败；`bash` 参数新增可选 `超时`（默认 30，钳 1~600），错误里附「等待终端输入」+ 非交互参数建议。stdin 继承实测会让 `input()` 静默挂死 >120 秒。\n5. 缺陷 5：审计 `src/工具执行.light`（执行工具 / 具异步执行 / 具并发执行）与 `代理循环.light`，**未发现任何工具调用层重试或重放**；同一条调用只走一次处理器（`具注册工具` 还对重名直接抛错）。该文件无需改动，回归用例用 10 次追加写 + 两次 mkdir 压测锁死「单次执行、每次返回自己的输出」。\n\n验证（Windows 本机，cwd=worktree）：\n- `python -m pytest -q tests/test_T0442_工具层缺陷.py -o addopts=` → **6 passed**\n- 相关回归：`tests/unit/test_工具执行.py / test_工具_schema自检.py / test_文件系统工具.py / test_工具_写文件.py` 51 passed（2 例因本机 `内存错误` 编译红，见风险）；examples `R42_bash跨平台 / R42_真实工具链 / r111shell提示词 / bash渲染 / 子进程* / 工具系统 / 总入口 / 权限 / R38 / 沙箱*` 全 rc=0。\n\n验证（192.168.0.88 FreeBSD 15.1，干净快照 + `LIGHT_MERGE=/home/workbuddy/light-merge`）：\n- `python3 -m pytest -q tests/test_T0442_工具层缺陷.py -o addopts=` → **6 passed**（13.3s）\n- 相关回归：16 个工具/bash/子进程/沙箱 examples 全 rc=0；`unit` 工具面 81 passed。\n- 全量 `python3 -m pytest -q tests/ -o addopts=''` 在该精简快照上跑完：97 failed / 42 errors 全部是缺文件（`scripts/`、`docs/`、`CHANGELOG.md` 等未随快照上传），补齐后复跑那些红文件：**180 passed + 61 passed**，只剩 1 例 `tests/test_T0407_收口接线.py::test_八种模式都可开会话` —— 在基线 main 上同样红（与本卡无关，已实测复现）。\n\n风险/边界：\n- 后端兼容：bash 仍返回 `{\"输出\",\"错误\",\"退出码\"}`，搜索仍返回 `{\"结果\":[{\"路径\",\"匹配行\"}]}`；新增键 `超时` 只是可选参数，未改成功路径结构。\n- shell 层错误识别是有限词表启发式（仅「rc=0 且 stderr 命中」时生效），不会把普通告警判失败；若遇到其它语言的 shell 错误文案，需要补词。\n- 本机 Windows 上 `tests/unit/test_工具执行.py` 有 2 例因编译器 `内存错误`（同机 example 也复现）红，属主机内存/编译环境问题，FreeBSD 侧同文件全绿。\n- 全量门禁的权威环境应是完整仓（含 lightplugin/docs/scripts）；本卡只保证相关回归与新用例全绿。",
+  "error": "",
+  "declared_paths": [
+    "src/工具_bash.light",
+    "src/工具_搜索文件.light",
+    "src/工具执行.light",
+    "stdlib/外部命令.py",
+    "tests/test_T0442_工具层缺陷.py"
+  ],
+  "changed_files": [
+    "src/工具_bash.light",
+    "src/工具_搜索文件.light",
+    "stdlib/外部命令.py",
+    "tests/test_T0442_工具层缺陷.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "ab17a60a94cc47798001fdc3c75f04fa"
+}
