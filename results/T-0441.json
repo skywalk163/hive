@@ -1,0 +1,68 @@
+{
+  "task": "T-0441",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0441",
+  "base": "main",
+  "head": "e7630c0b5c6d6b967e4b6fbdb4d2b69be4c684c7",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-23T08:56:37+08:00",
+  "finished_at": "2026-11-23T08:56:37+08:00",
+  "duration_s": 0.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest tests/test_T0441_组合模式.py tests/test_T0403_新模式预设.py tests/test_T0439_模式分层与轮数.py tests/test_T0397_会话模式权限.py tests/test_T0406_模式规格文档.py -q",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "................................................                         [100%]",
+        "48 passed in 179.46s (0:02:59)"
+      ]
+    }
+  ],
+  "summary": "# T-0441 正交组合（Agent 模式 4 × 工作方法 5 = 20）\n\n## 做了什么\n\n- `src/预设组合.light`：新增 §2.6 —— `代理预设清单/工作方法清单/查找加号/解析组合/组合串/方法删减/代理行表/组合行表/组合矩阵`；\n  `组合清单()` 8→9（新增 `default` order 5，方法顺延 6-9）；`组合()` / `是已知预设()` 改为先解析组合串，\n  裸 id 作为兼容别名（裸代理→`+default`，裸方法→`standard+`）。\n- 工具面规则：`组合行表 = 代理行表 − 方法删减`，方法**只删不增**；`default`/`topdown` 删减集为空。\n- `src/预设.light`：提示/终止/开关先 `解析组合` 再取方法维；`default` 全空；`内置预设文案` 增「默认」。\n- `src/设置页.light`：`default` 元数据 + 帮助正文，方法组 4→5；设置预设页两组由数据驱动，无需改。\n- CLI：`--method` 旗标、`解析工作方法()`、`组合预设标识()`；`--preset` 接受 9 id + 20 组合串且合法入参**原样返回**。\n- Web：`/api/chat` 支持 `method`，`归一化预设()` 产组合串，注册表缓存键用组合串；统计帧增 `模式`/`方法`；\n  会话存储仍「裸 id 原样存、带 method 才升级组合串」（保 T-0397）。\n- UI：主输入区 + 新建会话面板都改两下拉，`localStorage.lh.mode` 旧单值可升级；`index.html` 增 `#method-select`。\n- 文档：模式规格 0.3（解析规则/删减表/20 组合表/入口），配置参考增「模式与方法」，CHANGELOG 增本条。\n\n## 改了哪些文件\n\n`src/预设组合.light`、`src/预设.light`、`src/设置页.light`、`src/总入口.light`、`src/cli外壳.light`、\n`src/web服务器.light`、`webui/index.html`、`webui/app.js`、`webui/new-session.js`、`docs/功能对标/模式规格.md`、\n`docs/配置参考.md`、`CHANGELOG.md`、`tests/test_T0441_组合模式.py`（新建）、\n`tests/test_T0403_新模式预设.py`、`tests/test_T0439_模式分层与轮数.py`（判据迁移，T-0397 未改）。\n\n## 验证\n\n`python -m pytest tests/test_T0441_组合模式.py tests/test_T0403_新模式预设.py tests/test_T0439_模式分层与轮数.py tests/test_T0397_会话模式权限.py tests/test_T0406_模式规格文档.py -q` → **48 passed**（158s）。\n`node --check webui/app.js new-session.js settings.js` 通过。\n\n## 判据迁移理由\n\n- T-0403：清单 8→9、`EXPECTED_ORDER` 插 `default@5`、行数/叶子加 `default=standard(33,34/30)`；前端断言改两维数组。\n- T-0439：`METHOD` 前插 `default`、方法数 5、全部 9、`组1首=default`；UI 断言两下拉。\n- T-0397 不动：裸 id 原样存储的语义保留。\n\n## 卡面修正 / 风险\n\n- 判据 7 笔误：第三种请求「只给 `preset=ptc`」实际落到 `ptc+default`（不是同一组合），实现按此；\n  前两种（`preset=ptc+brainstorm` 与 `preset=ptc`+`method=brainstorm`）同组合。\n- `default` 若塞任一删减项，T-0441 等价性/删减判据立红（反证已成立）。\n- 未实测组合 `ptc+brainstorm` / `minimal+brainstorm` 只在文档标观察项，不声称已验证。",
+  "error": "",
+  "declared_paths": [
+    "src/预设组合.light",
+    "src/预设.light",
+    "src/设置页.light",
+    "src/设置预设页.light",
+    "src/总入口.light",
+    "src/cli外壳.light",
+    "src/web服务器.light",
+    "webui/index.html",
+    "webui/app.js",
+    "webui/new-session.js",
+    "webui/settings.js",
+    "docs/功能对标/模式规格.md",
+    "docs/配置参考.md",
+    "CHANGELOG.md",
+    "tests/test_T0441_组合模式.py",
+    "tests/test_T0403_新模式预设.py",
+    "tests/test_T0439_模式分层与轮数.py",
+    "tests/test_T0397_会话模式权限.py"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/功能对标/模式规格.md",
+    "docs/配置参考.md",
+    "src/cli外壳.light",
+    "src/web服务器.light",
+    "src/总入口.light",
+    "src/设置页.light",
+    "src/预设.light",
+    "src/预设组合.light",
+    "tests/test_T0403_新模式预设.py",
+    "tests/test_T0439_模式分层与轮数.py",
+    "tests/test_T0441_组合模式.py",
+    "webui/app.js",
+    "webui/index.html",
+    "webui/new-session.js"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
