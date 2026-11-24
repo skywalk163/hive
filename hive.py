@@ -9410,6 +9410,79 @@ def cmd_ports(args) -> int:
     return 0
 
 
+def _tool_repo_staleness() -> dict:
+    """检查**正在运行的这份 hive.py 自身**是否落后于远端主线。
+
+    2026-11-24 的教训：四个坑（线程池泄漏、PIPE 挂死、ahead 空转、pid 判活）
+    改好、测过、写了文档，但改动停在别的工作区没 commit；实际起集群的那份
+    代码还是旧的，于是文档说「已修」、现场继续 MemoryError。靠人记「改完要
+    重启/要更新」是记不住的 —— 让启动本身说话。
+
+    返回 ``{"state": ..., "behind": n, "detail": str}``，state 取值：
+      * ``unknown``：不在 git 仓里 / 没有 origin / 探测失败（静默放行）
+      * ``current``：HEAD 与远端一致，或本地领先（自己就是最新的）
+      * ``behind`` ：远端有本地没有的提交 —— 该更新了
+
+    绝不在启动路径上做 fetch：那会把 SSH/凭据/网络的等待塞进启动。这里只用
+    本地已有的远端跟踪引用（refs/remotes/origin/*）判断，快、离线也安全。
+    """
+    here = Path(__file__).resolve().parent
+    try:
+        if git(["rev-parse", "--git-dir"], here, check=False).returncode != 0:
+            return {"state": "unknown", "behind": 0, "detail": "不是 git 工作区"}
+        head = rev_parse(here, "HEAD") or ""
+        if not head:
+            return {"state": "unknown", "behind": 0, "detail": "取不到 HEAD"}
+        # 优先比 origin/main，其次 origin/master；都没有就无从判断。
+        remote_ref, remote_sha = "", ""
+        for cand in ("origin/main", "origin/master"):
+            p = git(["rev-parse", "--verify", "--quiet", cand], here, check=False)
+            if p.returncode == 0 and (p.stdout or "").strip():
+                remote_ref, remote_sha = cand, p.stdout.strip()
+                break
+        if not remote_sha:
+            return {"state": "unknown", "behind": 0,
+                    "detail": "没有 origin/main 或 origin/master 本地引用"}
+        if head == remote_sha:
+            return {"state": "current", "behind": 0, "detail": "与远端一致"}
+        # 本地是远端祖先 → 落后；否则（分叉或领先）不劝人更新。
+        anc = git(["merge-base", "--is-ancestor", head, remote_sha], here,
+                  check=False)
+        if anc.returncode != 0:
+            return {"state": "current", "behind": 0,
+                    "detail": f"本地与 {remote_ref} 分叉或领先，不动它"}
+        cnt = git(["rev-list", "--count", f"{head}..{remote_sha}"], here,
+                  check=False)
+        try:
+            behind = int((cnt.stdout or "0").strip() or 0)
+        except ValueError:
+            behind = 0
+        if behind <= 0:
+            return {"state": "current", "behind": 0, "detail": "与远端一致"}
+        return {"state": "behind", "behind": behind,
+                "detail": f"落后 {remote_ref} {behind} 个提交"}
+    except Exception as exc:        # noqa: BLE001 —— 自检绝不能挡住启动
+        return {"state": "unknown", "behind": 0,
+                "detail": f"{type(exc).__name__}: {exc}"}
+
+
+def _warn_if_tool_repo_behind() -> None:
+    """落后就大声说，并给出确切的下一步；`HIVE_SKIP_VERSION_GATE=1` 可闭嘴。"""
+    if os.environ.get("HIVE_SKIP_VERSION_GATE", "").lower() in ("1", "true", "yes", "on"):
+        return
+    st = _tool_repo_staleness()
+    if st.get("state") != "behind":
+        return
+    here = Path(__file__).resolve().parent
+    print(f"⚠ 正在运行的 hive 落后远端 {st.get('behind')} 个提交（{st.get('detail')}）。",
+          file=sys.stderr)
+    print("  这份代码就是你正在起的那份 —— 修好的改动若没落地，现场会继续复现。",
+          file=sys.stderr)
+    print(f"  更新： git -C \"{here}\" pull --ff-only && hive cluster restart",
+          file=sys.stderr)
+    print("  跳过本提醒：HIVE_SKIP_VERSION_GATE=1", file=sys.stderr)
+
+
 def cmd_cluster(args) -> int:
     """常驻集群入口：实现在 hive_cluster.py，缺模块时给出可操作的错误。"""
     # `hive daemon` 是 cluster 的别名（argparse alias 不保留用户输入的命令名）；
@@ -9417,6 +9490,11 @@ def cmd_cluster(args) -> int:
     raw = sys.argv[1:]
     if "daemon" in raw and "--no-mcp" not in raw:
         args.mcp = True
+    # 起集群之前先自检「我现在跑的这份是不是最新的」。
+    # 2026-11-24：修好的四个坑因为没 commit / 没更新到实际运行的那份而白修，
+    # 文档说已修、现场照样 MemoryError。提醒走 stderr，绝不改变退出码。
+    if getattr(args, "action", "") in ("start", "restart"):
+        _warn_if_tool_repo_behind()
     try:
         import hive_cluster
     except ImportError as exc:
