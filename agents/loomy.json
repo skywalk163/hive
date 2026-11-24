@@ -1,0 +1,30 @@
+{
+  "name": "loomy",
+  "host": "win10",
+  "command": "",
+  "mode": "accept",
+  "manual": false,
+  "abilities": [
+    "code",
+    "docs",
+    "verify"
+  ],
+  "capabilities": [
+    "gui",
+    "windows",
+    "linux"
+  ],
+  "repos": {
+    "hive": "G:/dswork/duan-light-merge/hive",
+    "lightharness": "G:/dswork/duan-light-merge/lightharness",
+    "light": "G:/dswork/duan-light-merge/light-merge",
+    "lightmem": "G:/dswork/duan-light-merge/lightmem",
+    "lightplugin": "G:/dswork/duan-light-merge/lightplugin",
+    "lightprism": "G:/dswork/duan-light-merge/lightprism"
+  },
+  "launch": "",
+  "worktrees": "C:/Users/skywalk/.hive/wt/loomy",
+  "max_concurrency": 1,
+  "created": "2026-11-24T12:09:05+08:00",
+  "accept_window_minutes": 180
+}
