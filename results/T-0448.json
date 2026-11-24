@@ -1,0 +1,39 @@
+{
+  "task": "T-0448",
+  "agent": "dumate-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0448",
+  "base": "main",
+  "head": "c12c6607ad4a23d95d5922652e0a7d136c336347",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T11:51:57+08:00",
+  "finished_at": "2026-11-24T12:02:55+08:00",
+  "duration_s": 658.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0448_工具面装配.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 20.14s"
+      ]
+    }
+  ],
+  "summary": "# T-0448 交付摘要\n\n- 新增 `src/工具面装配.light`：纯数据 + 纯函数。`叶子映射` 覆盖 DSH standard 全部工具名（英文线名与中文注册名双口径），首项即 DSH 包名主叶子；写不出叶子依据的 125 个注册名显式登记在 `不上叶子表`，按 A/B/C/D 四类在模块头写明理由。\n- `补充叶子`：standard/ptc/cordis/default 为全集；topdown/bottomup/lazy 为全集减写类叶子；brainstorm 只留读/搜；minimal 只留 bash 壳族；`代理+方法` 组合串取交集；未知预设返回空表（不抛装配期错误）。\n- `未映射默认保留`：标准类预设为真、minimal/brainstorm 为假。`装配报告` 返回 `{保留, 注销, 未映射}`，兼容叶子条目与工具条目两种形状。\n- 新增 `tests/test_T0448_工具面装配.py`：7 项全绿——DSH 名全覆盖且首项一致、未知工具返回 `[]`、standard 含 todo/skill/web/present/subagent/goal、brainstorm 无写类叶子、minimal 只留 bash、topdown 减写、装配报告不砍成 4 个。\n- 实测（真实注册表 158 个工具，任务卡写的 148 已随仓增长）：standard 保留 158 / 注销 0；minimal 只留 `bash`；brainstorm 只留 `读文件,搜索文件`；standard+brainstorm 同为只读。\n- 反跑记录：临时删掉 `\"todo_write\": [\"tool-todo\"]` 一行，`test_dsh标准工具名全有叶子` 立红（报 `DSH 工具名没有叶子映射 'todo_write'`）；恢复该行后 7 passed。\n- 未改 `src/总入口.light`、`src/核心工具.light`、`src/预设组合.light`；未改现有 4 个工具名与参数键；无新依赖；装配期不抛错。\n- 遗留：运行时接线归 T-0456——`总入口` 需改用本模块的 `叶子映射` 与 `未映射默认保留`，否则预设过滤仍会把工具砍到 4 个。",
+  "error": "",
+  "declared_paths": [
+    "src/工具面装配.light",
+    "tests/test_T0448_工具面装配.py"
+  ],
+  "changed_files": [
+    "src/工具面装配.light",
+    "tests/test_T0448_工具面装配.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "0f9cc895581348bf88a5c3c1a1470703"
+}
