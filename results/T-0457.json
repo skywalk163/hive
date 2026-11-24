@@ -1,0 +1,43 @@
+{
+  "task": "T-0457",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0457",
+  "base": "main",
+  "head": "2b8cdd96b4960301528d3d12de1b854288de81a2",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T18:06:24+08:00",
+  "finished_at": "2026-11-24T18:40:29+08:00",
+  "duration_s": 2045.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0457_pyisms.py",
+      "code": 0,
+      "tail": [
+        "0.11s call     tests/test_T0457_pyisms.py::test_case[D101-def \\u52a0\\u6cd5(\\u7532, \\u4e59):-1-1-\\u6bb5\\u843d \\u52a0\\u6cd5 \\u63a5\\u6536 \\u7532, \\u4e59\\uff1a]",
+        "0.02s call     tests/test_T0457_pyisms.py::test_case[D118-\\u4ece math \\u5bfc\\u5165 sqrt-1-3-\\u4ece \\u6570\\u5b66 \\u5bfc\\u5165 sqrt]",
+        "",
+        "(13 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "70 passed in 8.25s"
+      ]
+    }
+  ],
+  "summary": "## T-0457 交付说明（AI 惯性诊断 D1xx + 消灭 L0000）\n\n**做了什么**：新增 `src/ai_pyisms.py`（纯标准库，只读 lexer 的 token），按 token 序列认出「这行是按\nPython 写的」，给出 `line/column/end_column + code + wrong/right + message + 整行 replacement`；\n`registry.explain()` 新增 `source=` 入参，命中 pyisms 即返回真码（`provisional=False`），不再落\n`L0000`。码表 21 条（D101–D121）覆盖 `docs/AI编程指南.md` §六 全部 14 条 + `else/elif`、`and/or/not`、\n`list()/dict()` 等细分。现场那条 `def 问候():` 现在报 `D101`（line 1 col 1，replacement 为\n`段落 问候：`，message 明说「别去修冒号」）；同文件另一行 `print(\"hi\")` 报 `D119`。\n\n**改了哪些文件**：`src/ai_pyisms.py`（新，987 行）、`src/diagnostics/registry.py`（D1xx 码段\n`PYISM_DIAGNOSTICS` + `explain_pyisms()` + `diagnostic()` 认 D 码）、`src/diagnostics/__init__.py`\n（导出）、`tests/test_T0457_pyisms.py`（新，70 条用例）。未碰 cli/lexer/parser/keywords。\n\n**验证**：`python -m pytest -q tests/test_T0457_pyisms.py` → 70 passed（worker 环境 PATH 首位是\nPython312 才有 pytest；`python` 直落 3.13 会报 `No module named pytest`，属环境、非产物）；\n`+ tests/test_diagnostics_registry.py` → 129 passed（旧 19 条 L 码归因与否定例全部不变）。\n端到端：把 `def/if/and/return/print/单引号` 的纯 Python 文件逐行套 replacement，`light check` 语法通过。\n全仓 557 个 `.light`（85989 行）扫一遍无崩溃，0.22 ms/行。\n\n**关键取舍**（都在代码注释里）：\n1. `explain()` 必须**显式**给 `source=`，不从报错文本猜——报错文本引用 token 也用单引号\n   （`无法识别的语法元素：':'。`），当源码扫会把每条语法错误误判成 D115。\n2. 卡里给的 `if→若 / return→返 / for→遍 / elif→否则若` 都实测可编译，但指南主形式是\n   `如果 / 返回 / 遍历 / 否则如果`；`replacement` 取指南主形式（AI 照抄的就是指南），message 标注别名可用。\n3. `新建列表()/新建字典()` 按「以指南原文为准」处理，但**降为 warning**：本仓 `stdlib/数学.light`\n   自己在用，指南 §六-5 说它「不存在」是文档滞后（建议另开卡修指南）。\n4. 嵌入块（`引 Python:` … `结束引`）整块跳过，否则 C/Go 代码会被误报；无结束标记时按词法器口径吃到 EOF。\n\n**遗留风险**：① `spec/light.spec.json` 门禁本来就红（lexer.py/code_generator.py 在 11-24 被\nT-0444/T-0445 改过，spec 停在 11-18），我改 registry.py 又叠一条指纹；`spec/` 不在允许路径，按红线\n不动，需收口卡统一 `python3 -m spec.build_spec` 重生成。② `cli/light.py` 的接线（把 source 传进\n`explain`/直接吃 `explain_pyisms`）归 T-0464，本卡只交付能力。③ D114（遍历用「之」）在全仓命中 154 次\n（`stdlib/JSON.light` 45 次）——指南说不许混用、仓库自己就在混用，保持 warning 未升级。",
+  "error": "",
+  "declared_paths": [
+    "src/ai_pyisms.py",
+    "src/diagnostics/",
+    "tests/test_T0457_pyisms.py"
+  ],
+  "changed_files": [
+    "src/diagnostics/__init__.py",
+    "src/diagnostics/registry.py",
+    "src/ai_pyisms.py",
+    "tests/test_T0457_pyisms.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "eddb6fc774684d3ebae48788ed6b6eb5",
+  "fence": 1
+}
