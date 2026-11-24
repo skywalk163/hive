@@ -1,0 +1,106 @@
+{
+  "task": "T-0464",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0464",
+  "base": "main",
+  "head": "84439829010c6c4184fcbdbb24af2f32c9081678",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T00:02:09+08:00",
+  "finished_at": "2026-11-25T00:24:57+08:00",
+  "duration_s": 1368.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0464_wire.py",
+      "code": 0,
+      "tail": [
+        "0.57s call     tests/test_T0464_wire.py::TestCardLevels::test_full_is_index_page",
+        "0.47s call     tests/test_T0464_wire.py::TestChineseAliases::test_aliases_are_documented_in_help",
+        "0.35s call     tests/test_T0464_wire.py::TestCardLevels::test_snippets_still_works",
+        "0.01s setup    tests/test_T0464_wire.py::TestChineseAliases::test_run_alias_matches_english",
+        "17 passed in 37.58s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_ai_check_json.py",
+      "code": 0,
+      "tail": [
+        "1.69s setup    tests/test_ai_check_json.py::TestExitCodeContract::test_clean_file_exits_0",
+        "0.92s setup    tests/test_ai_check_json.py::TestDiagnosticFields::test_unknown_position_stays_zero",
+        "0.77s setup    tests/test_ai_check_json.py::TestExitCodeContract::test_missing_file_exits_2",
+        "0.72s call     tests/test_ai_check_json.py::TestTextPathUnchanged::test_missing_file_text_output",
+        "20 passed in 19.31s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_syntax_card_rank.py",
+      "code": 0,
+      "tail": [
+        "0.01s setup    tests/test_syntax_card_rank.py::test_rank_uses_hint_when_no_fixes_and_hits_default_one",
+        "0.01s setup    tests/test_syntax_card_rank.py::test_corpus_dir_env_override",
+        "",
+        "(5 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "20 passed in 8.51s"
+      ]
+    }
+  ],
+  "summary": "# T-0464 收口接线\n\n- 接线：`ai check --json` 接 `src/ai_pyisms`（D1xx）。同行若只有 `L0000` 占位诊断，由 D1xx 接管；编译器已给出的「词法错误」定位保留原文并追加 D1xx（`tests/test_ai_check_json.py` 锁着这条）。\n- 可套用修复：每条诊断新增 `fix_edits`（span + replacement，1-based / end 开区间，与 `light patch --edits` 同口径）；`fix_suggestions` 同步携带。`fixes` 仍是人读中文（T-0318 契约锁定 str 列表，不改）。\n- `--strict`（默认关）：`ai check --json` 追加 D2xx warning（ALIAS→D201 / PUNCT→D202 / TYPE→D203），不改 ok 与退出码；`light check --strict` 新增文本 warning 段，关时输出逐字不变。\n- `--fast`：进程内语法解析 + D1xx，跳过子进程、类型检查、代码生成、运行检查；与 `--run` 互斥。\n- `ai card --level compact|standard|full`（默认 compact；`--full` 等价 standard）。compact 不前置 banner（≤300 硬上限）；带 `--rank-pitfalls` 时保留 banner，维持反馈闭环的「顶部引用 STATUS.md」判据。\n- 中文别名：运行/检查/编译/测试/格式化 → run/check/compile/test/fmt；只替换第一个非选项 token，`--` 之后不动；`--help` 已列出，别名与英文命令 stdout/退出码逐字一致。\n- 文档：README 顶部 AI 段与 docs/AI编程指南.md 首段改为指向 `docs/ai/` 三层卡与 `AGENTS.md`，并贴 `light 运行` / `light ai check --json --fast` 实测输出。\n- 验证：三条 verify 全绿（17 / 20 / 20 passed）；另跑 test_ai_feedback_loop(5)、test_cli_json(25)、T-0457/0458/0459 全绿。\n- `--fast` 实测 P50（Windows / Python 3.13，坏文件 9 次）：1046ms（内部 duration_ms 480ms）；干净文件 885ms（内部 298ms）。未达 <300ms，如实报。\n- 3.9s 归因：python 启动 ~130ms + cli.light 模块导入 ~310ms（feedback_collector/argparse 等）+ light_parser_v3 导入 ~280ms，已占 ~720ms；默认路径再起一个 `check` 子进程（+~480ms）并跑代码生成/类型检查；`--run` 再起一个 `light run` 进程（本机实测单次 ~6.5s）。\n- 依赖并入：main 尚未 land T-0457~T-0461，本分支 merge 了五个 task 分支（src/ai_pyisms.py、src/ai_strict.py、tools/ai_copilot/syntax_card.py、docs/ai/、AGENTS.md、llms.txt、mcp/ 等）才能跑 verify；越界文件均为依赖产物、内容未改。land 时请先合依赖分支再合本卡，或直接合本卡（五个依赖提交已在历史里）。\n- 风险：D1xx 现在默认出现在 `ai check --json`，个别历史脚本可能多出 warning 级诊断（error 判据未变）；`light check --json` 暂未接 `--strict`（卡面只要求文本路径，避免动存量 JSON 快照）。",
+  "error": "",
+  "declared_paths": [
+    "cli/light.py",
+    "README.md",
+    "docs/AI编程指南.md",
+    "tests/test_T0464_wire.py"
+  ],
+  "changed_files": [
+    "AGENTS.md",
+    "docs/ai/README.md",
+    "docs/ai/compact.md",
+    "docs/ai/standard.md",
+    "llms.txt",
+    "mcp.example.json",
+    "mcp/README.md",
+    "mcp/light_mcp.py",
+    "skills/light/SKILL.md",
+    "src/ai_pyisms.py",
+    "src/ai_strict.py",
+    "src/diagnostics/__init__.py",
+    "src/diagnostics/registry.py",
+    "tests/test_T0457_pyisms.py",
+    "tests/test_T0458_strict.py",
+    "tests/test_T0459_aeicard.py",
+    "tests/test_T0460_discovery.py",
+    "tests/test_T0461_mcp.py",
+    "tests/test_syntax_card_rank.py",
+    "tools/ai_copilot/syntax_card.py",
+    "README.md",
+    "cli/light.py",
+    "docs/AI编程指南.md",
+    "tests/test_T0464_wire.py"
+  ],
+  "out_of_paths": [
+    "AGENTS.md",
+    "docs/ai/README.md",
+    "docs/ai/compact.md",
+    "docs/ai/standard.md",
+    "llms.txt",
+    "mcp.example.json",
+    "mcp/README.md",
+    "mcp/light_mcp.py",
+    "skills/light/SKILL.md",
+    "src/ai_pyisms.py",
+    "src/ai_strict.py",
+    "src/diagnostics/__init__.py",
+    "src/diagnostics/registry.py",
+    "tests/test_T0457_pyisms.py",
+    "tests/test_T0458_strict.py",
+    "tests/test_T0459_aeicard.py",
+    "tests/test_T0460_discovery.py",
+    "tests/test_T0461_mcp.py",
+    "tests/test_syntax_card_rank.py",
+    "tools/ai_copilot/syntax_card.py"
+  ],
+  "lease_id": "cacd51b1b5a64f9dbe279a3db4e01184"
+}
