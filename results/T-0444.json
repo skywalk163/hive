@@ -1,0 +1,52 @@
+{
+  "task": "T-0444",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0444",
+  "base": "main",
+  "head": "25d663b6c75d128bac1a9f46d906dc11b73709db",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T08:31:35+08:00",
+  "finished_at": "2026-11-24T08:33:33+08:00",
+  "duration_s": 118.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_lexer_关键字边界.py",
+      "code": 0,
+      "tail": [
+        "0.01s setup    tests/test_lexer_关键字边界.py::test_声明后使用一致_未定义甲",
+        "0.01s setup    tests/test_lexer_关键字边界.py::test_check与run同源_同名且完整",
+        "",
+        "(7 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "7 passed in 46.55s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_lexer.py",
+      "code": 0,
+      "tail": [
+        "============================ slowest 15 durations =============================",
+        "0.01s call     tests/test_lexer.py::test_basic_keywords",
+        "",
+        "(14 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "10 passed in 6.32s"
+      ]
+    }
+  ],
+  "summary": "# T-0444 工作总结：中文标识符含关键字被词法截断\n\n## 结论\n\n已修。`甲定义乙` / `未定义甲` 这类「汉字游程里夹着关键字 `定义`」的标识符不再被切断：\n词中/词尾整体成词，独立出现仍是关键字。check 与 run 现在看到同一个完整标识符，\n运行期报错名与源码一致。\n\n## 方案选择：方案 1（整体识别）\n\n标识符优先整体成词：`定义` 处于汉字词词中/词尾时并入标识符；只有独立出现\n（词首且后不接汉字、或两侧有空白）时才是 KEYWORD。\n\n放弃方案 2（词法期报「标识符不得包含关键字」）的理由：\n- 会把 `参数定义`、`未定义甲` 这类自然中文名连同**已声明**的合法用法一起判死，\n  与卡面判据 3 直接冲突；\n- 需要改 `docs/syntax.md` 与 CHANGELOG 的语法口径，收益不抵成本。\n\n## 改动（严格限定在卡片允许路径）\n\n1. `src/lexer.py`（唯一逻辑改动，1 行代码 + 注释）\n   `_P0A_SUFFIX_SPLIT_KW = frozenset(_P0A_HARD_STMT - {'函数'}) | {'定义'}`\n   → 去掉 `| {'定义'}`，并写明理由与证据。\n\n   为什么这是根因：该集合是「多字关键字在后缀位置必须切分」的排除表。\n   `定义` 被列进去后，`scan_pos>0` 的 `定义`（即 `甲定义乙`、`未定义甲` 里的）\n   一律切开；而声明处因为预扫描把整串登记进 `user_definitions`，反而整体成词 ——\n   正是卡面说的「能定义、不能用」。\n\n   为什么安全：`定义` 作语句头时恒在语句起始（`scan_pos==0`），由第一层最长匹配\n   直接发 KEYWORD；且 `定义 x 等于 y` 语句本身已下线（`src/parser_stmt.py:2783`\n   对语句头的 `定义` 报迁移提示），词中并入吞不掉任何活着的语句语法。\n\n2. `tests/test_lexer_关键字边界.py`（新增，7 条）\n   - 判据 1：`甲定义乙` 未声明 → run 报 `name '甲定义乙' is not defined`（且不含 `name '甲'`）\n   - 判据 2：`未定义甲` 未声明 → 报全名（且不含 `name '未'`）\n   - 判据 3：`设 未定义甲 为 9` + `打印(未定义甲)` → 只打印 `9`，check 同结论，且两处 token 都是 `未定义甲`\n   - 判据 4：check 与 run 同源 —— check 词法看到的标识符必须是源码里的完整串，\n     run 报的名字必须与它一致（详见「与卡面的偏差」）\n   - token 级：词中/词尾整体成词；独立 `定义` 仍是 KEYWORD（`定义 甲`、`甲 定义 乙`、`定义 宏 …` 首 token）\n   - 回归：`设x为10` / `甲加乙` / `total加1` / `abc_1` 切分不变\n\n   `src/keywords.py` **未改**（无需新增辅助集合），语法文档与 CHANGELOG **未改**（方案 1 不涉及口径变更）。\n\n## 证据\n\n### 全语料 A/B（改动前 vs 改动后，逐文件 token 流 sha1）\n\n- 范围：本仓 `git ls-files *.light` 共 557 个文件，552 个可完整分词（5 个本就 LexerError：含 `×`/`&`/反引号）\n- 结果：**仅 1 个文件 token 流变化** —— `bootstrap/release/stdlib/参数解析.light:15`，\n  `参数定义` 由 `参数`+`定义` 合并为一个标识符（正是本卡要修的行为）\n- 其余 551 个文件 token 流逐字节一致\n\n### 反证（把 `定义` 加回排除集 = 回到「关键字优先切分」）\n\n`python -m pytest -q tests/test_lexer_关键字边界.py` 实测 **4 failed, 3 passed**：\n- 红：`甲定义乙` 报错名、`未定义甲` 报错名、check/run 同源、token 级整体成词\n- 绿：判据 3、独立 `定义` 仍为关键字、compact 回归\n\n### verify\n\n```\npython -m pytest -q tests/test_lexer_关键字边界.py   → 7 passed\npython -m pytest -q tests/test_lexer.py              → 10 passed\n```\n\n附加回归（未在卡片 verify 内，主动跑过）：\n`tests/test_level6_lexer.py`、`tests/unit/test_lexer.py`、\n`tests/unit/test_lexer_p0a_deterministic.py`、`tests/unit/test_lexer_compound_safe_alignment.py`\n→ 71 passed, 1 skipped（skipped 为既有）, 140 subtests passed\n\n## 与卡面的偏差（如实记录，未硬凑）\n\n1. **卡面「反证：第 1/3/4 条必须真红」中，第 3 条实测修前也是绿。**\n   原因：`_scan_user_definitions` 会把 `设 X` 声明的名字整体登记进白名单，声明与使用\n   都能整体成词，所以「声明后使用 → 9」在修前就成立（这也与卡面四组对照表的第 5 行一致）。\n   该条在本文件里保留为**一致性守卫**（防后续改动打破声明/使用同源），没有伪装成判别器。\n\n2. **判据 4 按「check 与 run 必须看到同一个完整标识符」落地，而不是字面的「check 绿即失败」。**\n   原因：check 是静态语法/类型检查，不做名字解析；未声明名字天然是 check 绿、run 红，\n   要把它挪到 check 必须改 `src/linter/light_linter.py` —— 不在本卡允许路径内。\n   本卡要消除的是「check 的通过建立在被截断的 token 上」：现在 check 词法看到的就是\n   `甲定义乙`，run 报的也是 `甲定义乙`，两边同名同源；修前两边一起错成 `甲`，本条真红。\n\n## 环境备注（给总控 / 复跑的人）\n\n- 本机默认 `python`（workbuddy 3.13.12）**没有 pytest**，`python -m pytest` 会直接\n  `No module named pytest`。\n- 更关键：hive 的 verify 会经 `hive_compat` 把命令里的 `python` **映射到跑 hive 的那个\n  解释器**（`hive_compat.py:318-332`，`sys.executable`），不是 PATH 里的 `python`。\n  所以只改 PATH **无效**——第一次 submit 就是这样假红（verify 两条 tail 都是\n  `...workbuddy\\binaries\\python\\versions\\3.13.12\\python.exe: No module named pytest`，\n  提交仍在 25d663b，未改代码）。\n- 本次重提的做法：用\n  `C:\\Users\\PCbeta Tester\\AppData\\Local\\Programs\\Python\\Python312\\python.exe`\n  （pytest 9.1.1 + xdist + subtests）启动 hive MCP server，verify 里的 `python`\n  随之映射到 3.12，两条 verify 才会真跑本仓测试。\n- 全部判据走 Python subprocess，不用 head/grep/awk/`!`/`$()`，Windows 上不触发 POSIX 假失败。",
+  "error": "",
+  "declared_paths": [
+    "src/lexer.py",
+    "src/keywords.py",
+    "tests/test_lexer_关键字边界.py"
+  ],
+  "changed_files": [
+    "src/lexer.py",
+    "tests/test_lexer_关键字边界.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "0bc251e8684541439b592be65ebb3135",
+  "fence": 3
+}
