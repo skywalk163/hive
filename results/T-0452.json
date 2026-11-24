@@ -1,0 +1,39 @@
+{
+  "task": "T-0452",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0452",
+  "base": "main",
+  "head": "d0a145a6bc81d0bbd7ca469ccde7e37c71b1d9f5",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T13:41:28+08:00",
+  "finished_at": "2026-11-24T13:54:59+08:00",
+  "duration_s": 811.4,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0452_网页工具.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".........                                                                [100%]",
+        "9 passed in 13.38s"
+      ]
+    }
+  ],
+  "summary": "# T-0452 工作说明：lightharness 网页工具接线（web_search / web_fetch）\n\n- 新增 `src/工具_网页.light`，三个入口：`造网页搜索工具定义(依赖)` / `造网页抓取工具定义(依赖)` / `网页工具状态(依赖)`。\n- web_search：参数 `query`（必填）+ `limit`（可选 1-100，snake_case），执行体委托 `搜索提供商.造搜索工具定义`（参数校验/构造请求/归一响应），本层只加两道：缺密钥闸门（`isError=真`，点名 `DEEPSEEK_API_KEY`/`EXA_API_KEY`/`PERPLEXITY_API_KEY`，明确「不会发请求、不返回空结果」）与 limit 截断（sources 裁剪 + `truncated`）。\n- web_fetch：参数 `url`；准入走 `抓取策略.校验抓取地址` + `抓取策略.主机是否非公网字面量`（非 http(s)/内嵌凭据/私网与回环字面量一律拒绝并说明原因），抓取器由依赖注入，不联网；正文 >32KB 只回头尾预览 + `Omitted N bytes` 文案，并带 `truncated=真`，不吐全文。\n- `网页工具状态(依赖)` 返回 `{搜索:{可用,原因}, 抓取:{可用,原因}}`，缺 key 时原因点名环境变量，未注入抓取器时点名依赖项，供启动日志/doctor 直接打印。\n- 改动文件：`src/工具_网页.light`（新）、`tests/test_T0452_网页工具.py`（新，9 用例）；未动 `src/总入口.light` / `src/核心工具.light`，未加任何 npm/python 依赖；测试全部注入假 执行器/抓取器，零网络。\n- 验证：`python -m pytest -q tests/test_T0452_网页工具.py` → `9 passed`（Windows 本机，25s 左右；未用 head/grep/! 等 POSIX 语法）。\n- 反跑 A（判据 6）：把 `判定抓取准入` 中私网拒绝那 3 行删掉 → 用例 3（四类非法目标）与反跑锚点用例立红（2 failed）；还原后 sha256 `581783A1…589` 与改前一致，复绿 `9 passed`。反跑 B（缺密钥闸门改成静默空表 → 用例 1 红）为同法锚点，代码内已注释标记。\n- 遗留风险 1：`溢出.构造预览` 的 `(预算 + 1) // 2` 在本语言按 `预算 + (1 // 2)` 求值，头预算被算成整个 cap（基线 `tests/unit/test_溢出.py::test_构造预览_部分预算头尾拼接` 现红，非本卡引入）；`溢出.light` 不在本卡允许路径，故本模块改调 `溢出.取前N字节/取后N字节` 组对称预算 + `描述省略`，建议另开卡修 构造预览。\n- 遗留风险 2：域名（非 IP 字面量）只做字面量判定，DNS 解析后的私网复核仍属宿主网络层（沿用 `抓取策略` 既有边界）；接真实抓取时须由 `真实抓取提供` 的 DNS/固定 IP 逻辑兜底。\n- 遗留风险 3：本卡只造工具定义，不注册（禁止改 总入口/核心工具）；需后续卡在工具面装配处一行 `注册表.注册(造网页搜索工具定义(依赖))` 才会对模型可见。",
+  "error": "",
+  "declared_paths": [
+    "src/工具_网页.light",
+    "tests/test_T0452_网页工具.py"
+  ],
+  "changed_files": [
+    "src/工具_网页.light",
+    "tests/test_T0452_网页工具.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "cf991bdfcca44e7488a6c30322d827ba"
+}
