@@ -1,0 +1,44 @@
+{
+  "task": "T-0468",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0468",
+  "base": "main",
+  "head": "e2954baf7c11d8d0e771e42f30aca6fba01cb957",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T00:13:51+08:00",
+  "finished_at": "2026-11-25T00:35:25+08:00",
+  "duration_s": 1294.9,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0468_MCP挂载.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".....                                                                    [100%]",
+        "5 passed in 26.52s"
+      ]
+    }
+  ],
+  "summary": "# T-0468 完成报告\n\n## 做了什么\n1. **配置发现脱离 cwd**（src/mcp接线.light）：`取MCP配置路径(数据根)` 现在按\n   显式 `HARNESS_MCP_CONFIG` → 数据根 → `HARNESS_HOME` → 用户持久化根（缺省 ~/.lightharness）\n   → `HARNESS_ROOT` → cwd 依次探测，全部转绝对路径；一个都找不到时打印\n   `[MCP] 未找到 MCP 配置: <路径>`，返回结构带 `未找到=真`，不再静默 no-op。\n2. **预设通配挂载 mcp__\\***（src/预设挂载过滤.light）：新增 §3.1 `是MCP标识` / `MCP通配开关` /\n   `通配挂载`，`按预设过滤` 对 `mcp__` 前缀条目直接放行，不看组合表（组合表逐行对齐上游、\n   没有 mcp__ 这一行）。开关 `HARNESS_MCP_TOOLS`（0/off/false/否/假 关闭，缺省开）；\n   minimal / brainstorm 等收紧预设仍按 `未映射默认保留` 收紧，不给它们塞宿主级工具。\n3. **让 MCP 工具有叶子可循**（src/总入口.light）：`工具名到叶子` 对 `mcp__*` 返回「自身即叶子」，\n   使其能进 `造条目表带映射`/`装配挂载集`，`预设保留工具` 才不会把它们当无叶子注销；\n   `组装注册表` 把 数据根 透传给 `挂载MCP服务器`。\n\n## 改了哪些文件\n- src/mcp接线.light、src/总入口.light、src/预设挂载过滤.light\n- tests/test_T0468_MCP挂载.py（新增，5 条判据）\n- 未改 src/web服务器.light：`己.根` 原本已透传给 `组装注册表`，发现链路修好后无需再动。\n\n## 跑了什么验证\n- `python -m pytest -q tests/test_T0468_MCP挂载.py` → 5 passed（约 29s）。\n  覆盖：显式配置下 standard 含 2 个 mcp__t0468__* 工具且 bash 仍在；standard 假注册表\n  下 MCP 工具不被注销（minimal 仍注销）；数据根 / HARNESS_HOME 下的 mcp.json 均能发现；\n  配置缺失有明确日志；`HARNESS_MCP_TOOLS=0` 可关；静态反跑锚点。\n- 定向回归：test_T0403 / T0419 / T0448 / T0456 共 27 passed；examples/test_mcp接线、\n  examples/test_mcp_prod、examples/test_预设挂载过滤 全部通过。\n\n## 遗留风险\n- 若入口不在仓库根启动、且既没设 `HARNESS_MCP_CONFIG` 也没设 `HARNESS_ROOT`、mcp.json 也不在\n  数据根/持久化根下，仍只能靠 cwd 兜底（与旧语义一致）——真正的默认修复建议把 mcp.json 放进\n  `~/.lightharness` 或设 `HARNESS_ROOT`。\n- `[装配]` 日志的「未映射」计数仍包含 mcp__*（`工具面装配.装配报告` 不在本卡允许路径内，\n  只影响日志口径，不影响挂载结果）。\n- MCP 客户端沿用既有语义：`组装注册表` 返回的兼容注册表不持有客户端句柄，进程退出即断连；\n  本卡未改客户端实现（任务卡明确不做）。",
+  "error": "",
+  "declared_paths": [
+    "src/mcp接线.light",
+    "src/总入口.light",
+    "src/预设挂载过滤.light",
+    "src/web服务器.light",
+    "tests/test_T0468_MCP挂载.py"
+  ],
+  "changed_files": [
+    "src/mcp接线.light",
+    "src/总入口.light",
+    "src/预设挂载过滤.light",
+    "tests/test_T0468_MCP挂载.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "f304ce43354e43379f8f90b0e0cd5833"
+}
