@@ -1,0 +1,42 @@
+{
+  "task": "T-0461",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0461",
+  "base": "main",
+  "head": "bb4c7b0a6d95d1b1aa3e2792a9412800de2df021",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T23:08:36+08:00",
+  "finished_at": "2026-11-24T23:17:55+08:00",
+  "duration_s": 559.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0461_mcp.py",
+      "code": 0,
+      "tail": [
+        "0.14s setup    tests/test_T0461_mcp.py::test_light_run_reports_nonzero_rc",
+        "0.14s setup    tests/test_T0461_mcp.py::test_bad_arguments_never_kill_the_process",
+        "0.13s setup    tests/test_T0461_mcp.py::test_light_check_reports_diagnostics_for_broken_file",
+        "0.13s setup    tests/test_T0461_mcp.py::test_initialize_and_tools_list",
+        "11 passed in 15.21s"
+      ]
+    }
+  ],
+  "summary": "# T-0461 交付小结：light-mcp（check / run / patch 三工具，纯标准库 stdio）\n\n## 结果\n\n`python -m pytest -q tests/test_T0461_mcp.py` → **11 passed**（24s，Windows/CPython 3.13）。\n\n## 做了什么\n\n| 文件 | 说明 |\n|---|---|\n| `mcp/light_mcp.py`（新增，约 640 行） | 纯标准库 stdio MCP server。支持 `initialize` / `notifications/initialized` / `ping` / `tools/list` / `tools/call`，暴露 `light_check` / `light_run` / `light_patch` |\n| `mcp/README.md`（新增） | 宿主配置一页说明：Cursor / Claude Code / 通用 JSON、Windows 路径写法、示例调用、行为约定、排错表 |\n| `mcp.example.json`（0 字节占位 → 填好） | `mcpServers.light`：`python -X utf8 <repo>/mcp/light_mcp.py` + `PYTHONIOENCODING=utf-8` + `LIGHT_ROOT` |\n| `tests/test_T0461_mcp.py`（新增，11 例） | 宿主视角验收：握手/工具清单、好/坏文件 check、patch 与 CLI 逐字一致、run 的 rc 透传、错误路径 `isError` 且进程存活、`Content-Length` 分帧、示例配置可解析 |\n\n## 关键实现决定\n\n1. **传输层两种分帧都支持**：按 MCP 规范读 `Content-Length: N` 头 + 定长正文；同时兼容项目内 `mcp_server.py` 骨架用的「一行一个 JSON」。客户端第一条报文决定回应格式——宿主（Cursor/Claude Code）走规范分帧，脚本化自测走换行分帧，两不误。\n2. **`strict` 的语义**：CLI 没有 `--strict` 开关，MCP 层也不允许做业务判断，所以把它定成**传输层严格性**——`true` 要求 `light ai check` 的整段 stdout 恰好是一个 JSON 对象；`false`（默认）在夹带日志时仍从后往前抽 JSON。**不改变 `ok` 判定**，README 里写明了。\n3. **不存在路径 = 工具错误**：`light ai check` 对缺文件是 `exit_code=2`（用法/文件错误），三个工具都提前拦成 `isError:true` + `code=L_MCP_NOT_FOUND`，与卡面「不存在的 path 断言 isError」的要求一致；源码里有语法错则是业务结果（`isError:false` + `ok:false`），不混。\n4. **路径先绝对化**：服务端给子进程固定 `cwd=<仓根>`，所以入参的相对路径按**宿主进程**的 cwd 先补成绝对路径，agent 传 `./示例.light` 不会被误解析到仓根。\n5. **不写盘、不判业务**：`light_patch` 只返回 `new_text`（底层直接 `src/patch_engine.patch`，span 映射为单行 `start_line/start_col/end_line/end_col`），修不修、写不写由调用方决定。\n\n## 两个坑（留给后面的人）\n\n- **`mcp.example.json` 被 `.gitignore` 的 `*.json` 规则忽略**。`.gitignore` 不在本卡允许路径内，提交前用 `git add -f mcp.example.json` 强加入库；land 之后文件被跟踪，忽略规则对它失效。建议后续在某张有 `.gitignore` 权限的卡里补一行 `!mcp.example.json`。\n- **`mcp/` 故意不放 `__init__.py`**：仓库 `tests/conftest.py` 会把仓根插进 `sys.path[0]`，若有 `__init__.py` 就会生成一个顶层 `mcp` 包去遮蔽官方 `mcp` SDK。现在它只是命名空间目录，`pyproject` 的 `packages.find include` 也不含 `mcp*`，不影响打包。\n\n## 边界（未做）\n\n- 未改 `cli/light.py`（T-0464 地盘）、未加依赖、未联网、无 HTTP/SSE 传输。\n- `light_check` 每次 ~1.2–1.8s（要拉一次 `light` 解释器），这是 CLI 侧固有成本，MCP 层不做缓存（缓存会引入「结果过期」这类业务判断）。\n\n## 接管说明\n\n本卡原由 `lightharness-fb98` 领取（18:39，180 分钟时限到 21:39 未交付）。按主控指令：`hive unassign T-0461` 退回 ready → 释放 store 侧陈旧租约 → `doubao-win` 领取执行，最早从 23:0x 开始，本次交付未复用对方任何产物（对方无 worktree、无 task 分支）。",
+  "error": "",
+  "declared_paths": [
+    "mcp/",
+    "mcp.example.json",
+    "tests/test_T0461_mcp.py"
+  ],
+  "changed_files": [
+    "mcp.example.json",
+    "mcp/README.md",
+    "mcp/light_mcp.py",
+    "tests/test_T0461_mcp.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "10c83656fa65482da8fe27d21dd14d7e"
+}
