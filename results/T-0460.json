@@ -1,0 +1,44 @@
+{
+  "task": "T-0460",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0460",
+  "base": "main",
+  "head": "eef3fab30009a7902f4a150c8766de12ecb1cc13",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T18:12:49+08:00",
+  "finished_at": "2026-11-24T18:24:19+08:00",
+  "duration_s": 690.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0460_discovery.py",
+      "code": 0,
+      "tail": [
+        "0.01s call     tests/test_T0460_discovery.py::test_all_backticked_paths_exist",
+        "0.01s call     tests/test_T0460_discovery.py::test_llms_txt_format",
+        "",
+        "(12 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "6 passed in 8.11s"
+      ]
+    }
+  ],
+  "summary": "# T-0460 交付小结\n\n## 做了什么\n\n在 light 仓根新增三个零配置发现入口，互不复制正文，只给指针：\n\n| 文件 | 字节 | 内容 |\n|------|------|------|\n| `AGENTS.md` | 3247 | 首屏 5 行（是什么/hello/怎么跑/怎么查/怎么验）+ 六条硬规则 + 常用导入 + 命令表 + 可跑示例 + 别做 + 卡住了看哪里 |\n| `llms.txt` | 1256 | 标准格式：`# 标题` + 摘要 + `## 链接`（spec、AI 指南、stdlib 速查、L0 字表、MVP 面、bench、AGENTS、SKILL）+ 可选区 |\n| `skills/light/SKILL.md` | 2531 | frontmatter（name/description/when_to_use）+ 三步闭环（读卡→写→`ai check --json`→按 fixes 改）+ 完整可跑示例 + 失败模式表 |\n\n合计 7034 字节（上限 12000），单文件均 < 6KB。\n\n## 事实来源（逐字对照 spec）\n\n- `spec/light.spec.json` v0.4.2：L0 实际字数 44、关键字 172、stdlib 模块 109 / 导出 2191。\n- 抽查导出名 `读取文件`/`写入文件`/`文件存在`/`分割`/`拼接` 均在 spec 中存在，写进文档后由测试反向校验。\n- 示例实测：`python cli/light.py run` 输出 952（README 行数）；`ai check --json` 返回 `ok: true`、exit 0。\n- 失败模式表只写实测过的错误：缺冒号 → 「期望 冒号「:」」；`列出目录` → 导入错误。`print`/`True`/函数式 `追加` 在本版能跑，文档改写成“统一规范写法”，不谎报错误。\n\n## 判据\n\n`python -m pytest -q tests/test_T0460_discovery.py` → 6 passed。\n\n测试覆盖：三文件存在/字节预算、AGENTS 必需标记、llms.txt 首行与 `##` 分节 + 链接目标存在、SKILL frontmatter、三入口所有反引号相对路径存在（并要求 docs/、spec/、stdlib/ 各有覆盖）、spec 事实比对（L0 字数 / ≥5 关键字 / ≥5 stdlib 名 + 反向抽查）。\n\n## 需要主控知道的一个坑\n\nlight 仓 `.gitignore` 第 221 行是 `*.txt`，`llms.txt` 默认被忽略。本卡不改 `.gitignore`（不在允许路径内），提交前用 `git add -f llms.txt` 强制入库；land 之后该文件已被跟踪，忽略规则不再生效。建议后续在某张有 `.gitignore` 权限的卡里补一行 `!llms.txt`（不属本卡范围）。\n\n## 未做/边界\n\n- 未改 `README.md`（T-0464）、未改 `docs/ai/`（T-0459）、未搬 4.8 万字指南正文、未新增依赖。\n- T-0459 的三层静态卡尚未落地（本分支无 `docs/ai/`），因此三入口只指向现存权威文件 + `light ai card` 实时出卡，不写不存在的路径；T-0459 落地后可再加一条静态链接。",
+  "error": "",
+  "declared_paths": [
+    "AGENTS.md",
+    "llms.txt",
+    "skills/light/SKILL.md",
+    "tests/test_T0460_discovery.py"
+  ],
+  "changed_files": [
+    "llms.txt",
+    "AGENTS.md",
+    "skills/light/SKILL.md",
+    "tests/test_T0460_discovery.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "308ddd0dcf2945abaf3e60e6a2697e90",
+  "fence": 1
+}
