@@ -39,6 +39,7 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -631,15 +632,37 @@ def _git_live(args: list[str], cwd, timeout: float = 10.0) -> tuple[int, str, st
 
     `_git()` 的 `_GIT_CACHE` 会把 `git status --porcelain` 的结果钉死，
     autosync 之后必须重新判定，所以三态判定一律走这个实时版本。
+
+    四个非默认参数都是踩过的坑，别去掉：
+      * ``encoding="utf-8", errors="replace"``：中文 Windows 的默认编码是
+        cp936，而 git 的输出（提交信息、中文文件名）是 UTF-8 —— 不指定就
+        会在读取线程里抛 UnicodeDecodeError，调用方只看到「git 没输出」
+        或「git 卡住了」（2026-11-24 现场：cluster.log 里 11 次
+        ``Exception in thread ... _readerthread: UnicodeDecodeError``）；
+      * ``stdin=subprocess.DEVNULL``：git 拉起的后代进程会继承管道，
+        communicate() 等不到 EOF 就永久挂住 —— hive.py 里的 run() 早就
+        这么做了，这里此前漏掉；
+      * ``GIT_TERMINAL_PROMPT=0``：凭据缺失/远端 401 时快速失败，不弹窗等人；
+      * 捕获走**临时文件**而不是 PIPE：凭据管理器这类后代握着写端时，
+        timeout 杀掉直接子进程也解不开 communicate() 的等待（2026-11-24：
+        lighthive 的 ls-remote 就是这样把整轮同步拖死的）。hive.py 的
+        _CaptureToFileProxy 是同一口径。
     """
-    try:
-        p = subprocess.run(
-            ["git", *args], cwd=str(cwd), text=True, capture_output=True,
-            timeout=timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-            **_no_window())
-    except (OSError, subprocess.SubprocessError):
-        return -1, "", ""
-    return p.returncode, (p.stdout or ""), (p.stderr or "")
+    with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
+        try:
+            p = subprocess.run(
+                ["git", *args], cwd=str(cwd),
+                stdin=subprocess.DEVNULL, stdout=fout, stderr=ferr,
+                timeout=timeout,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                **_no_window())
+        except (OSError, subprocess.SubprocessError):
+            return -1, "", ""
+        fout.seek(0)
+        ferr.seek(0)
+        return (p.returncode,
+                fout.read().decode("utf-8", "replace"),
+                ferr.read().decode("utf-8", "replace"))
 
 
 # --------------------------------------------------------------------------- #

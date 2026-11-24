@@ -73,7 +73,7 @@ rem `find  "11916"` sat on screen since 00:52 while the dashboard was down.
 powershell -NoProfile -Command ^
   "$d='%DASH%'; $a=@('-u','%SERVEPY%','--status','%STATUS%','--port','%PORT%','--host','%HOST%','--auto-refresh','--refresh-interval','%INTERVAL%');" ^
   "$pf='%PIDFILE%'; $old=if(Test-Path $pf){Get-Content $pf -TotalCount 1 -ErrorAction SilentlyContinue}else{$null};" ^
-  "if($old -and (Get-Process -Id $old -ErrorAction SilentlyContinue)){Write-Host ('dashboard already running (pid=' + $old + '), port %PORT%'); exit 0};" ^
+  "$pr=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $old) -ErrorAction SilentlyContinue; if($pr -and (($pr.CommandLine -match 'serve\.py') -or ($pr.CommandLine -match 'dashboard'))){Write-Host ('dashboard already running (pid=' + $old + '), port %PORT%'); exit 0} else {if(Test-Path $pf){Remove-Item $pf -Force -ErrorAction SilentlyContinue}};" ^
   "$p=Start-Process -FilePath 'python' -ArgumentList $a -WorkingDirectory $d -PassThru -WindowStyle Hidden -RedirectStandardOutput '%LOGOUT%' -RedirectStandardError '%LOGERR%';" ^
   "Set-Content -Path $pf -Value $p.Id; Write-Host ('dashboard started (pid=' + $p.Id + '), port %PORT%')"
 if errorlevel 1 (
@@ -92,6 +92,16 @@ if not exist "%PIDFILE%" (
 set /p PID=<"%PIDFILE%"
 if "%PID%"=="" (
     echo dashboard not running
+    del "%PIDFILE%" 2>nul
+    exit /b 0
+)
+rem PIDs get recycled: confirm the number is still the dashboard, otherwise
+rem only drop the pid file and never taskkill someone else's process
+rem (2026-11-24: pid 1664 was already conhost.exe).
+powershell -NoProfile -Command ^
+  "$old=%PID%; $pr=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $old) -ErrorAction SilentlyContinue; if($pr -and (($pr.CommandLine -match 'serve\.py') -or ($pr.CommandLine -match 'dashboard'))){exit 0} else {exit 1}"
+if errorlevel 1 (
+    echo dashboard not running ^(stale pid file: %PID% is not dashboard^)
     del "%PIDFILE%" 2>nul
     exit /b 0
 )
@@ -116,7 +126,8 @@ if "%PID%"=="" (
     echo not running ^(stale pid file^)
     exit /b 1
 )
-powershell -NoProfile -Command "if (Get-Process -Id %PID% -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
+powershell -NoProfile -Command ^
+  "$old=%PID%; $pr=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $old) -ErrorAction SilentlyContinue; if($pr -and (($pr.CommandLine -match 'serve\.py') -or ($pr.CommandLine -match 'dashboard'))){Write-Host ('running (pid=' + $old + ')'); exit 0} else {Write-Host ('not running (stale pid file: ' + $old + ' is not dashboard)'); exit 1}"
 if errorlevel 1 (
     echo not running ^(stale pid file^)
     exit /b 1

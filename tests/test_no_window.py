@@ -241,10 +241,30 @@ def test_dashboard_refresh_loop_is_guarded():
 
 
 def test_cluster_git_helpers_are_guarded():
-    """集群里周期性跑的 git/tasklist 小工具。"""
-    for qual in ("RepoSyncAgent._git_rev", "RepoSyncAgent._remote_head",
-                 "_pid_alive"):
-        assert _function_guarded("hive_cluster.py", qual), f"{qual} 漏了 no_window kwargs"
+    """集群里周期性跑的 git/tasklist 小工具。
+
+    `RepoSyncAgent` 的 git 小工具自 2026-11-24 起统一走 `_git_capture`
+    （临时文件捕获 + stdin=DEVNULL + no_window），函数体内不再直接调
+    subprocess —— 所以钉两件事：那个统一出口本身带防护，且这些小工具
+    没有任何绕过出口的裸调用。
+    """
+    assert _function_guarded("hive_cluster.py", "_git_capture"), \
+        "_git_capture 是 RepoSyncAgent 的唯一 git 出口，必须带 no_window kwargs"
+    assert _function_guarded("hive_cluster.py", "_pid_alive"), \
+        "_pid_alive 漏了 no_window kwargs"
+
+    path = ROOT / "hive_cluster.py"
+    tree = ast.parse(_read(path))
+    for qual in ("RepoSyncAgent._git_rev", "RepoSyncAgent._remote_head"):
+        for q, node in _iter_functions(tree.body, []):
+            if q != qual:
+                continue
+            bare = [c for c in _calls_in(node) if _callee(c)]
+            assert not bare, (
+                f"{qual} 应统一走 _git_capture，不许自己调 subprocess："
+                f"{[c.func.attr for c in bare]}"
+            )
+            break
 
 
 # --------------------------------------------------------------------------- #

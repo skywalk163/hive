@@ -704,6 +704,17 @@ def net_timeout() -> float | None:
 # 看板 30s 一轮、多仓 sync 时不至于 3×N 次往返。
 _ls_remote_cache: dict[str, tuple[float, str]] = {}
 
+# 探测明确回「没有凭据」的仓：{str(Path)}。这些仓再 fetch 也只会把
+# 120s 的 HIVE_NET_TIMEOUT 整整等满（凭据管理器弹不出来也不返回），
+# 于是每轮 sync 都多挂两分钟 —— 2026-11-24 的 lighthive 就是这样。
+# 探测成功一次就把路径从集合里摘掉，凭据补上后自动恢复。
+_auth_missing: set[str] = set()
+_AUTH_ERROR_TOKENS = (
+    "could not read username", "could not read password",
+    "terminal prompts disabled", "authentication failed",
+    "permission denied", "403 forbidden", "401 unauthorized",
+)
+
 
 def remote_head(path: str | Path) -> str:
     """`git ls-remote origin refs/heads/main refs/heads/master` 取回远端主线 SHA。
@@ -712,14 +723,24 @@ def remote_head(path: str | Path) -> str:
     失败/分支不存在返回空串 ""。
     """
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    key = str(Path(path).expanduser())
     try:
-        p = run(["git", "ls-remote", "origin",
+        # `-c credential.helper=`：只做探测，不该把凭据管理器叫起来。
+        # 无界面的会话里它会一直等一个永远不出现的输入框，把 10s 超时
+        # 变成 120s 的 fetch 空转。
+        p = run(["git", "-c", "credential.helper=", "ls-remote", "origin",
                  "refs/heads/main", "refs/heads/master"],
                 cwd=str(path), check=False, timeout=10.0, env=env)
     except Exception:
         return ""
     if p.returncode != 0 or not (p.stdout or "").strip():
+        blob = f"{p.stderr or ''}\n{p.stdout or ''}".lower()
+        if any(tok in blob for tok in _AUTH_ERROR_TOKENS):
+            _auth_missing.add(key)
+        else:
+            _auth_missing.discard(key)
         return ""
+    _auth_missing.discard(key)
     # ls-remote 输出两行：`<sha>\trefs/heads/main` 和 `<sha>\trefs/heads/master`
     # 取第一个非空行的 SHA（main 优先；有些仓只有 master）。
     for line in (p.stdout or "").strip().splitlines():
@@ -763,6 +784,11 @@ def fetch_if_changed(path: str | Path, ttl: float = FETCH_IF_CHANGED_TTL_S) -> b
 
     # ls-remote 拿远端 SHA
     remote_sha = remote_head(path)
+
+    # 远端明确要凭据而本机没有 → 再 fetch 也只是把超时等满，直接跳过。
+    if key in _auth_missing:
+        _ls_remote_cache[key] = (now_s, "")
+        return False
 
     # ls-remote 失败 → 回落无条件 fetch（网络抖动不能让跨机卡消失）
     if not remote_sha:
@@ -4235,8 +4261,12 @@ class Hive:
         原样保留（git 自己保证）；万一重叠，git 拒绝 ff 且不丢任何东西。
 
         返回结构化结果 dict：
-          status: up-to-date / fast-forwarded / diverged / unreachable /
-                  missing / no-remote
+          status: up-to-date / fast-forwarded / ahead / diverged /
+                  unreachable / missing / no-remote
+
+        `ahead` 是「本地领先远端」的终态：远端已无新提交可快进，等 push 把
+        本地提交带上去。它必须与 `fast-forwarded` 分开，否则调用方会把
+        「什么都没动」当成「刚追上」，对着同一个 sha/target 反复重试。
         """
         path = path.expanduser()
         if not path.exists():
@@ -4287,8 +4317,28 @@ class Hive:
             p = git(["merge", "--ff-only", remote], path, check=False)
             rc, p_stderr = p.returncode, (p.stderr or "")
         if rc == 0:
-            return {"repo": name, "path": str(path), "status": "fast-forwarded",
-                    "sha": rev_parse(path, "HEAD") or remote}
+            # rc=0 不等于「刚快进」：本地领先远端时 git 只回
+            # "Already up to date."，HEAD 一动不动。旧代码一律记
+            # fast-forwarded 并写入本地 HEAD，于是 sha ≠ target，
+            # 补偿循环每轮都判「还差一截」再跑一遍 merge —— 永不收敛。
+            # 2026-11-24 现场：light 仓同一对 sha/target 刷了 99 次、
+            # 每 4~5 分钟一轮，整段时间线上都是 git 进程。
+            new_head = rev_parse(path, "HEAD") or head
+            if new_head != head:
+                return {"repo": name, "path": str(path),
+                        "status": "fast-forwarded", "sha": new_head}
+            if git_ok(["merge-base", "--is-ancestor", remote, new_head], path):
+                behind = (git(["rev-list", "--count",
+                               f"{remote}..{new_head}"], path, check=False)
+                          .stdout.strip() or "?")
+                return {"repo": name, "path": str(path), "status": "ahead",
+                        "sha": new_head,
+                        "reason": f"本地领先 {remote_ref} {behind} 个提交，"
+                                  "等待 push；远端没动就不重试"}
+            # HEAD 没动、远端也不是祖先：说明 git 认为已是最新（例如远端
+            # 指向的就是 HEAD 的另一条等价路径），按 up-to-date 收口。
+            return {"repo": name, "path": str(path), "status": "up-to-date",
+                    "sha": new_head}
 
         # ff 失败：本地分叉，或未提交改动与传入提交重叠。绝不自动解冲突。
         dirty = git(["status", "--porcelain", "--untracked-files=no"], path,
@@ -4401,11 +4451,15 @@ class Hive:
             else:
                 for r in results:
                     status = r["status"]
-                    if status in ("up-to-date", "fast-forwarded", "diverged"):
+                    if status in ("up-to-date", "fast-forwarded", "ahead",
+                                  "diverged"):
                         if status == "up-to-date":
                             print(f"{r['repo']}: 已最新")
                         elif status == "fast-forwarded":
                             print(f"{r['repo']}: 快进到 {r.get('sha', '')[:12]}")
+                        elif status == "ahead":
+                            print(f"{r['repo']}: 本地领先远端"
+                                  f"（{r.get('reason', '待推送')}）")
                         else:
                             print(f"{r['repo']}: 落后但无法快进（{r.get('reason', '')}）")
                         for n in (r.get("notes") or [])[:3]:
@@ -9379,12 +9433,20 @@ def cmd_cluster(args) -> int:
     # `cluster stop` 不动看板（只停集群，看板照旧可读），要停用 `hive dash stop`。
     if rc == 0 and getattr(args, "action", "") in ("start", "restart"):
         if os.environ.get("HIVE_DASH_AUTOSTART", "1").lower() not in ("0", "false", "no", "off"):
+            # force=True：显式 start 不该被 autostart 的 5 分钟节流挡住——
+            # 否则「刚跑过别的命令 → cluster start → 看板还是没起」，人只会更困惑。
+            # 失败**要说话**：2026-11-24 的现场就是这里静默吞异常 —— 集群起来了、
+            # 看板没起，人只看到下一行「看板 未运行」，还得从头猜为什么。
+            ok, err = False, ""
             try:
-                # force=True：显式 start 不该被 autostart 的 5 分钟节流挡住——
-                # 否则「刚跑过别的命令 → cluster start → 看板还是没起」，人只会更困惑。
-                dashboard_ensure(wait=3.0, force=True)
-            except Exception:      # noqa: BLE001 —— 看板起不来不该把集群启动判失败
-                pass
+                ok = dashboard_ensure(wait=3.0, force=True)
+            except Exception as exc:   # noqa: BLE001 —— 看板起不来不该把集群启动判失败
+                err = f"{type(exc).__name__}: {exc}"
+            if not ok:
+                print("看板自启失败（不影响集群）"
+                      + (f"：{err}" if err else "：3 秒内未就绪")
+                      + "；执行 hive dash start 可看到详细报错",
+                      file=sys.stderr)
         print(dashboard_status_line())
     return rc
 

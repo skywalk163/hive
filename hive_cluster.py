@@ -50,6 +50,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -1057,6 +1058,32 @@ class Discovery:
 # 集群本体
 # --------------------------------------------------------------------------- #
 
+def _git_capture(cmd: list, timeout: float, env=None) -> tuple:
+    """跑一条外部命令，返回 ``(rc, stdout, stderr)``。
+
+    捕获走**临时文件**而不是 PIPE：git 的后代会继承写端（upload-pack、
+    凭据管理器），``communicate()`` 等不到 EOF 就永久挂住 —— timeout 只杀掉
+    直接子进程，管道仍被后代握着，调用照旧不返回。2026-11-24 现场：
+    lighthive 的 ls-remote 因为凭据管理器卡住，整轮补偿同步被拖死，进程列表
+    里只剩一个「卡着不动」的 git.exe。
+
+    hive.py 的 _CaptureToFileProxy 是同一口径；这里不 import hive（它是可选
+    依赖，import 失败也要能起集群），所以自己实现一份最小版。
+    """
+    with tempfile.TemporaryFile() as fout, tempfile.TemporaryFile() as ferr:
+        try:
+            proc = subprocess.run(cmd, timeout=timeout, stdin=subprocess.DEVNULL,
+                                  stdout=fout, stderr=ferr, env=env,
+                                  **no_window_kwargs())
+        except (OSError, subprocess.SubprocessError):
+            return -1, "", ""
+        fout.seek(0)
+        ferr.seek(0)
+        return (proc.returncode,
+                fout.read().decode("utf-8", "replace"),
+                ferr.read().decode("utf-8", "replace"))
+
+
 class RepoSyncAgent:
     """P0 轻量代码同步器：消费 repo.updated 事件 + 5 分钟游标补偿。
 
@@ -1160,13 +1187,29 @@ class RepoSyncAgent:
             if not target:
                 continue
             cur = (self._state.get("repos") or {}).get(name) or {}
-            if cur.get("sha") == target:
-                if cur.get("status") != "up-to-date":
+            # 本地 HEAD 现况：游标里的 sha 是上一轮的，人把仓归位之后必须重判，
+            # 否则 ahead/diverged 的跳过会把人已修好的仓一直钉在旧状态。
+            head_now = self._git_rev(Path(path), "HEAD")
+            if cur.get("sha") == target or (head_now and head_now == target):
+                if (cur.get("status") != "up-to-date"
+                        or cur.get("sha") != (head_now or target)):
                     cur["status"] = "up-to-date"
+                    cur["sha"] = head_now or target
+                    cur["target"] = target
                     cur["updated_at"] = _iso()
                     cur["error"] = ""
                     self._state.setdefault("repos", {})[name] = cur
                     self._save()
+                continue
+            # 本地领先（ahead）是终态：远端还停在同一个 target 上，就没必要
+            # 再跑一遍 merge --ff-only（它只会回 "Already up to date."）。
+            # 少了这一条，补偿循环会把同一对 sha/target 每 5 分钟重演一次，
+            # 既刷屏又白占 git 进程，直到有人把本地提交 push 上去。
+            if (cur.get("status") in ("ahead", "diverged")
+                    and str(cur.get("target") or "") == target
+                    and head_now == cur.get("sha")):
+                # diverged 同样是终态：分叉要人来裁决，远端没变之前每轮重跑
+                # merge 只会反复撞同一堵墙（lightprism 就是这种）。
                 continue
             self._sync_repo(name, target)
 
@@ -1223,8 +1266,10 @@ class RepoSyncAgent:
             if status in ("up-to-date", "fast-forwarded"):
                 rec["synced_at"] = _iso()
             self._record(name, str(path), status, target, "", rec)
+            detail = f"（{rec['detail']}）" if status == "ahead" and rec["detail"] else ""
             _log(f"sync: {name} {status} {str(actual)[:12]}"
-                 + (f" target={str(target)[:12]}" if target else ""))
+                 + (f" target={str(target)[:12]}" if target else "")
+                 + detail)
 
     def _record(self, name: str, path: str, status: str, target: str,
                 error: str = "", rec: dict | None = None) -> None:
@@ -1246,34 +1291,29 @@ class RepoSyncAgent:
             self._last_error = f"save: {exc}"
 
     # -- git 小工具 -------------------------------------------------------- #
+    # 编码/管道三件套与 hive_repos._git_live 保持一致：中文 Windows 的
+    # locale 是 cp936，git 输出却是 UTF-8，不显式指定会在读取线程里抛
+    # UnicodeDecodeError；stdin 不给 DEVNULL 则后代进程握管道会把调用挂死。
     @staticmethod
     def _git_rev(repo: Path, ref: str) -> str:
-        try:
-            p = subprocess.run(["git", "-C", str(repo), "rev-parse", ref],
-                               capture_output=True, text=True, timeout=5,
-                               **no_window_kwargs())
-            return p.stdout.strip() if p.returncode == 0 else ""
-        except (OSError, subprocess.SubprocessError):
-            return ""
+        rc, out, _err = _git_capture(["git", "-C", str(repo), "rev-parse", ref],
+                                     timeout=5)
+        return out.strip() if rc == 0 else ""
 
     @staticmethod
     def _remote_head(repo: Path) -> str:
-        try:
-            p = subprocess.run(
-                ["git", "-C", str(repo), "ls-remote", "origin",
-                 "refs/heads/main", "refs/heads/master"],
-                capture_output=True, text=True, timeout=15,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-                **no_window_kwargs())
-            if p.returncode != 0:
-                return ""
-            for line in p.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 2 and parts[1] in ("refs/heads/main",
-                                                    "refs/heads/master"):
-                    return parts[0]
-        except (OSError, subprocess.SubprocessError):
+        rc, out, _err = _git_capture(
+            ["git", "-C", str(repo), "-c", "credential.helper=",
+             "ls-remote", "origin",
+             "refs/heads/main", "refs/heads/master"], timeout=15,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        if rc != 0:
             return ""
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] in ("refs/heads/main",
+                                                "refs/heads/master"):
+                return parts[0]
         return ""
 
 
@@ -1411,6 +1451,13 @@ class CoordinatorAgent:
 class Cluster:
     def __init__(self, config: Config):
         self.config = config
+        # 心跳/发现/复制共用的 HTTP 线程池：一个进程只建一次。
+        # 以前每次心跳都 `with ThreadPoolExecutor(...)`，线程创建速率
+        # （1s 心跳 × 3~5 peers）远高于回收，Windows 上最终撞到线程上限：
+        # 日志里 31 次 MemoryError、3 次 can't start new thread，hived 就死在
+        # 维护循环里，cluster.pid 留给一个没人认领的号码。
+        self._http_pool = ThreadPoolExecutor(max_workers=16,
+                                             thread_name_prefix="hive-http")
         self.identity = Identity(config.state_dir, config.name)
         self.node_id = self.identity.node_id
         self.incarnation = self.identity.incarnation
@@ -3651,7 +3698,7 @@ class Cluster:
         if not peers:
             return
         best = self.term
-        with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+        with self._pool_ctx() as pool:
             futs = [pool.submit(http_json,
                                 str(p["url"]).rstrip("/") + "/api/cluster/health",
                                 "GET", None, 0.8, self.config.token) for p in peers]
@@ -3685,7 +3732,7 @@ class Cluster:
                 return False
         best_term = 0
         leader_seen = False
-        with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+        with self._pool_ctx() as pool:
             futs = [pool.submit(http_json,
                                 str(p["url"]).rstrip("/") + "/api/cluster/health",
                                 "GET", None, 0.5, self.config.token)
@@ -3817,7 +3864,7 @@ class Cluster:
         store_ahead = 0
         try:
             if peers:
-                with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+                with self._pool_ctx() as pool:
                     futs = {pool.submit(http_json,
                                         str(p["url"]).rstrip("/") + "/api/cluster/vote",
                                         "POST", body, 0.8, self.config.token): p
@@ -4046,7 +4093,7 @@ class Cluster:
     def _leader_heartbeat(self, peers: list[dict], body: dict) -> None:
         if not peers:
             return
-        with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+        with self._pool_ctx() as pool:
             futs = {pool.submit(http_json,
                                 str(p["url"]).rstrip("/") + "/api/cluster/heartbeat",
                                 "POST", body, 0.9, self.config.token): p
@@ -4126,9 +4173,14 @@ class Cluster:
             threading.Thread(target=self._store_catch_up, args=(leader_url,),
                              name="hive-store-catchup", daemon=True).start()
 
+    @contextlib.contextmanager
+    def _pool_ctx(self):
+        """借用共享池，**退出时不 shutdown**（它属于整个进程）。"""
+        yield self._http_pool
+
     def _peer_heartbeat(self, peers: list[dict], body: dict) -> None:
         """跟随者之间的状态交换（发现 + 活跃度 + 进度/租约的旁路同步）。"""
-        with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+        with self._pool_ctx() as pool:
             futs = {pool.submit(http_json,
                                 str(p["url"]).rstrip("/") + "/api/cluster/heartbeat",
                                 "POST", body, 0.7, self.config.token): p
@@ -5211,7 +5263,7 @@ class Cluster:
         ok = 1  # 自己已落盘
         if peers:
             body = {"op": op, "term": self.term}
-            with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+            with self._pool_ctx() as pool:
                 futs = [pool.submit(http_json,
                                     str(p["url"]).rstrip("/") + "/api/cluster/op",
                                     "POST", body, 1.5, self.config.token)
@@ -5238,7 +5290,7 @@ class Cluster:
         ok = 0
         if peers:
             body = {"seq": int(seq), "term": self.term}
-            with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+            with self._pool_ctx() as pool:
                 futs = [pool.submit(http_json,
                                     str(p["url"]).rstrip("/") + "/api/cluster/op/commit",
                                     "POST", body, 1.5, self.config.token)
