@@ -1,0 +1,40 @@
+{
+  "task": "T-0458",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0458",
+  "base": "main",
+  "head": "6cfe9c71ee83a49f6227b9173df3da68a73e2813",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T18:15:29+08:00",
+  "finished_at": "2026-11-24T19:15:35+08:00",
+  "duration_s": 3607.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0458_strict.py",
+      "code": 0,
+      "tail": [
+        "0.06s call     tests/test_T0458_strict.py::test_卡面举例但spec完全没条目的词不报",
+        "0.06s call     tests/test_T0458_strict.py::test_单字符中文标点映射[\\u8bbe \\u7532: \\u5178 = \\uff5b1: 2\\uff5d\\u3002\\n-\\uff5b-{]",
+        "0.05s call     tests/test_T0458_strict.py::test_多目标声明跳过并记录",
+        "0.05s call     tests/test_T0458_strict.py::test_省略类型报TYPE且不给替换",
+        "60 passed in 23.55s"
+      ]
+    }
+  ],
+  "summary": "# T-0458 交付摘要：strict 检测器（别名 / 中文标点 / 省略类型）纯模块\n\n## 交付物\n\n| 文件 | 说明 |\n|---|---|\n| `src/ai_strict.py` | 新增，纯标准库，无新增依赖 |\n| `tests/test_T0458_strict.py` | 新增，60 条用例 |\n\n## 接口\n\n```python\ncheck(source: str, *, canonical: str = \"L2\", spec_path=None) -> list[StrictFinding]\ncheck_report(source, *, canonical=\"L2\", spec_path=None) -> StrictReport\n```\n\n`StrictFinding` 字段与任务卡一致：`line / column / end_column / kind / actual /\nexpected / replacement / message`，`kind ∈ {ALIAS, PUNCT, TYPE}`。\n`check_report` 额外带回 `skipped_spec`（spec 缺信息而跳过）与 `skipped_source`\n（这次源码里替换不安全而跳过）两份清单 + `to_dict()` 可 JSON 序列化。\n\n**位置口径**：与 `src/lexer.py` 的 token 完全一致（行、列均从 1 起，汉字算 1 列），\n`end_column` 是开区间右端 —— `行[column-1:end_column-1]` 正好等于 `actual`。\n\n## 三类规则\n\n- **ALIAS**：sapec 的 `keywords[].主形式` + `keywords[].别名`（链式解析到终点）。检出 20 条。\n- **PUNCT**：spec `operators[].全角 → canonical` 单字符映射；中文引号 `「」`/`『』`\n  按**整条字符串 token** 给替换。\n- **TYPE**：`设 甲 为 10。` 这类无标注声明，只报不给 replacement（类型不代猜）。\n\n## 三条关键设计判断（都是「不猜」）\n\n1. **句号 `。` 不归一成 `.`**：spec `syntax_forms.cn_en_punctuation` 的反例明确\n   「半角 `.` 会被读成小数点，`1.` 变成浮点 1.0」，替换即产出非法代码。任务卡\n   PUNCT 规则里列了 `。`，但与 spec 冲突，按「spec 是唯一真相」取 spec 口径。\n2. **`跳出/跳过` 归一成 `断/跃`，不是卡面正文写的 `跳/过`**：spec `keywords`\n   登记的主形式是 `断`/`跃`；`跳`/`过` 无主形式登记，因此落在 `skipped_spec`\n   等人补 spec，而不是被悄悄当成规范形。\n3. **`返回→返`、`定义→设` 不做**：这两个词在 spec 里**没有任何别名关系登记**\n   （`定义` 无主形式、`返回` 无主形式也无反向别名）。任务卡举例里有这两对，\n   但第 3 条又要求「spec 里没有的别名关系就跳过」——按后者执行，并在此列出。\n   同理 `并且`/`或者` 在 spec.keywords 里根本没有条目，无从归一。\n\n## 幂等与收敛（已实测）\n\nL1 样本 → 套用全部 ALIAS/PUNCT 替换 → 剩余 findings 只剩 `TYPE`；\n连套两轮字节完全一致（无振荡）。\n\n端到端：L1 原文与归一后代码分别 `python -m cli.light run`，均 rc=0、输出\n`3/1/2` 一致；手写 L2 样本 findings = 0。\n\n## spec 缺信息清单（待 spec 补齐，不是本卡能改的）\n\n`check_report(...).skipped_spec` 共 33 条：32 条 ALIAS + 1 条 PUNCT\n（`syntax_forms.subject_object` 标 `已实测=false`）。ALIAS 判据是纯结构的\n（类别内已有 L0 单字或已登记别名轴，但该多字词既无主形式也无反向别名），\n包含 `定义 / 函数 / 段落 / 接收 / 常量 / 继续 / 退出循环 / 否则若 / 接口 /\n实现 / 继承` 等 —— 需 spec 负责人补「主形式」，本模块不猜。\n\n## 验证\n\n```\npython -m pytest -q tests/test_T0458_strict.py\n→ 60 passed（Windows 本机，含仓库默认 addopts -n 4 --dist=loadscope）\n```\n\n无需回退 192.168.0.88：Windows 侧 verify 直接绿。\n\n## 边界遵守\n\n只新增 `src/ai_strict.py` 与 `tests/test_T0458_strict.py`，`git status` 无其它改动。\n未触碰 `src/diagnostics/`、`cli/light.py`、`spec/`、`src/lexer.py`；不写盘、不新增依赖。",
+  "error": "",
+  "declared_paths": [
+    "src/ai_strict.py",
+    "tests/test_T0458_strict.py"
+  ],
+  "changed_files": [
+    "src/ai_strict.py",
+    "tests/test_T0458_strict.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "6e0e791a5d80458e9bdadcfb38d4cad2",
+  "fence": 1
+}
