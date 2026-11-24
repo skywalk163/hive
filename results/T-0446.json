@@ -1,0 +1,42 @@
+{
+  "task": "T-0446",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0446",
+  "base": "main",
+  "head": "d0f8e9bfce3598c0e72d035018d1f6e900ca9b28",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T12:32:44+08:00",
+  "finished_at": "2026-11-24T14:02:25+08:00",
+  "duration_s": 5382.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_R226_deep_nest.py",
+      "code": 0,
+      "tail": [
+        "0.06s setup    tests/test_R226_deep_nest.py::test_一百五十层嵌套调用_可编可跑",
+        "0.05s call     tests/test_R226_deep_nest.py::test_修复没有硬抬递归上限",
+        "0.04s call     tests/test_R226_deep_nest.py::test_语义对拍_新旧路径逐字一致[\\u8c03\\u7528_\\u5355\\u5c42]",
+        "0.04s call     tests/test_R226_deep_nest.py::test_语义对拍_新旧路径逐字一致[\\u5e42\\u53f3\\u7ed3\\u5408]",
+        "39 passed in 19.34s"
+      ]
+    }
+  ],
+  "summary": "# T-0446 工作说明（R226：parser 深嵌套 RecursionError）\n\n## 做了什么\n- 归因：`_parse_primary` 见 `(` 就把 14 级优先级阶梯整轮重下一遍（实测 13~14 帧/层），\n  默认上限 1000 ⇒ 60~70 层见顶；嵌套调用同形（70 绿 / 80 红）。与 OS 无关。\n- 修复（都不抬 `sys.setrecursionlimit` / `threading.stack_size`，AST 形状、语法表、L0 字表未动）：\n  1. 括号组迭代化：`_parse_paren_nest`（`src/parser_expr.py`）一次吃掉连续 n 层 `(`，\n     组内只解析一次，之后每关闭一层用 `_parse_expr_tail` 接着跑本层表达式；\n     阶梯函数新增 `left` 种子参数（默认 None ⇒ 行为与改前逐字一致）。\n  2. 单参调用链迭代化：`_parse_call_spine` 把 callee 名压进列表、最内层交原解析器、\n     再逐层回卷；形状不符即原样回滚 pos 退回原路径（原本能过的写法语义零变化）。\n- 两条路都留了开关 `_iterative_paren_parse` / `_iterative_call_spine`，供反证用例关掉。\n- 改的文件：`src/parser_expr.py`（唯一实现改动）、`tests/test_R226_deep_nest.py`（新增 39 例）。\n  `src/parser_core.py`、`src/code_generator.py` 未改（纯括号层生成物本来就是 `甲 = 1`，\n  codegen 不需要为括号收敛做改动）。\n\n## 验证\n- `python -m pytest -q tests/test_R226_deep_nest.py` → **39 passed**（35s，带项目 addopts `-n 4`）。\n- 150 层括号 / 150 层嵌套调用 / 150 层「每层括号组后接运算符」：parse→gen→compile→exec 全过。\n- 递归上限压到 500：同一 150 层夹具仍可编可跑；**parse 最小递归上限 30 层 = 55、150 层 = 55**\n  （完全持平，栈深与层数解耦）；反证（开关置 False）同一夹具在子进程里 `RecursionError`。\n- 语义对拍 26 种形态（纯括号/混优先级/比较链/包含/除法/整除/幂/元组/调用/三元）：\n  新旧路径 AST 结构、生成的 Python 文本、运行输出三者逐字一致。\n- 大模块 303721 字节 / 4405 行：Win10 parse 1.30s gen 0.16s pycompile 0.16s 峰值 70.9MB；\n  FreeBSD 1.88s/0.26s/0.19s、68.6MB。\n- **FreeBSD 15.1（192.168.0.88）同文件 39 passed**（~/r226，只上传 src + 本判据，不依赖仓库残留）。\n- 回归：解析相关子集 49 文件 720 例，我的树 717 passed / 3 failed；3 例全在\n  `tests/unit/test_R167_L239_同族形态.py`，根因是 `stdio.h not found`（原生腿缺 C 头文件），\n  在**基线 HEAD 上跑同样 3 红**（3 failed, 9 passed）⇒ 环境性、非本卡引入。\n  （全量 10568 例的完整差分受 180 分钟预算与 4 核机型限制未跑完，如实登记。）\n\n## 遗留风险（如实登记）\n1. 嵌套调用：parse 已解耦（最小上限 55 恒定），但 codegen 仍逐层递归（~1.7 帧/层）\n   + CPython 自身 ≈200~250 层括号上限 ⇒ 150/200 层在 500 上限下过，300 层先撞 codegen。\n   可用区间以宿主上限为界（卡内允许）。\n2. 同卡第二残留 `/` 链 `_light_trunc_div` 复测：N=200 仍可编可跑，N=220 起产物被 CPython\n   判 `too many nested parentheses`（宿主嵌套上限）；上限压到 500 时 150 项仍绿。本轮不修。\n3. 既有缺陷（非本卡引入，未动）：`(1+2)*3` 生成 `1 + 2 * 3`（实跑 7，应为 9），\n   `(1+2)*(3+4)` 同理；基线 HEAD 复现一致，属 codegen 折叠时「低优先级括号组当左操作数」\n   漏补括号。本判据因此不对该形态断期望值，只判新旧路径逐字一致。\n4. 本机 `python`（WorkBuddy 内置 3.13.12）没装 pytest，验证用\n   `C:\\Users\\PCbeta Tester\\AppData\\Local\\Programs\\Python\\Python312\\python`（3.12.9 + pytest 9.1.1）。",
+  "error": "",
+  "declared_paths": [
+    "src/parser_expr.py",
+    "src/parser_core.py",
+    "src/code_generator.py",
+    "tests/test_R226_deep_nest.py"
+  ],
+  "changed_files": [
+    "src/parser_expr.py",
+    "tests/test_R226_deep_nest.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "52c460e434b848f487f2d860ca425c8d",
+  "fence": 1
+}
