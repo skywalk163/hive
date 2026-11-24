@@ -683,6 +683,23 @@ class Config:
             kw.get("election_jitter") or _env_float("HIVE_CLUSTER_ELECTION_JITTER", DEFAULT_ELECTION_JITTER_S))
         self.leader_lease = float(
             kw.get("leader_lease") or _env_float("HIVE_CLUSTER_LEADER_LEASE", DEFAULT_LEADER_LEASE_S))
+        # 租约必须显著长于**空闲心跳间隔**，否则两者撞车。
+        #
+        # 2026-11-24/25 现场：`leader_lease` 默认 5s，`idle_heartbeat_interval`
+        # 也默认 5s —— 空闲时主控每 5 秒才发一次心跳，跟随者的租约恰好 5 秒
+        # 到期。网络上只要晚几十毫秒，维护循环就先判「主节点租约过期」，
+        # 清空 leader_id，下一拍心跳到了再重新采纳。于是 state.json 里留下
+        # 55 次 `leader_lost(主节点租约过期)` 与 54 次 `leader_seen` 一一配对，
+        # cluster.log 里「采纳主控」刷屏（旧日志累计 44692 次），而这条清空
+        # 走 `_emit_locked` 不写文本日志 —— 只看日志根本不知道是谁清的。
+        #
+        # 判据：租约至少是「空闲心跳间隔 × 3」，给足两个心跳的抖动余量。
+        # 显式给 leader_lease 的调用方（含测试）不受影响 —— 只有默认值会被
+        # 抬到安全下限，避免既有用例里 `leader_lease=1.0` 这类短值被改写。
+        if not (kw.get("leader_lease") or _env_float(
+                "HIVE_CLUSTER_LEADER_LEASE", 0.0)):
+            self.leader_lease = max(
+                self.leader_lease, self.idle_heartbeat_interval * 3.0)
         # 成员表 TTL：见 DEFAULT_MEMBERSHIP_TTL_S 的注释。仅用于展示/GC；
         # 票池口径自 T-0328 起只认 alive/suspect，dead 不再抬高 quorum。
         self.membership_ttl = float(
