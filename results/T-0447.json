@@ -1,0 +1,40 @@
+{
+  "task": "T-0447",
+  "agent": "loomy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0447",
+  "base": "main",
+  "head": "83550218f6e0a22bbed92892f5ccf528b1c356ad",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T13:39:59+08:00",
+  "finished_at": "2026-11-24T14:51:51+08:00",
+  "duration_s": 4312.4,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_R227_mem_snapshot.py",
+      "code": 0,
+      "tail": [
+        "0.14s setup    tests/test_R227_mem_snapshot.py::test_退出码_全绿为0且subprocess模式行数契约",
+        "0.01s setup    tests/test_R227_mem_snapshot.py::test_采集器_行数与字段齐全",
+        "",
+        "(9 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "6 passed, 1 skipped in 13.24s"
+      ]
+    }
+  ],
+  "summary": "# T-0447 工作说明：T-0445「内存错误」取证——抓原始失败快照 + 同机连跑统计与内存曲线\n\n## 做了什么（交付物）\n\n1. **采集器 `tools/r225_mem_capture.py`（新增，~1060 行，纯 Python）**：\n   - 每模块独立编译子进程（compile-one）或单子进程连编（compile-batch，--workers 1 默认，\n     对齐 T-0445「单进程连编」口径，可测进程内累积）；--workers W>1 走 W 路并行子进程。\n   - 两条内存分支均实测：Windows = ctypes+psapi GetProcessMemoryInfo(EX 结构\n     WorkingSet/PeakWorkingSet/PrivateUsage) + GlobalMemoryStatusEx + GetProcessHandleCount；\n     POSIX = resource.getrusage ru_maxrss（KB，按平台折算）+ sysctl hw.realmem /\n     vm.stats.vm.v_free_count×hw.pagesize（拿不到降级 None 不崩），按平台分支 import resource。\n   - 逐条记录：文件/字节/行数/编译耗时 ms/编译前后 RSS/峰值工作集/私有字节/rc/异常类型/\n     异常尾部 200 字符；产物 runs.csv + summary.json（每轮首末峰值 RSS、增长%、轮间与轮内\n     斜率、机器信息、Python 版本、参数快照）+ report.txt（ASCII 每轮一行）。\n   - 失败即抓快照：traceback 全文、当时 RSS、系统可用物理内存、句柄数、tracemalloc top10\n     （按行号聚合）、Python 版本、主机名、起止时间、并发数、模块路径、rc；MemoryError 无\n     traceback 时落快照+模块路径+rc 并标 traceback_missing（快照在 except 块内抓取）。\n   - 子进程崩溃/OOM 落盘一条 CRASH 记录，父进程不静默；--timeout-s 看门狗自杀；\n     --amplify 生成 3 个放大模块（1200 项链/≥200KB 大模块/项链+嵌套+大模块叠加）；\n     --balloon-pct 内存气球（压可用物理内存到目标百分比，自带超时自杀，结束即终止）。\n   - 三态判定 classify_rounds（纯函数）：flaky 优先 → leak（轮间单调+总增长>5%+末半程仍\n     在爬；或非首轮 inproc 轮内单向爬升）→ stable（无失败且末段收敛）→ failing（一致失败）。\n     末段收敛检查是相对任务字面的收紧：防「前几轮缓存驻留、之后持平」被打成假 leak\n     （实测 Win 峰值 39.1→45.1MB 后连续 7 轮零增长），判据构造数据仍按字面三分各覆盖一例。\n\n2. **判据 `tests/test_R227_mem_snapshot.py`（新增，7 用例，全文件 ~16s < 60s）**：\n   CSV 行数=模块数×轮数+字段齐全；斜率/增长%手算对拍（纯函数+summary 集成复核）；\n   leak/stable/flaky 三组构造数据（另附 failing 防混淆）；失败快照真实触发（注入 300 层\n   深嵌套括号必炸模块，断言快照字段齐全）；Windows/POSIX 内存分支各自跑通（skip 仅用于\n   平台缺席：Win 上 skip POSIX 真分支、FB 上 skip psapi 分支，两侧对称互证）；退出码语义。\n\n## 跑了什么验证（数字）\n\n- **判据**：Windows `python -m pytest -q tests/test_R227_mem_snapshot.py`（默认 addopts -n 4）\n  = **6 passed 1 skipped，16s**；FreeBSD 15.1（python3.12.13，`-o addopts=''`）=\n  **6 passed 1 skipped，4.5s**——两平台对称全绿，各自 skip 的正是本平台没有的内存分支，\n  该分支在另一侧真跑通过（POSIX 真分支在 FB 实测 ru_maxrss>0）。\n- **取证矩阵（264 lightharness 模块，夹具 T-0399 worktree）**，双平台全表：\n\n  | 矩阵 | 平台 | 峰值RSS | 轮间增长% | 轮间斜率KB/轮 | 三态 | 失败/崩溃 |\n  |---|---|---|---|---|---|---|\n  | M1 单进程连编×10轮 | Win10/py3.14.7 | 45.1MB(轮4起持平) | 15.33(前4轮驻留) | 539 | stable | 0/0 |\n  | M1 单进程连编×10轮 | FB15.1/py3.12.13 | 42.4MB(轮3起持平) | 3.09 | 271 | stable | 0/0 |\n  | M2 8并发×10轮 | Win10/py3.14.7 | 39.7MB | -0.11 | 1 | stable | 0/0 |\n  | M2 8并发×10轮 | FB15.1/py3.12.13 | 36.9MB | -0.02 | 18 | stable | 0/0 |\n  | M3 放大×5轮(+tracemalloc) | Win10/py3.14.7 | 97.7MB | -0.39 | -92 | stable | 0/0 |\n  | M3 放大×3轮 | FB15.1/py3.12.13 | 69.8MB | 0.04 | 193 | stable | 0/0 |\n  | M3 放大+气球(可用内存7.2~7.5%)×3轮 | Win10/py3.14.7 | 71.5MB | 1.02 | -8 | stable | 0/0 |\n\n  Win M1 轮内斜率：首轮 35.5KB/模块（预热驻留），轮 2-10 在 ±5KB/模块 内波动；\n  FB M1 轮 2 起轮内斜率≈0。M1 全程 2640 次编译、M2 全程 2640 个子进程编译，零失败零崩溃。\n\n## 结论三分（T-0445 内存分支）\n\n**证据不足 → 当前环境下不可复现，本卡不关闭 T-0445 内存分支，需要原始失败快照才能继续。**\n全矩阵（单进程连编 / 8 并发 / 放大叠加 / 内存气球压到 ~7.5% 可用）× 双平台（Win10 / FreeBSD 15.1）\n全部 stable、零失败、零崩溃、零原始失败快照——同代码两平台同绿，不构成「宿主问题」的\n硬证据（对照要求一边红一边绿），也不构成「代码问题」（无最小复现）。T-0445 修复的 codegen\n递归是确定性问题，与本「偶发内存错误」仍是两处。\n\n**需要总控补的条件（按优先级）**：① 失败当时的原始 stderr/退出码原文与 rc；② 当时的\npytest 参数与插件清单（是否 xdist、并发数、timeout 插件版本）；③ lightharness 当时的\ncommit 与模块清单（原始样本可能比 264 个更大/更重）；④ 机器规格（机型/CPU/物理内存/\nWindows 版本与补丁号——本机 Win10 19045 / 19GB 物理）；⑤ Python 精确 patch 版本；\n⑥ 失败发生时段宿主是否有并发负载（xdist 多 worker 同时跑大模块是最可疑的场景）。\n\n## 附注与遗留风险\n\n- 附带验证：FreeBSD 首跑放大矩阵因调用方式（csh 不支持内联环境变量 + 采集器放在\n  非标准位置导致 root 推导失效）产生 9 条 ModuleNotFoundError 快照——恰好实证了\n  失败快照机制在 POSIX 分支真实可用（traceback 全文/降级字段齐全/父进程非 0 退出）。\n- 三态判定的「末段收敛」收紧已在判据与采集器 docstring 中说明口径；若总控要求严格\n  任务字面（去掉末段检查），需同步改 classify_rounds 与判据构造数据。\n- FreeBSD 未跑内存气球（共享机，压到 10% 可用内存可能影响其他用户进程，红线不常驻占机）。\n- 产物留档：`%TEMP%\\r227_evidence\\{matrix1_inproc, matrix2_w8, matrix3_amp,\n  matrix3_balloon, freebsd}\\`（runs.csv / summary.json / report.txt）；远端 ~/r227 已清理。\n- 本卡只改了允许路径（tools/r225_mem_capture.py、tests/test_R227_mem_snapshot.py），\n  src/ 与 tests/test_R225_win_memory.py 未动；commit 83550218f on task/T-0447。",
+  "error": "",
+  "declared_paths": [
+    "tools/r225_mem_capture.py",
+    "tests/test_R227_mem_snapshot.py"
+  ],
+  "changed_files": [
+    "tests/test_R227_mem_snapshot.py",
+    "tools/r225_mem_capture.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "32449a240c3b46ac93d080bd0ea744f2",
+  "fence": 1
+}
