@@ -1,0 +1,46 @@
+{
+  "task": "T-0459",
+  "agent": "loomy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0459",
+  "base": "main",
+  "head": "819fd4c76edf6b3073a319680b9291ac01396b1d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T18:06:59+08:00",
+  "finished_at": "2026-11-24T18:36:30+08:00",
+  "duration_s": 1771.4,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0459_aeicard.py tests/test_syntax_card_rank.py",
+      "code": 0,
+      "tail": [
+        "0.01s call     tests/test_T0459_aeicard.py::test_write_ai_docs_roundtrip",
+        "0.01s setup    tests/test_T0459_aeicard.py::test_write_ai_docs_roundtrip",
+        "",
+        "(4 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "42 passed in 5.44s"
+      ]
+    }
+  ],
+  "summary": "# T-0459 语法卡三层重写（compact/standard/full）工作总结\n\n## 结果\n\n- **42 passed**：`python -m pytest -q tests/test_T0459_aeicard.py tests/test_syntax_card_rank.py` 全绿（Windows, Python 3.14.7 + 用户级 site-packages）。\n- **FreeBSD 15.1 双平台对照 OK**（192.168.0.88, Python 3.12.13）：compact=271 / standard=2002 / full=350 / version=0.4.2，与 Windows 输出逐字节一致；远端临时产物已清理。\n- `grep -c \"v3\\.2\" tools/ai_copilot/syntax_card.py` = 0。\n- `python -m cli.light ai card` 默认输出 689 字节（改动前 1013 字节）；`--full` 4253 字节（standard 层）。cli/light.py 未改动，经旧签名兼容层继续工作，T-0464 接 `--level` 时直接传 `level=` 即可。\n\n## 改动清单（全部在卡面允许 paths 内）\n\n| 文件 | 说明 |\n|---|---|\n| `tools/ai_copilot/syntax_card.py` | 整体重写：`generate_compact_card()` / `generate_standard_card()` / `generate_full_card()` 三层 + `generate_syntax_card(level=...)` 统一入口；`read_version()` 从 src/version.py 读版本；`write_ai_docs()` 落盘 docs/ai/；旧签名（compact/include_verbs/include_pitfalls/ranked）三态兼容保留 |\n| `tests/test_T0459_aeicard.py` | 新增验收：长度上限（len() 计）、三 level 无 v3.2、版本号与 src/version.py 断言相等、必含词（读取文件/段落/若/引 SQL）、6 条硬规则实测坑、spec 派生健全性（stdlib50 ⊆ spec 导出全集、暗坑逐条对上 spec diagnostics、L0 分组对上 spec l0_core、骨架覆盖 spec 类别关键字）、docs/ai 逐字一致（换行归一化）、full 索引、旧签名兼容 |\n| `tests/test_syntax_card_rank.py` | rank_pitfalls 全部测试逐字保留；删除旧 _BASELINE_FULL/_BASELINE_COMPACT 死快照，ranked 置顶区块的逐字基线改为动态调用三层卡（等价防腐烂效果），新增 standard 层置顶组合测试 |\n| `docs/ai/compact.md` / `standard.md` / `README.md` | 由 `write_ai_docs()` 生成，与生成函数输出逐字一致（测试断言防腐烂） |\n\n## 设计要点与卡面约束落实\n\n1. **事实全部来自 spec/light.spec.json**：keywords（骨架按类别机械过滤）、l0_core（16 章 44 字分组）、stdlib（常用 50：白名单 模块→每模块截断，函数名全部来自 spec 导出，共 50 个）、operators（按类别分组渲染，含 状态≠可用 的标注）、diagnostics（全量 19 条一行一条）。卡面没有第二份关键字表；`_generate_verb_table`（旧附录，元数来自 src/keywords.py）仅为 pipeline 兼容保留，不在三层卡正文内。\n2. **\"14 条暗坑\"与实际不符**：spec diagnostics 实际 19 条，按\"所有事实从 spec 取\"原则全量收录并在节标题标注实际条数（卡面完成标准只断言必含词与长度，未断言条数）。\n3. **\"引 SQL\"来源**：spec keywords 的嵌入块类别含 `引`/`嵌入`/`结束引`/`结束嵌入`；\"SQL\"是 `引 SQL:` L3 域嵌入句式的领域标签示例（实现见 src/code_generator.py），卡内明确标注\"SQL/模式/公式 为 L3 域标签示例\"，不构成第二份事实表。\n4. **版本号真源**：`read_version()` 正则读 src/version.py 的 `__version__`；status_banner 同步改为 version.py（STATUS.md 仅用于 MVP 链接登记检查），读不到降级为空串不抛异常。\n5. **跨平台换行**：core.autocrlf=true 下重新 checkout 会把工作区 md 转 CRLF，docs 一致性断言按换行归一化对比（入库内容恒为 LF），避免 Windows/FreeBSD 差异误报。\n6. **未动**：cli/light.py、spec/light.spec.json、docs/AI编程指南.md（4.8 万字未搬）。\n\n## 踩坑记录（供后续 agent 参考）\n\n- hive MCP server 在 claim 时 push 被拒（远端 main 有并发提交）后卡死（whoami 连续超时）；本次走 CLI 兜底闭环：`hive claim` → `hive take`（租约实际已先落地，卡面与 worktree 由 CLI 补齐）。建议后续 MCP claim 失败/超时后同样先查租约归属。\n- 新签名若把 `compact` 参数默认值设为 `False`，会吞掉显式 `compact=False`（旧完整版语义）；已改为三态 `compact=None`：True→compact、False→standard、None→保持 level。\n- verify 的 pytest 需要 Python314 + `PYTHONPATH=C:\\Users\\skywalk\\AppData\\Roaming\\Python\\Python314\\site-packages`（默认 python 3.13 无 pytest）。\n\n## Verify 记录\n\n```\n$ python -m pytest -q tests/test_T0459_aeicard.py tests/test_syntax_card_rank.py\n42 passed in 5.35s\n```",
+  "error": "",
+  "declared_paths": [
+    "tools/ai_copilot/",
+    "docs/ai/",
+    "tests/test_syntax_card_rank.py",
+    "tests/test_T0459_aeicard.py"
+  ],
+  "changed_files": [
+    "docs/ai/README.md",
+    "docs/ai/compact.md",
+    "docs/ai/standard.md",
+    "tests/test_T0459_aeicard.py",
+    "tests/test_syntax_card_rank.py",
+    "tools/ai_copilot/syntax_card.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "94243560c958401485aea680ff411ac2",
+  "fence": 1
+}
