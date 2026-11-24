@@ -1,0 +1,48 @@
+{
+  "task": "T-0454",
+  "agent": "loomy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0454",
+  "base": "main",
+  "head": "1208a2681146de14405cbd4037e559206d54451e",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T14:05:24+08:00",
+  "finished_at": "2026-11-24T16:58:16+08:00",
+  "duration_s": 10372.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0454_前端可观测.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 3.92s"
+      ]
+    },
+    {
+      "cmd": "node --check webui/app.js",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "# T-0454 工作说明：lightharness 前端可观测（错误帧 / 结束原因 / streaming 看门狗 / 压缩不阻塞）\n\n## 交付内容\n\n| 文件 | 改动 | 说明 |\n|---|---|---|\n| `webui/app.js` | 修改（4 处 + 测试钩子） | 见下方分项 |\n| `webui/style.css` | 修改（1 处） | 新增 `.sys .continue-btn` 样式 |\n| `tests/test_T0454_前端可观测.py` | 新增（7 用例） | node --check + 静态契约 + 4 条 node+DOM 桩行为用例 + 反跑 |\n| `webui/messages.js` | **未改** | addSystem 已返回节点、addCompaction 已有，无改动需求 |\n\n## 实现分项（对齐任务卡 4 点）\n\n1. **错误帧渲染**：`handleFrame` JSON 解析后新增 `json.error` 分支，同时覆盖\n   `{\"error\":{...}}` 与 `[{\"error\":{...}}]`（数组包裹）两种形状；文案\n   `驱动失败：<message>`（含 `消息` 键回退），`setStatus(\"down\")`，收口思考块与\n   当前气泡；不改 streaming 生命周期（由 [DONE]/收尾统一收口）。\n2. **结束原因提示**：`renderStats` 尾部接 `handleEndReason`，消费 T-0453 统计帧新字段\n   `结束原因`（四值闭集）：`max-steps` → 提示「本轮达到步数上限（N 步）…」+\n   行内「继续」按钮（点击即 `sendMessage(\"继续\")`，点击后 disabled 防重复）；\n   `max-tokens` → 「输出被截断」；`aborted` → 「已中止」；`error` → 指向错误提示；\n   `completed` 静默。\n3. **streaming 自愈看门狗**：`STREAM_WATCHDOG_MS=30000`、巡检 5s；`setStreaming(true)`\n   挂看门狗，`handleFrame` 每帧 `touchStream()` 喂狗，`setStreaming(false)` 撤狗；\n   超时自愈四连：收口思考/气泡 → `finalizeTurn` → `setStatus(\"down\")` →\n   `setStreaming(false)`（内部 flush 本地队列）→ 提示「连接可能已断开…可重发」。\n   时间源 `nowMs()`（=Date.now），测试可注入假时钟。\n4. **压缩提示不阻塞**：文案补「本轮结束后发「继续」即可接着做」；压缩帧处理路径\n   本就不动 streaming/队列，行为用例钉住该契约。\n\n## 测试设计（零依赖红线）\n\n- **DOM/时钟/存储桩 + SSE 假流全部由测试文件运行时写入 tmp**（不引 jsdom）；\n  行为用例走真链路：stub `fetch`+ReadableStream 喂 SSE chunk → 真实\n  `sendMessage/readStream/handleFrame` → 断言真实 `messages.js` 渲染出的气泡。\n- 假流语义对齐真实 ReadableStream：空队列 `read()` 挂起，`push/end` 唤醒挂起的\n  read（否则 pump 永挂——第一版假流缺 pending-resolver，正是首跑全红的根因）。\n- `[DONE]` 后必须 `st.end()` 关流（真实服务端发完 [DONE] 即关）——否则 pump 挂死、\n  node 不退出，xdist worker 被判 crashed。\n- 「继续」按钮点击时序按真实用户行为放对流收口之后（统计帧先到、流随后结束）。\n- 测试钩子 `window.__lhTest` 仅在 `window.__LH_TEST__` 为真时挂载（生产零开销零暴露）。\n\n## 验收命令结果（本机 Windows，worktree 内）\n\n- `python -m pytest -q tests/test_T0454_前端可观测.py` → **7 passed**（xdist -n 4）\n- `node --check webui/app.js` → 退出码 0（messages.js 同样 0）\n\n## 反跑记录（判据 4）\n\n- 锚点：app.js 中错误帧分支 `if (errObj) {`（恰出现 1 次）。\n- 变异：该行替换为 `if (false) { /* T-0454 反跑：错误帧分支已禁用 */`，写 tmp shadow\n  副本跑 errorFrame 场景 → `CASE_FAIL errorFrame: 对象形错误帧未渲染 .sys.error 气泡`\n  → rc=1（**用例 3a 立红**）；src 原文件全程未动（读回比对一致），无写回-还原竞态。\n\n## 红线自查\n\n- 未引 npm/python 依赖（node 原生 + Python stdlib subprocess）；DOM 桩全在测试文件内。\n- 未改服务端帧形状：`结束原因` 字段名与 T-0453 一致（`{\"种类\":\"统计\",\"结束原因\":…}`）。\n- 未动既有 `种类` 帧渲染契约：会话/统计/压缩/计划/审批请求/工具调用/工具结果分支\n  原样保留，错误分支与 touchStream 插在解析后最前，不影响既有顺序。\n- 未改构建与 webui 之外的文件；messages.js 无需改动。\n\n## 遗留说明\n\n- 看门狗自愈后 `setStreaming(false)` 会 flush 本地队列：若队列非空，重发即开新流\n  （streaming 回 true）——这是设计内行为，行为用例按「自愈瞬间 false + flush 后重发\n  发生」两段钉住。\n- 域名类 URL 的 DNS 层私网复核不在本卡范围（T-0452 卡面已注明归宿主网络层兜底）。",
+  "error": "",
+  "declared_paths": [
+    "webui/app.js",
+    "webui/messages.js",
+    "webui/style.css",
+    "tests/test_T0454_前端可观测.py"
+  ],
+  "changed_files": [
+    "webui/app.js",
+    "webui/style.css",
+    "tests/test_T0454_前端可观测.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "307fafdc1e114bd69ede604fce10aca8",
+  "fence": 1
+}
