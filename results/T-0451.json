@@ -1,0 +1,40 @@
+{
+  "task": "T-0451",
+  "agent": "loomy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0451",
+  "base": "main",
+  "head": "e7fbb4cd74a64071a4ffd29f0c975e1b3305c97d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T12:41:43+08:00",
+  "finished_at": "2026-11-24T12:46:05+08:00",
+  "duration_s": 262.7,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0451_技能目录.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 15.76s"
+      ]
+    }
+  ],
+  "summary": "# T-0451 交付摘要：lightharness 技能目录发现与 skill 工具（SKILL.md 扫描 + 系统提示段）\n\n## 新增文件与行数\n\n- `src/技能目录.light`：约 230 行（新增；`src/技能清单.light` 只读导入，未改动）\n- `tests/test_T0451_技能目录.py`：约 340 行，7 条用例（新增）\n\n## 验收命令结果\n\n`python -m pytest -q tests/test_T0451_技能目录.py` → **7 passed**（主工作区与 worktree 各跑一次，xdist -n 4 下无竞态）\n\n## 判据覆盖\n\n| 判据 | 用例 | 结果 |\n|---|---|---|\n| 1 两处各 1 技能 → 发现 2 个、字段正确 | `test_两处各一技能发现两个且字段正确` | ✓ |\n| 2 同名两处 → 只留先出现（skills/）那份 | `test_同名去重只留先出现的` | ✓ |\n| 3 坏 frontmatter → 跳过并给 跳过原因，好的仍发现 | `test_坏frontmatter跳过且好的仍发现` | ✓ |\n| 4 清单段 `- 名字：描述` / 按码点截断 / `<` 转义 / 条数上限 | `test_渲染技能清单段_条目截断转义与上限` | ✓ |\n| 5 skill 工具：已知名 `<skill_content name=\"x\">`；未知名 isError=真+可用清单 | `test_skill工具_已知名渲染未知名列清单` | ✓ |\n| 6 工具定义过 `工具.校验工具定义形状`，名字恰为 `skill` | `test_工具定义形状合法且名为skill` | ✓ |\n| 7 反跑：删掉同名去重 → 用例 2 立红 | `test_反跑_删掉同名去重_用例2立红` | ✓ |\n\n## 实现要点\n\n1. **发现技能(根, 额外目录表 = [])**：扫 `<根>/skills/*/SKILL.md` 与 `<根>/.skills/*/SKILL.md`\n   （额外目录表每根同口径、优先级在后），同名去重取先出现者。返回\n   `{\"技能\": [{名字, 描述, 路径, 正文长度}], \"跳过\": [{路径, 跳过原因}]}`。\n   单个坏文件只记 `跳过原因`，绝不整体抛错（红线）。\n2. **解析技能文件(文本)**：极简 frontmatter（`name:` / `description:`）逐行解析，\n   正文取结束 `---` 之后。缺起始/结束 `---`、缺 name、缺 description、空文件 →\n   `{\"ok\": 假, \"跳过原因\": ...}`。额外剥 UTF-8 BOM（Windows 写文件工具常见）。\n3. **渲染技能清单段(技能表, 上限条数 = 50)**：一行一条 `- 名字：描述`；超长描述\n   **先按码点截断原文（80 码点 + 省略号）再走 `技能清单.转义文本`**（顺序避免把\n   转义实体截成半截）；超限给 `仅列前 N 个` 提示行。可直接拼进系统提示。\n4. **造技能工具定义(发现函数, 根)**：`skill` 工具（参数 `name`，DSH 同名 snake_case，\n   schema 过 `工具.校验工具定义形状`）；已知名按需读文件 → 复用 `技能清单.渲染技能内容`\n   渲染 `<skill_content name=\"…\">`（name 属性转义、正文文本转义）；未知名返回\n   `isError=真` + 可用名字清单（截断 20 个）。嵌套 `执行` 段落闭包捕获\n   发现函数与根（与 `src/交互工具.light` 的 DI 模式一致）。\n\n## 反跑实现（判据 7，pytest -n 4 安全）\n\n- 锚点：`src/技能目录.light` 中的同名去重守卫行\n  `如果 列表包含(已有名字表, 解析[\"名字\"]):`（测试断言该行恰好出现 1 次）。\n- 变异：该行替换为 `如果 假:`（行为等价于删掉去重），写入临时 shadow 目录。\n- 注入：shadow runner（测试内嵌的 Python 引导脚本）复用 `运行.py::_setup_paths()`\n  装好光明导入钩子后，把 shadow 目录**插到 `LightFinder.search_paths` 最前**——\n  变异版 `技能目录.light` 先命中，兄弟模块（工具/技能清单）仍从 `src/` 正常解析。\n- 断言：变异版跑判据 2 同款 driver，发现数 == 2（即用例 2 的 `== 1` 必红）；\n  并断言 `src/技能目录.light` 原文件全程未被修改。**无写回-还原竞态**。\n\n## 词法/平台注意（避坑记录）\n\n- 目录扫描用内置 `列出目录`（builtins 地板，`src/总入口.light` 已有调用先例）+\n  `os.path.join`，规避标准库 文件系统 模块导出名的「列/遍历/筛选」词法伪关键字陷阱\n  （与 `src/工具_搜索文件.light` 同款规避）。\n- `跳出`（break）用于 frontmatter 结束行定位；`当` 循环实现清单条数上限，不依赖\n  跨行列表字面量。\n\n## 红线自查\n\n- 未改 `src/技能清单.light`（git status 仅两个新增文件）。\n- 无网络请求、无新增依赖（stdlib 只导入既有 字符串处理 的 `字符转ASCII`）。\n- 发现阶段对单个坏文件只记 `跳过原因`，不抛错。",
+  "error": "",
+  "declared_paths": [
+    "src/技能目录.light",
+    "tests/test_T0451_技能目录.py"
+  ],
+  "changed_files": [
+    "src/技能目录.light",
+    "tests/test_T0451_技能目录.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "4b6c4ad587d0459d9eedcf452d6b4ae4",
+  "fence": 1
+}
