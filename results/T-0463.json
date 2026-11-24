@@ -1,0 +1,39 @@
+{
+  "task": "T-0463",
+  "agent": "dumate-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0463",
+  "base": "main",
+  "head": "bc75632124f3d5ad4c4e629999b6848664faaa06",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T18:53:50+08:00",
+  "finished_at": "2026-11-24T19:00:21+08:00",
+  "duration_s": 391.1,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0463_corpus.py",
+      "code": 0,
+      "tail": [
+        "0.02s setup    tests/test_T0463_corpus.py::test_prompt_never_leaks_code_tokens",
+        "0.01s call     tests/test_T0463_corpus.py::test_two_runs_are_byte_identical",
+        "",
+        "(9 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "6 passed, 1 skipped in 10.39s"
+      ]
+    }
+  ],
+  "summary": "# T-0463 交付摘要：语料导出器（stdlib + spec → 需求/代码配对 JSONL）\n\n## 结论\n\n- 新增 `tools/gen_ai_corpus.py`（纯标准库 CLI，无网络、无模型调用）。\n- 新增 `tests/test_T0463_corpus.py`（7 项契约测试）。\n- 生成器实际产出 **1756 条**配对样本（要求 ≥500），其中 `runnable:true` 458 条；\n  两次运行 `light_sft.jsonl` 的 sha256 完全一致。\n- 产物写入 `build/corpus/`（`.gitignore:167` 已忽略），提交范围只有生成器与测试两件代码文件。\n\n## 做法要点\n\n1. 素材：`stdlib/*.light`（119 个模块）顶层「段落」定义；`spec/light.spec.json` 提供 172 个关键字与 2191 条导出签名，用于判定标识符是否已知。\n2. 样本：签名行 + 去注释段体；**超过 60 行一律跳过**（实测最长 57 行）。\n3. 需求侧（`prompt`）：由模块主题 + 函数名动宾拆分 + 10 个句式模板合成，再用同义词改写；\n   对每条样本动态计算禁忌词（`code` 中出现的多字关键字、ASCII 标识符、结构性单字 `设/若/且/与/为/从/在/的/是/空/长`），\n   prompt 命中即换模板，仍不合格的样本直接丢弃，保证不泄题。\n4. `runnable`：不依赖文件/网络/进程/FFI、且不引用未知标识符（含未知 ASCII 标识符）时为 `true`，\n   进入 `light check` 抽样池；其余保留为 SFT 语料但标 `false`。\n5. 确定性：按 `(文件名, 起始行号)` 排序、固定 `L-0001` 递增 id、`json.dumps(sort_keys=True)`、manifest 无时间戳。\n6. `manifest.json` 记录条数、`by_level`、`by_source_class`、逐文件分布、`matrix`（4 level × 5 source）、\n   `jsonl_sha256` 与跳过原因统计。\n\n## 验证证据（本机实际输出）\n\n```\n$ python -m pytest -q tests/test_T0463_corpus.py\n......s                                                                  [100%]\n6 passed, 1 skipped in 13.32s\n```\n\n- `s` 为 `test_runnable_samples_pass_light_check`：本机无 `light` 命令，按卡要求 `pytest.skip`，未伪造通过。\n- 双跑哈希：\n  `4a2380f85aa06ecd2822602e6d0c5bb7f6c417a50b62590d7c4ea77e72399df2`\n  （`build/corpus_a` 与 `build/corpus_b` 完全一致）\n- 分布（`--stats`）：\n\n```\nlevel |    文本    |    数据    |    算法    |    系统    |    网络    | 合计\nL1    |   148    |   173    |   311    |   113    |    18    |  763\nL2    |    77    |   110    |   281    |   105    |    13    |  586\nL3    |    68    |    93    |   148    |    39    |    17    |  365\nL4    |    11    |     5    |    10    |    14    |     2    |   42\n合计  |   304    |   381    |   750    |   271    |    50    | 1756\n```\n\n## 复现\n\n```\npython tools/gen_ai_corpus.py --out build/corpus/ --min 500 --stats\npython -m pytest -q tests/test_T0463_corpus.py\n```\n\n## 边界说明\n\n- 未修改 `stdlib/`、`spec/`、`docs/AI编程指南.md`；未联网、未调用模型 API。\n- `light check` 抽检在无 `light` 命令的机器上跳过，不做假绿；`runnable` 判据已在生成器中写死并可被测试复核。",
+  "error": "",
+  "declared_paths": [
+    "tools/gen_ai_corpus.py",
+    "tests/test_T0463_corpus.py"
+  ],
+  "changed_files": [
+    "tests/test_T0463_corpus.py",
+    "tools/gen_ai_corpus.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "cf990cb098c04b49bc046911b54042b9"
+}
