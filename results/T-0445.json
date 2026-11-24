@@ -1,0 +1,41 @@
+{
+  "task": "T-0445",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0445",
+  "base": "main",
+  "head": "8a6b0c2da31d52541a0688cc7bfb0272d2989aa1",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-24T09:21:35+08:00",
+  "finished_at": "2026-11-24T10:18:35+08:00",
+  "duration_s": 3420.1,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_R225_win_memory.py",
+      "code": 0,
+      "tail": [
+        "0.01s call     tests/test_R225_win_memory.py::test_语义不变_样例[\\u51cf\\u6cd5\\u5de6\\u7ed3\\u5408]",
+        "0.01s call     tests/test_R225_win_memory.py::test_语义不变_样例[\\u5e42\\u8fd0\\u7b97]",
+        "0.01s call     tests/test_R225_win_memory.py::test_语义不变_样例[\\u6bd4\\u8f83\\u4e0e\\u903b\\u8f91]",
+        "0.01s call     tests/test_R225_win_memory.py::test_语义不变_样例[\\u6574\\u9664\\u622a\\u65ad]",
+        "17 passed in 68.63s (0:01:08)"
+      ]
+    }
+  ],
+  "summary": "R225 / T-0445 交付（实机：Win10 + CPython 3.13.18；交叉：192.168.0.88 FreeBSD 15.1 + 3.12.13）\n\n结论：lightharness 的「栈溢出」是**光明侧确定性缺陷**，不是宿主偶发；「内存错误」在可及样本上未能复现，按规矩不编结论。\n- 根因：`PythonCodeGenerator._generate_expr` 对 BinaryOp 按 AST 形状逐层递归，而 parser 把 `a+b+c` 解析成左结合链，N 项链＝N 层帧＋N 层括号。\n- 修复前实测：n≤200 通过；n≥220 产物层层括号 → CPython `too many nested parentheses`（SyntaxError）；n≈1000 codegen 自身 RecursionError。1200 项链 10 连跑 **10/10 红**（非偶发，换平台同样红）。\n- 修复：`src/code_generator.py` 把左撇链拆成 spine 后迭代折叠（`_left_spine` / `_fold_binary_spine` / `_generate_binary_chain`），按优先级与「比较链必须留括号」规则发射；`写 \"a\" + …` 的 `_gen_write_merged` 同口径。旧递归实现保留为反证基线（`_iterative_binary_chain=False` 必红，生产路径恒 True）。\n- 修复后阈值：2500 项链可编；3000 撞 CPython 自身 compile 递归上限（宿主 Python 限制，与光明无关）。\n- 「内存错误」证据：264 个 lightharness 源模块单进程连跑编译，RSS 22→27MB 平稳（无累积）；最大 140KB 模块峰值 62.9MB；5MB 单字符串/10 万元素列表峰值 132MB。该量级不存在编译器分配失败；判宿主还需原始失败快照（当前 lightharness worktree 全绿，取不到），故只登记不关闭。\n- 边界（不修，如实登记）：parser 深嵌套 60 层可编、80 层 RecursionError（`parser_expr.py` 不在本卡允许路径）；>100 层块缩进撞 CPython MAXINDENT。均未靠 `setrecursionlimit` 硬抬。\n- 新增 `tests/test_R225_win_memory.py`（17 例）：1200 项链 10 连跑＋峰值记录、2000 项写拼接链、≥200KB/4405 行大模块耗时与峰值基线（Win 峰值 51.7/62.9MB，FreeBSD 107~109/132.4MB，阈值取 2.3 倍）、反证必红、递归上限不被改写且压到 700 仍可编、10 例语义对拍、深嵌套 60 层边界、双平台内存探针自证。\n- 验证：`python -m pytest -q tests/test_R225_win_memory.py` → Win10 17 passed；FreeBSD 15.1 同一份夹具 17 passed。\n- 回归：`tests/test_codegen.py` + `tests/test_context_manager.py` + `tests/test_内置与直调S2_BI2.py` → 185 passed / 1 failed（预存：`test_自之属性带索引赋值` 在 HEAD 同样红）；264 个 harness 模块批量编译 0 失败；CLI 跑 `从 工具执行 导入` 用例正常。\n- 风险：扁平化只删「同优先级左结合」的多余括号，并保留整体外层括号，既有按文本断言的用例零回归；但下游若断言「逐层括号」形态会看到文本差异（语义已对拍）。除 `/` 链（`_light_trunc_div` 逐层调用，>150 链仍受 CPython 嵌套上限）外无已知语义偏差。",
+  "error": "",
+  "declared_paths": [
+    "src/code_generator.py",
+    "src/lexer.py",
+    "src/parser_core.py",
+    "tests/test_R225_win_memory.py"
+  ],
+  "changed_files": [
+    "src/code_generator.py",
+    "tests/test_R225_win_memory.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "525adede627440dca52a8ae33fdf11ce"
+}
