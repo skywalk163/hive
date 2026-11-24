@@ -3541,6 +3541,22 @@ class Cluster:
             now = _now()
             self.leader_lease_until = now + self.config.leader_lease
             self._last_leader_heartbeat_at = now
+            # 关键：真正的本人心跳必须把新租约**写回节点记录**。
+            #
+            # 否则维护循环里那段「防御性收敛」会把本机租约又拉回记录里的
+            # 陈旧值：
+            #     rec_lease = nodes[leader].lease_until_epoch
+            #     if leader_lease_until > rec_lease: leader_lease_until = rec_lease
+            #     if now > leader_lease_until: _clear_leader_locked(租约过期)
+            # 于是「心跳续租 → 收敛回旧值 → 判定过期 → 清空 leader_id →
+            # 下一拍再采纳」每轮循环一次。2026-11-24 现场：同一 term 内
+            # 「采纳主控」刷了 44692 次、约每 5 秒一条，而 cluster.log 里
+            # 一条 leader_lost 都没有 —— 因为 _clear_leader_locked 走的是
+            # _emit_locked（只记事件、不写 cluster.log），清空完全静默。
+            rec_node = self.nodes.get(lid)
+            if isinstance(rec_node, dict):
+                rec_node["lease_until"] = _iso(self.leader_lease_until)
+                rec_node["lease_until_epoch"] = self.leader_lease_until
         else:
             # 从同伴快照里「听说」的主节点不能当直接心跳：只转述对方记录的
             # 绝对到期时间。min(..., now+lease) 只做上限裁剪（防异常大值），
