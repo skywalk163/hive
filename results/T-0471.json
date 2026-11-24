@@ -1,0 +1,43 @@
+{
+  "task": "T-0471",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0471",
+  "base": "main",
+  "head": "823996b9f4e04a5c98ce773c9d19b27205f39583",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T05:37:49+08:00",
+  "finished_at": "2026-11-25T05:56:24+08:00",
+  "duration_s": 1115.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_cluster_upgrade_runbook.py",
+      "code": 0,
+      "tail": [
+        "........                                                                 [100%]",
+        "8 passed in 1.61s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_lease_heartbeat_floor.py",
+      "code": 0,
+      "tail": [
+        ".....                                                                    [100%]",
+        "5 passed in 4.08s"
+      ]
+    }
+  ],
+  "summary": "## 做了什么\n\n1. **fb98（FreeBSD，原主控）已换新代码并重启**：仓 HEAD 早就是 `754ea22`（含\n   `554cb2b`/`4730460`），但进程还是 11-23 11:52 起的那份（41.9h）。\n   `cluster restart` 因老进程没落盘 `cluster.pid` 停在「找不到 pid 文件」，\n   改用 `sudo -n -u skywalk kill -TERM 9933` 让老进程优雅退出，再\n   `cluster start`（新 pid 640，参数从 `state_dir/config.json` 重建，\n   `--store --claim-backend store --mcp` 都在）。term 3923 → 3925，\n   主控权交到 `DESKTOP-6LFQUO8`。\n2. **IC6RTQ4（本机 `C:\\dswork\\hive`）没有重启**：本节点当时有 running 的卡\n   （T-0471 自己 + T-0467），按红线「不许在还有 running 任务时重启对应节点」\n   主动放弃。它的仓也已在 `754ea22`，只差一次重启。\n3. 文档重写：`docs/cluster/节点升级清单.md` 补了逐节点判据（谁还报 4~5s 租约\n   就是旧代码）、fb98 的账号/PATH/pid 三个现场坑、重启主控会换主、以及本次\n   实测前后对比与「没做」项。\n\n## 验证（可复现）\n\n- `python -m pytest -q tests/test_cluster_upgrade_runbook.py` → 8 passed\n- `python -m pytest -q tests/test_lease_heartbeat_floor.py` → 5 passed\n- 实测：主控下发租约 4.8s → 14.7~15.0s（≥10s 判据过）；\n  05:50:54–05:53:21 共 17 次采样，`leader_lost` 恒为 5、`leader_id` 恒为\n  `DESKTOP-6LFQUO8`，不再成对刷。\n\n## 遗留风险\n\n- IC6RTQ4 本地视图仍是 3.9~5.0s（旧代码按自己的默认值重算），余量薄；\n  待它空闲后按清单第 1、2 步重启即可收尾。\n- 主控现在是 6LFQUO8；fb98 `leader_priority=20`，下次选举可能拿回主控权\n  —— 两边都已是新代码，不影响判据。\n- 未改 `state.json`、未动 `hive_cluster.py` 的租约/选举逻辑、未用\n  reset/push 类危险操作。",
+  "error": "",
+  "declared_paths": [
+    "docs/cluster/节点升级清单.md"
+  ],
+  "changed_files": [
+    "docs/cluster/节点升级清单.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "9c1f7300e3d244f4b3d2fe9934f31019",
+  "fence": 1
+}
