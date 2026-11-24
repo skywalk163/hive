@@ -1,0 +1,42 @@
+{
+  "task": "T-0466",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0466",
+  "base": "main",
+  "head": "6774b679f46f6953d9cf7a098e3dda4253804245",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T00:14:52+08:00",
+  "finished_at": "2026-11-25T00:41:48+08:00",
+  "duration_s": 1616.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0466_使用率显示.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......                                                                   [100%]",
+        "6 passed in 63.71s (0:01:03)"
+      ]
+    }
+  ],
+  "summary": "# T-0466 结果：上下文使用率显示准确率整改\n\n## 做了什么\n1. **分母跟随真实模型窗口**（`src/web服务器.light` 新增 `取显示窗口`）：按「内置模型目录 contextWindow → 已缓存 jet-hub 目录 → 环境变量窗口 → 保守 32768」取值，并把 `窗口来源` 随统计帧上报。压缩预算（`造压缩配置` / `压判断触发`）**未动**，仍是 `HARNESS_MODEL_CONTEXT_WINDOW` 口径。\n2. **分子改「当前驻留上下文」**（新增 `重算上下文占用`）：取会话事件 `assistant/message` 里最后一次上报的 `用量[\"输入\"]`（即模型侧 prompt_tokens），不再用「本轮输入+本轮输出」的 step 累加；取不到上报时回退本轮累计，并在帧里用 `占用口径=本轮累计` 标注。三处跑一轮的落点（同步/流式/排队续跑）都接了重算。\n3. **统计帧封顶 100**（新增 `封顶使用率`，保留 1 位小数）：`上下文使用率` 不再出现 928%；新增字段 `上下文窗口/窗口来源/上下文占用/占用口径`，旧键全部保留。/compact 帧的 `上下文利用率` 同步封顶。\n4. **前端封顶**（`webui/app.js`）：新增 `USAGE_MAX/clampUsagePct/formatUsagePct`，顶栏统计与输入区「上下文 xx%」统一走封顶文案（溢出显示 `100%+`），颜色阈值改用封顶后的值，tooltip 展示窗口/来源/占用口径。\n5. 新增 `tests/test_T0466_使用率显示.py`（黑盒 .light 片段 + 前端文本断言，6 个用例）。\n\n## 验证\n- `python -m pytest -q tests/test_T0466_使用率显示.py` → **6 passed**（约 68s；编译 web服务器 依赖树较慢，用例标了 timeout=900）。\n- 现场等价输入（in 267680 / out 26980 / 窗口 1,000,000）→ 使用率 **26.8%**（旧口径 29.5%，旧分母 32768 时是 928%）。\n- `python 运行.py examples/test_web服务器E5.light` → 通过。\n- `tests/test_T0404_会话细节.py` + `tests/test_流式推流接线契约.py` → 19 passed。\n- `tests/test_T0398_附件暂存契约.py::test_服务端稳健接收附件形状` 仍失败（500）；**已用 git stash 在未改动的基线上复现，属既有问题**，与本卡无关。\n\n## 风险 / 遗留\n- jet-hub 目录只读缓存、不触发探测：若用户从未拉过模型目录（`GET /api/models` 没调过）且模型不在内置目录里，分母会回退到环境窗口并标注 `窗口来源=环境默认`（此时使用率可能仍偏高，但不再静默当真实窗口）。\n- 「in/out」数字本身仍是 step 累计口径（本卡不改计量器语义），已在顶栏 tooltip 里写明。\n- 宿主默认 `python`（3.13.12）原先没装 pytest，为跑验收命令已 `pip install pytest pytest-xdist pytest-timeout`。",
+  "error": "",
+  "declared_paths": [
+    "src/web服务器.light",
+    "webui/app.js",
+    "tests/test_T0466_使用率显示.py"
+  ],
+  "changed_files": [
+    "src/web服务器.light",
+    "webui/app.js",
+    "tests/test_T0466_使用率显示.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "036bca257d614ac2b4396d9c95326331",
+  "fence": 1
+}
