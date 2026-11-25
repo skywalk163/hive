@@ -91,6 +91,56 @@ def test_section_28_says_where_to_run(text):
         "2.8 要明确「不要套在 agent 的 exec/后台任务里」")
 
 
+def test_section_28_covers_non_windows_nodes(text):
+    """不能只写 Windows。
+
+    集群里有 FreeBSD（fb98）和 Linux 节点，只教 `schtasks`/`.cmd` 等于把它们
+    漏掉了。至少要给一个脱离会话的通用做法（`setsid` / `systemd --user` /
+    `rc.d` 之类），否则那几台节点的人照抄不了。
+
+    注意：跨平台说明必须是**正文散文**，不能只出现在代码块的注释里 ——
+    否则删掉正文那句、只剩一行注释，也照样能骗过判据（本卡反跑时踩过）。
+    """
+    sec = _section_28(text)
+    # 去掉 fenced code block 后再判断，这样代码注释里的关键词不算数
+    prose = re.sub(r"```.*?```", "", sec, flags=re.S)
+    assert re.search(r"Linux|FreeBSD", prose), (
+        "2.8 的正文（非代码块）里没提 Linux/FreeBSD 节点该怎么做")
+    assert re.search(r"setsid|systemd|rc\.d|nohup|daemon", prose), (
+        "2.8 的正文里要给出脱离会话拉起的具体手段（setsid / systemd / rc.d / nohup）")
+    # 具体手段在代码块里也要有可抄的样例
+    assert re.search(r"```sh.*?setsid|```sh.*?nohup", sec, re.S), (
+        "2.8 应给出可直接照抄的 sh 代码块（setsid/nohup）")
+
+
+def test_section_28_explains_reclaim_vs_crash(text):
+    """必须讲清「怎么区分被回收和自己崩」。
+
+    这是本文最实用的一条判据 —— 判错方向，人就会一头扎进
+    `hive_cluster.py` 里找不存在的 bug。要能对上现场特征：
+    日志无 traceback、退出码是 Ctrl+C 语义、只在 agent 里复现。
+    """
+    sec = _section_28(text)
+    assert re.search(r"区分|怎么判断|区别|判错", sec), (
+        "2.8 没说明「怎么区分被回收 vs 自己崩」")
+    assert re.search(r"traceback", sec, re.I), (
+        "区分手段里必须包含「看 cluster.log 有没有 traceback」")
+    assert re.search(r"0xC000013A|Ctrl\+C|SIGTERM|信号", sec), (
+        "区分手段里要提到退出码/信号特征")
+    assert re.search(r"普通终端.*(稳定|不掉)|只在.*agent.*(掉|回收)", sec), (
+        "2.8 应给出可操作的经验判据：普通终端稳定、agent 里掉 = 被回收")
+
+
+def test_section_28_warns_uptime_zero_is_not_proof(text):
+    """`uptime` 归零不等于原来那个进程活着——可能被重新拉起。
+
+    只看「uptime 是个位数」会误判成功，必须要求「持续增长」。
+    """
+    sec = _section_28(text)
+    assert re.search(r"持续增长|仍在增长|还在增长|一直在涨", sec), (
+        "2.8 要说明「uptime 要持续增长」才算真活着")
+
+
 def test_section_28_has_ic6rtq4_timeline(text):
     """要带现场时间线，证明这是真实踩过的坑而不是理论。"""
     sec = _section_28(text)
