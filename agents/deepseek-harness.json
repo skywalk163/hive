@@ -1,0 +1,25 @@
+{
+  "name": "deepseek-harness",
+  "host": "fb98",
+  "command": "",
+  "mode": "manual",
+  "manual": true,
+  "abilities": [
+    "code",
+    "docs",
+    "verify",
+    "python",
+    "pytest"
+  ],
+  "capabilities": [
+    "python",
+    "pytest"
+  ],
+  "repos": {
+    "lightharness": "/home/skywalk/dswork/lightharness"
+  },
+  "launch": "",
+  "worktrees": "/home/skywalk/.hive/wt",
+  "max_concurrency": 1,
+  "created": "2026-11-26T04:27:22+08:00"
+}
