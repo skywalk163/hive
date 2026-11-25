@@ -1,0 +1,80 @@
+{
+  "task": "T-0470",
+  "agent": "lightharness-fb98",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0470",
+  "base": "main",
+  "head": "9b2c459756762b55dfd28f4809fc0e1e29bf62c2",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T00:18:33+08:00",
+  "finished_at": "2026-11-25T06:26:21+08:00",
+  "duration_s": 22068.8,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0470_工具根与cd守卫.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......                                                                   [100%]",
+        "6 passed in 18.61s"
+      ]
+    }
+  ],
+  "summary": "# T-0470 总结：工具根 / worktree 支持（cd 守卫与读写路径解耦）\n\n## 做了什么\n\n1. **工具根升级为「会话级 + 线程级」**（`src/工具_路径安全.light`）\n   - 新增线程局部工具根（`threading.local`）：`设置工具根/清除工具根/取工具根覆盖`。\n   - `取根目录()` 优先级：`HARNESS_ROOT`（T-0180 红线，强制覆盖）> 会话 cwd 参数 >\n     **本线程工具根** > `HARNESS_CWD` > `当前目录()`。无 worktree 时行为与旧版逐字一致。\n   - 新增白名单 `工具根白名单()`：项目根（`当前目录()`）、`~/.hive/wt`、\n     `HARNESS_TOOL_ROOTS`（`os.pathsep` 分隔）。**不可信入口**（工具参数、cd 目标）\n     必须命中白名单；Web 层按用户选定的会话 cwd 属「信任设置」，只校验存在（T-0395 语义不变）。\n   - 新增 `路径在根内 / 是允许工具根 / 解析工具根 / 取调用根`；`normcase+normpath`\n     归一后做「根 + 分隔符」前缀判定，避免 `/a/bc` 冒充 `/a/b` 的子路径。\n\n2. **cd 守卫从「字面量正则」改为「解析后路径判定」**（`src/工具_bash.light`）\n   - 删除 `越界正则`（只匹配 `cd /abs`、`cd ..`，被 `W=...; cd $W` 合法绕过）。\n   - 新实现：切词（保留引号/转义/`$(...)` 语义）→ 切简单命令段 → 收集 `VAR=值`/`export`\n     → 展开 `$VAR` / `${VAR}` / `${VAR:-默认}` / `${VAR:?}` → 展开 `~` → 相对当前目录\n     解析成绝对路径 → 统一安全判定（工具根内 / 白名单内 / 上级目录拒绝）。\n   - 覆盖间接形式：包装词（`then/do/{/}/sudo/env/xargs`…）、子 shell、管道、\n     `eval \"cd …\"`、`sh -c 'cd …'`（按载荷文本递归判定）、`pushd`。\n   - 静态不可判定的一律拒绝：`$()`、反引号、`cd -`、未定义变量展开为空（等价回主目录）、\n     单引号里的字面量 `/tmp`（引号只影响是否展开，不影响路径判定）。\n\n3. **四个工具统一使用工具根**\n   - `工具_bash / 工具_读文件 / 工具_写文件 / 工具_搜索文件` 全部改为 `取调用根(参数)`。\n\n4. **Web 层透传会话 cwd**（`src/web服务器.light`）\n   - `处理对话` 解析出会话后 `设置工具根(会话对象.取工作目录(), 真)`；\n     `后台跑一轮`（流式线程）、`后台消费待办`（202 兜底线程）各自设置；\n     三处 `最终` 均 `清除工具根()`，避免线程复用串会话。\n\n## 改了哪些文件\n\n- `src/工具_路径安全.light`、`src/工具_bash.light`、`src/工具_读文件.light`、\n  `src/工具_写文件.light`、`src/工具_搜索文件.light`、`src/web服务器.light`\n- 新增 `tests/test_T0470_工具根与cd守卫.py`（6 个用例）\n\n## 验证\n\n- `python -m pytest -q tests/test_T0470_工具根与cd守卫.py` → **6 passed**（FreeBSD 15.1 本机直跑）。\n  用例：① 会话 cwd 成四工具根；② cd 守卫解析后判定（15 种形式矩阵）；\n  ③ 间接形式（then/eval/sh -c/sudo/pushd，含「根内不该误杀」正例）；\n  ④ 无 worktree 回归；⑤ 白名单；⑥ Web 服务端会话 cwd 透传到 bash 工具。\n- 回归（均绿）：`test_T0180_工作目录集中化`(5)、`test_T0395_会话工作目录`(6)、\n  `test_T0442_工具层缺陷`(6)、`test_T0449_编辑工具`+`test_T0397_会话模式权限`(16)、\n  `test_T0448/T0419/T0403/T0450/T0456`(27+11)、`test_T0453/T0423/T0401`(19)、\n  `test_T0405/T0421/T0420/流式推流/ T0388`(28)、`tests/unit`(714 passed)。\n- `tests/unit` 3 条失败（溢出/溢出保留/安全策略）与 `tests/test_回归.py` 27 条失败\n  **均为改动前基线同样失败**（在干净 worktree `/tmp/t0470/base`@7007fbb 复跑，失败集合逐条相同，\n  `diff` 为空），与本次改动无关。\n\n## 遗留风险\n\n- 守卫是**静态分析**，不做真实执行：`bash script.sh`、`source x.sh`、`python -c` 里的\n  cd 无法静态判定（这类本来也不会改变工具进程的工作目录，且 cd 只影响子进程）。\n- 白名单只放 `~/.hive/wt` 与项目根；若将来 worktree 换根，需要设 `HARNESS_TOOL_ROOTS`。\n- 线程根是 `threading.local`：跨线程复用工具（例如自建线程池直调 bash 工具）需要先\n  `设置工具根`，否则回落到 `HARNESS_CWD` / 当前目录（与旧行为一致，不会静默越界）。",
+  "error": "",
+  "declared_paths": [
+    "src/工具_路径安全.light",
+    "src/工具_bash.light",
+    "src/工具_读文件.light",
+    "src/工具_写文件.light",
+    "src/工具_搜索文件.light",
+    "src/web服务器.light",
+    "tests/test_T0470_工具根与cd守卫.py"
+  ],
+  "changed_files": [
+    "src/web服务器.light",
+    "src/会话细节.light",
+    "src/工具_作业.light",
+    "src/工具_网页.light",
+    "src/总入口.light",
+    "src/智能体指令.light",
+    "src/核心工具.light",
+    "tests/test_T0403_新模式预设.py",
+    "tests/test_T0450_作业工具.py",
+    "tests/test_T0452_网页工具.py",
+    "tests/test_T0453_压缩后续跑.py",
+    "tests/test_T0454_前端可观测.py",
+    "tests/test_T0455_指令渲染.py",
+    "tests/test_T0456_收口接线.py",
+    "webui/app.js",
+    "webui/style.css",
+    "src/工具_bash.light",
+    "src/工具_写文件.light",
+    "src/工具_搜索文件.light",
+    "src/工具_读文件.light",
+    "src/工具_路径安全.light",
+    "tests/test_T0470_工具根与cd守卫.py"
+  ],
+  "out_of_paths": [
+    "src/会话细节.light",
+    "src/工具_作业.light",
+    "src/工具_网页.light",
+    "src/总入口.light",
+    "src/智能体指令.light",
+    "src/核心工具.light",
+    "tests/test_T0403_新模式预设.py",
+    "tests/test_T0450_作业工具.py",
+    "tests/test_T0452_网页工具.py",
+    "tests/test_T0453_压缩后续跑.py",
+    "tests/test_T0454_前端可观测.py",
+    "tests/test_T0455_指令渲染.py",
+    "tests/test_T0456_收口接线.py",
+    "webui/app.js",
+    "webui/style.css"
+  ],
+  "lease_id": "1718ee562b364426a5268e4e6c455d97"
+}
