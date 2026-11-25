@@ -1,0 +1,48 @@
+{
+  "task": "T-0473",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0473",
+  "base": "main",
+  "head": "8ca21bd7cfa815d75ce37978c8b546df307e811a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T09:58:23+08:00",
+  "finished_at": "2026-11-25T10:03:10+08:00",
+  "duration_s": 287.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_node_restart_cards.py",
+      "code": 0,
+      "tail": [
+        ".......                                                                  [100%]",
+        "7 passed in 0.77s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_lease_heartbeat_floor.py",
+      "code": 0,
+      "tail": [
+        ".....                                                                    [100%]",
+        "5 passed in 1.17s"
+      ]
+    }
+  ],
+  "summary": "# T-0473 节点重启收口 IC6RTQ4\n\n## 结论\n\n本机（DESKTOP-IC6RTQ4 / `C:\\dswork\\hive`）已从 0.16.08 同步到 0.16.09 并重启集群进程，\n重启后实测 `uptime_s=134.1`、主控下发租约 `14.2s`（旧代码是 4.8s），两条判据都满足。\n记录已追加到 `docs/cluster/节点重启记录.md`。\n\n**一个必须说清的遗留**：本机 agent 的沙箱会在工具调用结束时回收「脱离会话」的子进程，\n所以重启后的 hived 在 10:01:01 被环境回收了（约 3 分钟；`cluster.log` 无 traceback，\n是外部终止）。常驻拉起方式已写进记录备注（`C:\\Users\\PCbeta Tester\\.hive\\run-cluster-ic6rtq4.cmd`\n或计划任务 `HiveCluster-IC6RTQ4`，需在普通终端/登录会话里跑）。\n\n## 实测数字\n\n| 项目 | 重启前（09:32） | 重启后（10:00） |\n|---|---|---|\n| 版本 `hive.py --version` | 0.16.08 | 0.16.09 |\n| `health.uptime_s` | 166272.4（46.19h） | 134.1 |\n| 租约（`leader_lease_until_epoch` − now） | 4.8s | 14.2s |\n| 角色 | leader term=3928 | follower term=3931，主控 DESKTOP-6LFQUO8 |\n\n`cluster status` 重启前本机为 `alive follower`（其间短暂当过 leader），重启后 `alive follower term=3931`。\n\n## 做了什么\n\n1. **自检**：`python hive.py --version` = 0.16.08；`cluster.pid` 里 `\"version\": \"0.16.08\"`（pid 4180）；\n   `health.uptime_s=166272.4`（>1h）、租约 4.8s（<10s）→ 确实是旧代码，需要重启。\n2. **同步**：`hive.py` 有本地未提交补丁（`env_error` 取键健壮性），`pull --ff-only` 被拒。\n   用 `git stash push -- hive.py` → `pull --ff-only`（9f82595→cc94e25，5 个提交）→ `git stash pop`，\n   没有 reset、没有丢改动。同步后 `hive.py --version` = 0.16.09。\n3. **重启**：`hive cluster restart` 停掉 pid=4180，新进程用 0.16.09 起来，health 归零重算。\n4. **证实**：按卡片要求用 `/api/cluster/health` 判据（uptime<600、租约≥10s），两条都过。\n5. **记录**：在 `docs/cluster/节点重启记录.md` 追加本节点那一条（`### DESKTOP-IC6RTQ4 — 2026-11-25 09:58`）。\n6. **判据**：`tests/test_node_restart_cards.py` 7 passed；`tests/test_lease_heartbeat_floor.py` 5 passed；\n   两条一起跑 12 passed。\n\n## 没做 / 做不到\n\n- **让 hived 跨会话常驻**：沙箱会回收非服务化子进程（`cluster start` 报「已启动」但调用一结束就没了；\n  计划任务拉起也被 Ctrl+C 结束，`LastTaskResult=0xC000013A`）。当前非管理员，无法装 SYSTEM 级服务。\n  已把可用的拉起方式（cmd 包装 + 计划任务）留在机器上并写进记录，需要人在普通会话里执行。\n- 没动 `hive_cluster.py` 的租约/选举逻辑；没有 reset --hard / push --force / --no-verify；\n  没有改 `state.json`，记录里的数字都是 `/api/cluster/health` 与 `hive.py --version` 的原始读数。",
+  "error": "",
+  "declared_paths": [
+    "docs/cluster/节点重启记录.md"
+  ],
+  "changed_files": [
+    "inbox/workbuddy-win11/T-0473.md",
+    "tasks/T-0473.md",
+    "docs/cluster/节点重启记录.md"
+  ],
+  "out_of_paths": [
+    "inbox/workbuddy-win11/T-0473.md",
+    "tasks/T-0473.md"
+  ],
+  "lease_id": "99f0271605a049428159f020731d61d4",
+  "fence": 1
+}
