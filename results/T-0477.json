@@ -1,0 +1,42 @@
+{
+  "task": "T-0477",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0477",
+  "base": "main",
+  "head": "e32cb13f4c7987f499740033f683ef203c0e9646",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T13:21:00+08:00",
+  "finished_at": "2026-11-25T13:42:04+08:00",
+  "duration_s": 1264.2,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0477_工具面白名单.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".........                                                                [100%]",
+        "9 passed in 61.36s (0:01:01)"
+      ]
+    }
+  ],
+  "summary": "# T-0477 交付说明：工具面白名单收口（standard 160/168 → 22，MCP 不再硬塞叶子）\n\n## 改动\n\n1. `src/工具面装配.light`\n   - 新增 `基础白名单()`（22 个）、`只读白名单()`（12 个）、`最小白名单()`（bash）；\n   - 新增 `工作方法删减(方法)`：直接复用 `预设组合.方法删减` 的叶子表，只做「叶子→注册名」翻译，方法维只删不增；\n   - 新增 `白名单(预设标识)`：解析「代理+方法」后落到对应名表；未知预设抛错；standard 类附带 `mcp__*` 通配；\n   - 原有 `补充叶子/未映射默认保留/装配报告` 保留为查询接口（不再参与保留判定）。\n\n2. `src/总入口.light`\n   - `预设保留工具` 改为「白名单命中才保留，未命中一律注销」，删除 `未映射默认保留` 兜底分支；\n   - `工具名到叶子(\"mcp__*\")` 改为返回 `[]`；MCP 去留由 `HARNESS_MCP_TOOLS`（默认开）+ 白名单 `mcp__*` 通配决定；\n   - 删除 `todo_write` 的无叶子特例（brainstorm 已由只读白名单承载，todo_write 恢复 `tool-todo` 叶子）；\n   - 装配日志改为 `保留 / 白名单外注销 / 未映射(应=0)`，并打印白名单外注销名字（最多 20 个）。\n\n3. 新增 `tests/test_T0477_工具面白名单.py`（9 条判据）。\n\n`src/预设组合.light` 未改（组合行表 33 行口径不变）。\n\n## 实测\n\n```\n[装配] 预设=standard 保留=22 白名单外注销=138 未映射(应=0)=0 挂载失败=0\nstandard=22（18 个必须集逐个在册）\nschema JSON=8,600 字符（收口前 46,870）\nptc=22  topdown=22  bottomup=17  lazy=18  brainstorm=12  minimal=1\nbottomup 删：目标/提问提交/回答提交/待答列出/答案取出\nlazy     删：提问提交/回答提交/待答列出/答案取出\nMCP 开关开：+2 个假 MCP 工具（保留 24）；HARNESS_MCP_TOOLS=0：保留 22、MCP 注销\n工具名到叶子(\"mcp__echo\") = []\n```\n\n## 验收\n\n`python -m pytest -q tests/test_T0477_工具面白名单.py` → **9 passed in 62.43s**（全绿）。\n\n反跑（均先红后恢复，恢复后全绿）：\n1. 删掉必须集里的 `todo_write` → `test_standard工具面20到30且必须集逐个在册` 红（missing `todo_write`）；\n2. 把「未映射默认保留」兜底加回 `预设保留工具` → `test_装配日志未映射为零且不再出现168` 红（未映射=126，保留=148）；\n3. 把 `mcp__*` 叶子改回自身名 → `test_mcp工具无叶子且受开关控制` 红（无叶子=1）。\n\n## 已知被本卡改口径的旧断言（未改旧测试文件，路径白名单不含它们）\n\n以下旧测试断言的是本卡要删除的旧行为，定向回归中会红，属预期口径变更，不是功能回归：\n- `tests/test_T0468_MCP挂载.py`：要求 `工具名到叶子(mcp__*)` 返回自身名、standard 全量保留 MCP；\n- `tests/test_T0469_提示与工具面.py::test_mcp工具与预设过滤共存`：要求过滤前后总数不变（白名单收口后必然减少）；\n- `tests/test_T0456_收口接线.py`：要求 standard 保留 `待办添加/提醒注册/SSH执行`，且源码中必须有「未映射默认保留」兜底；\n- `tests/test_T0403_新模式预设.py::test_工具集按规格表_装配层`：要求 bottomup ≥20（基础集 22，按权威删减表去掉 5 个后为 17）。\n\n其它定向回归：T-0448（12 条）全过；T-0469 除上述 1 条外全过；T-0468 除 2 条 MCP 旧口径外全过；T-0403 除上述 1 条外全过。",
+  "error": "",
+  "declared_paths": [
+    "src/工具面装配.light",
+    "src/总入口.light",
+    "src/预设组合.light",
+    "tests/test_T0477_工具面白名单.py"
+  ],
+  "changed_files": [
+    "src/工具面装配.light",
+    "src/总入口.light",
+    "tests/test_T0477_工具面白名单.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "96f941b01be1409fb737ccd9e8912495"
+}
