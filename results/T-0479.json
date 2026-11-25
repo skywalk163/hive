@@ -1,0 +1,39 @@
+{
+  "task": "T-0479",
+  "agent": "teleagent-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0479",
+  "base": "main",
+  "head": "2a51c953a193266517fe920a4898f1688c859949",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T14:08:59+08:00",
+  "finished_at": "2026-11-25T14:08:59+08:00",
+  "duration_s": 0.7,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0479_环境段.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "..................                                                       [100%]",
+        "18 passed in 11.26s"
+      ]
+    }
+  ],
+  "summary": "# T-0479 工作说明：系统提示环境与时间上下文段\n\n## 交付\n\n新增两个文件，未动任何既有文件（卡面允许路径恰好就是这两个）：\n\n1. **src/提示_环境段.light**（约 190 行）\n   - 对外入口：`环境段文本(信息, 时区偏移 = 480, 默认时区 = \"\")`；\n     别名 `环境段(...)` 转发同一实现（接线归 T-0487 / T-0489，本卡不接线）。\n   - 入参字典，不读全局、不探测进程、不碰环境变量（平台标记由调用方传入）。\n   - 行序（缺字段整行省略，不写「未知」）：\n     1. `操作系统：windows；shell：pwsh`（单边字段时只写存在的一边）\n     2. `命令一律按 pwsh 语法写；路径分隔符工具层统一用 /`\n     3. `工作目录：…（项目根：…）；相对路径从工作目录解析`（项目根可选）\n     4. `当前本地时间：2026-11-25 12:30（UTC+08:00）`\n     5. `当前模式：standard + default`（可选字段）\n   - 时间行复用 `时间上下文.格式化时间戳(现在, 偏移, 区)` 与 `时区偏移文本(偏移)`：\n     取戳前 16 位（到分钟）、T→空格，再拼 `（UTC<偏移>）`；**不自己拼日期**。\n   - 偏移来源优先级：字典字段 `时区偏移` → 形参 `时区偏移`（缺省 480）。\n     文案中不含任何固定偏移；480 只作为缺省参数。\n   - 隐私归一：`C:\\Users\\<name>` / `/home/<name>` / `/Users/<name>` 的用户名段\n     替换为 `<home>`（纯字符串扫描，不引正则，避免三层转义坑）。\n   - 长度保护：整段超过 400 字时截到 399 + `…`（环境段不许挤掉工具契约）。\n\n2. **tests/test_T0479_环境段.py**（18 用例，单个 .light 驱动跑全部探针）\n   - A 全字段 5 行 / 关键词 / 别名一致 / 长度 ≤400；\n   - B 缺工作目录 / 缺本地时间整行省略，且不出现「未知」；\n   - C 偏移 480→+08:00、0→+00:00、-300→-05:00、缺省→480、形参 0 生效；\n   - D Windows / Unix / 多级目录家目录归一，用户名不再出现；\n   - E 整数字段 / 空 / 非字典 / 时间非数字 → 整行省略而不是抛错；\n   - F 只有壳 / 只有系统时句式不残缺；\n   - G 固定时区文案反向断言。\n\n## 验收证据\n\n- `python -m pytest -q tests/test_T0479_环境段.py` → **18 passed**\n  （本机按 T-0472 记录的口径：`C:\\Python314\\python.exe` +\n  `PYTHONPATH=C:\\Users\\skywalk\\AppData\\Roaming\\Python\\Python314\\site-packages`，\n  带 pytest.ini 的 `--timeout=60 -n 4`；另用 Python310 `-o addopts=\"\"` 也 18 passed）。\n- `git status --porcelain` 提交前只有两个 `??`（就是本卡两个允许路径）；\n  提交 `2a51c95`，2 files changed, 455 insertions(+)。\n\n## 反跑验证（改坏 → 红 → 恢复 → 绿）\n\n1. 缺失分支写「未知」→ 6 failed（缺工作目录 / 缺字段不写未知 / 非字符串 /\n   全空 / 只有壳 / 只有系统），其余 12 passed。\n2. 时间行把手写 `\"+08:00\"` 替掉 `时区偏移文本(偏移)` → 4 failed\n   （偏移 0 / 负偏移 / 形参 0 / 固定时区文案），其余 14 passed。\n3. 去掉 `家目录归一(...)` 包裹 → 3 failed（Windows / Unix / 多级目录），其余 15 passed。\n   恢复正式版本后 18 passed。\n\n## 平台踩坑（给后续任务）\n\n- PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写 BOM；光明词法直接报\n  `未知字符: '﻿' (0xFEFF)`，看起来像产物坏了。改文件一律用\n  `[IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))`。\n- `py -V:3.10` 在 worktree 目录下偶发 `No suitable Python runtime found`（既有已知坑），\n  改用绝对路径解释器。\n- 本机 PATH 上的 `python` 是 TeleAgent runtime（无 pytest）；\n  跑卡面 verify 需按 T-0472 的 Python314 + PYTHONPATH 口径。\n\n## 遗留\n\n- 接线（把 `环境段(...)` 拼进系统提示）归 T-0487 / T-0489，本卡未改\n  `src/系统提示.light` / `src/总入口.light`。\n- 未 land 合入 main，按惯例等确认。\n\n> AI生成",
+  "error": "",
+  "declared_paths": [
+    "src/提示_环境段.light",
+    "tests/test_T0479_环境段.py"
+  ],
+  "changed_files": [
+    "src/提示_环境段.light",
+    "tests/test_T0479_环境段.py"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
