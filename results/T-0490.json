@@ -1,0 +1,132 @@
+{
+  "task": "T-0490",
+  "agent": "lightharness-fb98",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0490",
+  "base": "main",
+  "head": "a1cec557e21a2aaa2eec57f5d64fa5c3e0ac9270",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T18:12:36+08:00",
+  "finished_at": "2026-11-25T18:49:52+08:00",
+  "duration_s": 2236.1,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0490_继续排队可见.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".........                                                                [100%]",
+        "9 passed in 23.81s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0453_压缩后续跑.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "....                                                                     [100%]",
+        "4 passed in 25.81s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0454_前端可观测.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 3.00s"
+      ]
+    },
+    {
+      "cmd": "node --check webui/app.js",
+      "code": 0,
+      "tail": []
+    }
+  ],
+  "summary": "T-0490 完成。只改了允许路径内的 3 个文件（webui/messages.js 未改）。\n\n做了什么：\n1. 后端 src/web服务器.light：给 202 排队轮次补可见落点——入队/开始/完成/失败四阶段事件写进会话库；显式 session_id 惰性登记到会话库（根治「切回历史空白/空壳会话」）；新增 GET /api/sessions/:id/queue 轻量状态端点（深度/消息数/忙）；120s 超时由静默丢弃改为写「失败」回执；加 2s 兜底唤醒线程扫孤儿待办（不重做 T-0453 的释放方拉起核心逻辑）。SSE 帧形状与结束原因字段名未动。\n2. 前端 webui/app.js：202 后只盯当前会话轮询 /queue，消息数变化即自动重拉 /api/sessions/:id 并回放；统计帧（max-steps）到达后点「继续」直接发新请求（sendSerial 防老轮 finally 关新流）；切会话空历史给「该会话暂无历史消息」明确提示；停止按钮已接 /api/task/stop，本卡未改其语义。\n\n验证（全绿）：python -m pytest -q tests/test_T0490_继续排队可见.py（9 passed）；T-0453（4 passed）；T-0454（7 passed）；node --check webui/app.js（OK）。测试含真起服务+mock LLM 的 202 排队落库断言、light 驱动超时回执、node DOM 桩真链路（含删 startQueuedPoll 锚点反跑立红）。\n\n遗留风险：轮询 60s 后仅提示「超过 60 秒未返回」，未做无限等待；队列唤醒线程为进程级守护（无显式停止接口），随服务进程退出而终止；排队事件以 role=system 消息落库，前端历史回放会原样显示「[阶段] 文本」系统消息。",
+  "error": "",
+  "declared_paths": [
+    "src/web服务器.light",
+    "webui/app.js",
+    "webui/messages.js",
+    "tests/test_T0490_继续排队可见.py"
+  ],
+  "changed_files": [
+    "docs/功能对标/提示对账.md",
+    "src/web服务器.light",
+    "src/代理.light",
+    "src/任务控制.light",
+    "src/压缩.light",
+    "src/压缩E5.light",
+    "src/压缩摘要器.light",
+    "src/工具_bash.light",
+    "src/工具面装配.light",
+    "src/总入口.light",
+    "src/提示_MCP段.light",
+    "src/提示_协作段.light",
+    "src/提示_技能段.light",
+    "src/提示_权限段.light",
+    "src/提示_环境段.light",
+    "src/提示_纪律段.light",
+    "tests/test_T0469_提示与工具面.py",
+    "tests/test_T0472_任务控制.py",
+    "tests/test_T0477_工具面白名单.py",
+    "tests/test_T0478_技能段.py",
+    "tests/test_T0479_环境段.py",
+    "tests/test_T0480_权限段.py",
+    "tests/test_T0481_MCP段.py",
+    "tests/test_T0482_纪律段.py",
+    "tests/test_T0483_协作段.py",
+    "tests/test_T0484_压缩摘要器.py",
+    "tests/test_T0485_提示对账.py",
+    "tests/test_T0486_压缩接线.py",
+    "tests/test_任务控制.py",
+    "webui/app.js",
+    "webui/index.html",
+    "webui/style.css",
+    "webui/tool-card.js",
+    "tests/test_T0490_继续排队可见.py"
+  ],
+  "out_of_paths": [
+    "docs/功能对标/提示对账.md",
+    "src/代理.light",
+    "src/任务控制.light",
+    "src/压缩.light",
+    "src/压缩E5.light",
+    "src/压缩摘要器.light",
+    "src/工具_bash.light",
+    "src/工具面装配.light",
+    "src/总入口.light",
+    "src/提示_MCP段.light",
+    "src/提示_协作段.light",
+    "src/提示_技能段.light",
+    "src/提示_权限段.light",
+    "src/提示_环境段.light",
+    "src/提示_纪律段.light",
+    "tests/test_T0469_提示与工具面.py",
+    "tests/test_T0472_任务控制.py",
+    "tests/test_T0477_工具面白名单.py",
+    "tests/test_T0478_技能段.py",
+    "tests/test_T0479_环境段.py",
+    "tests/test_T0480_权限段.py",
+    "tests/test_T0481_MCP段.py",
+    "tests/test_T0482_纪律段.py",
+    "tests/test_T0483_协作段.py",
+    "tests/test_T0484_压缩摘要器.py",
+    "tests/test_T0485_提示对账.py",
+    "tests/test_T0486_压缩接线.py",
+    "tests/test_任务控制.py",
+    "webui/index.html",
+    "webui/style.css",
+    "webui/tool-card.js"
+  ],
+  "lease_id": "180e9c1f5e50434eb28c294ad949c07f"
+}
