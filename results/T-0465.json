@@ -1,0 +1,41 @@
+{
+  "task": "T-0465",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0465",
+  "base": "main",
+  "head": "fc53f33a40aaacfab806a0e26d5cd96af8b4dff3",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T05:40:17+08:00",
+  "finished_at": "2026-11-25T07:05:04+08:00",
+  "duration_s": 5087.2,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0465_bench_report.py",
+      "code": 0,
+      "tail": [
+        "============================ slowest 15 durations =============================",
+        "0.01s call     tests/test_T0465_bench_report.py::test_report_numbers_match_data_files",
+        "",
+        "(14 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "6 passed in 3.88s"
+      ]
+    }
+  ],
+  "summary": "# T-0465 收口说明\n\n## 做了什么\n1. 冷启动实验（真实模型 `deepseek-flash`，两臂 × 20 条 × 最多 3 轮，串行）：有入口文档 pass@1 13/20=65.0%、pass@3 16/20=80.0%、自愈率 3/7=42.9%；无入口文档（模拟 R222）pass@1 8/20=40.0%、pass@3 14/20=70.0%、自愈率 6/12=50.0%。\n2. `ai check` 延迟实测 60 样本：绝对路径 P50=1685 ms（P90=1970 ms），`--run` P50=7658 ms；相对路径 60/60 次 rc=1「文件不存在」（内层检查子进程固定 `cwd=_PROJECT_DIR`）。\n3. 报告 `docs/bench/AI友好度_20261126.md`：北极星四项 / 与 R222 对比 / 错误码 Top10（只有 3 个不同码，不凑十行）/ 结论 / FAIL 清单（内部评审版）/ 方法与限界。\n4. 数据与复现脚本：`coldstart_20261125.json`、`ai_check_latency_20261125.json`、`stub_run_20261125.json`、`coldstart_probe.py`、`ai_check_latency.py`；作废的两次跑留 `_parallel_run_artifact.json`、`_serial_budget4096_artifact.json`（30 s 超时假失败 / 4096 预算烧空）。\n\n## 关键判断\n- 「3 轮内写出能跑代码」：有文档 16/20、无文档 14/20，轮数不是瓶颈；入口文档主要抬首轮命中率（+25 个百分点）。\n- 最大阻塞在判据侧：5 条任务产物能跑、只是没写判据要的字面片段（LA-005/009/013/018/020），提示词里没要求 → 归 T-0462。\n- 细粒度诊断码没生效：语法/名称错误全落 `L0000`（13 次），自愈靠的是人话文案。\n\n## 验证\n`python -m pytest -q tests/test_T0465_bench_report.py` → 6 passed。测试不只查段落，还把报告数字回算到三份 JSON，对不上即红。\n\n## 遗留风险\n1. 单次运行噪声 ±5 个百分点（当天三次 pass@1：有文档 70/60/65、无文档 50/45/40），本轮取串行 + 60 s 超时 + 预算翻倍那一次。\n2. 探针没有工具，只能把入口文档注入 system，**测不出「自己发现文档」**，冷启动发现率只能写未跑（原因）。\n3. 模型侧空回复伪影：4096 烧空 15 次、16384 仍空 2 次（no_entry LA-009 / LA-013 末轮），接真实 harness 前要先定预算策略。\n4. 只在 Windows 本机跑，未做 0.88 FreeBSD 复跑（未跑，原因：本卡判定不触发 POSIX 判据；跨平台一致性不在本卡验收范围）。",
+  "error": "",
+  "declared_paths": [
+    "docs/bench/",
+    "tests/test_T0465_bench_report.py"
+  ],
+  "changed_files": [
+    "docs/bench/AI友好度_20261126.md",
+    "docs/bench/ai_check_latency.py",
+    "docs/bench/coldstart_probe.py",
+    "tests/test_T0465_bench_report.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "0c97990c6f3041cc8db7444edec6423e"
+}
