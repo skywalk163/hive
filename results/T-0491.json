@@ -1,0 +1,37 @@
+{
+  "task": "T-0491",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0491",
+  "base": "main",
+  "head": "a115e2a2ac8d4f74549621b826c8beac0c31cc3d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T16:51:55+08:00",
+  "finished_at": "2026-11-25T16:59:32+08:00",
+  "duration_s": 457.7,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0469_提示与工具面.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "..........                                                               [100%]",
+        "10 passed in 36.27s"
+      ]
+    }
+  ],
+  "summary": "# T-0491 交付说明（修 T-0469 MCP 共存断言：白名单收口后「过滤后==过滤前」已失效）\n\n## 做了什么\n- `tests/test_T0469_提示与工具面.py`：只改 `test_mcp工具与预设过滤共存` 一条。删掉老口径 `assert 后 == 前`（T-0477 把白名单从 168 收到 22 后它必然红），换成白名单收口下的正确等式：`后 == (白名单数 - 1) + 2`（白名单本体 22 + 本探针实挂的 `mcp__demo__echo`/`mcp__demo__add`），并断言白名单本体 20–30、`白名单外注销 > 0`（过滤真的发生，不许退回 168 全量）。\n- `MCP_DRIVER` 同步微调：新增 `从 工具面装配 导入 白名单` 与 `MCP_白名单数=` 一条打印（只加打印，其它 key 口径未动）。`MCP_echo在/MCP_add在/MCP_待办在/MCP_目标在/MCP_无叶子` 五条原断言保留不动。\n- 其余 9 条用例、其它 driver、`src/*.light` 一律未碰；无 `reset --hard` / `push --force` / `--no-verify`。\n\n## 验证\n- `python -m pytest -q tests/test_T0469_提示与工具面.py` → **10 passed**（改前 9 passed + 1 failed）。\n- 复跑 T-0487 判据（在 `.worktrees/doubao-win/T-0487`，本 worktree 基于 main 无该文件）→ 仍 **9 passed**。\n- 反跑实测：① 断言退回 `后 == 前` → 该用例立红；② `(白名单数 - 1) + 2` 改成 `+ 1` → 立红（实挂 MCP 确实被等式钉住）；③ `白名单外注销 > 0` 放宽成 `>= 0` → **仍绿**（基线本来就是 138，这条只能防「过滤被整体关掉」，不能当本次反跑锚点，故按原强度 `> 0` 保留）。恢复后 10 passed。\n\n## 遗留\n- T-0487 的 `hive_submit` 记 failed 的唯一原因就是本条红，现已在实现侧消除；T-0487 需由总控 retry 收口。\n- 本卡按任务卡新建（T-0491），卡文件同时放在 `hive/tasks/T-0491.md` 与服务端克隆的任务目录；服务端克隆里的副本尚未提交，需总控提交/归档。",
+  "error": "",
+  "declared_paths": [
+    "tests/test_T0469_提示与工具面.py"
+  ],
+  "changed_files": [
+    "tests/test_T0469_提示与工具面.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "26cd0a7d108a4f91920a7334c67bdb50"
+}
