@@ -1,0 +1,56 @@
+{
+  "task": "T-0472",
+  "agent": "loomy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0472",
+  "base": "main",
+  "head": "5eec9dc1d8df582be2a481d330323b29ae5b3ba7",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T09:25:01+08:00",
+  "finished_at": "2026-11-25T10:06:54+08:00",
+  "duration_s": 2513.8,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0472_任务控制.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "............                                                             [100%]",
+        "12 passed in 15.58s"
+      ]
+    }
+  ],
+  "summary": "# T-0472 工作说明：lightharness 运行中任务控制落地（停止/暂停/插入 + 可杀进程树）\n\n## 交付\n\n从 stash「历史改动-运行中任务控制功能-20261125完整备份」（旧基线 e7fbb4c，落后 22 提交）\n逐段手工迁移到当前 main（8c73f0f，含 T-0466/0468/0469/0470 成果），**不做整文件覆盖**。\n提交：task/T-0472 分支 5eec9dc（10 files, +1529 -1）。\n\nstash 位于 FreeBSD 远端（192.168.0.88）/home/skywalk/dswork/lightharness 的 repo 里\n（本机 refs/stash 已悬空），经 ssh 导出 stash 版本全文 + parent 差异补丁后在本地逐段合并。\n\n### 迁移清单（按依赖序）\n1. **src/任务控制.light + tests/test_任务控制.py**：stash 未追踪独立模块直接入库。\n   377 行，模块级字典单例表 + 互斥锁：开运行/关运行/请求停止/请求暂停/请求继续/等继续/\n   登记工具/绑定进程树/停工具/暂停工具/继续工具/列工具/插入提示/取插入/发工具状态/调用上下文。\n2. **src/代理.light（+10 行）**：工具执行前 `设置调用上下文(会话键, 调用id)` + `登记工具(...)`，\n   执行后 `清调用上下文()`。干净可迁移，与 stash 原样一致。\n3. **src/工具_bash.light（+75 行）**：进程树分支**叠加**在 T-0442/T-0467/T-0470 修复版之上：\n   - 有调用上下文 → `bash处理进程树`：stdlib 进程树执行（cmd /c 或 sh -c），\n     `绑定进程树(调用id, 树)` 供 /api/task/stop、/api/task/tool/* 精确杀整棵树；\n     `树.等待(超时秒*1000)` 保留 T-0442 超时契约（超时即杀树 + 「超时被终止」说明 + 部分输出保留 + 退出码 -1）；\n     被用户停止 → 错误标注 `[命令已被用户停止]` + 退出码 -1；启动失败/结束都 `完成工具`。\n   - 无上下文（CLI/测试）→ 原 `外部命令.执行命令` 同步路径，T-0442 的 取超时秒/是等待输入/\n     是shell层错误、T-0470 的 cd 守卫全部原样保留（源码契约测试钉死）。\n   - stash 版本丢掉的 T-0442 修复（超时参数/stdin DEVNULL/退出码透传）全部保留，未回退。\n4. **src/web服务器.light（+118 行）**：六个 handler（处理停止任务/暂停/继续/工具控制/插入提示/\n   工具清单）+ `/api/task/stop|pause|resume|steer|tools|tool/stop|tool/pause|tool/resume`\n   八条路由（先于 chat 分派）；流式路径连接侧 `开运行(排队键, 收控制帧)`（/api/task/* 立即可见）、\n   `收控制帧` 推工具状态帧；后台跑一轮循环开头 `是已请求停止→跳出` / `等继续(排队键,400)` /\n   `取插入→覆盖当轮文本`（下一步之前生效）；最终块 `关运行` 收口。\n   stash 里混入的 `计量器.记录响应`（统计口径改动）不在本卡范围，未迁移。\n5. **webui**：index.html 运行中任务条（插入/停止任务按钮）；style.css 控制条与任务条样式（+54 行）；\n   tool-card.js 每卡 暂停/继续/停止 控制条 + applyToolState + setControlHandler（+45 行）；\n   app.js taskControl/steerIntoRunning/controlTool + 「工具状态」帧处理 + running-bar 随流切换\n   + 停止按钮同步请求服务端杀进程（+65 行）。stash 里混入的剪贴板图片粘贴功能不在本卡范围，未迁移\n   （错误帧处理已由 T-0454 合入，跳过）。\n\n## 验收证据\n\n- **验收命令**：`python -m pytest -q tests/test_T0472_任务控制.py` → **12 passed**\n  （Windows 本机 + FreeBSD 15.1 远端双平台全绿）\n  覆盖：工具级 stop 真杀进程树且只杀对应调用（另一棵树仍存活）、会话级 请求停止 联动杀树\n  （已杀子进程=1、树死透）、bash 进程树路径正常执行退出码 0、已停止会话的 bash 立即补杀并标注\n  [命令已被用户停止]、进程树路径超时契约（超时词+终止词+退出码-1）、无上下文原路径零回退、\n  暂停/继续状态机 + 插入 FIFO + 停止优先于暂停、web/代理/bash/webui 五处接线源码契约。\n- `python -m pytest -q tests/test_任务控制.py` → 7 passed（模块自身，双平台）\n- 回归（证明 T-0466~0470 修复零回退）：\n  - T-0442 bash 工具层：6 passed（本机+远端）\n  - T-0470 工具根与 cd 守卫：6 passed（**FreeBSD 远端**；本机因 POSIX 判据 cmd 假失败，\n    与改动无关——干净基线本机同样 5 failed，任务卡已预警此平台差异）\n  - T-0466 使用率显示：9 passed；T-0468 MCP 挂载：5 passed（本机）\n  - test_流式推流接线契约.py：12 passed（本机，web 服务器改动必须过的契约）\n  - JS 语法：node --check app.js / tool-card.js 通过\n- 手工冒烟（进程级）：工具级/会话级停止均经 进程树.杀树 真杀子进程，\n  等待到死(5000)=True 验证（A1/A2 用例即冒烟证据）。\n\n## 遗留事项\n\n1. **stash 条目未删除**（任务卡第 5 点）：远端 repo `/home/skywalk/dswork/lightharness`\n   的 .git 属主是 skywalk，workbuddy 账户无写权限（`error: cannot lock ref 'refs/stash':\n   Permission denied`）。不提权，留待 repo 属主执行 `git stash drop 'stash@{0}'`。\n   备份目录 `/home/skywalk/dswork/lightharness_backup_20261125_0825/` 完好（6 文件：\n   任务控制.light / web服务器.light / 工具_bash.light / app.js / tracked.patch / untracked.list）。\n2. `examples/test_计量器.light` 与 `src/令牌计量.light` 的 stash 改动按任务卡说明未迁移\n   （当前 main 已含等价改动）。\n3. Windows 上 T-0470 测试为环境假失败（POSIX 判据 + cmd），基线即如此，非本次改动引入。\n\n## 平台踩坑记录（给后续任务）\n\n- 本机跑 pytest：`C:\\Python314\\python.exe` + `PYTHONPATH=C:\\Users\\skywalk\\AppData\\Roaming\\Python\\Python314\\site-packages`\n  （当前 shell 的 APPDATA 被 Loomy 沙箱重定向，pytest 装在真实用户目录）。\n- **PYTHONPATH 不要放 light-merge**：运行.py 的 `_setup_paths` 对已存在路径跳过 insert，\n  会让 `light-merge/antlrparser/cli.py` 抢在 `light-merge/cli/` 包之前命中\n  → `from cli.light import main` 报 `'cli' is not a package`。让运行.py 自己探测兄弟仓即可。\n- Light 驱动变量名避开关键字词根：单字 `等`（撞 `等于`）会语法错；用 `等一/等二` 风格。\n- Light 字符串拼接不收整数：`打印(\"x=\" + 整数值)` 报类型错误，必须 `转字符串(整数)`。\n- Light 驱动 boot 拼接顺序注意：平台分支段（定义 慢命令）必须在引用它的段之前。",
+  "error": "",
+  "declared_paths": [
+    "src/任务控制.light",
+    "tests/test_任务控制.py",
+    "src/工具_bash.light",
+    "src/代理.light",
+    "src/web服务器.light",
+    "webui/index.html",
+    "webui/style.css",
+    "webui/tool-card.js",
+    "webui/app.js",
+    "tests/test_T0472_任务控制.py"
+  ],
+  "changed_files": [
+    "src/web服务器.light",
+    "src/代理.light",
+    "src/任务控制.light",
+    "src/工具_bash.light",
+    "tests/test_T0472_任务控制.py",
+    "tests/test_任务控制.py",
+    "webui/app.js",
+    "webui/index.html",
+    "webui/style.css",
+    "webui/tool-card.js"
+  ],
+  "out_of_paths": [],
+  "lease_id": "cfd018fe1aaf4ea98bbd99b19b3603e9",
+  "fence": 1
+}
