@@ -1,0 +1,44 @@
+{
+  "task": "T-0476",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0476",
+  "base": "main",
+  "head": "79b85ae2f4b8a6fe68f3034afd5dc958fc7ea48f",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T10:55:36+08:00",
+  "finished_at": "2026-11-25T10:59:06+08:00",
+  "duration_s": 210.4,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_runbook_sandbox_pitfall.py",
+      "code": 0,
+      "tail": [
+        "..........                                                               [100%]",
+        "10 passed in 0.26s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_cluster_upgrade_runbook.py",
+      "code": 0,
+      "tail": [
+        "........                                                                 [100%]",
+        "8 passed in 0.25s"
+      ]
+    }
+  ],
+  "summary": "# T-0476 工作说明\n\n## 做了什么\n\n把 `T-0473` 现场暴露的坑沉淀进操作手册，并补上初版遗漏的两处实用内容。\n\n### 第一部分：2.8 节本体（已在 main 的 `a35be65`）\n\n新增 `docs/cluster/节点升级清单.md` 的 **`### 2.8`**（紧跟 `2.7` 之后、\n`## 重启顺序` 之前），讲清：现象（`restart` 打印成功、当场 health 通、uptime 归零，\n但调用一结束进程就消失）、实际时间线（`09:57:48` 成功 → `10:01:01` 被回收 →\n常驻方式拉起才稳定）、根因（agent 沙箱回收「脱离会话」的子进程）、\n正确做法与「隔 3~5 分钟复采 uptime」的复查要求。\n\n### 第二部分：本次补的两个真实缺口（`652aab0` 之上）\n\n领卡复核时发现初版 2.8 **只写了 Windows 的做法**，而且没讲**怎么区分\n「被回收」和「自己崩了」**。这两点在实际跟进中都会踩到，补上：\n\n1. **跨平台做法**：集群里有 FreeBSD（fb98）和 Linux 节点，只教\n   `schtasks`/`.cmd` 等于把那些节点漏掉了。补了 `setsid` / `systemd --user` /\n   `rc.d` 的说明，并给出可直接照抄的 sh 代码块。\n2. **区分被回收 vs 自己崩**：给了一张对照表 —— 看 `cluster.log` 有没有\n   traceback、退出码是不是 Ctrl+C 语义（`0xC000013A`）、进程是否凭空消失、\n   以及最关键的经验判据「**同一份代码，普通终端稳定、agent 里掉 = 被回收**」，\n   这时别去追 `hive_cluster.py` 的 bug。\n   还补了一条假象提醒：`uptime` 突然归零但节点仍是 `alive`，说明被重新拉起了，\n   **不代表原来那个进程还活着** —— 要看 `uptime` 是否**持续增长**。\n\n## 判据\n\n`tests/test_runbook_sandbox_pitfall.py` 从 7 项扩到 **10 项**，新增 3 条：\n\n- `test_section_28_covers_non_windows_nodes`：正文（**非代码块**）里必须有\n  Linux/FreeBSD 说明与具体手段，且代码块里有可抄的 sh 样例；\n- `test_section_28_explains_reclaim_vs_crash`：必须包含「看 traceback」\n  「退出码/信号特征」「普通终端稳定 vs agent 里掉」三个区分手段；\n- `test_section_28_warns_uptime_zero_is_not_proof`：必须写明 uptime 要**持续增长**。\n\n### 判据自身踩过两个坑（都已修）\n\n1. **假通过**：`test_one_liner_includes_recheck` 最初把「一句话版本」之后到文件\n   末尾全算进检查范围，2.8 正文里的「隔 3~5 分钟」被误匹配 → 这条**永远通过**。\n   改为只取紧随其后的第一个 ``` 代码块。\n2. **关键词藏在注释里也能骗过**：`test_section_28_covers_non_windows_nodes`\n   最初直接在整个 2.8 里搜 `Linux|FreeBSD`，但 sh 代码块的注释里也有\n   「# Linux / FreeBSD：…」—— 于是我删掉正文那句跨平台说明后，变异测试\n   **0 红**（没被抓住）。改为**先剥掉 fenced code block 再判断正文**。\n\n这两次都是靠「变异 → 应变红却没红」发现的。判据的假通过比被测代码的漏洞更危险。\n\n## 验收逐条核对\n\n| 卡面验收项 | 结果 |\n|---|---|\n| `python -m pytest -q tests/test_runbook_sandbox_pitfall.py` | **10 passed** |\n| `python -m pytest -q tests/test_cluster_upgrade_runbook.py`（T-0471 原判据不许改红） | **8 passed** |\n| `### 2.8` 存在且位置在 2.7 之后、`## 重启顺序` 之前 | ✓ |\n| 该节含「回收」「3~5 分钟」「计划任务/普通终端」 | ✓ |\n| 一句话版本含复采要求（只看代码块内部） | ✓ |\n| 无真实密码、路径用 `<user>` 占位 | ✓ |\n| 新章节不是空壳 | ✓ 本次 diff 76 行新增（文档 +26 / 判据 +50） |\n\n### 反跑记录（变异 → 红 → 还原 → 绿）\n\n第一轮（初版 7 项判据）：\n- 删「隔 3~5 分钟复采」那句 → `test_section_28_requires_delayed_recheck` 红\n- 删整个 `### 2.8` 段 → 5 项红（含位置检查）\n- 一句话版本换无复采版本 → `test_one_liner_includes_recheck` 红\n\n第二轮（本次新增 3 项）：\n- 删正文跨平台说明（保留注释）→ `test_section_28_covers_non_windows_nodes` 红\n- 删整个 sh 代码块 → 同上红\n- 删「区分被回收 vs 自己崩」整段 → 2 项红\n- 去掉「持续增长」→ `test_section_28_warns_uptime_zero_is_not_proof` 红\n\n全部还原后均 0 红。\n\n## 独立复核（不只重跑测试）\n\n把 2.8 引用的关键事实（`09:57:48`、`10:01:01`、`0xC000013A`、`IC6RTQ4`、`T-0473`）\n逐个回到 `docs/cluster/节点重启记录.md`（T-0473 那条）核对，**全部有佐证，无编造**。\n\n## 改动范围\n\n只改卡面 `paths` 里的两个文件：\n- `docs/cluster/节点升级清单.md`（2.8 节补跨平台 + 区分方法）\n- `tests/test_runbook_sandbox_pitfall.py`（7 → 10 项）\n\n未动 `docs/cluster/节点重启记录.md`、未动 `hive_cluster.py`、\n未改 `tests/test_cluster_upgrade_runbook.py` 的既有断言、\n未用 `reset --hard` / `push --force` / `--no-verify`。\n\n## 没做 / 做不到（如实列）\n\n1. **第一次 submit 被判 failed（零改动）**，原因值得记：我先做交付物并推到 main\n   （`a35be65`）**然后**才建卡，导致卡分支相对 main 没有 diff，被\n   `guard_result_head` 的「零改动」闸门拦下。**我没有用 `allow_empty_diff: true`\n   去绕过它** —— 那会把机制关掉。正确做法是 retry 重领，基于最新 main 补真实内容\n   （即本轮的跨平台与区分方法），让它产出真实 diff。\n   教训：**先建卡、后干活**，顺序反了会自己给自己制造零改动。\n2. **没有在真实 agent 沙箱里复现「被回收」**：那是 IC6RTQ4 的环境，我只能引用\n   `T-0473` 记录里的事实并交叉核对，无法在此复现。2.8 里已注明出处。\n3. **`setsid` 那段没有实测**：本机是 Windows，给不出 FreeBSD/Linux 的实跑验证；\n   它是通用做法（脱离会话/进程组），已标注为「同理」，不是我在那些节点上验过的。",
+  "error": "",
+  "declared_paths": [
+    "docs/cluster/节点升级清单.md",
+    "tests/test_runbook_sandbox_pitfall.py"
+  ],
+  "changed_files": [
+    "docs/cluster/节点升级清单.md",
+    "tests/test_runbook_sandbox_pitfall.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "bbf75aa232a747f7b3d59162e4c77893"
+}
