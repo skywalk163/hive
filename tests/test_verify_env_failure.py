@@ -112,6 +112,28 @@ def test_verify_entry_uses_full_output_but_keeps_short_tail():
     assert entry["env_error"]["kind"] == "platform_module"
 
 
+def test_verify_entry_env_error_does_not_break_result_failure_kind():
+    """verify_entry 的精简 env_error 只有 {kind, reason}，判读时须回填 cmd/code。
+
+    T-0473 现场：硬取 env["cmd"] 抛 KeyError，cmd_submit 在写 res/<tid> 之前
+    中断——分支推上去了、结果文件却写不出来。
+    """
+    p = SimpleNamespace(stdout="ModuleNotFoundError: No module named 'resource'",
+                        stderr="", returncode=1)
+    entry = verify_entry(T0342_CMD, p)
+    assert set(entry["env_error"]) == {"kind", "reason"}
+
+    res = {"task": "T-0000", "status": "failed", "verify": [entry]}
+    fk = result_failure_kind(res)
+    assert fk is not None and fk["kind"] == "environment"
+    assert fk["items"][0]["cmd"] == T0342_CMD
+    assert fk["items"][0]["code"] == 1
+
+    annotated = annotate_result_failure(dict(res))
+    assert annotated["verify_env_errors"][0]["kind"] == "platform_module"
+    assert "非产物判据失败" in verify_failure_message([entry])
+
+
 def test_legacy_results_are_recognized_without_rewriting_history():
     """历史卡没有 failure_kind 字段，靠 verify[].tail 回溯即可显形。"""
     legacy = {"task": "T-0344", "status": "failed", "error": "verify 未通过",

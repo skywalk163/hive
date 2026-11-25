@@ -1750,7 +1750,15 @@ def result_failure_kind(res: dict) -> dict | None:
         env = v.get("env_error") or classify_verify_failure(
             v.get("cmd"), v.get("code"), v.get("tail"))
         if env:
-            items.append({"cmd": env["cmd"], "code": env["code"],
+            # env_error 由 verify_entry() 产出时只带 {kind, reason}，没有
+            # cmd/code；而 classify_verify_failure() 产出的那份是带 cmd/code 的。
+            # 原先硬取 env["cmd"] 会在「verify 失败且被判为环境性假红」时抛
+            # KeyError: 'cmd'，让 cmd_submit 在写 res/<tid> 之前中断
+            # （分支推上去了、结果文件却写不出来）。
+            # 故两处来源都兼容：env 里没有就退回 verify 条目自身的 cmd/code，
+            # 仍然没有则为 None —— 标注字段不全不该阻断产结果。
+            items.append({"cmd": env.get("cmd", v.get("cmd")),
+                          "code": env.get("code", v.get("code")),
                           "kind": env["kind"], "reason": env["reason"]})
     if not items:
         return None
