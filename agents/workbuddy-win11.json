@@ -17,7 +17,8 @@
     "hive": "C:/dswork/hive",
     "light": "C:/dswork/light",
     "lightharness": "C:/dswork/lightharness",
-    "lighthive": "C:/dswork/lighthive"
+    "lighthive": "C:/dswork/lighthive",
+    "lightmem": "C:/dswork/lightmem"
   },
   "launch": "",
   "worktrees": "C:/dswork/hive-wt",
