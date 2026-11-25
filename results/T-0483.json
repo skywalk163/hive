@@ -1,0 +1,40 @@
+{
+  "task": "T-0483",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0483",
+  "base": "main",
+  "head": "a96113c611f4c270ae839954a43b91f01b672d06",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T14:08:36+08:00",
+  "finished_at": "2026-11-25T14:22:52+08:00",
+  "duration_s": 856.8,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0483_协作段.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......                                                                   [100%]",
+        "6 passed in 21.91s"
+      ]
+    }
+  ],
+  "summary": "# T-0483 工作说明\n\n新增 `src/提示_协作段.light`：纯文本模块，导出 `协作段文本(工具名表 = 空)`，按在场工具裁剪「协作与长任务」段。\n子代理组（派发子任务/subagent）三条：同条消息一起发起、只等结果时结束回合不 sleep/轮询、收齐后再给最终答案、并发上限按工具定义（DSH 口径 8）。\n目标组（目标/goal）两条：`complete` 只在目标真达成时调；`blocked` 要同一阻塞条件连续 3 轮并写 `blocked_reason`，难度大/还有活不算。\n工作流组（工作流提交/workflow）一条：仅显式要求工作流或大规模编排时才用，一两个委派用普通子代理。\nbash 组一条：bash/格式化器/生成器可能无冲突检测地覆盖并发编辑，整合者 review 最终 diff 并跑相关测试。\n空工具表按标准工具面解释（四组全出）；非空但一个工具都没命中返回空串。未改任何禁止路径，未接线（归 T-0487），未承诺 subagent_fork/list_agents/run_code。\n新增 `tests/test_T0483_协作段.py`：子进程跑 .light 探针，覆盖关键词、bash 单条裁剪、工作流门控、标准工具面、无关工具空串、禁词与 ≤1200 长度。\n验证：`python -m pytest -q tests/test_T0483_协作段.py` → 6 passed；git status 仅两个允许路径的新文件。\n反跑已做并恢复：①「连续 3 轮」→「卡住就 blocked」红 2 项；②删「只等结果时结束回合」红 2 项；③无工具仍出全部段落红 2 项（含「只有 bash」判据）。\n遗留风险：本模块未接入系统提示，实际生效待 T-0487 接线；测试仅覆盖本卡判据，未跑全仓回归。",
+  "error": "",
+  "declared_paths": [
+    "src/提示_协作段.light",
+    "tests/test_T0483_协作段.py"
+  ],
+  "changed_files": [
+    "src/提示_协作段.light",
+    "tests/test_T0483_协作段.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "81b9280ba73e423784da52627431605c",
+  "fence": 1
+}
