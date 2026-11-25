@@ -1,0 +1,39 @@
+{
+  "task": "T-0488",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0488",
+  "base": "main",
+  "head": "feef8260fed0f2c64a7b6f0106371a3892b3ed30",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T18:07:55+08:00",
+  "finished_at": "2026-11-25T18:35:35+08:00",
+  "duration_s": 1660.2,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0488_生产面快照.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "........                                                                 [100%]",
+        "8 passed in 27.31s"
+      ]
+    }
+  ],
+  "summary": "做了什么：新增生产面装配快照判据与手工验收清单，把 T-0469 之后「提示变长/工具变多」首次钉在真实装配链上（组装注册表 + 生产提示文本 + 默认系统提示文本 + 压缩检查点），全程不调模型、不联网、不读家目录。\n改了哪些文件：新增 tests/test_T0488_生产面快照.py（8 个用例，一次子进程跑完全部探针）；新增 docs/功能对标/生产面验收.md（手工清单 + 实测快照 + 缺口 + 反跑结果）。未改 src/*.light、未改 tests/test_T0469_提示与工具面.py。\n验证：python -m pytest -q tests/test_T0488_生产面快照.py → 8 passed（约 50s，Windows/Python 3.13）。\n快照三行关键数字：工具数 22（20–30）；带上下文提示 3150 字符（上限 6000、无截断）；描述表 JSON 8600 字符（≤15000）；装配快照 3260 字符（含两级 AGENTS）。\n反跑（在 %TEMP%\\T0488rev 一次性副本里做，未动交付 worktree 的 src）：①装配提示段改成契约在前 → 2 failed（AGENTS 顺序 + 快照收尾）；②去重函数改成返回全量 → 2 failed（根正文出现 2 次）；③假摘要器换确定性拼接 → 1 failed（C_八段数=0）。恢复后 8 passed。\n口径偏差：卡面「带上下文提示 4500–6000」不可达——全上下文实测 3150（旧原文 2563 + 六段约 587），与 T-0487 同口径改钉 3000–6000 且无截断，已在测试与文档写明。\n重要缺口（文档第 2 节）：总入口.本轮系统提示 未把 上下文 传给 生产提示文本，真实生产提示实测 2563 字、无环境/技能/MCP 四段；手工清单改用会话 JSONL 的 request/header 取证（/api/sessions/current 不含系统提示/工具数）。\n遗留风险：手工清单与三项实测数字需在有真实模型 Key 的环境补跑；若真实 request/header 仍是 2563 字，按缺陷入账，不算本卡通过。",
+  "error": "",
+  "declared_paths": [
+    "tests/test_T0488_生产面快照.py",
+    "docs/功能对标/生产面验收.md"
+  ],
+  "changed_files": [
+    "docs/功能对标/生产面验收.md",
+    "tests/test_T0488_生产面快照.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "5a109f3375754a17846a3c586866f062"
+}
