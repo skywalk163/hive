@@ -1,0 +1,39 @@
+{
+  "task": "T-0484",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0484",
+  "base": "main",
+  "head": "27c5676e773551cfc5c702c19dc64f964f74e171",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T13:45:06+08:00",
+  "finished_at": "2026-11-25T13:53:58+08:00",
+  "duration_s": 532.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0484_压缩摘要器.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......                                                                   [100%]",
+        "6 passed in 13.65s"
+      ]
+    }
+  ],
+  "summary": "# T-0484 压缩摘要器（八段 checkpoint 指令与校验）\n\n- 新增 `src/压缩摘要器.light`：纯函数 + 常量，无网络/模型/文件系统依赖。\n  - `造摘要指令()`：中文八段 checkpoint 指令（标题固定、顺序固定、`(none)` 占位，含「保留原文事实」「不提及压缩」「只输出 checkpoint 文本」三条规则，含旧检查点同结构合并句）；实测 631 字符 ≤ 4000。\n  - `造摘要请求(消息表, 旧检查点文本=\"\")`：`深拷贝` 入参后追加一条 user 文本消息；旧检查点非空则在指令尾部追加「先前检查点如下，按同结构合并：\\n旧文」。\n  - `校验摘要(文本)` → `[\"ok\", \"缺段\"]`：八段 `## 标题` 必须全在且首次出现位置严格递增；缺失/乱序都进缺段（乱序也 ok=假，不只查数量）。\n  - `抽取摘要文本(块表)`：只拼 `type==\"text\"` 块（兼容中文键），`去除空格` 去首尾空白；无文本块 → \"\"。\n  - `摘要指令字符上限()`=4000；`八段标题()` 返回 `深拷贝`，外部追加不污染契约常量。\n  - 八段中英对照（主要请求与意图/Primary Request and Intent … 关键上下文/Critical Context）固定在模块注释，后续卡不得改名。\n- 新增 `tests/test_T0484_压缩摘要器.py`（6 组判据，驱动脚本 + 运行.py 子进程 + k=v），覆盖指令顺序与规则、请求不原地改、旧检查点合并且在、校验缺失/乱序、抽取拼接与去空白、常量副本。\n- 验证：`python -m pytest -q tests/test_T0484_压缩摘要器.py` → 6 passed（22.7s）。\n- 反跑三条均红后已恢复：删「不提及」规则 → 组1 红；校验去顺序判据 → 组4 乱序红；请求去掉 `深拷贝` → 组2 入参被追加红。恢复后全绿。\n- 未改 `src/压缩.light` / `src/压缩配套.light` / `src/压缩E5.light`（接线归 T-0486）；未做 reset/push。遗留：无。",
+  "error": "",
+  "declared_paths": [
+    "src/压缩摘要器.light",
+    "tests/test_T0484_压缩摘要器.py"
+  ],
+  "changed_files": [
+    "src/压缩摘要器.light",
+    "tests/test_T0484_压缩摘要器.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "81fffc6935514a6f8c4680fc9a2b87c9"
+}
