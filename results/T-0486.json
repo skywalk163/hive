@@ -1,0 +1,77 @@
+{
+  "task": "T-0486",
+  "agent": "lightharness-fb98",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0486",
+  "base": "main",
+  "head": "d23a3c1ad64c2eeedcb236fd36688184f2e2d033",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T14:17:49+08:00",
+  "finished_at": "2026-11-25T14:57:15+08:00",
+  "duration_s": 2367.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0486_压缩接线.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......                                                                   [100%]",
+        "6 passed in 15.96s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0402_压缩升级.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".........                                                                [100%]",
+        "9 passed in 9.03s"
+      ]
+    }
+  ],
+  "summary": "# T-0486 工作说明\n\n## 改动\n- `src/代理.light`：新增 `造模型摘要器(客户端, 会话, 选项)`，返回 `(会话, 尾号) -> 摘要文本|空` 闭包；折叠区取消息、剥旧检查点正文、经 T-0484 `造摘要请求/抽取摘要文本/校验摘要` 调客户端（工具表空、选项透传），成功登记 model 来源，失败/异常返回空不重试。`代理循环` 构造处在 `选项[\"压缩配置\"]` 存在且未自带摘要器、且 `模型摘要 != 假` 时注入；开关默认读 E5（`HARNESS_COMPACTION_MODEL_SUMMARY=0` 关闭），选项可显式覆盖；不写会话事件/不触发工具。\n- `src/压缩.light`：新增摘要来源元信息槽（`设/取/清`），`压缩造摘要` 先清槽、模型摘要失败退确定性并登记 `摘要来源=deterministic`；`造检查点消息` 附 `摘要来源/摘要段数/提供方/模型` 并清槽，`落摘要来源到事件` 把元信息提到新写入事件顶层；`压缩到最近` 两处均落事件。\n- `src/压缩E5.light`：`压缩配置解析()` 新增键 `模型摘要`（env `HARNESS_COMPACTION_MODEL_SUMMARY`，默认 1；0/false/no 关），`压缩配置` 类新增同属性并构造读取；其它默认不变。\n- `tests/test_T0486_压缩接线.py`：6 项判据（假客户端，无联网）：成功八段落 model 来源、缺段/抛错回退 deterministic 且调用恰好 1 次、工具表空且事件不污染、env=0 不注入、旧检查点合并、E5 默认/关闭、代理注入/关闭/自带不被覆盖。\n\n## 验证\n- `python -m pytest -q tests/test_T0486_压缩接线.py` → 6 passed\n- `python -m pytest -q tests/test_T0402_压缩升级.py` → 9 passed\n- 合并回归（T-0484/T-0402/T-0486/T-0397/T-0425）→ 33 passed\n- 完整套件 600s 超时未跑完（环境耗时，非失败）；卡片两条 verify 命令全绿。\n\n未改 `src/web服务器.light`、未改 `src/压缩摘要器.light` 八段规则；无 force push / reset --hard / --no-verify。",
+  "error": "",
+  "declared_paths": [
+    "src/代理.light",
+    "src/压缩.light",
+    "src/压缩E5.light",
+    "tests/test_T0486_压缩接线.py"
+  ],
+  "changed_files": [
+    "src/web服务器.light",
+    "src/代理.light",
+    "src/任务控制.light",
+    "src/压缩摘要器.light",
+    "src/工具_bash.light",
+    "tests/test_T0472_任务控制.py",
+    "tests/test_T0484_压缩摘要器.py",
+    "tests/test_任务控制.py",
+    "webui/app.js",
+    "webui/index.html",
+    "webui/style.css",
+    "webui/tool-card.js",
+    "src/压缩.light",
+    "src/压缩E5.light",
+    "tests/test_T0486_压缩接线.py"
+  ],
+  "out_of_paths": [
+    "src/web服务器.light",
+    "src/任务控制.light",
+    "src/压缩摘要器.light",
+    "src/工具_bash.light",
+    "tests/test_T0472_任务控制.py",
+    "tests/test_T0484_压缩摘要器.py",
+    "tests/test_任务控制.py",
+    "webui/app.js",
+    "webui/index.html",
+    "webui/style.css",
+    "webui/tool-card.js"
+  ],
+  "lease_id": "6ce65d03879c409ab446250c34f22e84"
+}
