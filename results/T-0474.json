@@ -1,0 +1,42 @@
+{
+  "task": "T-0474",
+  "agent": "fb98-dsh",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0474",
+  "base": "main",
+  "head": "c3748921d6498b059927601ca07b6ad3e5a0d14f",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T09:46:45+08:00",
+  "finished_at": "2026-11-25T09:52:26+08:00",
+  "duration_s": 341.8,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_node_restart_cards.py",
+      "code": 0,
+      "tail": [
+        ".......                                                                  [100%]",
+        "7 passed in 0.10s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_lease_heartbeat_floor.py",
+      "code": 0,
+      "tail": [
+        ".....                                                                    [100%]",
+        "5 passed in 0.15s"
+      ]
+    }
+  ],
+  "summary": "# T-0474 工作说明（fb98，FreeBSD 15.1）\n\n## 做了什么\n1. 先确认节点归属：`python hive.py cluster status` 显示本机为 fb98，与卡面一致，未领别的节点的卡。\n2. 领卡：本会话无 `hive_claim` MCP 工具，改用仓库 CLI 等价路径 `hive claim` + `hive take T-0474 --agent fb98-dsh`（同一 Worker.claim 抢锁），lease `ff79ff1c`，worktree `/home/skywalk/.hive/wt/T-0474`。\n3. 自检：版本 `0.16.09`、HEAD `cc94e25a`（= origin/main），租约 14.80s（新代码），但 `uptime_s=14467.8`（≈4h）> 1h —— 仓新、进程旧，判定必须重启，没走「无需重启」捷径。\n4. 重启前红线核查：唯一非释放集群租约 T-0472 属 DESKTOP-6LFQUO8，本机无 running 卡。\n5. 重启：`cluster restart` 命中「找不到 pid 文件」老坑（未真重启），改用 `sudo -n -u skywalk kill -TERM 640`，等 5s 优雅退出、端口释放后 `cluster start` 重建参数拉起 PID 3536。主控按预期交到 6LFQUO8（term 3929→3931）。\n6. 实测复核：uptime 13.9~37.9s（<600）、租约 14.17~14.95s（≥10s），均达标。\n\n## 改了哪些文件\n仅 `docs/cluster/节点重启记录.md`（追加 fb98 一条，含前后实测数字），全部在 paths 内。\n\n## 验证\n- `python -m pytest -q tests/test_node_restart_cards.py`：见提交时 verify。\n- `python -m pytest -q tests/test_lease_heartbeat_floor.py`：见提交时 verify。\n\n## 没做 / 风险\n- 没重启其它节点（T-0473/T-0475 由各自卡负责），没碰 IC6RTQ4 的旧代码残留。\n- 未改 state.json / health 数字、hive_cluster.py 租约逻辑；未用 reset --hard / push --force / --no-verify。",
+  "error": "",
+  "declared_paths": [
+    "docs/cluster/节点重启记录.md"
+  ],
+  "changed_files": [
+    "docs/cluster/节点重启记录.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "ff79ff1c0b2a4c998d60026f740f90cd"
+}

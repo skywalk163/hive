@@ -1,0 +1,43 @@
+{
+  "task": "T-0475",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0475",
+  "base": "main",
+  "head": "1e984fc12ce10d22bcb2cd03e7654c408f6c35e8",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T09:34:56+08:00",
+  "finished_at": "2026-11-25T09:39:47+08:00",
+  "duration_s": 291.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_node_restart_cards.py",
+      "code": 0,
+      "tail": [
+        ".......                                                                  [100%]",
+        "7 passed in 0.35s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_lease_heartbeat_floor.py",
+      "code": 0,
+      "tail": [
+        ".....                                                                    [100%]",
+        "5 passed in 0.48s"
+      ]
+    }
+  ],
+  "summary": "# T-0475（DESKTOP-6LFQUO8 节点重启）工作说明\n\n## 身份确认（卡面要求的第一步）\n\n先跑 `python hive.py cluster status` 确认本机节点名，再领卡：\n\n```\n本机 DESKTOP-6LFQUO8（DESKTOP-6LFQUO8-8a3bf94c）\nIP 192.168.0.100\n```\n\n与卡面「只给 DESKTOP-6LFQUO8（http://192.168.0.100:8788，仓在\n`G:\\dswork\\duan-light-merge\\hive`）」完全一致。T-0473（IC6RTQ4）与\nT-0474（fb98）不是本机的卡，未领。\n\n## 自检结果（第 1 步）\n\n| 项目 | 实测 | 卡面要求 | 结论 |\n|---|---|---|---|\n| 本仓版本 | `0.16.09` | 0.16.09 | 通过 |\n| 本仓 HEAD | `cc94e25` | 含 0.16.09 | 通过 |\n| `uptime_s` | `31458.8`（8.74h） | < 3600 才免重启 | **不通过** |\n| 主控下发租约 | `14.9s` | ≥ 10s | 通过 |\n\n**判定：需要重启。** 版本和租约都已达标，但 uptime 8.74h 远超卡面的 1 小时\n门槛，按卡面规则仍执行重启 —— 这条规则的意义正是「不要仅凭租约数字就\n假定进程跑的是新代码」。\n\n## 执行（第 3 步）\n\n重启前确认集群里只有本卡 T-0475 在 running，没有别的卡会被打断。\n\n```\npython hive.py cluster restart\n  → 集群已停止（pid=11700）\n  → 集群已启动：DESKTOP-6LFQUO8 http://127.0.0.1:8788\n  → 看板 http://192.168.0.100:8787/ 运行中\n```\n\n**未遇到**卡面提到的「集群在运行，但找不到 pid 文件」——当前进程是 0.16.08\n时代起的（有落盘 pid），所以 restart 正常走完，不需要手工 SIGTERM。\n\n## 验证（第 4 步，health 实测）\n\n重启前后对比：\n\n| | uptime | 主控下发租约 | role | term |\n|---|---|---|---|---|\n| 重启前 | 31458.8s（8.74h） | 14.9s | leader | 3925 |\n| 重启后 | **21.1s** | **13.9s** | follower | **3928** |\n\n两项判据：`uptime < 600` ✓、`租约 ≥ 10s` ✓。\n\n本机重启前是 leader，重启后主控权按卡面预期交给 `DESKTOP-IC6RTQ4`，\nterm 3925 → 3928。按卡面要求，改去 health 里 `leader` 指向的那台验租约。\n\n## ⚠ 重要遗留（如实记录，未糊过去）\n\n**新主控 `DESKTOP-IC6RTQ4` 仍在跑旧代码。** 实测：\n\n```\nIC6RTQ4  role=leader  uptime=46.12h  自报 leader_lease_until 稳定在 4.78~4.86s\nfb98     role=follower uptime=3.83h   租约 14.7s\n6LFQUO8  role=follower uptime=0.01h   租约 14.8s（本机，已重启）\n```\n\n连续 6 次采样 IC6RTQ4 的 `leader_lease_until_epoch - now` 都是 `4.73~4.86s`，\n即旧代码的 5s 租约。**这说明「只升级跟随者没用」这条警告是真的** ——\n本机虽然升级并重启了，但只要主控是旧代码，集群侧就还有租约撞车的风险。\n\n彻底收口需要 `T-0473`（IC6RTQ4 那张卡）把 IC6RTQ4 也重启到 0.16.09。\n\n**本机自身侧已稳定**：重启后观察 90 秒，`state.json` 里 `leader_lost`\n计数恒为 13 不再增长，不再出现「判死又复活」的抖动。\n\n## 改动范围\n\n只改了卡面允许的路径：`docs/cluster/节点重启记录.md`（追加本机那一条，\n未覆盖 FIXTURE 样例与其它节点条目）。未动 `hive_cluster.py`、\n未改 `state.json`、未用 `reset --hard` / `push --force` / `--no-verify`。\n\n## 判据\n\n```\npython -m pytest -q tests/test_node_restart_cards.py     → 7 passed\npython -m pytest -q tests/test_lease_heartbeat_floor.py  → 5 passed\n```\n\n另外单独验证了判据**确实解析到本机条目**（而不是因无记录而空过）：\n识别到的节点条目 = `['DESKTOP-6LFQUO8']`，解析出的租约数字 = `[14.9]`，\n`max >= 10` 为 True。\n\n## 没做 / 做不到\n\n1. **没有让集群彻底收口**：新主控 IC6RTQ4 是旧代码（4.8s 租约），\n   本卡只负责本机，改不了它。已在记录里点名，交给 T-0473。\n2. **没有验证「重启后主控下发的租约由新代码签发」**：重启后主控换成了\n   IC6RTQ4（旧代码），所以现在观察到的 4.8s 是旧代码的行为；\n   要等它升级后才能看到 15s 的主控租约。本机自己作为 follower 收到的\n   13.9s 是它按新代码 `min(远端, now+15s)` 算出来的，不是主控签发的值。",
+  "error": "",
+  "declared_paths": [
+    "docs/cluster/节点重启记录.md"
+  ],
+  "changed_files": [
+    "docs/cluster/节点重启记录.md"
+  ],
+  "out_of_paths": [],
+  "lease_id": "61125164aa2a4ae68cc9b6b0edba3f57",
+  "store_write_error": "T-0475 结果写入 leader store 失败（已尝试 4 次）：store 未启用"
+}
