@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.16.09 — 2026-11-25
+
+> **本版必须逐节点更新并重启各自的集群进程。** 租约由主控签发，只升级跟随者
+> 无效：主控跑旧代码就继续按 `now+5s` 下发。步骤见
+> `docs/cluster/节点升级清单.md`；`cluster start/restart` 现在会自检并告警。
+
+### Fixed
+
+- **「采纳主控」自清自愈刷屏：本人心跳续的租约被收敛逻辑拉回旧值**
+  （`554cb2b`）。`_adopt_leader_locked(refresh_lease=True)` 收到主控本人心跳时
+  只续本机 `leader_lease_until`，**没写回** `nodes[leader]["lease_until_epoch"]`；
+  维护循环那段「防御性收敛」又用记录里的旧值把本机租约压回去，于是每轮都是
+  「心跳续租 → 收敛回旧值 → 判定过期 → 清空 leader_id → 下一拍再采纳」。
+  清空走 `_emit_locked`，**只记事件不写 cluster.log**，所以从日志里只能看到
+  「采纳主控」刷屏、看不到是谁清的（旧日志累计 44692 次，同一 term 内）。
+  修法：真身心跳在续租处同时把新租约写回节点记录；转述路径
+  （`refresh_lease=False`）保持 `min(远端, now+lease)` 上限裁剪不变，
+  防幽灵主控永不过期。新增 `tests/test_leader_lease_converge.py`(6 项)，
+  含「真死主控仍须过期」的反向保护。
+
+- **租约默认值与空闲心跳默认值同为 5s，空闲时每轮必撞车**（`4730460`）。
+  `DEFAULT_LEADER_LEASE_S = 5.0` 与 `DEFAULT_IDLE_HEARTBEAT_S = 5.0` 相等：
+  空闲时主控每 5 秒才发一次心跳，跟随者租约恰好 5 秒到期，网络上晚几十毫秒
+  就判「主节点租约过期」。`state.json` 里 55 次 `leader_lost(主节点租约过期)`
+  与 54 次 `leader_seen` 一一配对 —— 主控明明活着却被反复"判死又复活"。
+  改为 `max(默认值, 空闲心跳 × 3)`（5s 空闲心跳 → 15s 租约），显式传
+  `leader_lease` 的调用方不受影响。新增 `tests/test_lease_heartbeat_floor.py`(5 项)。
+
+### Added
+
+- **`hive cluster start/restart` 版本闸**（`84760b4`）：启动前自检「正在运行的
+  这份 hive」是否落后 `origin/main`，落后就在 stderr 告警并给出
+  `git pull --ff-only && hive cluster restart`。只读本地远端跟踪引用，
+  **不做任何网络操作**（启动不该被 SSH/凭据挂住），也不改变退出码 ——
+  提醒不是拦截；`HIVE_SKIP_VERSION_GATE=1` 可闭嘴。
+  新增 `tests/test_version_gate.py`(9 项)。
+
+- **`docs/cluster/节点升级清单.md`**（T-0471）：逐节点仓路径、先查 running 再
+  重启、**follower 先于 leader** 的重启顺序、升级后用 `api/cluster/health`
+  实测租约 ≥ 10s 的判定门槛，以及 fb98 专属现场坑（`sudo -n -u skywalk`
+  换账号并显式给 HOME、`hive` 不在 PATH、`cluster.pid` 缺失时发 SIGTERM
+  让老进程优雅退出、重启主控会换主所以别按老地址验）。
+  新增 `tests/test_cluster_upgrade_runbook.py`(8 项)钉住这些硬信息。
+
 ## 0.16.08 — 2026-11-23
 
 ### Fixed

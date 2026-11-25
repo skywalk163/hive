@@ -1,7 +1,7 @@
 {
-  "version": "0.16.08",
-  "commit": "d6e869c75db4d6938daf98d05e1a6ead8c475592",
-  "published_at": "2026-11-23T10:09:17+08:00",
+  "version": "0.16.09",
+  "commit": "PENDING",
+  "published_at": "2026-11-25T09:30:00+08:00",
   "published_by": "WIN10",
-  "notes": "0.16.08：cluster start/stop pid 身份校验与陈旧 pid 自愈（T-0440）、task list 读 res 结果（T-0435）、display_state 收口（T-0438）、land 多远端惰性探测（T-0437）"
+  "notes": "0.16.09：集群租约收口 —— 本人心跳把租约写回节点记录（554cb2b，修「续租→收敛→判过期→清空→重新采纳」自清自愈刷屏）；租约默认值改为 max(默认, 空闲心跳×3)=15s（4730460，修 DEFAULT_LEADER_LEASE_S 与 DEFAULT_IDLE_HEARTBEAT_S 同为 5s 的撞车）；cluster start/restart 加版本闸（84760b4，正在跑的这份落后 origin/main 就告警）；新增节点升级清单与判据（T-0471）。本版要求各节点各自更新并重启，租约由主控签发，只升级跟随者无效。"
 }
