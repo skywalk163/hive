@@ -1,0 +1,60 @@
+{
+  "task": "T-0480",
+  "agent": "lightharness-fb98",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0480",
+  "base": "main",
+  "head": "1492cd906d78b1256cac8ae811b1a3f31c60884d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T13:56:54+08:00",
+  "finished_at": "2026-11-25T14:06:00+08:00",
+  "duration_s": 546.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0480_权限段.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 5.32s"
+      ]
+    }
+  ],
+  "summary": "# T-0480 完成报告：提示：权限与审批边界段（放行/审批/拒绝 + 沙箱口径）\n\n## 结论\n\n新增纯文本模块 `src/提示_权限段.light` 与判据 `tests/test_T0480_权限段.py`，\nverify `python -m pytest -q tests/test_T0480_权限段.py` → **7 passed**。\n\n## 做了什么\n\n- `权限段文本(权限预设标识, 审批策略)`：\n  - 用 `权限.是权限预设` 校验，未知预设 → `\"\"`（不猜）；\n  - `全放行` → 「文件与命令无需逐次确认」；\n  - `全拒绝` → 「写盘与命令一律拒绝；需要时先说明原因，不要反复重试」；\n  - `按类别` / `自定义` → 「放行：读文件、看目录、搜索；需审批：写文件、运行命令、联网；拒绝：危险命令」；\n  - 审批策略 `ask` → 补「需审批的操作会逐次询问，等待用户答复，不要跳过」；\n    `never` → 补「本会话不询问审批；被拒绝即视为不可做」；空/未知策略 → 省略审批行；\n  - 所有合法输出追加沙箱拒绝口径行「被沙箱或权限拒绝时，不要换措辞重试同一操作；说明原因，或改用允许的路径。」\n- `权限段(...)`：别名，与主函数逐字等价（测试钉住）。\n- 总长上限 600 字符（实测最大 110 字符），文案仅含用户能懂的说法，无内部字段名。\n\n## 红线自查\n\n- 只导入 `权限` 的预设/分类标签常量与 `是权限预设`、`审批` 的策略标签；**未调用权限管理器判定，未复制放行/拒绝规则**；\n- 未改 `权限.light` / `审批.light` / `互举接线.light` 既有断言；\n- 文案无 `类别放行` / `通过` / `审批策略` / `类别` 等内部键名；\n- 未改 `系统提示.light` / `总入口.light`（接线归 T-0487 / T-0489）；\n- 无 `git reset --hard` / `push --force` / `--no-verify`。\n\n## 验证\n\n| 环境 | 命令 | 结果 |\n|---|---|---|\n| FreeBSD 15.1（192.168.0.88 / 3.12.13） | `python -m pytest -q tests/test_T0480_权限段.py` | 7 passed in 4.7s |\n\n7 条用例覆盖：四预设文案、三类类别名、两种审批策略、未知预设空串、空策略省略审批行、\n长度/内部词/别名/沙箱口径、反跑锚点源码存在性。\n\n## 反跑记录（三条均实测立红，恢复后全绿）\n\n1. 把 `全拒绝` 分支改成「尽量少做」→ `test_全放行与全拒绝文案` 立红；\n2. 未知预设返回全放行文案 → `test_未知预设返回空串` 立红；\n3. 删掉沙箱拒绝口径行 → `test_长度内部词别名与沙箱口径` 立红。\n\n每次反跑后从备份恢复，最终 verify 7 passed。\n\n## 没做 / 风险\n\n- 未接线到生产系统提示（按卡面红线归 T-0487 / T-0489），本模块目前只提供纯文本函数；\n- 未知审批策略按空策略口径「省略审批行」处理（卡面验收只明确空策略行为，未在文案里猜策略含义）；\n- 类目名举例（读文件/看目录/搜索、写文件/运行命令/联网、危险命令）是用户能懂的说明性样例，\n  不是工具层实际规则的复刻。",
+  "error": "",
+  "declared_paths": [
+    "src/提示_权限段.light",
+    "tests/test_T0480_权限段.py"
+  ],
+  "changed_files": [
+    "src/web服务器.light",
+    "src/代理.light",
+    "src/任务控制.light",
+    "src/工具_bash.light",
+    "tests/test_T0472_任务控制.py",
+    "tests/test_任务控制.py",
+    "webui/app.js",
+    "webui/index.html",
+    "webui/style.css",
+    "webui/tool-card.js",
+    "src/提示_权限段.light",
+    "tests/test_T0480_权限段.py"
+  ],
+  "out_of_paths": [
+    "src/web服务器.light",
+    "src/代理.light",
+    "src/任务控制.light",
+    "src/工具_bash.light",
+    "tests/test_T0472_任务控制.py",
+    "tests/test_任务控制.py",
+    "webui/app.js",
+    "webui/index.html",
+    "webui/style.css",
+    "webui/tool-card.js"
+  ],
+  "lease_id": "ce13dedfa2b84b9d8ceb3ff0f1c6f1c7"
+}
