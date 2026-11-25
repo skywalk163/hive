@@ -1,0 +1,36 @@
+{
+  "task": "T-0467",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0467",
+  "base": "main",
+  "head": "8b7233aae36cd633771dadb8429eb5bb1c986dd3",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T09:18:49+08:00",
+  "finished_at": "2026-11-25T09:18:49+08:00",
+  "duration_s": 0.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0442_工具层缺陷.py -o addopts=",
+      "code": 0,
+      "tail": [
+        "......                                                                   [100%]",
+        "6 passed in 44.03s"
+      ]
+    }
+  ],
+  "summary": "（人工 submit，未写 summary）",
+  "error": "",
+  "declared_paths": [
+    "src/工具_bash.light",
+    "docs/工具_bash_本地旧版_20261124.bak",
+    "tests/test_T0442_工具层缺陷.py"
+  ],
+  "changed_files": [
+    "docs/工具_bash_本地旧版_20261124.bak"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
