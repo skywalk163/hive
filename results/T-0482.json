@@ -1,0 +1,40 @@
+{
+  "task": "T-0482",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0482",
+  "base": "main",
+  "head": "581ce0dd87bf2b3ca20f94c7c968c171da4bf6f7",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-25T14:36:40+08:00",
+  "finished_at": "2026-11-25T14:44:53+08:00",
+  "duration_s": 493.9,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0482_纪律段.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "........                                                                 [100%]",
+        "8 passed in 13.79s"
+      ]
+    }
+  ],
+  "summary": "# T-0482 工作说明\n\n## 做了什么\n新增纯文本提示模块 `src/提示_纪律段.light`，导出 `纪律段文本(工具名表)`：把 5 条工具使用纪律（查退出码 / 别用 cat/sed/head/tail / 别用 shell 找文件 / 定向替换 / 网页结果外部不可信且给出处）按在场工具整条裁剪；工具名表为空（含 []）时按与 T-0469 同口径的标准工具面解释，无关工具面返回空串。文案只讲行为、不碰实参契约段的「命令」「路径」等字段名，不含 apply_patch / run_code / workflow，不引网络、不读文件系统、不接线。\n\n## 改了哪些文件\n- `src/提示_纪律段.light`（新增）：规则库 + 标准工具面副本 + 在场判定 + 纪律段文本。\n- `tests/test_T0482_纪律段.py`（新增）：子进程 driver 走真实 .light 段落，8 项判据覆盖四工具关键词、cat 明确列举、单工具裁剪、无关工具空串、空表标准工具面 ≥4 条、红线禁词、与 `系统提示.实参契约段()` 句级查重、长度 ≤900。\n\n## 跑了什么验证\n- `python -m pytest -q tests/test_T0482_纪律段.py`：8 passed（Windows 上直接绿，无需改用 FreeBSD 机器）。\n- 三组反跑均按预期立红：①删「外部不可信」条 → 3 failed；②把 cat 条改成「尽量别用」→ 3 failed；③加一句 apply_patch 说明 → 1 failed（红线禁词）。恢复原始产物后复跑 8 passed。\n\n## 取舍与遗留风险\n- 任务卡写「至少 4 条才渲染」，验收又要求「只有读文件 → 只出现 1 条」。按验收口径处理：规则库固定 5 条（不足 4 条则整段不渲染），按在场工具裁剪后可少于 4 条。\n- 本卡只交付纯文本模块，未改 `src/系统提示.light`、`src/总入口.light`；接线归 T-0487，本模块的提示尚未进入生产提示。\n- `git status` 仅两个允许路径为未跟踪新文件；未 push、未 force、未 --no-verify。",
+  "error": "",
+  "declared_paths": [
+    "src/提示_纪律段.light",
+    "tests/test_T0482_纪律段.py"
+  ],
+  "changed_files": [
+    "src/提示_纪律段.light",
+    "tests/test_T0482_纪律段.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "f59c622b322a408787ad708402b3330b",
+  "fence": 1
+}
