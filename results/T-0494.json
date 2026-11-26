@@ -1,0 +1,58 @@
+{
+  "task": "T-0494",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0494",
+  "base": "main",
+  "head": "88adf6e454842dd2d50323b4856a37869db6ca25",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T09:37:28+08:00",
+  "finished_at": "2026-11-26T10:02:32+08:00",
+  "duration_s": 1504.4,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_openi_decisions_wire.py",
+      "code": 0,
+      "tail": [
+        "................                                                         [100%]"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_openi_v3_judge.py",
+      "code": 0,
+      "tail": [
+        "....................                                                     [100%]"
+      ]
+    },
+    {
+      "cmd": "python train_openi.py --self-check",
+      "code": 0,
+      "tail": [
+        "batch: x=4x768 pad-weight OK",
+        "roundtrip OK; rule labels: {'EDIT': 'FR', 'FIX': 'REFACTOR'}",
+        "v3 coverage: {\"train\": {\"n_decision_tokens\": 216, \"points\": {\"SAFE\": 37, \"PLAN\": 32, \"RETRY\": 30, \"EDIT\": 66, \"CTX\": 22, \"NEXT\": 21, \"FIX\": 8}, \"validation_codes\": [\"ERR=CHECKER_FAIL\", \"ERR=RUNTIME\", \"PASS\"]}, \"test\": {\"n_decision_tokens\": 41, \"points\": {\"EDIT\": 14, \"NEXT\": 4, \"FIX\": 1, \"PLAN\": 5, \"SAFE\": 7, \"CTX\": 6, \"RETRY\": 4}, \"validation_codes\": [\"ERR=CHECKER_FAIL\", \"ERR=RUNTIME\", \"PASS\"]}, \"points_with_any_label\": [\"CTX\", \"EDIT\", \"FIX\", \"NEXT\", \"PLAN\", \"RETRY\", \"SAFE\"], \"points_with_test_labels\": [\"CTX\", \"EDIT\", \"FIX\", \"NEXT\", \"PLAN\", \"RETRY\", \"SAFE\"], \"n_points_with_test_labels\": 7, \"n_test_decision_rows\": 41, \"validation_codes_seen\": [\"ERR=CHECKER_FAIL\", \"ERR=RUNTIME\", \"PASS\"], \"has_err_validation\": true, \"split_diagnostics\": {\"group_split\": false, \"n_clusters\": 612, \"train_test_template_overlap\": 45, \"val_test_template_overlap\": 19, \"n_templates\": 9, \"splits\": {\"train\": 428, \"val\": 92, \"test\": 92}}}",
+        "v3 split_diagnostics: {\"group_split\": false, \"n_clusters\": 612, \"train_test_template_overlap\": 45, \"val_test_template_overlap\": 19, \"n_templates\": 9, \"splits\": {\"train\": 428, \"val\": 92, \"test\": 92}}",
+        "== self-check PASS =="
+      ]
+    }
+  ],
+  "summary": "# T-0494 工作说明\n\n## 完成内容\n\n把 `data/unified/decisions.jsonl` 的 241 条真实决策接进 `train_openi.py`，解除 v3 门禁三条 blocker，**不声称任何判据通过**。\n\n### 代码改动（4 个允许路径内）\n\n1. **`train_openi.py`**\n   - `_load_payload()`：`--data-dir` 分支读 `decisions.jsonl`（缺失即空串）；内嵌分支读重建后的 payload；`meta` 记 `decisions_sha256`。旧 payload 缺键 `setdefault` 空串，行为不变。\n   - `load_samples()`：每条决策记录转样本（task=task_text / code=source / validation=validation_code / decisions / meta.template / `_category=runtime_decision`）；缺字段、空 decisions、未登记验证码一律报错；末尾调用 `decision_budget()` 做确定性限量。\n   - `build_ids()` real 策略：自带 decisions 时原样注入限量点、逐点校验 `Vocab.point_token_ids` / `vocab.decisions`；无自带字段退回旧逻辑。\n   - 新增 `decision_budget()`：sha256 派生每样本 1 点（FIX 稀有点全留），密度 0.003858 ≤ 0.02；`DENSITY_MAX` 等阈值未改。\n   - `stratified_split()`：新增 FIX 簇级奇偶交替，整簇迁移保证 train/test 双侧有 FIX、overlap 恒 0、样本守恒。\n   - 重建内嵌 `_PAYLOAD_B64`（含 decisions，33,728→81,137 bytes）。\n\n2. **`scripts/embed_payload.py`**：打包 `decisions` + `decisions_sha256`，`--check` 比对 decisions（旧内嵌缺键会报不一致）。\n\n3. **`tests/test_openi_decisions_wire.py`**（新建，16 项）：payload 双路径 / 向后兼容 / embed --check / 241 条转换 / 三类报错 / real 注入与词表校验 / 旧逻辑退回 / sha256 可复现与密度 / FIX 跨 5 个 seed 双侧覆盖 / group-split 守恒 / 门禁解除且 verdict 如实 / 数据快照字节对齐。\n\n4. **`reports/决策标签接线_2026-11-26.md`**（新建）：前后对比表、实现细节、密度取舍、红线遵守、验收结果。\n\n### 关键实测数据（CPU，纯标准库）\n\n| 指标 | 接线前 | 接线后 |\n|---|---|---|\n| 训练样本（内嵌） | 371 | 612 |\n| 真实决策条数 | 0（36 合成 EDIT） | 241 |\n| test 决策点覆盖 | 1/7 | 7/7 |\n| test 决策行 | 9（<30） | 78 |\n| train/test 模板重合 | 27 | 0 |\n| 决策密度 | — | 0.003858（≤0.02） |\n| `gated` | true | false |\n| `verdict` | incomplete | 未声称（后续 V100 复跑） |\n\n全量注入纯决策样本密度 0.078、混入老样本后 0.0184；限量后 0.003858，留足安全余量。\n\n## 验收结果\n\n| 命令 | 结果 |\n|---|---|\n| `python -m pytest -q tests/test_openi_decisions_wire.py` | 16 passed |\n| `python -m pytest -q tests/test_openi_v3_judge.py` | 20 passed（不回归） |\n| `python train_openi.py --self-check` | PASS |\n| `python train_openi.py --group-split --self-check` | PASS（overlap=0、7/7、密度达标） |\n| `python scripts/embed_payload.py --check` | 一致 |\n\n## 如实说明\n\n- 本机无 torch，`LP_ALLOW_CPU=1` 的 2-epoch CPU smoke 无法执行，metrics.json 的完整训练后数值未产出；上表来自纯标准库 self-check / label_coverage。\n- 默认 `--self-check` 走非 group-split（既有语义），overlap 仍为 45；门禁解除在 `--group-split` 模式下成立，任务卡要求的就是该模式。\n- 本卡未改任何判据阈值/分母（单测断言 `DENSITY_MAX=0.02`、`MIN_PROBE_TEST_ROWS=30`、`MIN_DECISIVE_GAP=3`），门禁解除后单测构造 ③=0.5385 场景仍判 `fail`、`verdict=fail`。\n- 未伪造 decisions、未从 test 反推标签、未复制 test 进 train；`data/runtime/*` 与 `data/unified/*` 只读（单测断言字节对齐）。\n- V100 复跑与最终判据结论是后续卡的事。\n\n## 前置修复（非本仓）\n\n领取时 hive agent 配置缺 `lightprism` 本地路径，导致 claim 建了租约但 worktree 失败。已在协调仓 `agents/workbuddy-win11.json` 补 `\"lightprism\": \"C:/dswork/lightprism\"` 并推送（commit `116881d`），随后重新 claim 成功。该改动在 hive 协调仓，不在 lightprism 代码仓，不影响本卡交付物。",
+  "error": "",
+  "declared_paths": [
+    "train_openi.py",
+    "scripts/embed_payload.py",
+    "tests/test_openi_decisions_wire.py",
+    "reports/决策标签接线_2026-11-26.md"
+  ],
+  "changed_files": [
+    "reports/决策标签接线_2026-11-26.md",
+    "scripts/embed_payload.py",
+    "tests/test_openi_decisions_wire.py",
+    "train_openi.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "4cdc11f0e82a41d0b59ac0753e0d6ec6",
+  "fence": 1
+}
