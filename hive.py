@@ -1732,6 +1732,195 @@ def verify_entry(cmd: str, p) -> dict:
     return entry
 
 
+# --------------------------------------------------------------------------- #
+# 异步提交 job 状态（T-0492）
+#
+# MCP `hive_submit` 过去把 verify（单条上限 1800s）整段跑在 handler 里，
+# stdio 单线程服务被占住，客户端超时报 `invalid raw MCP result`，分支已推、
+# 结果却没落。这里为「同步段 commit/push + 后台 verify」提供状态文件与锁。
+# --------------------------------------------------------------------------- #
+
+SUBMIT_JOB_ACTIVE = ("pushing", "verifying", "writing")
+_PID_STILL_ACTIVE = 259
+
+
+def verify_timeout_seconds() -> int:
+    """verify 单条上限；测试可用 HIVE_VERIFY_TIMEOUT 调小。"""
+    raw = os.environ.get("HIVE_VERIFY_TIMEOUT", "").strip()
+    if raw:
+        try:
+            return max(1, int(float(raw)))
+        except ValueError:
+            pass
+    return 1800
+
+
+def submit_job_root(agent: str) -> Path:
+    """job 状态根：设了 HIVE_STATE 就用它，否则 ~/.hive/agents/<agent>。"""
+    state_root = Path(os.environ.get("HIVE_STATE")
+                      or DEFAULT_STATE / "agents" / agent).expanduser()
+    return Path(state_root) / "jobs"
+
+
+def submit_job_path(agent: str, tid: str) -> Path:
+    return submit_job_root(agent) / f"{tid}.json"
+
+
+def submit_job_log_path(agent: str, tid: str) -> Path:
+    return submit_job_root(agent) / f"{tid}.log"
+
+
+def submit_job_lock_path(agent: str, tid: str) -> Path:
+    return submit_job_root(agent) / f"{tid}.lock"
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_submit_job(agent: str, tid: str) -> dict | None:
+    try:
+        data = json.loads(submit_job_path(agent, tid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_submit_job(job: dict) -> Path:
+    tid, agent = str(job["task"]), str(job["agent"])
+    path = submit_job_path(agent, tid)
+    _atomic_write_json(path, job)
+    return path
+
+
+def update_submit_job(agent: str, tid: str, **fields) -> dict | None:
+    job = read_submit_job(agent, tid)
+    if job is None:
+        return None
+    job.update(fields)
+    job["updated"] = iso()
+    _atomic_write_json(submit_job_path(agent, tid), job)
+    return job
+
+
+def pid_alive(pid: int) -> bool:
+    """跨平台判 pid 是否还活着。
+
+    Windows 上 `os.kill(pid, 0)` 会走 TerminateProcess，**绝不能**用来探活。
+    """
+    pid = int(pid or 0)
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == _PID_STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+def submit_job_status(agent: str, tid: str,
+                      has_result: bool = False) -> dict | None:
+    """读 job 状态；pid 已死且没有结果时标成 lost（不伪造结果）。"""
+    job = read_submit_job(agent, tid)
+    if not job:
+        return None
+    if job.get("phase") in SUBMIT_JOB_ACTIVE:
+        pid = int(job.get("pid") or 0)
+        if pid and not pid_alive(pid) and not has_result:
+            job.update({"phase": "lost",
+                        "error": "后台 verify 进程已不在了（未留下结果）"})
+            job["updated"] = iso()
+            _atomic_write_json(submit_job_path(agent, tid), job)
+    return job
+
+
+def submit_job_tail(agent: str, tid: str, lines: int = 20) -> list[str]:
+    try:
+        text = submit_job_log_path(agent, tid).read_text(encoding="utf-8",
+                                                        errors="replace")
+    except OSError:
+        return []
+    return text.strip().splitlines()[-lines:]
+
+
+def _read_lock_pid(lock: Path) -> int:
+    try:
+        return int(lock.read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def acquire_submit_job_lock(tid: str, job_dir: Path) -> Path:
+    """拿 tid 的提交锁；锁被活进程占着就抛 HiveError。
+
+    用 O_EXCL 建文件 + pid 探活，不用 fcntl/msvcrt：Windows 与 FreeBSD 同一套。
+    """
+    job_dir = Path(job_dir)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    lock = job_dir / f"{tid}.lock"
+    for _ in range(2):
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("ascii"))
+            os.close(fd)
+            return lock
+        except FileExistsError:
+            holder = _read_lock_pid(lock)
+            if holder and pid_alive(holder):
+                raise HiveError(f"{tid} 已有后台提交在跑（pid={holder}）")
+            try:
+                lock.unlink()
+            except OSError as e:
+                raise HiveError(f"{tid} 提交锁无法清理: {e}") from e
+    raise HiveError(f"{tid} 提交锁获取失败")
+
+
+def refresh_submit_job_lock(tid: str, job_dir: Path) -> None:
+    """后台 job 启动后把锁里的 holder 换成自己，父进程死了也不会被误接管。"""
+    lock = Path(job_dir) / f"{tid}.lock"
+    tmp = lock.with_name(lock.name + f".{os.getpid()}.tmp")
+    try:
+        tmp.write_text(str(os.getpid()), encoding="ascii")
+        os.replace(tmp, lock)
+    except OSError:
+        pass
+
+
+def release_submit_job_lock(tid: str, job_dir: Path, force: bool = False) -> None:
+    """释放提交锁。
+
+    `force=True` 给后台 job 自己用：job 是这张卡当前唯一的提交者，结束时必须
+    把锁清掉——否则 holder 是还活着的 MCP 父进程，下一次 submit 会被误判成
+    「已有后台提交在跑」而永远提交不了。
+    """
+    lock = Path(job_dir) / f"{tid}.lock"
+    holder = _read_lock_pid(lock)
+    if not force and holder and holder != os.getpid() and pid_alive(holder):
+        return
+    try:
+        lock.unlink()
+    except OSError:
+        pass
+
+
 def result_failure_kind(res: dict) -> dict | None:
     """判读一份结果的失败性质：新结果读标注，老结果按 verify 输出回溯。
 
@@ -5529,10 +5718,22 @@ class Hive:
 
     def cmd_submit(self, tid: str, keep: bool = False, note: str = "",
                    pr: bool = False) -> int:
-        """人工提交：commit + push + verify + 写结果，不依赖 worker 在跑。
+        """人工提交（同步）：prepare 负责 commit/push，finish 负责 verify/写结果。
 
+        同步语义与历史版本一致，拆分只为让 MCP 只跑同步段、verify 交给后台
+        job（T-0492）：
         返回 0 = 结果已同时落 Git 与 store（store 后端）/ 落 Git（git 后端）；
         返回 1 = 结果写进 leader store 失败（T-0296），Git 侧产物保留。
+        """
+        ctx = self.prepare_submit(tid, note=note, pr=pr)
+        return self.finish_submit(ctx, note=note, keep=keep, pr=pr)
+
+    def prepare_submit(self, tid: str, note: str = "", pr: bool = False) -> dict:
+        """提交同步段：校验、commit、push 任务分支；**不跑 verify**。
+
+        返回 finish_submit 需要的上下文。MCP 的 hive_submit 只调这一段，再把
+        verify 交给后台 job（T-0492）；因此这里的耗时只应包含 git 操作，不能
+        混进任何长命令。
         """
         self.fetch()
         card = self.card(tid)
@@ -5598,12 +5799,42 @@ class Hive:
         except HiveError as e:
             raise HiveError(f"提交/推送失败: {e}")
 
-        verify = []
-        for cmd in (card.get("verify") or []):
-            p = run_verify(cmd, cwd=wt)
-            verify.append(verify_entry(cmd, p))
-            log(f"{tid} 验证 {p.returncode}: {cmd}")
-        ok = all(v["code"] == 0 for v in verify)
+        return {
+            "task": tid, "agent": owner, "card": card,
+            "repo_path": str(repo), "wt": str(wt), "head": head,
+            "base": base, "changed": changed, "out_of_paths": oop,
+            "claim": claim, "lease_id": str(claim.get("lease_id") or ""),
+            "fence": claim.get("fence"), "note": note, "pr": bool(pr),
+            "verify": list(card.get("verify") or []),
+        }
+
+    def finish_submit(self, ctx: dict, note: str = "", keep: bool = False,
+                      pr: bool = False, verify: list | None = None,
+                      timed_out: bool = False) -> int:
+        """提交收尾段：verify（未传入时现场跑）、结果闸门、写 res 分支 + store。
+
+        `verify` 由后台 job 传入；`timed_out=True` 表示某条 verify 超时中断，
+        即使其余通过也按 failed 收，绝不能把卡留在 running（T-0492）。
+        """
+        tid = str(ctx["task"])
+        owner = str(ctx["agent"])
+        card = ctx["card"]
+        repo = Path(str(ctx["repo_path"]))
+        wt = Path(str(ctx["wt"]))
+        head = str(ctx["head"])
+        base = str(ctx.get("base") or "main")
+        changed = list(ctx.get("changed") or [])
+        oop = list(ctx.get("out_of_paths") or [])
+        claim = ctx.get("claim") or {}
+        note = note or str(ctx.get("note") or "")
+        pr = bool(pr or ctx.get("pr"))
+        if verify is None:
+            verify = []
+            for cmd in (card.get("verify") or []):
+                p = run_verify(cmd, cwd=wt, timeout=verify_timeout_seconds())
+                verify.append(verify_entry(cmd, p))
+                log(f"{tid} 验证 {p.returncode}: {cmd}")
+        ok = (not timed_out) and all(v["code"] == 0 for v in verify)
 
         # 结果闸门（T-0205）：产结果前校验 head 在远端可获取、零改动非异常。
         # 手动 submit 与 worker 走同一条产结果链路（deepseek-win 等 manual agent
@@ -5621,7 +5852,11 @@ class Hive:
             else:
                 error = ""
         else:
-            error = verify_failure_message(verify)
+            if timed_out:
+                bad = next((v for v in verify if v.get("timed_out")), {})
+                error = f"verify 超时，已终止: {bad.get('cmd', '')}"
+            else:
+                error = verify_failure_message(verify)
 
         summary_file = wt / ".hive" / "summary.md"
         if summary_file.exists() and summary_file.stat().st_size > 0:
@@ -5640,7 +5875,7 @@ class Hive:
             "task": tid, "agent": owner, "mode": "manual",
             "status": "done" if ok else "failed",
             "branch": f"task/{tid}", "base": card.get("base") or "main",
-            "head": head, "exit_code": 0, "timed_out": False,
+            "head": head, "exit_code": 0, "timed_out": bool(timed_out),
             "started_at": started, "finished_at": iso(),
             "duration_s": round(duration, 1), "verify": verify, "summary": summary,
             "error": error,
@@ -5731,6 +5966,193 @@ class Hive:
               f"\nbranch: task/{tid}  head: {head}\n"
               f"verify: " + ", ".join(f"{v['code']}" for v in verify), flush=True)
         return 0
+
+    # -- 异步提交（T-0492） -------------------------------------------------- #
+    def submit_async(self, tid: str, note: str = "", pr: bool = False,
+                     keep: bool = True) -> dict:
+        """MCP 用：同步段 commit+push 后立即返回，verify 交给后台进程。
+
+        返回 dict（不是退出码）：status=submitting、branch、head、job、log、pid。
+        已有活 job 时直接返回它，不重复 push、不重复起进程。
+        """
+        card = self.card(tid)
+        owner = (card.get("owner")
+                 or (self.claim_info(tid) or {}).get("agent") or "")
+        if not owner:
+            raise HiveError(f"{tid} 没有 owner，先 take 或 assign")
+        existing = submit_job_status(owner, tid,
+                                     has_result=bool(self.result_info(tid)))
+        if existing and existing.get("phase") in SUBMIT_JOB_ACTIVE \
+                and pid_alive(int(existing.get("pid") or 0)):
+            return {
+                "status": "submitting", "task": tid,
+                "branch": existing.get("branch") or f"task/{tid}",
+                "head": existing.get("head") or "",
+                "job": str(submit_job_path(owner, tid)),
+                "log": existing.get("log") or "",
+                "pid": int(existing.get("pid") or 0),
+                "phase": existing.get("phase"),
+                "verify_total": int(existing.get("verify_total") or 0),
+                "existing": True,
+            }
+        ctx = self.prepare_submit(tid, note=note, pr=pr)
+        job_dir = submit_job_root(owner)
+        job_path = job_dir / f"{tid}.json"
+        log_path = submit_job_log_path(owner, tid)
+        acquire_submit_job_lock(tid, job_dir)
+        job = {
+            "task": tid, "agent": owner, "dir": str(self.dir),
+            "repo_path": ctx["repo_path"], "wt": ctx["wt"],
+            "head": ctx["head"], "base": ctx["base"],
+            "changed": ctx["changed"], "out_of_paths": ctx["out_of_paths"],
+            "verify": ctx["verify"], "keep": bool(keep), "pr": bool(pr),
+            "note": note, "lease_id": ctx["lease_id"], "fence": ctx["fence"],
+            "claimed_at": (ctx["claim"] or {}).get("claimed_at") or "",
+            "phase": "verifying", "pid": 0, "started_at": iso(),
+            "updated": iso(), "log": str(log_path), "branch": f"task/{tid}",
+            "verify_total": len(ctx["verify"]), "verify_index": 0,
+        }
+        try:
+            write_submit_job(job)
+        except OSError as exc:
+            release_submit_job_lock(tid, job_dir)
+            raise HiveError(f"{tid} 后台 job 状态写入失败: {exc}") from exc
+        cmd = [sys.executable, str(Path(__file__).resolve()),
+               "--dir", str(self.dir), "submit", tid,
+               "--run-job", str(job_path), "--keep"]
+        kwargs = {
+            "stdin": subprocess.DEVNULL, "close_fds": True,
+            "cwd": str(ctx["wt"]),
+        }
+        if os.name == "nt":
+            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP：父进程退出/控制台关掉
+            # 都不能把 verify 带走（T-0492 现场就是 submit 被超时杀掉）
+            kwargs["creationflags"] = 0x00000008 | 0x00000200
+        else:
+            kwargs["start_new_session"] = True
+        out = open(log_path, "ab")
+        try:
+            kwargs["stdout"] = out
+            kwargs["stderr"] = out
+            p = subprocess.Popen(cmd, **kwargs)
+        except OSError as exc:
+            release_submit_job_lock(tid, job_dir)
+            update_submit_job(owner, tid, phase="failed",
+                              error=f"后台进程启动失败: {exc}")
+            raise HiveError(f"{tid} 后台 verify 进程启动失败: {exc}") from exc
+        finally:
+            out.close()
+        update_submit_job(owner, tid, pid=p.pid)
+        log(f"{tid} 已提交并转入后台 verify（pid={p.pid}, log={log_path}）")
+        return {
+            "status": "submitting", "task": tid,
+            "branch": f"task/{tid}", "head": ctx["head"],
+            "job": str(job_path), "log": str(log_path),
+            "pid": p.pid, "phase": "verifying",
+            "verify_total": len(ctx["verify"]),
+            "existing": False,
+        }
+
+    def run_submit_job(self, job_file: str | Path) -> int:
+        """后台 job 入口：只跑 verify + 落结果，不再 commit/push。"""
+        job_path = Path(job_file)
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log(f"提交后台任务读取失败: {job_path}（{exc}）")
+            return 1
+        tid = str(job.get("task") or "")
+        agent = str(job.get("agent") or "")
+        if not tid or not agent:
+            log(f"提交后台任务字段不全: {job_path}")
+            return 1
+        log(f"{tid} 后台提交开始（{agent}, head={job.get('head')}）")
+        job_dir = submit_job_root(agent)
+        refresh_submit_job_lock(tid, job_dir)
+
+        def _fail(phase: str, error: str) -> int:
+            update_submit_job(agent, tid, phase=phase, error=error, updated=iso())
+            log(f"{tid} 后台提交 {phase}：{error}")
+            return 1
+
+        try:
+            self.fetch()
+            if self.result_info(tid):
+                update_submit_job(agent, tid, phase="done", updated=iso())
+                log(f"{tid} 已有结果，后台提交跳过")
+                return 0
+            card = self.card(tid)
+            wt = Path(str(job.get("wt") or ""))
+            if not wt.exists():
+                return _fail("failed", f"worktree 不存在: {wt}")
+            lease_id = str(job.get("lease_id") or "")
+            claim = self.claim_info(tid) or {}
+            if claim.get("agent") and claim.get("agent") != agent:
+                return _fail("lease_lost", f"租约已被 {claim.get('agent')} 接管")
+            if lease_id and claim.get("lease_id") \
+                    and lease_id != claim.get("lease_id"):
+                return _fail("lease_lost", "lease_id 不匹配（租约被接管）")
+
+            cmds = list(job.get("verify") or [])
+            verify: list[dict] = []
+            timed_out = False
+            w = Worker(self.dir, agent)
+            with w.lease_heartbeat(tid, release=False):
+                for i, cmd in enumerate(cmds, 1):
+                    update_submit_job(agent, tid, phase="verifying",
+                                      verify_index=i,
+                                      verify_total=len(cmds), updated=iso())
+                    try:
+                        p = run_verify(cmd, cwd=wt,
+                                       timeout=verify_timeout_seconds())
+                    except HiveError as exc:
+                        timed_out = True
+                        verify.append({
+                            "cmd": cmd, "code": 124, "timed_out": True,
+                            "tail": str(exc).strip().splitlines()[-3:],
+                        })
+                        log(f"{tid} 后台 verify 超时: {cmd}")
+                        break
+                    verify.append(verify_entry(cmd, p))
+                    log(f"{tid} 后台验证 {p.returncode}: {cmd}")
+
+            claim = self.claim_info(tid) or {}
+            if claim.get("agent") and claim.get("agent") != agent:
+                return _fail("lease_lost", f"写结果前租约已被 {claim.get('agent')} 接管")
+            if lease_id and claim.get("lease_id") \
+                    and lease_id != claim.get("lease_id"):
+                return _fail("lease_lost", "写结果前 lease_id 不匹配")
+
+            update_submit_job(agent, tid, phase="writing", updated=iso())
+            ctx = {
+                "task": tid, "agent": agent, "card": card,
+                "repo_path": str(job.get("repo_path") or ""), "wt": str(wt),
+                "head": str(job.get("head") or ""),
+                "base": str(job.get("base") or "main"),
+                "changed": list(job.get("changed") or []),
+                "out_of_paths": list(job.get("out_of_paths") or []),
+                "claim": claim, "lease_id": lease_id,
+                "note": str(job.get("note") or ""), "pr": bool(job.get("pr")),
+            }
+            rc = self.finish_submit(ctx, note=ctx["note"],
+                                    keep=bool(job.get("keep", True)),
+                                    pr=bool(job.get("pr")),
+                                    verify=verify, timed_out=timed_out)
+            res = self.result_info(tid) or {}
+            phase = "done" if res.get("status") == "done" else "failed"
+            update_submit_job(agent, tid, phase=phase, updated=iso(),
+                              result_status=str(res.get("status") or ""),
+                              error=str(res.get("error") or ""))
+            log(f"{tid} 后台提交结束：{res.get('status') or '无结果'}（rc={rc}）")
+            return rc
+        except Exception as exc:  # noqa: BLE001 后台进程最后一道记录
+            update_submit_job(agent, tid, phase="failed",
+                              error=f"{type(exc).__name__}: {exc}",
+                              updated=iso())
+            log(f"{tid} 后台提交异常：{type(exc).__name__}: {exc}")
+            return 1
+        finally:
+            release_submit_job_lock(tid, job_dir, force=True)
 
     def open_pr_for(self, tid: str, card: dict, result: dict,
                     repo: Path | str | None = None,
@@ -7518,11 +7940,14 @@ class Worker:
 
     # -- 租约心跳 ---------------------------------------------------------- #
     @contextmanager
-    def lease_heartbeat(self, tid: str):
+    def lease_heartbeat(self, tid: str, release: bool = True):
         """任务运行期间周期性刷新 claim 的 lease_until。
 
         活着的 worker 自己续租，watchdog 才能放心把「租约过期」判成死亡
         （否则健康的长任务会被错杀）。best-effort：刷新失败只 log，不打断任务。
+
+        `release=False` 给异步提交 job 用：续租只负责保命，结果写完由
+        `finish_submit` 自己释放租约（T-0492，释放早了 store 会拒收结果）。
         """
         stop = threading.Event()
         # T-0423：续租口径与 claim 一致（卡面 → origin/main → 兜底）。否则本机
@@ -7547,6 +7972,8 @@ class Worker:
             stop.set()
             t.join(timeout=5)
             sp.join(timeout=5)
+            if not release:
+                return
             # 任务已结束（成功/失败/异常都算），撤销租约
             if claim_backend() == "store":
                 store_release(tid, self.name, requeue=True)
@@ -8803,9 +9230,18 @@ def cmd_accept(args) -> None:
 
 
 def cmd_submit(args) -> int:
-    """CLI 入口：把 cmd_submit 的返回码透出去（T-0296：结果没落 store 要非 0）。"""
-    return Hive(args.dir).cmd_submit(args.task, args.keep, args.note or "",
-                                     pr=getattr(args, "pr", False)) or 0
+    """CLI 入口：默认同步；`--async` 只准备+推送，`--run-job` 是后台进程入口。"""
+    h = Hive(args.dir)
+    if getattr(args, "run_job", ""):
+        return h.run_submit_job(args.run_job)
+    if getattr(args, "async_submit", False):
+        info = h.submit_async(args.task, note=args.note or "",
+                              pr=getattr(args, "pr", False),
+                              keep=bool(getattr(args, "keep", True)))
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+        return 0
+    return h.cmd_submit(args.task, args.keep, args.note or "",
+                        pr=getattr(args, "pr", False)) or 0
 
 
 def cmd_pr(args) -> int:
@@ -9960,6 +10396,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--note", help="没有 summary.md 时的说明")
     s.add_argument("--pr", action="store_true",
                    help="verify 全绿后向 Gitea/GitLab 自动建 PR（失败不影响提交）")
+    s.add_argument("--async", dest="async_submit", action="store_true",
+                   help="只 commit+push 任务分支，verify 交给后台进程（T-0492）")
+    s.add_argument("--run-job", dest="run_job", default="",
+                   help="内部入口：按 job 文件跑后台 verify 并落结果")
     s.set_defaults(func=cmd_submit)
 
     s = sub.add_parser("pr", help="给已推送的 task/<tid> 建 PR（Gitea/GitLab，可附着结果）")
