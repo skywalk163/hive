@@ -1,0 +1,53 @@
+{
+  "task": "T-0507",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0507",
+  "base": "main",
+  "head": "b33a19f4e5a78fbebc9f81c491ad32e201e74177",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T22:14:58+08:00",
+  "finished_at": "2026-11-26T22:32:39+08:00",
+  "duration_s": 1061.1,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0507_熔断反馈闭环.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......................                                                   [100%]",
+        "22 passed in 26.02s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0449_执行管线.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......x.                                                                 [100%]",
+        "7 passed, 1 xfailed in 10.46s"
+      ]
+    }
+  ],
+  "summary": "# T-0507 完成说明\n\n- 做了什么：把「校验熔断」与「可操作反馈」对齐，落在 `src/工具执行.light §9`：\n  ① 轻量预校验（`具轻量预校验`）只查三类明显错误（顶层缺必填 / 顶层类型明显不符 /\n  顶层枚举越界），schema 只从工具条目的 `参数模式` 读，不新建 schema 表；嵌套字段、\n  额外字段、多类型（`type: [...]`）、`oneOf` 一律放行——全仓校验器对 list 型本就不判，\n  轻量层比它更严就会误拦，故与之一致。\n  ② 熔断器（`建熔断器/具记熔断/具造熔断消息`）：默认门限 3，显式传整数才改（0=关闭），\n  吃执行管线的 `PARAM_SCHEMA_INVALID` + 结构化错误信封，逐次留「字段（原因）→建议」摘要，\n  熔断消息含「连续失败 N 次 / 已尝试 N 次 / 各次原因 / 应换方案而非继续重试 / 门限可配置」。\n  ③ 接线：`建执行器` 追加第 9 参 `预校验=假`、第 10 参 `熔断=空`（默认按 3 建熔断器），\n  `具校验工具参数` 追加第 4 参；预校验命中即拦、不再调全量校验器，默认关 → 既有调用点逐键不变。\n- 顺带对齐：`src/工具面装配.light` 常驻规则第 3 条改成「熔断消息会列出各次失败原因，\n  应换方案（改参数结构、改调用方式或换工具）而非继续重试」，与运行时消息同口径。\n- 验证（Windows，全部实跑）：`python -m pytest -q tests/test_T0507_熔断反馈闭环.py` → 22 passed；\n  `python -m pytest -q tests/test_T0449_执行管线.py` → 7 passed, 1 xfailed；\n  另跑 T-0504 / T-0513 / T-0509 / T-0511 / T-0512 回归 → 62 passed, 1 xfailed。\n- 口径钉法：用例拿同一 schema 同参数，把预校验的 field/suggestion 与「工具.校验参数 + 错误增强」\n  逐字比对（缺/型/枚/非对象四例），防止长出第二套校验方言。\n- 遗留：`src/代理.light` 不在允许路径内，熔断计数/终止尚未切到 `具记熔断`；接线只需把\n  `记参数失败` 换成 `设 结 为 具记熔断(己.熔断器, 工具名, 结果)` + `如果 结[\"熔断\"] 为真 → 己.终止(结[\"消息\"])`，\n  语义与消息已在此卡钉死，后续卡搬运即可。另：预校验默认关闭是有意为之（零侵入），\n  若要在线上减少熔断，需在装配侧显式传 `预校验=真`。",
+  "error": "",
+  "declared_paths": [
+    "src/工具执行.light",
+    "src/错误增强.light",
+    "src/工具面装配.light",
+    "tests/test_T0507_熔断反馈闭环.py"
+  ],
+  "changed_files": [
+    "src/工具执行.light",
+    "src/工具面装配.light",
+    "tests/test_T0507_熔断反馈闭环.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "fa6402b0e9c942b587112a7c3f32370b"
+}
