@@ -13,11 +13,11 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
 from hive import (Hive, HiveError, IN_FLIGHT_STATES, claim_backend,
-                  git, git_net, iso, local_store, overlay_store_state)
+                  git, git_net, lease_until_iso, local_store,
+                  overlay_store_state)
 
 # 只缓存「在飞」卡的 claim/result；已 close 的卡从 main 的 results/ 文件读。
 _CACHE_STATES = set(IN_FLIGHT_STATES) | {"assigned", "running", "submitted"}
@@ -122,8 +122,13 @@ class ReadCache:
                         if claim:
                             claim = dict(claim)
                             claim["agent"] = claim.get("owner") or ""
-                            claim["lease_until"] = iso(datetime.fromtimestamp(
-                                float(claim.get("lease_until") or 0)))
+                            # lease_until 必须是带时区的 ISO 串（T-0506 实测教训）：
+                            # 这里原来手写 datetime.fromtimestamp(epoch) 忘了 tz，
+                            # 产出 naive 串，_rows 里 parse_iso(x) < now() 直接
+                            # TypeError（naive vs aware），hive_whoami 全挂。
+                            # 统一走 lease_until_iso（tz-aware，含脏数据兜底）。
+                            claim["lease_until"] = lease_until_iso(
+                                claim.get("lease_until"))
                             claims[tid] = claim
                         res = store.result_info(tid)
                         if res:
