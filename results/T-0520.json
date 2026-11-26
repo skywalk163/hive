@@ -1,0 +1,67 @@
+{
+  "task": "T-0520",
+  "agent": "teleagent-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0520",
+  "base": "main",
+  "head": "09147ea39a62c692eeb86d68487f77f5dc1591b3",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T22:37:59+08:00",
+  "finished_at": "2026-11-26T23:03:52+08:00",
+  "duration_s": 1553.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/unit/test_安全策略.py tests/unit/test_溢出.py tests/unit/test_溢出保留.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "........................................................                 [100%]",
+        "56 passed in 50.08s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0497_溢出与匿名标识.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".........                                                                [100%]",
+        "9 passed in 11.53s"
+      ]
+    }
+  ],
+  "summary": "## T-0520 工作说明（编译/词法契约类 3 条确定性缺陷）\n\n改动文件（均为卡内允许路径）：\n- `src/安全策略.light`：\n  1) `构造匿名标识` 先取十六进制前 8 位再左补零兜底，后缀恰为 8 位（ID 长度 5+8=13，能通过 `校验匿名标识`）；\n  2) 真正的根因不在「截断」，而在 `计算哈希` 的取模被吞：`(哈希 * 31 + 码) % 4294967296` 实际不取模（哈希无界膨胀），先截前 8 位会丢掉低位使不同盐同前缀。改成先乘加、再单独取模，恢复注释声明的语义。\n- `src/溢出.light`：`构造预览` 头预算改由中间变量算 `头半 // 2`，现在预算不足时头尾各留一部分（\"abcdef\"/4 → \"abef\"，省略 2）。\n- `src/溢出保留.light`：`适配文本` 二分中点、`保留内容` 头预算同法改；小预算留满预算字数（预算 4 → 头 AB/尾 IJ、省略字节 6；预算 1/2/3 分别留 1/2/3 字，不越界）。\n- `tests/test_T0497_溢出与匿名标识.py`（**新建**）：卡面第二条验收命令指向此路径，但仓库里不存在（只有 `test_T0497_双级可见性.py`），故按卡内允许路径新建真实回归判据 9 条，全部走 `python 运行.py` 真实管线。\n\n根因提示（重要，给后续卡）：真正的机器级问题是光明编译器对 `(a + b) // 2`、`(a + b) % m` 这类「括号内含加法的表达式」会**静默丢掉 `//` / `%` 运算**——实测 `(4+1)//2` 得 4、`(0+10+1)//2` 得 10、`(100+50)%4294967296` 得 150。这正是原实现「头端拿满全预算」与「哈希不取模」的来源，三个缺陷是同一个编译器坑的三个表现。本卡只按允许路径规避（拆成中间变量），未动编译器，建议另开卡在 light-merge 修解析优先级/lexer。\n\n验证（本机 py-3.10）：\n- `python -m pytest -q tests/unit/test_安全策略.py tests/unit/test_溢出.py tests/unit/test_溢出保留.py` → 56 passed\n- `python -m pytest -q tests/test_T0497_溢出与匿名标识.py` → 9 passed\n- 合并跑 65 passed；相关示例回归 `test_安全策略/test_溢出/test_R88_A_溢出保留/test_溢出恢复/test_溢出重试深化` 5 passed\n- 反证：把三个 src 文件还原为 HEAD 版本再跑新判据 → 6 failed（其余 3 条本就通过），确认判据有效。\n\n风险/遗留：`tests/test_T0398_附件暂存契约.py::test_服务端稳健接收附件形状` 单跑超时（起服务端子进程 240s 超时），与本卡改动无关（另一条路径即 附件准入 只是共用 计算哈希，若该用例也断言旧长度需复核；本轮已查 tests 中无 `file-[0-9a-f]+` 断言）。\n\n> AI生成",
+  "error": "",
+  "declared_paths": [
+    "src/安全策略.light",
+    "src/溢出.light",
+    "src/溢出保留.light",
+    "tests/test_T0497_溢出与匿名标识.py"
+  ],
+  "changed_files": [
+    "src/安全策略.light",
+    "src/溢出.light",
+    "src/溢出保留.light",
+    ".temp/bak/安全策略.light",
+    ".temp/bak/溢出.light",
+    ".temp/bak/溢出保留.light",
+    ".temp/x1",
+    ".temp/x2",
+    ".temp/x3",
+    "tests/test_T0497_溢出与匿名标识.py"
+  ],
+  "out_of_paths": [
+    ".temp/bak/安全策略.light",
+    ".temp/bak/溢出.light",
+    ".temp/bak/溢出保留.light",
+    ".temp/x1",
+    ".temp/x2",
+    ".temp/x3"
+  ],
+  "lease_id": "e18968079052460fa89a49e622c1e451"
+}
