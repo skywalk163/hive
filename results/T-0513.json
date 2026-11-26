@@ -1,0 +1,62 @@
+{
+  "task": "T-0513",
+  "agent": "trae-mac",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0513",
+  "base": "main",
+  "head": "a4c93cbc272d64b44b429ec0dfeffa47b157e8be",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T10:31:50+08:00",
+  "finished_at": "2026-11-26T10:49:18+08:00",
+  "duration_s": 1048.9,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0513_参数下沉.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "..........                                                               [100%]",
+        "10 passed in 25.87s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_R38_工具展示_token.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".............                                                            [100%]",
+        "13 passed in 9.24s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0448_工具面装配.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 53.26s"
+      ]
+    }
+  ],
+  "summary": "# T-0513 交付摘要：工具参数键名下沉 schema description（提示词压缩）\n\n## 改了什么\n\n只改允许路径：\n- `src/工具面装配.light`：新增 §8（工具参数键名下沉）\n  - `旧常驻段表` / `旧实参契约段`：与 `系统提示.light` §6 逐字一致的度量基线（仅度量用）；\n  - `参数细节表`：回填进 schema description 的权威参数说明，**覆盖真实 schema 全部 properties 键**（含旧提示没写的 `超时`/`起始行`/`结束行`/`最大结果` 等）；\n  - `参数细节别名表`：`read_file`/`read`/`write_file`/`edit_file`/`edit`/`search_files`/`glob`/`grep` 与中文注册名同族共用一份细节；\n  - `常驻工具规则文本`：压缩后的常驻核心规则——只留跨工具规则（合法 JSON、字段名不改写、校验失败改正、连续 3 次熔断）+ 指向 schema description 的一句话，不再列任何工具键名；\n  - `回填描述` / `回填工具定义` / `回填描述表`：只替换 `description`，`name`/`parameters` 原样保留；已回填则幂等；未知工具原样返回；\n  - `下沉前常驻文本` / `下沉后常驻文本` / `下沉节省`：字符 + token 双口径度量（token 复用 `令牌计量.估算文本`）。\n- `tests/test_T0513_参数下沉.py`：10 条判据（词法 / 基线 / 完整性 / 行为 / 度量）。\n- `src/工具展示.light`：未改（其 18 项导出清单由 `test_R38_工具展示_token.py` 钉死；token 度量按任务卡“可用”改为复用 `令牌计量.估算文本`，更贴近真实计费口径）。\n\n## 量化节省（本批工具相关常驻段）\n\n| 口径 | 下沉前 | 下沉后 | 节省 |\n|---|---|---|---|\n| 字符 | 559 | 206 | 353（63.1%） |\n| token（估算） | 299.6 | 113.4 | 186.2（62.2%） |\n\nschema description 的回填成本 344 字符，属于“按需展开”的单独账目（`下沉节省()[\"回填字符\"]`），不计入每轮常驻。\n\n## 红线自证\n\n- **下沉 ≠ 删除**：`参数细节表` 覆盖 5 个工具真实 schema 的**全部**参数键；旧常驻段里的行为要点（“一次调用只做一件事”“返回带行号”等）也保留在 description 里，测试逐条断言。\n- **签名不变**：回填只改 `description`，`parameters` 深度相等、`name` 不变，且原定义不被就地修改（返回副本）。\n- **行为可发现**：`常驻工具规则文本` 明确要求“调用前先看 schema description”。\n- **基线不漂移**：测试用 `系统提示` 的真实段函数逐字比对 `旧常驻段表` / `旧实参契约段`，提示改了而基线没跟会立红。\n\n## 反证（实际执行）\n\n把 `参数细节表[\"bash\"]` 里的「超时」删掉后，`test_参数细节覆盖真实schema全部键名` 立即报\n`Left contains one more item: '超时'`；恢复后 10 条全绿。\n\n## 验证结果（本机 macOS，工作区 worktree）\n\n- `python -m pytest -q tests/test_T0513_参数下沉.py` → **10 passed**\n- `python -m pytest -q tests/test_R38_工具展示_token.py` → **13 passed**\n- `python -m pytest -q tests/test_T0448_工具面装配.py` → **7 passed**\n  - 说明：本机原本缺 `lightplugin` 兄弟仓，T0448 两条装配报告用例在改动前后都因\n    `No module named '生产挂载'` 报错（非本次回归）。为跑通验收，已把\n    `http://192.168.1.5:3000/skywalk/lightplugin` 匿名克隆到\n    `~/.hive/wt/mac-trae/lightplugin`（仓外环境依赖，未进交付 diff），随后 7 条全绿。\n\n## 后续接线提示（不在本卡允许路径内）\n\n`系统提示.light` §6 的旧逐工具段与实参契约段需由后续卡（T-0514 集成回归或其前置）\n替换为 `工具面装配.常驻工具规则段()`，并在发给模型前对工具 schema 列表调用\n`工具面装配.回填描述表()`；本卡已把这两块与度量函数备好。",
+  "error": "",
+  "declared_paths": [
+    "src/工具面装配.light",
+    "src/工具展示.light",
+    "tests/test_T0513_参数下沉.py"
+  ],
+  "changed_files": [
+    "src/工具面装配.light",
+    "tests/test_T0513_参数下沉.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "380e26b8b120408ab4a701384bd83890"
+}
