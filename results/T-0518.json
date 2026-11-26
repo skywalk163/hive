@@ -1,0 +1,50 @@
+{
+  "task": "T-0518",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0518",
+  "base": "main",
+  "head": "726e1878896933006266bda506e490bdb84c354a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T07:05:30+08:00",
+  "finished_at": "2026-11-27T07:17:55+08:00",
+  "duration_s": 745.7,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0518_可观测性回归.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 13.65s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0517_执行结果结构化.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".............                                                            [100%]",
+        "13 passed in 12.87s"
+      ]
+    }
+  ],
+  "summary": "# T-0518 工作说明（W6-B/T6.4 验收：可观测性结构化查询与失败决策回归）\n\n## 做了什么\n- 新增 `tests/test_T0518_可观测性回归.py`（7 例）：消费 T-0517 信封 + T-0515/0516 traceId，不实现新能力。\n- 6 个失败/成功场景（中途超时未重试、同文案但重试耗尽、首步 notFound 两跳传播、缺处理、末步未知错误、全成功），标签由评审口径给出，被测实现不自证。\n- 决策对比（量化基线）：模拟决策代理分「结构化信封」与「纯文本（仅 \"执行失败: <失败原因>\"）」两路；纯文本定位只能逐级重跑，探测轮数为驱动里真实执行测得（每次探测=一次真实 workflow 跑）。\n- 结果：结构化 6/6 准确、失败步首轮定位、1 轮；纯文本 5/6（结构性上界：W1/W2 文案完全相同但正确动作相反）、定位需探测、达成正确决策均值 2.5 轮（3/4/2/2/3/1 vs 全 1）。\n- traceId 协同：工具「跑批」失败 → 工作流（父链=触发 traceId）→ 子代理 同根；按根 traceId 取回工具段 + 4 个唯一步骤 traceId 可单点反查，组装完整执行链。\n- 给 T-0517 增补场景「工作流首超」（重试上限 0）+ 1 例：同一 `timeout: 步骤失败` 文案由 重试次数/步骤表 区分「该重试」与「已耗尽该改方案」。\n\n## 改了哪些文件\n- `tests/test_T0518_可观测性回归.py`（新建）\n- `tests/test_T0517_执行结果结构化.py`（仅追加 2b 场景与 1 个测试，既有 12 例未动）\n\n## 验证\n- `python -m pytest -q tests/test_T0518_可观测性回归.py` → 7 passed（Windows 本地）\n- `python -m pytest -q tests/test_T0517_执行结果结构化.py` → 13 passed\n- 反证1（`跑执行步骤` 重试次数恒置 0）→ 决策准确率/同文案区分 2 例立红；反证2（步骤 traceId 置空）→ 协同/同文案区分 2 例立红；已 `git checkout` 还原，`git status` 仅上述两个测试文件。\n\n## 遗留风险\n- 决策代理是确定性规则模拟，不是真实 LLM：结论是「结构化字段是否足以支撑正确决策」的信息完备性论证，不等于模型实测评测。\n- 场景 handler 均为纯 stub，探测重跑无副作用；真实步骤带副作用时，纯文本探测的成本还会更高（判据只会更有利，不会失真）。\n- 子代理只纳入 traceId/同构协同，未进入决策对比表（子代理回收旧面本就不回步骤文本，基线不可比）。\n- 未使用 FreeBSD 节点：Windows 本地两条命令均 rc=0，未出现 POSIX 判据假失败。",
+  "error": "",
+  "declared_paths": [
+    "tests/test_T0518_可观测性回归.py",
+    "tests/test_T0517_执行结果结构化.py"
+  ],
+  "changed_files": [
+    "tests/test_T0517_执行结果结构化.py",
+    "tests/test_T0518_可观测性回归.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "be73fca7570c4c4fa232682f9f488177"
+}
