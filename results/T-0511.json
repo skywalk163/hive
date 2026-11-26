@@ -1,0 +1,50 @@
+{
+  "task": "T-0511",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0511",
+  "base": "main",
+  "head": "35551765966c4edb45438c1d5d6c572ed0f324b9",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T20:54:47+08:00",
+  "finished_at": "2026-11-26T21:21:08+08:00",
+  "duration_s": 1581.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0511_守卫一致性回归.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "..........                                                               [100%]",
+        "10 passed in 43.46s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0509_守卫接线.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "...........                                                              [100%]",
+        "11 passed in 18.60s"
+      ]
+    }
+  ],
+  "summary": "# T-0511 守卫一致性回归（W4/T4.4 验收）\n\n## 做了什么\n- 新增 `tests/test_T0511_守卫一致性回归.py`（10 个用例、2 个 .light 驱动、全量 160 工具，不抽样）：\n  策略层逐工具判定 + 执行层逐工具跑（无审批/审批两遍）+ 门控日志映射 + 五类高危动态模式 + 写文件/命令族组合场景 + 源码护栏。\n- 一致性结论（全部由运行结果钉住）：read_only 72 全放行零拦截；reversible 36 全放行；semi 5 提示不拦；irreversible 47 中 46 无审批即拒（REVERSIBILITY_CONFIRM），唯一例外是 bash 无命令参数（凭「无命令参数」降档并留痕）；approval=allowed-once 时 160 个全放行；配置抬到「校验」/压到「确认」同样整档生效，不因工具而异；五类高危模式（递归强删/覆盖移动/重定向覆盖/宽权限/递归权限）统一 denied+CMD_RISK_CONFIRM，合法命令零拦截。\n\n## 改了哪些文件\n- 仅新增 `tests/test_T0511_守卫一致性回归.py`；`tests/test_T0509_守卫接线.py`、`tests/test_T0510_高危动态识别.py` 未改动（基线本来就绿，无必要改）。\n\n## 跑了什么验证\n- `python -m pytest -q tests/test_T0511_守卫一致性回归.py` → 10 passed（约 49s）\n- `python -m pytest -q tests/test_T0509_守卫接线.py` → 11 passed（约 32s）\n- `python -m pytest -q tests/test_T0510_高危动态识别.py` → 23 passed（基线复核）\n\n## 发现的不一致点 / 遗留风险\n1. 前置卡 T-0508 的 `tests/test_T0508_可逆性分级.py` 计数基线仍是 168/75/40/5/48，当前 main 注册表为 160/72/36/5/47（8 条已不在注册表），该文件现为红（`test_分级回填完整且可复核` 断言 72==75）。属基线漂移，不是守卫不一致；不在本卡允许路径，未改，建议另开卡更新基线。\n2. 三条错误码各归其规则源（CMD_RISK_CONFIRM / REVERSIBILITY_CONFIRM / GUARD_PRECHECK_FAILED），强度同为执行前拒绝，不算不一致，判据已显式钉住。\n3. 同档内「带路径/命令目标」的工具多一层前置校验（更严），无目标的批量工具只走确认（不更松）；口径为「同级只许更强、不得更弱」，已在测试注释记录。\n4. 测试计数基线（160/72/36/5/47）写在文件顶部，后续注册表增删工具时需同步更新，否则会以「基线漂移」失败提示。",
+  "error": "",
+  "declared_paths": [
+    "tests/test_T0511_守卫一致性回归.py",
+    "tests/test_T0509_守卫接线.py",
+    "tests/test_T0510_高危动态识别.py"
+  ],
+  "changed_files": [
+    "tests/test_T0511_守卫一致性回归.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "5438487771f14138b93f16119c7bbdff"
+}
