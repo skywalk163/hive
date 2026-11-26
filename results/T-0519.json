@@ -1,0 +1,46 @@
+{
+  "task": "T-0519",
+  "agent": "workbuddy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0519",
+  "base": "main",
+  "head": "9c529dabb7adb215672b8ff2c0b658158a2176fb",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T09:00:35+08:00",
+  "finished_at": "2026-11-26T09:05:48+08:00",
+  "duration_s": 200.0,
+  "verify": [
+    {
+      "cmd": "python3 -m pytest -q tests/test_mcp_cache_lease_tz.py",
+      "code": 0,
+      "tail": [
+        "..",
+        "[100%]",
+        "2 passed in 7.02s"
+      ]
+    },
+    {
+      "cmd": "python3 -m pytest -q tests/test_mcp.py tests/test_mcp_http.py tests/test_mcp_controller.py",
+      "code": 0,
+      "tail": [
+        "....................................",
+        "[100%]",
+        "36 passed in 178.39s (0:02:58)"
+      ]
+    }
+  ],
+  "summary": "mcp_cache 的 store 分支手写 datetime.fromtimestamp(epoch) 忘带 tz，产出 naive ISO 串，mcp_server._rows() 的 parse_iso(x) < now() 抛 TypeError（naive vs aware），hived HTTP 读工具（含 hive_whoami）全挂；stdio 模式不触发所以 CLI 一直没暴露。改用 hive.lease_until_iso()（tz-aware、脏数据兜底）并新增 tests/test_mcp_cache_lease_tz.py 回归（撤修复验证能抓住 bug）。进程内带缓存复现 → 修复后 whoami 正常。注意：hived fb98 节点 2026-11-24 启动，合入后需重启才生效。",
+  "error": "",
+  "declared_paths": [
+    "mcp_cache.py",
+    "tests/test_mcp_cache_lease_tz.py"
+  ],
+  "changed_files": [
+    "mcp_cache.py",
+    "tests/test_mcp_cache_lease_tz.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": ""
+}
