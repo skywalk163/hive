@@ -1,0 +1,52 @@
+{
+  "task": "T-0508",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0508",
+  "base": "main",
+  "head": "48c9988e98a8177c1497c2e3e3165ee12a890b1d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T16:01:35+08:00",
+  "finished_at": "2026-11-26T16:16:20+08:00",
+  "duration_s": 885.2,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0508_可逆性分级.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".....                                                                    [100%]",
+        "5 passed in 24.75s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0448_工具面装配.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 28.04s"
+      ]
+    }
+  ],
+  "summary": "# T-0508 工作说明\n\n做了什么：给 registry 补统一的可逆性（reversibility）风险分级元数据，纯元数据、不改执行行为。\n\n- `src/工具面装配.light`：新增 §10 段（导出区顺延为 §11）。四级常量 `read_only / reversible / semi / irreversible`；逐名分级表 `可逆性表` 160 条（逐名而非前缀，因为同一动词前缀跨档：写入缓冲可回滚 / 写入设置覆盖 / 写入终端外发）；`工具可逆性`、`是否显式分级`、`按可逆性取工具`、`未分级工具`、`可逆性统计`；注册接口回填 `附可逆性` / `补可逆性` / `工具之可逆性`，字段 `\"可逆性\"` 与 T-0496 的 `\"域\"` 挂在同一个工具表条目上。缺省 fail-closed：未知/MCP → irreversible。\n- `docs/风险分级规范.light.md`：四级判定标准（能否回滚 / 影响面 / 是否需确认）、判定流程三级优先、静态 vs 动态（bash/SSH/执行Python脚本 归 T-0510）、边界案例逐条理由、注册接口落点与复核基线。\n- `tests/test_T0508_可逆性分级.py`：5 个用例（回填完整性、关键工具档位、查询语义与 fail-closed、注册接口回填不改变执行、规范文档可复核）。\n\n验证：`python -m pytest -q tests/test_T0508_可逆性分级.py` → 5 passed（41.7s）；`python -m pytest -q tests/test_T0448_工具面装配.py` → 7 passed（39.7s）。同族回归 T-0496/T-0497/T-0504/T-0513 → 32 passed（71.6s）。真实注册表 160 工具：read_only 72 / reversible 36 / semi 5 / irreversible 47，未分级 0。\n\n口径偏差（需主控知情）：`具注册工具` 本体在 `src/工具执行.light`，不在本卡允许路径内，且它已反向 import 本模块，再加依赖会成环。故本卡没有新增它的参数槽位，只提供 `附可逆性`/`补可逆性` 两个回填入口（同一注册表的同一工具表条目）。把参数槽位接进 `具注册工具` 归 T-0509/T-0510 接线卡。\n\n风险：静态档位对 bash/SSH执行/执行Python脚本 取最坏情形（irreversible），纯读命令也会先落到不可逆档，需 T-0510 的动态判定降档后才不误报；分级本身尚未被任何守卫消费（行为接线在 T-0509/T-0510）。",
+  "error": "",
+  "declared_paths": [
+    "src/工具面装配.light",
+    "docs/风险分级规范.light.md",
+    "tests/test_T0508_可逆性分级.py"
+  ],
+  "changed_files": [
+    "src/工具面装配.light",
+    "docs/风险分级规范.light.md",
+    "tests/test_T0508_可逆性分级.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "e4f338c6f222462f892884acf434d83f"
+}
