@@ -1,0 +1,50 @@
+{
+  "task": "T-0500",
+  "agent": "dumate-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0500",
+  "base": "main",
+  "head": "9fd0c8b8be7cda0e7d3e345da6dcc3dda766c430",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T19:11:32+08:00",
+  "finished_at": "2026-11-26T19:13:33+08:00",
+  "duration_s": 121.8,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0500_能力发现回归.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......                                                                   [100%]",
+        "6 passed in 8.90s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0498_分层披露.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "...............                                                          [100%]",
+        "15 passed in 19.88s"
+      ]
+    }
+  ],
+  "summary": "（人工 submit，未写 summary）",
+  "error": "",
+  "declared_paths": [
+    "tests/test_T0500_能力发现回归.py",
+    "tests/test_T0497_双级可见性.py",
+    "tests/test_T0498_分层披露.py"
+  ],
+  "changed_files": [
+    "tests/test_T0500_能力发现回归.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "226cafb2d44447e3bdd9b25a56c3e5f4"
+}
