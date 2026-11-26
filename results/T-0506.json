@@ -1,0 +1,53 @@
+{
+  "task": "T-0506",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0506",
+  "base": "main",
+  "head": "c0b7f2d4a0f4bddc2956ce956013ff2d1466b147",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T20:24:29+08:00",
+  "finished_at": "2026-11-26T20:52:44+08:00",
+  "duration_s": 1696.0,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0506_错误消息增强.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "...............                                                          [100%]",
+        "15 passed in 47.33s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0450_错误增强_v3_json_contract.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".....                                                                    [100%]",
+        "5 passed in 18.66s"
+      ]
+    }
+  ],
+  "summary": "# T-0506 工作说明（W3/T3.3 错误消息增强：suggestion 可操作化）\n\n## 做了什么\n1. `src/错误增强.light` 新增 §13.6b：`模式示例文本/期望结构示例`（按子 schema 渲染一行骨架，深 2 层、单层 3 键后折 `…`）、`文本相似度/枚举近似值`（共同字符 / 较长串，阈值 0.5，不像就返回空）。\n2. `造校验建议` 升级：missing/type 对 object/array 追加「期望结构示例：{...}」「[<string>]」；enum 追加「最接近的合法值」（仅真像时）；additionalProperties 补「字段名须与 schema 原样一致」。标量文案逐字不变（T-0504 等值判据仍绿）。\n3. `校验失败文案` 多条错误时铺开全部字段：`另有 N 处字段错误：参数.乙（missing）…`（前缀不变，T-0504 子串判据仍绿）。\n4. 新增 §15：`造唯一命中建议 / 造编辑命中错误`（0 命中→notFound，多命中→internal，field=参数.旧文本，reason=editNoMatch/editMultiMatch，建议给「命中几处+行号+扩上下文/全部替换=真/插入行」三条路）、`造路径越界建议 / 造路径越界错误`（validation/schema，reason=pathEscape，建议带**真实工具根**与越界形态）。\n5. `src/工具面装配.light` 新增 §7c `名相似度 / 工具名建议`：旧名（T-0499 四合一前的四个名字）→ ctx_assembly + mode + 决策树原文；拼错→最像的兄弟工具；都不像→列可用工具名。`校验模型参数` 仅在「名不在表」分支附带 `工具名建议`，ok/skipped 语义不变。\n\n## 改了哪些文件\n- `src/错误增强.light`（+240 行）\n- `src/工具面装配.light`（+83 行）\n- `tests/test_T0506_错误消息增强.py`（新增，15 条用例）\n\n## 跑了什么验证\n- `python -m pytest -q tests/test_T0506_错误消息增强.py` → 15 passed\n- `python -m pytest -q tests/test_T0450_错误增强_v3_json_contract.py` → 5 passed\n- 同族回归：T-0504（12）、T-0505（24）、T-0499（4）、T-0513（10）、T-0448+T-0502（12）全绿\n\n## 遗留风险\n- 唯一命中建议已备好 API，但 `src/工具_编辑文件.light` 不在本卡 allowed paths，尚未接线（需另开卡把 执行替换 的 0/多命中分支改成调用 `造编辑命中错误`）。\n- `名相似度` 与 `错误增强.文本相似度` 同口径但各一份实现（装配层不 import 错误增强 的编译预算约束），改一处需同步另一处，已在两处注释里互相指认。\n- `pathEscape` 是路径护栏的真实原因码，但不属 JSON Schema 关键字集合；若日后有人按 schema 原因码做穷举白名单，需把它登记进去。",
+  "error": "",
+  "declared_paths": [
+    "src/错误增强.light",
+    "src/工具面装配.light",
+    "tests/test_T0506_错误消息增强.py"
+  ],
+  "changed_files": [
+    "src/工具面装配.light",
+    "src/错误增强.light",
+    "tests/test_T0506_错误消息增强.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "cbbd5fd6372547efb44cc0d0bdc940ea",
+  "fence": 1
+}
