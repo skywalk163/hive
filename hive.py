@@ -59,7 +59,7 @@ from pathlib import Path
 # 版本号：MAJOR.MINOR.PATCH，**PATCH 固定两位**（0.16.00 / 0.16.01 …）。
 # 集群升级要跨机器比较版本，字符串比较会在 "0.16.10" vs "0.16.9" 上出错，
 # 所以统一解析成整数三元组再比（parse_version / compare_versions）。
-VERSION = "0.16.09"
+VERSION = "0.16.10"
 VERSION_RE = re.compile(r"^(\d+)\.(\d{1,2})\.(\d{1,2})$")
 IDENT = ["-c", "user.name=hive-worker", "-c", "user.email=hive@localhost"]
 DEFAULT_STATE = Path.home() / ".hive"
@@ -1614,12 +1614,88 @@ def verify_command(cmd: str) -> str:
     return text
 
 
+# 后台 verify 的 Python 解释器解析（T-0498 后台 verify 环境假红）
+#
+# 后台 detached job（MCP 异步 submit）继承的是 hive 服务进程的环境：PATH 里
+# 没有交互 shell 的 WorkBuddy bin 目录，verify 命令里的裸 `python` 在 cmd.exe
+# 下会解析到 WindowsApps 存根；同一命令在交互 shell 里却全绿（T-0498 现场：
+# 同步 15/13/7 passed，异步 .light driver 子进程 AttributeError 且诊断未落盘）。
+# 启动后台 job 用的已是 sys.executable 全路径，但它执行的 verify 子命令仍是裸
+# python，所以在这里把「作为解释器」的裸 python/python3 换成 sys.executable。
+# 字符类里 '-' 放末尾，避免被当成范围符（否则 \ 与 : 之间被误解析出 bad escape）
+_VERIFY_PY_NOTOKEN = r'[\w./\\-]'
+_VERIFY_PY_RX = re.compile(
+    rf'(?<!{_VERIFY_PY_NOTOKEN})(python3?)(?!{_VERIFY_PY_NOTOKEN})')
+# 环境变量赋值项：PYTHONPATH=src / LIGHT_MERGE=/x 等（值里不含空白与命令分隔符）
+_VERIFY_ASSIGN_RX = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*')
+
+
+def _verify_py_is_cmd_pos(text: str, start: int) -> bool:
+    """``start`` 处的 python token 是不是「命令位」（可执行解释器）而非参数值。
+
+    命令位 = 行首 / `&&`、`;`、`|` 之后 / 前面全是 VAR=value 赋值项。
+    `python -m pytest -k python` 末尾那个 python 前面是 `-k `，不算命令位，
+    不会被误换；`reference/python/minilog.py` 这类路径连 token 都匹配不上。
+    """
+    pre = text[:start].rstrip()
+    if not pre:
+        return True
+    if pre.endswith(("&&", ";", "|")):
+        return True
+    parts = pre.split()
+    return bool(parts) and all(_VERIFY_ASSIGN_RX.fullmatch(p) for p in parts)
+
+
+def verify_python_exe(cmd: str, exe: str, *, is_nt: bool | None = None) -> str:
+    """Windows 上把 verify 命令里「命令位」的裸 python/python3 换成 ``exe`` 全路径。
+
+    只换命令位的独立 token——参数值（`-k python`）、路径形态
+    （`C:\\Python314\\python.exe`、`reference/python/minilog.py`）都不动。
+    非 Windows 原样返回，FreeBSD/Linux 的 verify 口径一个字节都不变。
+    """
+    if is_nt is None:
+        is_nt = os.name == "nt"
+    if not is_nt:
+        return str(cmd or "")
+    text = str(cmd or "")
+    quoted = f'"{exe}"'  # 总是加引号：Windows 路径可能含空格（用户名带空格）
+    # 用 lambda 而非字符串作 repl：Windows 路径里的反斜杠（C:\WorkBuddy\bin\...）
+    # 会被 re.sub 的模板解析器当转义序列（\b/\W）直接抛 PatternError。
+    return _VERIFY_PY_RX.sub(
+        lambda m: quoted if _verify_py_is_cmd_pos(text, m.start()) else m.group(0),
+        text)
+
+
+def verify_env(*, is_nt: bool | None = None) -> dict:
+    """后台 verify 的稳定编码环境；非 Windows 返回空 dict（不注入）。"""
+    if is_nt is None:
+        is_nt = os.name == "nt"
+    if not is_nt:
+        return {}
+    return {
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONLEGACYWINDOWSSTDIO": "1",
+    }
+
+
 def run_verify(cmd: str, cwd, timeout: int = 1800):
     """跑一条 verify 命令，返回 subprocess.CompletedProcess（stdout/stderr 都在）。
 
-    与直接 `run(cmd, shell=True)` 的差别只有一处：多经过 :func:`verify_command`。
+    与直接 `run(cmd, shell=True)` 的差别：多经过 :func:`verify_command` 的
+    Windows 垫片，以及 :func:`verify_python_exe` 的解释器解析/编码环境注入
+    （根治后台 detached job PATH 与交互 shell 不一致导致的裸 python 假红）。
     """
-    return run(verify_command(cmd), cwd=cwd, check=False, shell=True, timeout=timeout)
+    # 先解析卡面原文里的裸 python（不碰 verify_command/compat 之后生成的全路径
+    # 解释器），再过 Windows 垫片；compat 若再包一层，它自己已用 sys.executable。
+    text = verify_python_exe(cmd, sys.executable)
+    text = verify_command(text)
+    extra_env = verify_env()
+    env = None
+    if extra_env:
+        env = os.environ.copy()
+        env.update(extra_env)
+    return run(text, cwd=cwd, check=False, shell=True, timeout=timeout, env=env)
 
 
 # --------------------------------------------------------------------------- #

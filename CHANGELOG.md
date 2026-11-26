@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.16.10 — 2026-11-26
+
+> 修后台 verify 的解释器解析：**要生效必须逐节点升级并重启各自 hived**。
+> 主控发布后用 `hive upgrade rollout --restart` 下发（T-0498 现场：worker 本地
+> 同步跑全绿、MCP 异步后台 job 稳定假红，根因是后台 detached 进程环境里裸
+> `python` 解析不到交互 shell 的解释器）。
+
+### Fixed
+
+- **后台 verify 裸 `python` 落 WindowsApps 存根导致环境性假红**（T-0498）。
+  `run_verify` 原先直接 `shell=True` 执行卡面 verify 命令，而后台 job 继承
+  hive 服务进程的环境——PATH 里没有交互 shell 的 WorkBuddy bin 目录，命令里的
+  裸 `python`/`python3` 在 cmd.exe 下解析失败，`.light` driver 子进程连锁
+  AttributeError；同一命令在交互 shell 里却全绿。修法：新增 `verify_python_exe()`
+  在 Windows 上把「命令位」的裸 python/python3 token 换成 `sys.executable`
+  全路径（总是加引号，兼容用户名含空格），命令位按行首/`&&`/`;`/`|`/`VAR=val`
+  前缀判定，`-k python` 参数值与路径形态（`C:\Python314\python.exe`、
+  `reference/python/minilog.py`）不误伤；新增 `verify_env()` 注入
+  `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8` / `PYTHONLEGACYWINDOWSSTDIO=1`
+  固定编码。非 Windows 口径一个字节不变。新增 `tests/test_verify_python_exe.py`
+  （10 项），并对全部 519 条真实卡面 verify 命令做过改写冒烟。
+
 ## 0.16.09 — 2026-11-25
 
 > **本版必须逐节点更新并重启各自的集群进程。** 租约由主控签发，只升级跟随者
