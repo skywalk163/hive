@@ -1,0 +1,53 @@
+{
+  "task": "T-0510",
+  "agent": "loomy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0510",
+  "base": "main",
+  "head": "b6f2d2254fb349c2998c7c72741756c952642d3a",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T13:38:47+08:00",
+  "finished_at": "2026-11-26T13:41:52+08:00",
+  "duration_s": 185.1,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0510_高危动态识别.py",
+      "code": 0,
+      "tail": [
+        "  File \"C:\\Users\\skywalk\\.box-agent\\box-agent-runtime\\runtime\\python\\Lib\\site-packages\\execnet\\gateway_base.py\", line 389 in integrate_as_primary_thread",
+        "  File \"C:\\Users\\skywalk\\.box-agent\\box-agent-runtime\\runtime\\python\\Lib\\site-packages\\execnet\\gateway_base.py\", line 1273 in serve",
+        "  File \"C:\\Users\\skywalk\\.box-agent\\box-agent-runtime\\runtime\\python\\Lib\\site-packages\\execnet\\gateway_base.py\", line 1806 in serve",
+        "  File \"<string>\", line 8 in <module>",
+        "  File \"<string>\", line 1 in <module>"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0449_执行管线.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......x.                                                                 [100%]",
+        "7 passed, 1 xfailed in 18.57s"
+      ]
+    }
+  ],
+  "summary": "# T-0510 工作说明：W4/T4.3 高危操作动态风险识别（bash 命令内容分级）\n\n## 复跑（test_T0449_执行管线.py 已合入 main 后）\n\n- 前次 verify[1] rc=5（no_tests_collected）的归因成立：回归文件当时不在基线。\n- 现已 `git merge myrepo/main`（d1e281a）进 task/T-0510，解决 `src/工具执行.light`\n  唯一冲突（HEAD 的 T-0510 门控 × main 的 T-0504 校验闸门 + T-0515 traceId）：\n  * 导入区/导出区 union；\n  * `建执行器` 返回键 union（审批通道/审批结果 + 校验器/trace表/最后traceId/traceId工厂）；\n  * 门控 deny 分支按 main 的 trace 模式融合：记trace + 附trace元数据 +\n    具记审计(…, 本traceId)，同步与并发两条路径同判；\n- 卡面两条 verify 复跑（Windows 本机，py310 + pytest 9.1.1 + timeout + xdist）：\n  * `python -m pytest -q tests/test_T0510_高危动态识别.py` → **23 passed**；\n  * `python -m pytest -q tests/test_T0449_执行管线.py` → **7 passed, 1 xfailed**；\n- 受影响面回归：T-0515 traceId + T-0504 校验 + T-0497 可见性 + 并发原语 + 权限 +\n  T-0449 编辑工具 → **65 passed**。\n- merge commit：b6f2d22。\n\n## 交付\n\n1. `src/工具_路径安全.light` —— 命令语义动态风险识别（识别规则单一出口）\n   - `识别命令风险(命令, 基准目录)` 主入口，返回 `{\"高危\", \"模式\", \"理由\", \"命中段\"}`（可复核）；\n   - 规则（只识别明确破坏性模式，误报要低）：\n     * 递归强删：`rm` 带递归旗标（-r/-R/--recursive/组合短旗标含 r/R）；\n     * 覆盖移动：`mv` 带 -f/--force，或一源一目标且目标已存在（非目录，动态查文件系统）；\n     * 重定向覆盖：裸 `>` 目标文件已存在（动态查文件系统）；`>>` 追加、`>` 新建、fd 重定向（2>/1>/>&）不判；\n     * 宽权限变更：`chmod 777`（0777 同判）；递归权限变更：chmod/chown/chgrp 带 -R/--recursive；\n     * 间接形式穿透：包装词（sudo/env/nice/xargs/then/do…）、`|` `||` `&&` `;` `&` 链式切段逐段判定、\n       `eval`/`bash -c`/`sh -c` 载荷（含 -lc 组合旗标）递归判定（深度≤2）、`$()` 与反引号载荷摘为附加段；\n   - 引号感知：单引号内一字不切不摘；双引号内的连接符/`>` 不判；\n   - 明确不升级（防误拦正常构建/清理）：`rm` 无递归（含 `rm -f` 单文件）、`cp`、`mv -n`、\n     `mv` 目标不存在/目标是目录、`chmod` 常规模式（644/755/+x）、只读命令、管道只读链；\n   - 逃生舱：`HARNESS_CMD_RISK_OFF=1` 恒判非高危（生产临时关闭用）。\n\n2. `src/工具执行.light` —— 识别结果接入门控（**复用 §7 预决确认出口，不另起门控**）\n   - 新增 `具高危命令预决(工具名, 参数)`：shell 类工具（bash/sh/shell）取命令文本 → 识别命令风险\n     → 高危造 `决询问` 预决（理由带模式+理由），其余 → `决放行` 直通；\n   - 新增 `具高危命令收敛(执行器, 高危决)`：ask → §7 `具询问收敛`（审批通道/结果由执行器键注入）；\n   - 同步路径（`执行工具`）与并发路径（`具执行前置闸门`，被 `具异步执行`/`具并发执行` 复用）\n     都在「权限→限流→取消」之后、「审计开始」之前接入——两条路径同判；\n   - `建执行器` 默认键 `\"审批通道\": 假, \"审批结果\": 空`：高危命令默认 deny（默认保守：\n     确认未支持即不放行）；调用方注入 `审批通道=真 + 审批结果=allowed-once` → 放行；\n     denied/cancelled/未知 → deny；\n   - `具询问收敛` 无通道分支透传预决事由（拒绝消息带「审批事由：高危（模式）…」，可复核）；\n     判定语义不变（无通道仍 deny）；\n   - deny 记 `审计拒绝`（状态=调拒绝，参数摘要含命令）——与权限拒绝同形，可审计。\n\n3. `tests/test_T0510_高危动态识别.py` —— 23 用例全绿（Windows 本机 + FreeBSD 远端双平台）\n   - 判据1 高危识别：递归强删 7 形态 / 覆盖移动 3 形态（含动态文件系统）/ 重定向覆盖 2 形态 /\n     权限变更 5 形态 / 间接形式穿透 11 形态；\n   - 判据2 低误报：普通清理 3 / 构建只读 6 / 重定向新建·追加·fd 4 / 引号内不误切 4 /\n     mv 合法形式 3 / chmod 常规 3 / 逃生舱 / 空输入；\n   - 判据3 门控：默认拒绝（handler 不执行 + 消息带事由）/ 批准放行 / 拒绝·取消·未知 /\n     合法命令零变化 / 审计留痕 / 异步路径同判 / 只对 shell 类工具；\n   - 判据4 护栏：识别层与门控接线的源码锚点断言（防回退）+ 权限.light 静态危险表不受影响。\n\n## 验收结果\n\n- `python -m pytest -q tests/test_T0510_高危动态识别.py`\n  - Windows 本机（py310 + pytest 9.1.1 + timeout + xdist）：**23 passed**；\n  - FreeBSD 15.1 远端（192.168.0.88，Python 3.12.13）：**23 passed**；\n- `python -m pytest -q tests/test_T0449_执行管线.py`：**该文件在本分支基线（main 3993a4f）不存在**，\n  本机与远端均无从跑起。它是 W4 前置卡 T-0508/T-0509（可逆性分级 / 守卫接线）交付物，\n  两卡当前 state=ready 未开工、T-0510 的 depends_on 为空，故按可独立开工口径处理：\n  以 `tests/test_T0449_编辑工具.py` + `tests/unit/test_权限.py` + `tests/unit/test_Day3_并发原语A_B.py`\n  作为不回归替代验收——三者在 Windows 本机 **33 passed**、FreeBSD 远端 **33 passed**；\n  `tests/unit/test_Day3_并发原语A_B.py` + `tests/unit/test_smoke_support.py` 远端 **12 passed**\n  （覆盖被改动的 执行器异步/并发路径）。\n- `tests/test_T0470_工具根与cd守卫.py`（路径安全模块的最大既有用户）：\n  - Windows 本机 5 failed / 1 passed——**基线（未修改 main）同败**（`pwd`/`cd` POSIX 判据在\n    Windows cmd 下假失败，任务卡已预告），与本卡无关；\n  - FreeBSD 远端 5 passed + 1 failed——失败项 `test_Web服务端会话cwd透传到工具` 为 Web 服务器\n    类用例在远端 120s 超时，**基线推送远端同败**（同因、同用例），非本卡回归。\n    （远端对照目录已清理，0 残留。）\n\n## 红线自检\n\n- 识别规则可复核：每条规则有注释、返回 模式/理由/命中段；误报面在测试里逐条固化；\n- 复用 T-0509（§7 预决确认决策面 allow/deny/ask）同一判定出口，未另起门控；\n- 不改变合法命令的执行结果：非高危命令预决 allow 直通，门控只在 ask→deny / 批准链上生效；\n  生产 bash 主路径（代理→注册表→bash处理）不在本卡允许修改路径内，零变化。\n\n## 已知边界（有意取舍，保守低误报）\n\n- `$()`/反引号载荷只摘一层识别，更深嵌套不识别（字面已知模式由 权限.light 子串表兜底）；\n- `rm -f` 单文件强删不升级高危（与 `rm build.tmp` 同级，交静态分级/审批链），避免误拦构建清理；\n- `cp` 覆盖不升级高危（未在本卡点名面内，交静态分级）；\n- 识别只对 shell 类工具名（bash/sh/shell）生效。",
+  "error": "",
+  "declared_paths": [
+    "src/工具_路径安全.light",
+    "src/工具执行.light",
+    "tests/test_T0510_高危动态识别.py"
+  ],
+  "changed_files": [
+    "src/工具_路径安全.light",
+    "src/工具执行.light",
+    "tests/test_T0510_高危动态识别.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "9e86baca915d4ac1ad004b2997f36220",
+  "fence": 3
+}
