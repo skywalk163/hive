@@ -1,0 +1,52 @@
+{
+  "task": "T-0496",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0496",
+  "base": "main",
+  "head": "157a5375e1bc3ba7384fc678413cdb22a1698212",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T10:49:27+08:00",
+  "finished_at": "2026-11-26T11:06:29+08:00",
+  "duration_s": 1022.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0496_domain字段.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "..                                                                       [100%]",
+        "2 passed in 46.52s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0448_工具面装配.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 46.66s"
+      ]
+    }
+  ],
+  "summary": "# T-0496 工作说明\n\n做了什么：\n- `src/工具面装配.light` 新增 §7 能力域(domain)元数据段：显式覆盖表（边界工具逐名带理由：横切/本地编排/宿主/配置/浏览器族等）+ 前缀规则兜底表（顺序即优先级）+ MCP 透传动态解析（`mcp__<server>__<tool>` → `mcp_<server>`）；新增 `工具域/按域取工具/工具域名表/是MCP域标识/规则匹配` 查询函数并导出。domain 是纯元数据，不参与任何预设过滤/白名单/执行/剪枝。\n- `src/工具执行.light` 注册接口 `具注册工具` 加可选第 6 参 `域`（默认 `\"其他\"`），既有 5 参调用点零改动；新增 `按域列工具/工具之域` 纯查询并导出。\n- 交付 `tests/test_T0496_domain字段.py`：两条用例（一条查真实注册表全量 domain + 查询语义 + 缺省 + MCP，一条查注册接口 domain 不影响执行）。覆盖 160 工具全量非空 domain、按域子集与登记序、并集=全集、未知/非字符串/空串缺省为\"其他\"、MCP 解析与畸形兜底、执行管线不受影响。合并为两条用例是为规避 xdist 下多个 运行.py 同时编译 .light 触发 worker crash（pytest.ini --timeout=60 会把等待的子进程判超时）。\n\n回填复核：从真实 `组装注册表()` dump 出 160 个工具名逐名分类；横切工具（风险判定/校验装配/解析路径等 13 个）与编排工具（目标/计划/待办/提醒/作业等）单列理由；`执行动作队列`/`登记页面` 撞通用动词前缀，显式归 browser；`登记任务槽` 显式归 workflow。\n\n验证：\n- Windows 本机（PYTHONUTF8=1）：T0496 2 passed / T0448 7 passed。\n- FreeBSD 15.1（192.168.0.88，用卡片给出的 fallback 路径、worker 原样 verify 命令）：T0496 5 passed（旧版 5 用例）/ T0448 7 passed；新版 2 用例同样通过。\n- 首轮 hive_submit 在 Windows 上失败，原因是 worker 进程缺 PYTHONUTF8，T0448 的 `subprocess.run(text=True)` 按 cp936 解码 UTF-8 输出 → `UnicodeDecodeError`（GBK 假红， pristine main 同样失败），并非产物问题。已通过 CLI submit（在 UTF-8 环境）重跑。\n\n遗留风险：规则表对将来新工具默认落\"其他\"，需后续维护时补显式覆盖；MCP 工具集随配置变化，域名表中的 `mcp_*` 为动态解析、不进静态域名表。",
+  "error": "",
+  "declared_paths": [
+    "src/工具面装配.light",
+    "src/工具执行.light",
+    "tests/test_T0496_domain字段.py"
+  ],
+  "changed_files": [
+    "src/工具执行.light",
+    "src/工具面装配.light",
+    "tests/test_T0496_domain字段.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "1058be1ddd794c88b01ee57a1d0e57a3"
+}
