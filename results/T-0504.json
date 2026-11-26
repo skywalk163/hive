@@ -1,0 +1,57 @@
+{
+  "task": "T-0504",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0504",
+  "base": "main",
+  "head": "74538af9832db270cbd3bcb1b0b1e979f8b7e3b7",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T10:09:31+08:00",
+  "finished_at": "2026-11-26T11:02:49+08:00",
+  "duration_s": 3198.2,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0504_validation结构.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "............                                                             [100%]",
+        "12 passed in 40.31s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0450_错误增强_v3_json_contract.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".....                                                                    [100%]",
+        "5 passed in 25.18s"
+      ]
+    }
+  ],
+  "summary": "# T-0504 完成总结：W3/T3.1 统一 ValidationError 结构与 suggestion 字段\n\n## 做了什么\n\n1. `src/错误增强.light` 新增 §13「统一结构化错误信封」（T-0504 / T-0505 共用一只信封，\n   不另起 schema）：\n   - 键：`type`（validation|runtime）、`errorType`（schema|运行时细分）、`code`、\n     `field`、`reason`、`message`、`suggestion`、`retryable`、`traceId`、`details`；\n   - `造校验错误` / `造错误信封` / `是校验错误` / `信封可否重试`；\n   - `造校验错误表(原始错误表, 模式, 参数)`：把 `工具.校验参数` 的\n     `{路径,原因,细节}` 逐条转成信封，`field` 支持点号与数组下标\n     （`参数.配置.超时` / `参数.标签[0]`）；\n   - `suggestion` **按真实 schema 下钻生成**：missing 带期望域、type 带「期望 X（当前 Y）」、\n     enum 列合法值、additionalProperties 列可用字段、oneOf 列分支类型、\n     minimum/maximum/minLength/maxLength/minItems/maxItems 直接引用 schema 常量；\n   - `校验失败载荷`（ok=false + 首条信封平铺 + `validationErrors` 全量）+\n     `校验失败文案`（含建议与「另有 N 处」计数）。\n\n2. `src/工具执行.light`：\n   - `具注册工具` 增加可选 `参数模式`；新增 `具登记参数模式`；\n   - 新增 `具校验工具参数(工具, 参数, 校验器=空)`；\n   - `执行工具` 与 `具执行前置闸门` 在权限之后、限流之前插入校验闸门：\n     失败即 `状态=failed / 错误码=PARAM_SCHEMA_INVALID / 消息 / 错误(信封) /\n     校验错误(全量)`，**处理函数不执行**；\n   - 成功路径返回键仍是 `状态/结果/错误码/消息` 四键，未动。\n\n3. `src/工具面装配.light` 新增 §7：`参数模式表(条目表)` 与\n   `校验模型参数(模式表, 工具名, 参数, 校验入口=空)`（模型面入口，失败回同一载荷）。\n\n## 关键取舍（为什么校验入口走依赖注入）\n\n首版在 `工具执行` / `工具面装配` 直接 `import 工具/错误增强`。实测**编译期回归**：\n\n- `tests/test_T0442_工具层缺陷.py::test_缺陷3`：`elapsed` 21.0s，卡在 `<12s` 红线；\n- `tests/test_T0477_工具面白名单.py::test_mcp工具无叶子且受开关控制`：子进程 240s 超时。\n\n原因：`工具` 会拖入 `沙箱升级/审批`，`错误增强` 会拖入 `附件准入→消息/安全策略、终端`，\n整链被内联进每个 `工具_bash` / 装配使用方。改为**注入 `(模式,参数) → {通过,载荷}` 的校验入口**：\n`建执行器(..., 校验器=)` / `校验模型参数(..., 校验入口=)`；未注入 → 明确 `skipped=true`，\n不假报通过。改后 T-0442 该用例与 T-0477 全绿。运行期接线（总入口注入 `校验参数` +\n`校验失败载荷`）留给 T-0506/后续卡，本卡不越界改总入口。\n\n## 验收\n\n- `python -m pytest -q tests/test_T0504_validation结构.py` → 12 passed\n- `python -m pytest -q tests/test_T0450_错误增强_v3_json_contract.py` → 5 passed\n- 回归（`-n 0`）：`tests/test_T0442_工具层缺陷.py::test_缺陷3` +\n  `tests/test_T0477_工具面白名单.py` + `tests/test_T0448_工具面装配.py` +\n  `tests/unit/test_工具执行.py` → 37 passed\n- 终态复跑（`-n 0`）：`test_T0450_错误增强_v3_json_contract.py` +\n  `tests/unit/test_Day3_并发原语A_B.py` + `tests/unit/test_工具执行.py` → 34 passed\n\n## 需要说明的越界/卡点\n\n1. **`tests/test_T0450_错误增强_v3_json_contract.py` 此前仓内不存在**（本仓 T-0450 是\n   「作业工具」卡，无同名契约测试）。但卡面 verify 明确点名它，不建就必红，且 T-0506\n   也把它当回归闸门。故按其命名补建为**契约测试**（只钉 R18 旧契约 + W3 信封键集/同族，\n   不含实现），属 paths 之外的新增测试文件。若主线另有 W3/T-0450 产出此文件，\n   以主线版本为准、本文件可直接删除（无实现依赖）。\n2. `tests/test_T0450_错误增强_v3_json_contract.py` 的「同键」断言把信封键数钉为 10；\n   T-0505 若增键需同步该测试（属预期内的契约演进）。\n3. Windows 上未使用 head/grep/awk/`!`/`$()`，全部走 `python 运行.py` + pytest，未触发 POSIX 假失败。",
+  "error": "",
+  "declared_paths": [
+    "src/错误增强.light",
+    "src/工具面装配.light",
+    "src/工具执行.light",
+    "tests/test_T0504_validation结构.py"
+  ],
+  "changed_files": [
+    "src/工具执行.light",
+    "src/工具面装配.light",
+    "src/错误增强.light",
+    "tests/test_T0450_错误增强_v3_json_contract.py",
+    "tests/test_T0504_validation结构.py"
+  ],
+  "out_of_paths": [
+    "tests/test_T0450_错误增强_v3_json_contract.py"
+  ],
+  "lease_id": "60f713c12066425f887ebbbf4c730833"
+}
