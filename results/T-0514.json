@@ -1,0 +1,61 @@
+{
+  "task": "T-0514",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0514",
+  "base": "main",
+  "head": "deb8c58a95845e808807555b725d0254d373d8ca",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T21:39:40+08:00",
+  "finished_at": "2026-11-26T22:09:28+08:00",
+  "duration_s": 1788.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0514_预算集成回归.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".................                                                        [100%]",
+        "17 passed in 41.39s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0512_预算信号注入.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "............                                                             [100%]",
+        "12 passed in 14.63s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0513_参数下沉.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "..........                                                               [100%]",
+        "10 passed in 27.10s"
+      ]
+    }
+  ],
+  "summary": "# T-0514 W5-B/T5.3 验收：预算信号 × 参数下沉 集成回归\n\n## 做了什么\n只写集成测试与量化记录，未改任何核心实现（src 零改动）。17 条用例覆盖：下沉基线/账本、\n预算信号准确性、压缩提示下工具调用行为不变、20 轮长会话累加与阈值、超额软信号、总节省量。\n\n## 改动文件\n- 新增 `tests/test_T0514_预算集成回归.py`（唯一改动，符合卡面 paths）\n- `tests/test_T0512_预算信号注入.py` / `tests/test_T0513_参数下沉.py` 未动（前置卡已绿）\n\n## 验证（三条验收命令全绿）\n- `python -m pytest -q tests/test_T0514_预算集成回归.py` → 17 passed\n- `python -m pytest -q tests/test_T0512_预算信号注入.py` → 12 passed\n- `python -m pytest -q tests/test_T0513_参数下沉.py` → 10 passed\n\n## 量化记录（Windows 本机，无需 FreeBSD 兜底）\n- 常驻区：559 → 206 字符，省 353 字符，压缩比 63.15%；装配口径 299.58 → 113.42 token（省 186.17）。\n- 信号口径（4 字符/token）：system 144 → 56 token，单轮省 **88 token**；回填 5 份 schema 的 JSON 成本 **+88 token**。\n- 单轮验收场景（额度 1000）：本轮 104 = 头部 56 + 消息 48；前口径 192，差 **88** 恰等于常驻省量。\n- 全量重发口径：单轮净省 **0**、20 轮 **0**——下沉只是把字节从 system 搬到 schema；收益必须靠按需披露兑现。\n- 按需展开口径：20 轮 = 20×88 − 88 = **1672 token**（展开一次，之后只常驻规则段）。\n- 20 轮长会话：累计 85→1890、剩余 915→0、占比 8.5%→189%，每轮本轮逐轮等于真实估算；每轮模式恒触发。\n- 阈值：50% 首次触发第 6 轮（52.5%），80% 第 9 轮（80.1%），越线后持续；未到线不注入元数据。\n- 工具行为：5 个工具 parameters/name 零变化；按 schema description 的「命令」「超时」调用成功，缺必填仍 PARAM_SCHEMA_INVALID 且消息与下沉前逐字相同。\n\n## 反证（临时拷贝里下伤，确认用例不空转）\n- 具预算信号 本轮改常量 0 → 本轮 104→0，用例立红；\n- 回填工具定义 顺手改 parameters → 参数同 False、失败口径漂移，用例立红；\n- 应注入预算信号 恒真 → 第 1 轮占比 8.5% 也触发，阈值用例立红。\n\n## 风险 / 边界\n- 前置卡无打回：T-0512/T-0513 行为与卡面判据一致。\n- 结论口径写死在测试里：若日后调整 参数细节表 文案，回填增量会变，`回填增量头 >= 常驻省头/2` 这条同量级断言可能需重新校准。",
+  "error": "",
+  "declared_paths": [
+    "tests/test_T0514_预算集成回归.py",
+    "tests/test_T0512_预算信号注入.py",
+    "tests/test_T0513_参数下沉.py"
+  ],
+  "changed_files": [
+    "tests/test_T0514_预算集成回归.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "bb03e992f60d4d7787f03b682bc2f00f"
+}
