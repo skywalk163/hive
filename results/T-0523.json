@@ -1,0 +1,61 @@
+{
+  "task": "T-0523",
+  "agent": "loomy",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0523",
+  "base": "main",
+  "head": "0f5d6c6bcd8aa625bb6be4b8f3531656bed5053f",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T04:05:45+08:00",
+  "finished_at": "2026-11-27T04:11:52+08:00",
+  "duration_s": 367.4,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0395_会话工作目录.py tests/test_T0397_会话模式权限.py tests/test_T0398_附件暂存契约.py tests/test_T0470_工具根与cd守卫.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "...............ss.........                                               [100%]",
+        "24 passed, 2 skipped in 196.13s (0:03:16)"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0499_E2E超时与目标事件.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".............................                                            [100%]",
+        "29 passed in 34.52s"
+      ]
+    }
+  ],
+  "summary": "# T-0523 工作说明\n\n## 结论\n\n本卡负责的 **6 条 E2E 超时红全部修复并双平台验证**：\n\n| # | 用例 | 修前 | 修后（Win 串行 / 并发） | 修后（FreeBSD） |\n|---|---|---|---|---|\n| 1 | T0395::test_对话首条消息带目录写入新会话头信息 | 64s Timeout | 绿 | 绿 |\n| 2 | T0397::test_对话每轮写回预设 | 63s Timeout | 绿 | 绿 |\n| 3 | T0397::test_续轮与单项更新不互相抹除 | 63s Timeout | 绿 | 绿 |\n| 4 | T0398::test_服务端稳健接收附件形状 | 63s Timeout | 绿 | 绿 |\n| 5 | T0470::test_Web服务端会话cwd透传到工具 | 64s Timeout | 绿 | 绿 |\n| 6 | T0407::test_目标续跑两轮后由目标工具收口 | AssertionError goal/change=[] | 绿（35.7s） | 绿 |\n\n## 修前留证（逐条单跑，`-n 0`）\n\n- 5 条超时红实测为 **pytest-timeout 全局 60s 先杀**（63~64s 时 dump 栈后进程终止，无 summary 行）——机制：pytest.ini 全局 `--timeout=60` vs 「driver 重导入 web服务器 冷启动约 59s + 服务跑几轮」的结构性不匹配。\n- T0407::目标续跑 20.98s 走到 AssertionError：`模型 complete 必须落成 goal/change 事件`，实际 `[]`，但 `轮次数==2` 通过。\n\n## 根因链（探针取证，非猜测）\n\n### D1 · 超时预算与冷启动不匹配（两层）\n\n1. **pytest-timeout 层**：全局 60s < 冷启动 59s + 多轮对话。→ 修法：**方案 1（沿 T-0456 既有先例）**给全部真起子进程判据加 `@pytest.mark.timeout(300)`（26 条，含 6 条红 + 同文件的其余 driver 用例——并发争用下轻用例冷启动也会超 60s 甚至崩 worker，验收 1 实测 worker crashed）。选方案 1 的理由：方案 2/3（预热服务复用 / module 级 fixture）需重构每条用例独立 driver 的生命周期，破坏「每用例独立子进程 + 独立会话库」隔离语义，超出「只允许动超时声明/fixture 结构」边界；300s 与 T-0456 先例对齐，只放宽这些用例，全量不爆炸。\n2. **进程退出层（结构性新发现）**：`处理对话` 第一行就调 `取队列闸门()` → T-0490 的 `排队唤醒循环`（`当 真:` + sleep 2s）以**非守护线程**挂住进程（stdlib/线程.py 默认 `守护线程=False`）→ driver 业务跑完后进程永不退出 → subprocess 120s/240s `TimeoutExpired`（任务卡表格实测现象的真正机制）。→ 修法：`_run` 改造为「**结束标记行 + kill**」模式（fixture 结构）：driver 末尾统一追加 `打印(\"T0523-DRIVER-DONE\")`（T0398 注入 `主()` 末尾），Popen + 后台读流，见到标记即 kill 并按业务完成解析（rc=0，业务断言一字未动）；进程先退出且无标记 = 崩溃，按真实退出码返回；超时未见标记 = 真 hang，抛 TimeoutExpired。全量不拖慢（driver 跑完即收，不等进程自然退出）。\n\n### D2 · 目标 complete 未落 goal/change 事件\n\n**探针取证推翻了「目标工具处理 complete 时没写事件」的假设**：mock 收到 3 次请求，第 2 次（turn1 与 turn2 之间）**无 tools、末条 user 以「你现在是本 AI 编程助手的压缩引擎」开头**——是 T-0486 LLM 摘要器的压缩请求（HARNESS_MODEL_CONTEXT_WINDOW=200，turn2 step 前必然触发）。mock 状态机把它当正式对话，走了 `goal==1 and not 已调` 分支回 `目标.complete` tool_call，**把 goal 计数抢走**；turn2 正式请求只能回文本 → 目标工具从未被调用 → goal/change 落空。\n→ 修法（判据侧）：`_MOCK.do_POST` 识别「无 tools 的宿主旁路请求」回普通文本、**不推进 goal 计数**。修复后实测：tool/call + tool/result + goal/change（operation=complete, phase=complete, revision=2）全落盘，「web 闭包记录目标执行 → 会话对象.记录事件 → 台账推进」业务链路本来是通的。\n\n## 平台适配（判据实现，业务断言不动/只加强）\n\n- **会话目录名编码超 MAX_PATH**（T0395 用例5、T0499 D2 错误体实锤）：会话存储把项目根/工作目录整条转义编码成磁盘目录名（`--<路径>--`），pytest tmp_path 超长中文名编码后超 Windows 260 → 增量保存 500「会话保存失败」（随 pytest run 编号增长越来越易红，T0398 偶发红同根因）。→ 服务根/工作目录换系统 Temp 短目录（fixture/测试内 mkdtemp），断言语义不变。\n- **T0470::E 的 pwd 判据**：Windows 上 bash 工具走 `cmd /c`（无 pwd；`cd` 无参被 cd 守卫按 POSIX 语义拒绝），且 JSON 序列化把 `C:\\` 转义致「全文.包含(工作树)」结构性失配。→ mock 改调 `write_file`（注册名 write_file，双平台），Python 侧解析 tool-result 的「路径」并与 会话 cwd 精确比对 + 断言文件真实落盘（语义等价且更强，POSIX 下同样成立）。\n- T0499 D2 driver 保留 3 次全新 tmp 重试（沿 R87-E run_with_retry 先例），仅豁免驱动级失败（rc≠0/状态≠200/超时）；业务断言失败不重试，稳定回归照样红。\n\n## 新判据 tests/test_T0499_E2E超时与目标事件.py（8 条全绿）\n\n- D1 静态锁（27 条参数化）：全部真起子进程判据的 `@pytest.mark.timeout(300)` 在位 + pytest.ini 全局 `--timeout=60` 仍并存（「快用例全局看住 + 慢用例显式放宽」契约，防删全局预算或删 mark 回退）。\n- D2 动态契约（轻量 E2E，65s）：driver 内 mock 客户端 /goal → 第1轮文本 → 续跑第2轮 `目标.complete` → 断言 会话事件含 goal/change、JSONL 的 operation/phase、台账 phase=complete。不起 HTTP mock LLM（默认窗口无压缩，无摘要请求干扰）。\n\n## 验收结果\n\n- **Windows 本机**（C:\\Python314 + 用户级 site-packages + PYTHONPATH；LIGHTPLUGIN/LIGHT_MERGE 指主仓兄弟仓）：\n  - 验收1（T0395+T0397+T0398+T0470，-n 4）：**22 passed / 4 failed**——4 条全是 T0470 的 POSIX 判据用例（pwd/cd/eval 语义），主仓 HEAD d1e281a 实证同红，属既有平台差异。\n  - 验收2（T0407+T0401，-n 4）：**18 passed / 1 failed**——唯一红 test_八种模式都可开会话，见下「另开卡」。\n  - 验收3（T0499，-n 4）：**8 passed / 0 failed**。\n- **FreeBSD 15.1（192.168.0.88，workbuddy）**：git archive worktree HEAD 上传 /tmp/t0523-run，`pytest-3.12 -q -n 0`：\n  - 验收1 四文件：**26 passed / 0 failed**（T0470 四条 POSIX 判据全绿，34s）。\n  - 验收2+3：**47 passed / 1 failed**——唯一红同样是八模式（文案逻辑平台无关）。\n  - 远端临时产物已清理（/tmp/t0523-run 已删）。\n\n## 另开卡建议（本卡路径外，均实证与本卡改动无关）\n\n1. **八模式 400 文案退化（T-0441 回归）**：`归一化预设`（web服务器.light:998）对未知 preset 返回 `预设组合.light:330` 的「未知预设：nope-mode」（无清单），T-0407 的带清单分支（web服务器.light:1012 `连接字符串(预设清单())`）被短路成死代码。修法：998 行错误文案接 `预设清单()` 拼（该文件不在本卡允许路径）。base 99d6165 上即红（主仓 HEAD 同红）。\n2. **T0470 A/B/B2/C 四条 POSIX 判据的 Windows 红**：cmd 下无 pwd/eval/sh -c 语义；FreeBSD/Linux 原样绿（本次已实证）。建议按 flaky/环境台账口径登记 Windows 平台豁免，或后续给这四条做双平台命令模板。\n3. **排队唤醒线程挡进程退出**（D1 第二层根因）：`排队唤醒循环` 非守护线程且无停止条件，任何调过 处理对话 的宿主进程不退出。判据侧已用「结束标记 + kill」规避，但常驻进程/长跑场景建议另开卡给唤醒线程加守护/停止标志（web服务器.light:800）。\n\n## 修改文件清单（6 个，全部在允许路径内）\n\n- tests/test_T0395_会话工作目录.py：mark(300) ×6；_run 标记+kill；用例5 短根 fixture\n- tests/test_T0397_会话模式权限.py：mark(300) ×7；_run 标记+kill\n- tests/test_T0398_附件暂存契约.py：mark(300) ×1；_run 标记+kill；DONE 注入 主()；短根\n- tests/test_T0470_工具根与cd守卫.py：mark(300) ×5；_run 标记+kill；short_root fixture；E 用例 write_file 平台适配\n- tests/test_T0407_收口接线.py：mark(300) ×6；_MOCK 宿主旁路请求识别\n- tests/test_T0499_E2E超时与目标事件.py：新建（8 条）\n- 未动：src/目标工具.light、src/目标续跑.light（D2 探针证实业务链路本通，无需改）；未动 ci_environment_reds.txt / flaky_registry.txt；未用 skip",
+  "error": "",
+  "declared_paths": [
+    "tests/test_T0395_会话工作目录.py",
+    "tests/test_T0397_会话模式权限.py",
+    "tests/test_T0398_附件暂存契约.py",
+    "tests/test_T0470_工具根与cd守卫.py",
+    "tests/test_T0407_收口接线.py",
+    "src/目标工具.light",
+    "src/目标续跑.light",
+    "tests/test_T0499_E2E超时与目标事件.py"
+  ],
+  "changed_files": [
+    "tests/test_T0395_会话工作目录.py",
+    "tests/test_T0397_会话模式权限.py",
+    "tests/test_T0398_附件暂存契约.py",
+    "tests/test_T0407_收口接线.py",
+    "tests/test_T0470_工具根与cd守卫.py",
+    "tests/test_T0499_E2E超时与目标事件.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "09a202374e7f46beb094796f5cd27051",
+  "fence": 3
+}
