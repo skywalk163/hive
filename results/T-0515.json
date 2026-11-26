@@ -1,0 +1,57 @@
+{
+  "task": "T-0515",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0515",
+  "base": "main",
+  "head": "527ebc5003158d486aedc27987886c0e432c9fc4",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T12:48:31+08:00",
+  "finished_at": "2026-11-26T12:48:31+08:00",
+  "duration_s": 0.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0515_traceId穿插传递.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "............                                                             [100%]",
+        "12 passed in 13.56s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0449_执行管线.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......x.                                                                 [100%]",
+        "7 passed, 1 xfailed in 12.28s"
+      ]
+    }
+  ],
+  "summary": "T-0515 工作说明：工具执行 traceId 生成与穿插传递（补验后重提）。\n做了什么：在 工具执行.light 增加 uuid4 traceId（tr_ 前缀，可注入工厂）、执行器内 trace 表、审计 traceId、失败 suggestion、W3/T-0505 运行时异常信封（errorType/message/retryable/traceId）、父链/根链/重试链、追踪详情/按根追踪/最后traceId；同步、异步、并发三条执行路径同口径。父链既可由显式参数传入，也可由模型放回参数 traceId 键。\n本卡交付文件：src/工具执行.light、src/工具面装配.light（同族工具判定）、tests/test_T0515_traceId穿插传递.py（12 例）。\n越界说明（用户明确要求查收 T-0449 补的判据）：以 cherry-pick --no-commit 引入 task/T-0449 的 02e2983，只带 src/工具_编辑文件.light 的读/写回调修复 + tests/test_T0449_执行管线.py；未合并 T-0449 的旧基线，未碰 main。这两项属于本卡 paths 之外，但为验收命令 2 的必要判据依赖，特此记录。\n关键取舍：纯成功结果逐键不变（保 Day3 并发等价用例）；traceId 只挂在失败、重试与同族子操作等需要关联的结果上；不引入 span/采样/导出，只用 uuid4。\n验证一：python -m pytest -q tests/test_T0515_traceId穿插传递.py → 12 passed。\n验证二：python -m pytest -q tests/test_T0449_执行管线.py → 7 passed, 1 xfailed（xfail 是 T-0449 已登记的 isError 传播缺口，strict=False）。\n回归：tests/test_T0449_编辑工具.py + unit/test_工具执行.py + unit/test_Day3_并发原语A_B.py → 37 passed（-n0 串行）；此前 T0448/T0477 24 passed。\n反跑：在副本里把 附trace元数据 的 需暴露 判定恒假，判据变 12 errors（失败结果拿不到 traceId），证明关联行为被压住；副本已删。\n遗留风险：T-0505 本体尚未落地，本卡提前提供其运行时异常 traceId 字段，后续合入需对齐字段名；纯成功路径需经 最后traceId/追踪详情 查询关联键，不在成功结果中冗余暴露。",
+  "error": "",
+  "declared_paths": [
+    "src/工具执行.light",
+    "src/工具面装配.light",
+    "tests/test_T0515_traceId穿插传递.py"
+  ],
+  "changed_files": [
+    "src/工具执行.light",
+    "src/工具面装配.light",
+    "tests/test_T0515_traceId穿插传递.py",
+    "src/工具_编辑文件.light",
+    "tests/test_T0449_执行管线.py"
+  ],
+  "out_of_paths": [
+    "src/工具_编辑文件.light",
+    "tests/test_T0449_执行管线.py"
+  ],
+  "lease": "missing"
+}
