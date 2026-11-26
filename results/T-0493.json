@@ -1,0 +1,44 @@
+{
+  "task": "T-0493",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0493",
+  "base": "main",
+  "head": "60db9ca79bcac4c8d192406c3ebef428a91a14a1",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T08:31:18+08:00",
+  "finished_at": "2026-11-26T08:35:25+08:00",
+  "duration_s": 247.8,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_unified_decisions_snapshot.py tests/test_sft_data.py tests/test_err_samples.py tests/test_runtime_system.py",
+      "code": 0,
+      "tail": [
+        ".......................................................................s [ 86%]",
+        "...........                                                              [100%]"
+      ]
+    }
+  ],
+  "summary": "（人工 submit，未写 summary）",
+  "error": "",
+  "declared_paths": [
+    "data/unified/decisions.jsonl",
+    "data/unified/manifest.json",
+    "data/unified/translation_tasks.jsonl",
+    "src/lightprism/demo/train_demo.py",
+    "tests/test_unified_decisions_snapshot.py",
+    "reports/统一目录决策快照刷新_2026-11-26.md"
+  ],
+  "changed_files": [
+    "data/unified/decisions.jsonl",
+    "data/unified/manifest.json",
+    "data/unified/translation_tasks.jsonl",
+    "reports/统一目录决策快照刷新_2026-11-26.md",
+    "src/lightprism/demo/train_demo.py",
+    "tests/test_unified_decisions_snapshot.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "b18d34a0cdb74e958ba9bd4b27fa499e"
+}
