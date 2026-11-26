@@ -35,6 +35,7 @@ from hive import (  # noqa: E402
     HiveError, StoreCallError, Worker,
     _claim_holder, _verify_verdict, claim_backend, commit_file_to_ref, git, iso,
     lease_until_iso, now, parse_iso, rev_parse, store_lease,
+    submit_job_status, submit_job_tail,
 )
 try:  # T-0186 的纯逻辑模块；残缺部署（只拷 hive.py）时该工具报错而非整体崩
     import pending_matcher as pm  # noqa: E402
@@ -120,7 +121,7 @@ TOOLS: list[dict] = [
     },
     {
         "name": "hive_submit",
-        "description": "提交成果：把 worktree 里的改动 commit 并推到 task/<任务号> 分支，跑卡片上的 verify 命令，把结果写进 res/<任务号> 分支。提交前把工作说明写进 <worktree>/.hive/summary.md（也可以在这里用 note 传）。",
+        "description": "提交成果：先把 worktree 的改动 commit 并推到 task/<任务号> 分支，**立即返回**（status=submitting）；卡片上的 verify 在后台进程里跑，跑完把结果写进 res/<任务号>。进度用 hive_get_task / hive_result 查 submit.phase。提交前把工作说明写进 <worktree>/.hive/summary.md（也可以在这里用 note 传）。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -561,11 +562,32 @@ class HiveMcp:
         card = h.card(tid)
         body = card.pop("_body", "")
         card.pop("_path", None)
+        res = h.result_info(tid)
+        claim = h.claim_info(tid)
+        extra: dict = {}
+        # 异步提交的 phase 只在 owner 机器上有 job 文件；别机看到的是
+        # submit_remote=True，不假装自己知道进度（T-0492）。
+        job = submit_job_status(self.agent, tid, has_result=bool(res))
+        if job:
+            extra["submit"] = {
+                "phase": job.get("phase") or "",
+                "pid": job.get("pid") or 0,
+                "verify_index": job.get("verify_index") or 0,
+                "verify_total": job.get("verify_total") or 0,
+                "updated": job.get("updated") or "",
+                "log": job.get("log") or "",
+                "log_tail": submit_job_tail(self.agent, tid),
+                "error": job.get("error") or "",
+            }
+        elif isinstance(claim, dict) and claim.get("agent") \
+                and claim.get("agent") != self.agent:
+            extra["submit_remote"] = True
         return ok(f"{tid}：{card.get('title')}",
                   card=card,
                   task_md=body.strip(),
-                  claim=h.claim_info(tid),
-                  result=h.result_info(tid))
+                  claim=claim,
+                  result=res,
+                  **extra)
 
     def t_list_pending(self, a: dict) -> dict:
         """列出可领的卡（只读，不 claim）。
@@ -778,19 +800,24 @@ class HiveMcp:
             (wt / ".hive").mkdir(parents=True, exist_ok=True)
             (wt / ".hive" / "summary.md").write_text(note, encoding="utf-8")
 
-        h.cmd_submit(tid, keep=True, note=note)
-        res = self.hive().result_info(tid) or {}
-        return ok(f"{tid} 提交完成：{res.get('status')}",
-                  task_id=tid,
-                  status=res.get("status"),
-                  branch=res.get("branch"),
-                  head=res.get("head"),
-                  duration_s=res.get("duration_s"),
-                  verify=res.get("verify") or [],
-                  error=res.get("error") or "",
-                  hint=("verify 全绿就等总控合入；有红就改完再 hive_submit 一次"
-                        if res.get("status") == "done" else
-                        "verify 没过，看 verify 里的 tail 改代码后重新 hive_submit"))
+        try:
+            info = h.submit_async(tid, note=note, keep=True)
+        except HiveError as exc:
+            return err(f"{tid} 提交失败：{exc}",
+                       hint="commit/push 失败时分支没推上去，改完再提交；"
+                            "若只是后台起不来，看 job/log 或 hive_get_task")
+        return ok(f"{tid} 已提交，verify 在后台跑",
+                  task_id=tid, status="submitting",
+                  phase=info.get("phase"),
+                  branch=info.get("branch"),
+                  head=info.get("head"),
+                  job=info.get("job"),
+                  log=info.get("log"),
+                  pid=info.get("pid"),
+                  verify_total=info.get("verify_total"),
+                  existing=info.get("existing", False),
+                  hint=("分支已推送；verify 结果稍后落 res/<tid>，"
+                        "用 hive_get_task / hive_result 查 phase，不要重复 submit"))
 
     def t_block(self, a: dict) -> dict:
         tid = a["task_id"]
@@ -911,16 +938,29 @@ class HiveMcp:
         if not res and self.cache is not None:
             # 缓存最多落后一个刷新周期；刚 submit 完立刻查结果时兜底读一次真仓。
             res = self.hive().result_info(tid)
+        job = submit_job_status(self.agent, tid, has_result=bool(res))
         if not res:
+            if job:
+                return ok(f"{tid} 还在后台 verify：{job.get('phase')}",
+                          task_id=tid, status="submitting", result=None,
+                          submit={"phase": job.get("phase"),
+                                  "verify_index": job.get("verify_index") or 0,
+                                  "verify_total": job.get("verify_total") or 0,
+                                  "log_tail": submit_job_tail(self.agent, tid)},
+                          hint="等 job 写完结果再查；phase=lost 就 hive_retry 重来")
             return err(f"{tid} 还没有结果")
         v = _verify_verdict(res.get("verify") or [])
         res["verify_strength"] = v["verdict"]
         res["verify_entries"] = v["verify"]
         note = ("只有弱验收（grep/test -f 之类），成果没被真正执行验证"
                 if v["verdict"] == "weak-pass" else "")
+        extra = {}
+        if job:
+            extra["submit"] = {"phase": job.get("phase"),
+                               "log_tail": submit_job_tail(self.agent, tid)}
         return ok(f"{tid}：{res.get('status')}"
                   + (f"（{note}）" if note else ""),
-                  result=res, verify_strength=v["verdict"])
+                  result=res, verify_strength=v["verdict"], **extra)
 
     def t_stats(self, _a: dict) -> dict:
         h = self.hive_view()

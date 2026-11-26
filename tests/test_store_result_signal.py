@@ -23,7 +23,9 @@ import pytest
 import hive
 from conftest import sh
 
-VERIFY = f'{sys.executable} -c "print(1)"'
+# 用 PATH 上的 python，不用 sys.executable：后者在带空格的安装路径（如
+# "…\User Data\…\python.exe"）里未经引号写进卡面，cmd.exe 会把它拆成两段。
+VERIFY = 'python -c "print(1)"'
 
 
 # --------------------------------------------------------------------------- #

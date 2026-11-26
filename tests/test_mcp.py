@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -284,6 +285,21 @@ def test_sync_ttl_skips_refetch(world, mcp):
 # 写操作：领卡 → 干活 → 提交
 # --------------------------------------------------------------------------- #
 
+def _wait_result(c: McpClient, tid: str, timeout: float = 30.0) -> dict:
+    """轮询 hive_result 直到后台 verify 把结果写完（T-0492 起 submit 是异步的）。"""
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        env, is_err = c.call("hive_result", task_id=tid)
+        assert not is_err, env
+        res = (env.get("details") or {}).get("result")
+        if res:
+            return res
+        last = env
+        time.sleep(0.4)
+    raise AssertionError(f"{tid} 后台结果超时未出：{last}")
+
+
 def test_mcp_claim_submit_roundtrip(world, mcp):
     world.add_agent("a1", caps=("python",), command="true")
     world.add_task("T-0100", title="加一个文件", paths=("docs/",),
@@ -301,13 +317,13 @@ def test_mcp_claim_submit_roundtrip(world, mcp):
     (wt / ".hive" / "summary.md").write_text("用 MCP 提交的第一张卡\n", encoding="utf-8")
 
     submitted = c.ok("hive_submit", task_id="T-0100")["details"]
-    assert submitted["status"] == "done"
+    assert submitted["status"] == "submitting", "提交必须立刻返回，不再等 verify"
     assert submitted["branch"] == "task/T-0100"
     assert submitted["head"]
-    assert submitted["verify"][0]["code"] == 0
+    assert submitted["phase"] == "verifying"
 
-    # 结果真的落进 res 分支了
-    res = c.ok("hive_result", task_id="T-0100")["details"]["result"]
+    # 结果由后台 job 落进 res 分支（轮询等它跑完）
+    res = _wait_result(c, "T-0100")
     assert res["status"] == "done"
     assert res["summary"].startswith("用 MCP 提交")
     assert "refs/heads/res/T-0100" in world.refs("refs/heads/res/*")
@@ -443,6 +459,54 @@ def test_mcp_claim_race_only_one_wins_no_half_assigned(world, mcp):
 # --------------------------------------------------------------------------- #
 # 越权拦截
 # --------------------------------------------------------------------------- #
+
+def test_mcp_submit_async_does_not_block_get_task(world, mcp):
+    """T-0489 的直接回归：verify 在跑时，hive_get_task 必须还能秒回。"""
+    world.add_agent("a1", caps=("python",), command="true")
+    world.add_task(
+        "T-0101", title="后台 verify", paths=("docs/",), needs=("python",),
+        verify=('python -c "import time;time.sleep(6)"',))
+
+    c = mcp("a1")
+    c.initialize()
+    wt = Path(c.ok("hive_claim", task_id="T-0101")["details"]["worktree"])
+    (wt / "docs").mkdir(exist_ok=True)
+    (wt / "docs" / "async.txt").write_text("async\n", encoding="utf-8")
+    (wt / ".hive" / "summary.md").write_text("后台提交\n", encoding="utf-8")
+
+    t0 = time.monotonic()
+    env = c.ok("hive_submit", task_id="T-0101")
+    elapsed = time.monotonic() - t0
+    d = env["details"]
+    assert d["status"] == "submitting"
+    assert d["phase"] == "verifying"
+    assert d["job"] and Path(d["job"]).exists()
+    assert d["pid"], "必须给出后台进程 pid 便于排查"
+    assert elapsed < 15.0, f"submit 同步段太慢：{elapsed:.2f}s"
+
+    # verify 还在睡，这两次查询必须都是快的、合法的 JSON
+    for _ in range(2):
+        started = time.monotonic()
+        got = c.ok("hive_get_task", task_id="T-0101")["details"]
+        assert time.monotonic() - started < 4.0, (
+            "get_task 不能被后台 verify 堵住（verify 要睡 6s，被堵就会超 4s）")
+        assert got.get("submit") or got.get("result")
+
+    res = _wait_result(c, "T-0101", timeout=40)
+    assert res["status"] == "done"
+    assert res["verify"][0]["code"] == 0
+
+    # 结果落完后 job 也应收敛到终态，不留 verifying
+    deadline = time.monotonic() + 5
+    phase = ""
+    while time.monotonic() < deadline:
+        detail = c.ok("hive_get_task", task_id="T-0101")["details"]
+        phase = (detail.get("submit") or {}).get("phase", "")
+        if phase == "done":
+            break
+        time.sleep(0.2)
+    assert phase == "done", f"job 终态应是 done，实际 {phase}"
+
 
 def test_mcp_cannot_submit_or_abort_others_task(world, mcp):
     world.add_agent("a1", caps=("python",), command="true")
