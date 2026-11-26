@@ -1,0 +1,54 @@
+{
+  "task": "T-0509",
+  "agent": "dumate-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0509",
+  "base": "main",
+  "head": "7c7d808b3579a814b2efc18731c2a1b6cfcb644e",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T19:50:47+08:00",
+  "finished_at": "2026-11-26T20:23:18+08:00",
+  "duration_s": 1951.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0509_守卫接线.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "...........                                                              [100%]",
+        "11 passed in 18.70s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0449_执行管线.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......x.                                                                 [100%]",
+        "7 passed, 1 xfailed in 11.34s"
+      ]
+    }
+  ],
+  "summary": "# T-0509 交付摘要：可逆性分级 → 执行前确认门控\n\n做了什么：\n1. 工具面装配 §11.4 新增策略层（纯逻辑）：动作四档递增 放行<提示<校验<确认；默认 只读/可逆→放行、半可逆→提示、不可逆→确认；未显式分级→提示（防插件/自造工具误拦）、缺档/非法档→确认；造门控配置 可按档覆盖（如 irreversible→校验 放宽），非法值忽略；工具门控判定 支持原名/语义名（条目原名回落）/条目「可逆性」回填。\n2. 工具执行 §7c 接线：具分级守卫 接进 执行工具 与 具执行前置闸门（同步/异步/并发同判）；确认档复用 §7 预决收敛（无通道即 deny，allowed-once 放行）；动态降档仅限可复核结论（bash 无命令/非高危、写文件目标不存在），降档留门控日志；执行器新增第 8 参 门控 与 已读表/门控日志。\n3. 前置校验（复用 工具_路径安全，未另造）：写/编辑目标走 解析安全路径；bash rm/mv 目标走 校验破坏性命令目标；写文件覆盖已存在且未读过 → 拒绝。\n4. 工具_路径安全 新增 命令破坏性目标 / 校验破坏性命令目标（复用既有切段切词/解析安全路径/逃生舱）。\n\n验证：test_T0509_守卫接线 11 passed；test_T0449_执行管线 7 passed,1 xfailed；附带 T-0510 30 passed、T-0515+Day3 41 passed、test_工具执行 20 passed。\n\n遗留风险（如实登记）：\n- 任务卡交付物提到 docs/风险分级规范.light.md 接线章节，但该文件不在允许路径，未改，仅在代码注释与摘要说明。\n- test_T0502_改名与别名 2 条失败：该判据用桩参数 {\"好\":\"x\"} 逐个执行 160 工具并断言全 ok，其中 46 个现属不可逆档、默认确认（无审批通道即拒）——本卡预期行为，判据需随卡更新（不在允许路径）；需兼容的部署可传 造门控配置({\"irreversible\":\"校验\"})。\n- test_T0508 在 worktree 统计 160 工具（主检出 168）：8 个团队/交付/会话工具来自 挂载全部插件，worktree 缺插件产物，属环境差异，不动分级表与统计。\n- 两条验收命令均在 Windows 本机跑绿，未用 POSIX 语法。",
+  "error": "",
+  "declared_paths": [
+    "src/工具面装配.light",
+    "src/工具执行.light",
+    "src/工具_路径安全.light",
+    "tests/test_T0509_守卫接线.py"
+  ],
+  "changed_files": [
+    "src/工具_路径安全.light",
+    "src/工具执行.light",
+    "src/工具面装配.light",
+    "tests/test_T0509_守卫接线.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "757b440fde054757beb99fc23cd871fb"
+}
