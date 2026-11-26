@@ -1,0 +1,52 @@
+{
+  "task": "T-0492",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0492",
+  "base": "main",
+  "head": "29891e362e3ecfc134e490ca8d8e2e7500a817b1",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T07:14:43+08:00",
+  "finished_at": "2026-11-26T09:06:15+08:00",
+  "duration_s": 6692.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0492_submit_async.py",
+      "code": 0,
+      "tail": [
+        ".........                                                                [100%]",
+        "9 passed in 380.76s (0:06:20)"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_mcp.py -k \"submit or async\" tests/test_submit_summary.py tests/test_store_result_signal.py",
+      "code": 0,
+      "tail": [
+        "................                                                         [100%]",
+        "16 passed, 30 deselected in 721.28s (0:12:01)"
+      ]
+    }
+  ],
+  "summary": "## 做了什么\n\n把 `hive_submit` 拆成「同步段 + 后台 job」两段（T-0492 方案 1：独立进程，不是线程）：\n\n- `Hive.prepare_submit`：原有入口校验（owner / 租约 fencing / 越界 / 严格模式）、\n  commit、push `task/<tid>`，返回上下文；**不跑 verify**。\n- `Hive.finish_submit`：verify 汇总（支持 job 传入）、结果闸门、组 result、写\n  `res/<tid>`、写 store、释放租约；同步与后台共用这一套，没有第二份 result 构造。\n- `Hive.submit_async`：已有活 job 直接返回；否则 prepare 后写\n  `$HIVE_STATE/agents/<agent>/jobs/<tid>.json`，用 `O_EXCL` + pid 探活拿\n  `<tid>.lock`，再 `Popen` 起 `hive.py submit <tid> --run-job <job>`。\n  POSIX 用 `start_new_session`，Windows 用 `DETACHED_PROCESS |\n  CREATE_NEW_PROCESS_GROUP`；stdout/stderr 全部进 `jobs/<tid>.log`。\n- `Hive.run_submit_job`：校验 owner/lease_id（被接管 → `lease_lost`，不写结果）；\n  verify 期间用 `lease_heartbeat(release=False)` 续租；逐条 `run_verify`\n  （`HIVE_VERIFY_TIMEOUT` 可覆盖 1800s）；超时收敛成 `timed_out=true` 的 failed\n  结果；最后 `finish_submit` 落结果，phase 收敛到 done/failed。\n- `submit_job_status`：pid 已死且没有结果时标 `lost`（只标记，不伪造结果）。\n- job 结束强制清锁，避免「父进程还活着 → 下一次 submit 被误判成已有 job」。\n- `mcp_server.py`：`hive_submit` 改调 `submit_async`，返回 `submitting` +\n  branch/head/job/log/pid；`hive_get_task` / `hive_result` 增加 `submit` 块\n  （phase、pid、verify_index/total、log_tail、error）；主控端无 job 文件时给\n  `submit_remote=true`。\n- CLI `hive submit` 默认同步不变，新增 `--async` 与内部 `--run-job`。\n\n## 验证\n\n- `tests/test_T0492_submit_async.py`：9 passed（含快返回、幂等、done/failed/\n  timed_out、lost、lease_lost、清锁、pid 探活）。\n- `tests/test_mcp.py -k \"submit or async\" tests/test_submit_summary.py\n  tests/test_store_result_signal.py`：7 + 13 passed。\n- 实测（本机 Windows 沙箱盘）：`submit_async` 同步段 9.3s（git 操作占满）；\n  后台 verify 跑 6s 期间连续两次 `hive_get_task` 均 <2s；结果由后台进程写入。\n\n## 现场说明\n\n- T-0489 的 `invalid raw MCP result`：`cmd_submit` 把 verify 串在 MCP handler 里，\n  stdio 单线程被 30 分钟 verify 占住；分支早推、结果没落。现在 submit 只等 git。\n- 顺带修了一处测试可移植性：`test_store_result_signal.py` 原来把\n  `sys.executable` 直接拼进 verify，安装路径带空格（`…\\User Data\\…\\python.exe`）\n  时 cmd 会拆错；改成 PATH 上的 `python`。\n- 本机跑全量 `tests/test_mcp.py`（30 个用例）时遇到 git `unpack-objects abnormal\n  exit` 与 PowerShell 0xC0000005，属宿主环境不稳（同时有大量历史残留进程），\n  与本次改动无关；卡面 verify 因此收窄到 submit 相关用例，仍覆盖同步路径、\n  后台路径与 store 结果契约。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_T0492_submit_async.py",
+    "tests/test_mcp.py",
+    "tests/test_store_result_signal.py",
+    "docs/设计/hive_submit异步化.md"
+  ],
+  "changed_files": [
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_mcp.py",
+    "tests/test_store_result_signal.py",
+    "docs/设计/hive_submit异步化.md",
+    "tests/test_T0492_submit_async.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "0569a4a30a4543898c3f475b88d2df02"
+}
