@@ -1,0 +1,39 @@
+{
+  "task": "T-0501",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0501",
+  "base": "main",
+  "head": "f4ef7e8dc377c486d0f200c3bfed2eba10f3b3b9",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T13:00:12+08:00",
+  "finished_at": "2026-11-26T13:19:53+08:00",
+  "duration_s": 1181.1,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0501_命名映射表.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......                                                                   [100%]",
+        "6 passed in 19.06s"
+      ]
+    }
+  ],
+  "summary": "# T-0501 完成说明（W2/T2.1 语义化命名方案）\n\n- 做了什么：定义 `<域>.<动作>` 命名规范（域前缀原样取 T-0496 的 24 个 domain，唯一转写 `横切→xcut`，\n  因为函数名必须 ASCII；MCP 透传 `mcp__*` 不改名），并产出全部 **160** 个工具的 `tool_NN → 语义名` 映射表。\n- 编号口径：`tool_NN` 的 NN = `组装注册表().名单()` 的 0 基登记序；实测 tool_20..23 = 压缩选块/压缩摘要/\n  上下文装配/上下文装配报告（ctx），tool_66..68 = 工作流提交/状态查询/汇总（workflow），与卡面例子一致。\n  编号只是文档引用键，**不得**注册成别名。\n- 兼容策略：逐工具标注；`保留别名` 27 个（T-0477 基础白名单 22 + 只读白名单 2 + 既有判据/文档引用 3：\n  SSH执行/运行用例表/执行Python脚本），其余 **133** 个 `直接改名`；别名机制契约（解析顺序、打点、生命周期、\n  冲突规则）写进规范 §5.4，交给 T-0502/T-0463。\n- 改了哪些文件：`docs/工具命名规范.light.md`（规范 + §6 机器可读 JSON 映射表）、\n  `tests/test_T0501_命名映射表.py`（6 条判据）。未动 registry（红线遵守）。\n- 跑了什么验证：`python -m pytest -q tests/test_T0501_命名映射表.py` → **6 passed（26.8s）**；\n  其中「与真实注册表逐位一致」在挂载 lightplugin 的环境里强校验现名 160 位 + 域逐位相等（非跳过）。\n  反跑一次：把 `ctx.select_blocks` 前缀改成 `workflow.` → 域对齐判据红，恢复后全绿。\n- 遗留风险：①`workflow` 域仍过粗（61/160），本卡用族前缀（job_/plan_/goal_/todo_/reminder_/terminal_…）缓解，\n  根治需拆域，属 T-0496 口径变更，建议单开卡；②`skill.use` vs `skill.load`、`voice.speech_to_text` vs\n  `voice.transcript` 入口不同但动作相近，T-0502 需在 description 补区分；③登记序会被 `plugins.json`\n  启停位移，T-0502 请按现名消费，不要按编号消费。",
+  "error": "",
+  "declared_paths": [
+    "docs/工具命名规范.light.md",
+    "tests/test_T0501_命名映射表.py"
+  ],
+  "changed_files": [
+    "docs/工具命名规范.light.md",
+    "tests/test_T0501_命名映射表.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "451613dd795e485cb13f3e467282d371"
+}
