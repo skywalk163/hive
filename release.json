@@ -1,7 +1,7 @@
 {
-  "version": "0.16.09",
-  "commit": "5638283269e5a70e6b3669de20ef3db08c45e442",
-  "published_at": "2026-11-25T09:30:00+08:00",
-  "published_by": "WIN10",
-  "notes": "0.16.09：集群租约收口 —— 本人心跳把租约写回节点记录（554cb2b，修「续租→收敛→判过期→清空→重新采纳」自清自愈刷屏）；租约默认值改为 max(默认, 空闲心跳×3)=15s（4730460，修 DEFAULT_LEADER_LEASE_S 与 DEFAULT_IDLE_HEARTBEAT_S 同为 5s 的撞车）；cluster start/restart 加版本闸（84760b4，正在跑的这份落后 origin/main 就告警）；新增节点升级清单与判据（T-0471）。本版要求各节点各自更新并重启，租约由主控签发，只升级跟随者无效。"
+  "version": "0.16.10",
+  "commit": "1d6202d246d7d109cfd320fb47b86d5a2cb16902",
+  "published_at": "2026-11-26T09:55:16+00:00",
+  "published_by": "controller",
+  "notes": "0.16.10：修后台 verify 进程环境——Windows 上把命令位裸 python/python3 换成 sys.executable 全路径并固定 UTF-8 编码，根治 MCP 异步 detached job 的 verify 环境性假红（T-0498 现场）。各节点需升级并重启 hived 才生效。"
 }
