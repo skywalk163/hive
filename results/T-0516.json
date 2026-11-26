@@ -1,0 +1,49 @@
+{
+  "task": "T-0516",
+  "agent": "teleagent-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0516",
+  "base": "main",
+  "head": "9396c0403015318c3712af6a19d68aa060f2cef4",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T22:17:19+08:00",
+  "finished_at": "2026-11-26T22:20:29+08:00",
+  "duration_s": 190.2,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0516_traceId回归.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".........                                                                [100%]",
+        "9 passed in 15.41s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0515_traceId穿插传递.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "............                                                             [100%]",
+        "12 passed in 17.60s"
+      ]
+    }
+  ],
+  "summary": "# T-0516 交付摘要：traceId 穿插传递与「失败 → 重试 / 失败 → 改方案」关联回归\n\n## 交付物\n\n- `tests/test_T0516_traceId回归.py`：9 个用例，全部走 `.light` 真实执行管线（子进程 `python 运行.py <driver>`），不 mock。\n- 本卡为验收卡：**未改动任何实现文件**，提交仅含上述新增测试（首次提交 9396c04 已推 gitcode；本次为同分支复跑，无新 diff）。\n\n## 覆盖（对照卡面验收判据）\n\n1. **失败 → 重试**（判据 1）\n   - 首败（timeout）→ 二试（显式父 traceId）→ 三试（父 = 二试）：三次 traceId 互异、同根、`重试链` 逐次 `[首]` → `[首, 次]` → `[首, 次, 末]`；\n   - `按根追踪` 整族回溯顺序与状态 `failed × 3` 一致；\n   - 模型判断依据来自结构化错误：`errorType=timeout`、`retryable=true`、`code=TOOL_TIMEOUT`、suggestion 含「可原样重试」且带本次 traceId。\n2. **失败 → 改方案**（判据 1、红线）\n   - notFound 失败给出 `retryable=false`、`code=TOOL_NOT_FOUND`、suggestion 含「原样重试无意义」；\n   - 改方案两条入口：显式 `父traceId` 形参、模型把 `traceId` 塞回调用参数；\n   - 两条改方案均为新 traceId，`父traceId/根traceId/重试链=[失败, 本次]` 正确，且不覆盖原失败记录，整族按根可回溯 3 条。\n3. **按 traceId 反查结构化详情**（判据 2）\n   - 首败详情：工具名/状态/错误信息/建议/根/链逐项核对；链尾（三试）反查同样成立；\n   - 改方案的成功执行也可按 traceId 取回；\n   - 未知 traceId 返回空，不瞎编。\n4. **不泄露 / 仅在需要关联时暴露**（判据 3）\n   - 纯成功结果无 `traceId/根traceId/suggestion/建议`；同族子操作（读文件 → read_file）继承父链成功，才出现 traceId；\n   - 错误文案 `消息` 原样，不含 traceId 字样；\n   - 预算包装器 `具执行工具带预算`（T-0512）原样透传父链与 `运行时异常`；\n   - 失败/改方案的审计记录与结果同一 traceId（审计条目数核对）。\n5. **独立失败不串链**：无父链失败自成根、链只含自身，不混入他人族。\n\n## 判据输出原文（hive verify 同解释器口径，Python 3.12.13）\n\n```\n$ python -m pytest -q tests/test_T0516_traceId回归.py\n.........                                                                [100%]\n9 passed in 19.08s\n\n$ python -m pytest -q tests/test_T0515_traceId穿插传递.py\n............                                                             [100%]\n12 passed in 17.12s\n```\n\n环境说明：卡面判据在 Windows 不受 POSIX head/grep/awk 假失败影响（两条均 pytest）。前两次 submit 的 verify 假红是 hive 后台进程的 `sys.executable`（TeleAgent 运行时 Python 3.12.13）缺 pytest 插件（tail 明确 `No module named pytest`），属环境问题非产物问题；已给该解释器补装 pytest/pytest-timeout/pytest-xdist（pip 装包不影响 lightharness 仓任何文件），并已用同一解释器在 worktree 复跑两条判据全绿。本机 py -3.10 直跑同判据：9 passed (22.87s) + 12 passed (19.70s)，两解释器口径一致。\n\n## 反跑记录（两次均先红后绿，已还原）\n\n### A. 破坏父链继承\n- 改动：`记trace` 中 `如果 字典包含键(执行器[\"trace表\"], 父id) == 真` → `== 假`\n- 结果：3 failed（`test_失败到重试链路同根且链逐次增长`、`test_失败到重试可整族回溯`、`test_按traceId可取回失败结构化详情`）\n- 还原后复跑 9 passed。\n\n### B. 失败结果不暴露 trace 元数据\n- 改动：`附trace元数据` 中 `结果[\"状态\"] != 调正常 → 设 需暴露 为 假`\n- 结果：9 errors（驱动 rc=0 前置断言失败，失败响应无 traceId）\n- 还原后复跑 9 passed，`git status` 仅剩新增测试文件。\n\n## 结论\n\nT-0515 的 traceId 在「失败 → 模型据结构化错误判断 → 重试 / 改方案」两类真实链路中均可正确生成、传递与反查；成功路径不冗余暴露；未发现需要打回的行为缺口。\n\n> AI生成",
+  "error": "",
+  "declared_paths": [
+    "tests/test_T0516_traceId回归.py",
+    "tests/test_T0515_traceId穿插传递.py"
+  ],
+  "changed_files": [
+    "tests/test_T0516_traceId回归.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "794337af5cb2459a8f580f94a3b3f0fa"
+}
