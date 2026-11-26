@@ -1,0 +1,52 @@
+{
+  "task": "T-0497",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0497",
+  "base": "main",
+  "head": "097adc45c9549671fef6b58de506672217862dcb",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-26T14:54:09+08:00",
+  "finished_at": "2026-11-26T15:00:21+08:00",
+  "duration_s": 372.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0497_双级可见性.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "..........                                                               [100%]",
+        "10 passed in 11.18s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0448_工具面装配.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 27.30s"
+      ]
+    }
+  ],
+  "summary": "# T-0497 双级可见性（allowedTools / focusedTools）—— R2 重开修复\n\n## 本轮修了什么（T-0500 组合验收的缺陷）\n\n- 根因：`src/工具面装配.light` 的 `条目工具名()` 只读 `工具名` / `标识` / `id`，不读 schema 的 `name`（`src/工具.light` 的 ToolSchema / ToolDefinition 都是 `name` 口径）。硬白名单一开，name 形状的条目全被判成「无名」——160 条目录可见 0、剪枝只剩 1 个去重后的空名。\n- 修复：`条目工具名()` 改为 **`name` > `工具名` > `标识` > `id`** 依次回退（非字典 / 空字典 / 非串仍返回空串）。name 排第一，因为它就是模型 schema 里真正看到的工具名。\n- 补判据：`tests/test_T0497_双级可见性.py` 新增\n  - `test_name形状目录上硬白名单按名剪枝`：160 条 `{\"name\": ...}` 目录 + `allowedTools=[\"bash\",\"图片生成\"]` → 可见 2 / 剪枝 158 / 可见名 `bash,图片生成`；同一形状下软聚焦仍生效（160 个一个不少，聚焦项 `工具5` 前置且 `聚焦` 数 = 1）。\n  - `test_条目工具名回退优先级`：name > 工具名 > 标识 > id，非字典与空字典返回空串。\n\n## 验证\n\n- `python -m pytest -q tests/test_T0497_双级可见性.py` → **10 passed**\n- `python -m pytest -q tests/test_T0448_工具面装配.py` → **7 passed**（不回归）\n\n## 原有交付未变\n\n§5.6 的 `装配可见工具面()` / `模型可见条目()` / `可见性报告()` / `造可见性配置()` / `名匹配模式()`（`mcp__*` 通配）、`预设.预设可见性()`（顶层键 + `config` / `选项` 子字典、英/中键名）、`预设挂载过滤.按预设过滤可见()` / `预设字典可见()` 全部保留，行为口径与第一轮一致；未配置时不剪枝、不加键、顺序与条目引用逐项不变。\n\n## 领卡现场（台账问题，非本卡代码）\n\n- 领卡时 `hive_claim` 报「T-0497 已关闭」，但 git 卡面已是 `state: ready`（controller 14:18 重开）。\n- 根因：`cmd_reopen()` 只改 git 卡面、删 res/claim 分支，**没有清 store 侧**；leader store 里 T-0497 仍是 `done` 且留着归档结果，硬白名单式的领卡闸门（store 报已关闭）因此挡住领取。\n- 处置：用 store 官方 op `store_retry(\"T-0497\")`（`hive_store.Store.retry(clear_result=True)`）把 store 侧 task 置回 `ready` 并清掉陈旧结果，随后 `hive_claim` 成功。\n- 建议单开一张卡：`hive reopen` 在 store 模式下补 store 清理（task 置 ready + 清 result），否则每次重开都要人工修台账。\n\n## 风险与遗留\n\n- 仍只交付「纯函数 + preset 注入入口」；`总入口.light` 的接线留给下一张接线卡（不在本卡允许路径内）。\n- `allowedTools` 为空表按「未配置」处理（防一次空值误写把整个工具面锁死），无法表达「一个工具都不要」的 surface。",
+  "error": "",
+  "declared_paths": [
+    "src/工具面装配.light",
+    "src/预设.light",
+    "src/预设挂载过滤.light",
+    "tests/test_T0497_双级可见性.py"
+  ],
+  "changed_files": [
+    "src/工具面装配.light",
+    "tests/test_T0497_双级可见性.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "ea0fbfe2036243e3920a9d1f4d17ea83"
+}
