@@ -1,0 +1,52 @@
+{
+  "task": "T-0528",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0528",
+  "base": "main",
+  "head": "329a4257c900793483e0fa29e9b2e80cc7f13ca3",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T19:08:06+08:00",
+  "finished_at": "2026-11-27T19:42:44+08:00",
+  "duration_s": 2078.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/unit/test_ci_台账口径.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".........                                                                [100%]",
+        "9 passed in 160.96s (0:02:40)"
+      ]
+    },
+    {
+      "cmd": "python tests/ci_judge_env_reds.py self-check",
+      "code": 0,
+      "tail": [
+        "  [PASS] R80-C (参数语法迁移后): 本轮失败 3 / 新增红 0 / 命中环境账 3",
+        "  [PASS] 反向演示: 注入 1 条新回归 → 正确识别新增红 1 条",
+        "============================================================",
+        "[self-check] 结论: 全部通过（新增红恒为 0）",
+        "============================================================"
+      ]
+    }
+  ],
+  "summary": "# T-0528 收口：0.88 全量复跑 + 台账销账（2026-11-27）\n\n## 做了什么\n1. **全量复跑**：0.88（FreeBSD 15.1）用 T-0524 原口径重跑整轮——提交 `59798ce`（开跑前 `git rev-parse HEAD` == `origin/main`，本地/worktree 与远端快照一致），4 并发、641 例（排除 `_helper_L004/L007b`）、每例独立临时 cwd、75s 硬超时、仅 `运行Web服务器.light` 带 `HARNESS_WEB_LIFETIME=3`+`HARNESS_WEB_NO_OPEN=1`。\n2. **结果**：641 例 / **584.3s** / 13 red = 10 条 EXPECT_RED（`test_L101`、`test_L143`、`R71_C×2`、`R72 系列×4`、`R73_D`、`async_await_neg`）+ 台账 3 条（E-01 事件循环 / E-02 套接字 / E-06 进程树接线）。**T-0524 分账的 6 条真红全部转绿**：5 条唤醒线程挂死不复发（T-0526）、`test_会话持久化用户目录` 不再 Permission denied（T-0527）。\n3. **对拍**：扣 10 条 EXPECT_RED 后回归失败集合 3 条 → `judge --current` = 本轮失败 3 / 基线 3 / 命中环境账 3 / 环境账变绿 0 / **新增红 0 → 绿**。\n4. **销账**：`tests/ci_environment_reds.txt` 在「T-0524 全量对拍」节补「T-0528 销账」块（6 条 → T-0526/T-0527 修复 + 复跑取证 + judge 结果，原取证全留）；`tests/flaky_registry.txt`「T-0524 复核」节补同口径销账句（5 条仍不入账）。`tests/unit/test_ci_台账口径.py` 把硬钉子 `DETERMINISTIC_HANG_CASES` 升级为 `FIXED_HANG_CASES`：一条断言 5 条在两份台账外，一条实跑 5 条要求 rc=0 且 70s 内自己退出（90s 硬超时）。\n\n## 验证（都在本 worktree）\n- `python -m pytest -q tests/unit/test_ci_台账口径.py` → **9 passed in 191.70s**（新增的 5 条退出判据顺序跑，单条实测 ~34s，阈值 70s/90s）。\n- `python tests/ci_judge_env_reds.py self-check` → 全部 PASS（台账 3 条、新增红恒 0）。\n- `git diff --stat`：仅 3 份允许路径（+109/−16）。\n\n## 遗留风险 / 备注\n- 退出判据把 5 条起服务用例真跑一遍，单文件耗时从 ~19s 升到 ~192s；若 CI 机器负载高，阈值 70s 仍有余量（原挂死态 ≥90s）。\n- 0.88 上无 git 工作树，快照由 `git archive HEAD` 落 `/home/workbuddy/t0528_tree`（643 个 .light，含 2 载体），编译仍走 `~/light-merge` 旧快照（与 T-0524 同源），运行日志/失败集在 `/home/workbuddy/t0528_full.log`、`t0528_full_failures.json`。\n- 未改判据脚本、未登记任何真红、无 force/reset/--no-verify。",
+  "error": "",
+  "declared_paths": [
+    "tests/ci_environment_reds.txt",
+    "tests/flaky_registry.txt",
+    "tests/unit/test_ci_台账口径.py"
+  ],
+  "changed_files": [
+    "tests/ci_environment_reds.txt",
+    "tests/flaky_registry.txt",
+    "tests/unit/test_ci_台账口径.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "d0e87a68b1674424aaf7426bde6258e5"
+}
