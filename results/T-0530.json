@@ -1,0 +1,53 @@
+{
+  "task": "T-0530",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0530",
+  "base": "main",
+  "head": "678d16f54ed668e63e59ff7d69b76eec707e7b71",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T18:00:36+08:00",
+  "finished_at": "2026-11-27T18:03:27+08:00",
+  "duration_s": 171.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_回归.py -k \"web路由\"",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".                                                                        [100%]",
+        "1 passed in 34.97s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/unit/test_预设分组一致性.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "...                                                                      [100%]",
+        "3 passed in 35.10s"
+      ]
+    }
+  ],
+  "summary": "# T-0530 工作说明（第二轮：授权越界修退出挂死）\n\n## 做了什么\n- 判据口径修正（允许路径）：`examples/test_web路由.light` 组 0 卡数对齐 `预设清单(\"agent\")`，新增「各组合计 == `预设清单()` 全量」防漏卡；「每卡含配置」断言原样保留。\n- 新增 `tests/unit/test_预设分组一致性.py`：组数==3、组0/组1 类别、各组长对类别清单、三组之和对全量、挂载卡 id 唯一且并集==全量；字面量 4/9 不写死。\n- **越界（已获主控口头授权）修退出挂死**：`src/web服务器.light`\n  · `从 线程 导入 线程` → 增加 `创建线程`；\n  · `取队列闸门` 的 `排队唤醒循环` 改用 `创建线程(排队唤醒循环, 己, 守护线程=真)`（该函数自带启动，删掉多余的 `开始()`，否则二次启动报「线程已启动」）；\n  · 原因：该循环是 `当 真` 无限守望，原为非守护线程，主程序跑完进程不退出（T-0490 存量缺陷，被 379 行断言失败掩盖）。\n\n## 验证（Windows，仓库现用编译器）\n- `python -m pytest -q tests/test_回归.py -k \"web路由\"` → **1 passed in 44.0s**（60s 超时内）。\n- `python -m pytest -q tests/unit/test_预设分组一致性.py` → **3 passed**。\n- 直接跑 example：`elapsed=33.0s rc=0`，且打印 `--- 测试web路由(静态/CORS/认证) 通过 ---`。\n- `tests/unit` 全量：跑到 58% 后 xdist 卡住（`pytest.ini` 注释里记的 -n 4 偶发挂死），未跑完；本条只改线程守护标志，已用两条验收命令 + example 直跑覆盖。\n\n## 风险 / 备注\n- 守护线程只是退出语义变化：进程活着时唤醒循环照旧每 2s 扫一次，行为不变；进程结束时随解释器回收，不再阻塞退出。\n- 光明 `新建 类(...)` 不支持关键字实参（`守护线程: 真` / `= 真` 都编不过），只能走函数 `创建线程(..., 守护线程=真)`。\n- 0.88 的 `/home/workbuddy/light-merge` 是 11-18 非 git 副本，编译 `总入口` 报 695 语法错误，不能作为可信跑点。",
+  "error": "",
+  "declared_paths": [
+    "examples/test_web路由.light",
+    "tests/unit"
+  ],
+  "changed_files": [
+    "examples/test_web路由.light",
+    "src/web服务器.light",
+    "tests/unit/test_预设分组一致性.py"
+  ],
+  "out_of_paths": [
+    "src/web服务器.light"
+  ],
+  "lease_id": "90456a040593419b96ba19494a0d9282"
+}
