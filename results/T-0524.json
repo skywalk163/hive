@@ -1,0 +1,53 @@
+{
+  "task": "T-0524",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0524",
+  "base": "main",
+  "head": "1c837f293dab72ec015776bfb931ba43a571318d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T08:50:26+08:00",
+  "finished_at": "2026-11-27T09:55:54+08:00",
+  "duration_s": 3928.4,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_回归.py::test_env_red_baseline_report",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "s                                                                        [100%]",
+        "1 skipped in 3.32s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/unit/test_ci_台账口径.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "........                                                                 [100%]",
+        "8 passed in 2.92s"
+      ]
+    }
+  ],
+  "summary": "# T-0524 收口（台账卫生：并发假红归位 + env_red 自检恒红根治）\n\n## 做了什么\n- **D1 复核结论：原判断不成立，故未登记。** 5 条候选实测是「断言全过、进程退不出」的确定性挂死，不是并发假红：Windows 直跑 5/5 打 TIMEOUT120；0.88 FreeBSD 15.1 直跑 5/5 TIMEOUT90；pytest 串行（不带 xdist、--timeout=60）即 Timeout 红；faulthandler 栈指向主线程 `threading._shutdown` 等 `src/web服务器.light` 的 `排队唤醒循环`（T-0490 / a1cec55 引入，`停止()` 只停服务端不停唤醒线程）。按红线「真缺陷不得登记成环境红/flaky」，只写进台账复核节，未新增条目。\n- **D2 判据落地。** 新增 `tests/unit/test_ci_台账口径.py`（8 条判据）：字段/编号/平台合法、**每条必须带日期+测量依据+结果摘要**（缺即红）、引用文件真实存在、同例同平台不重复、环境红与 freebsd flaky 不双登记、**确定性挂死不得登记为 flaky**、与 `ci_judge_env_reds.load_ledger` 及 `test_回归` 解析口径一致。\n- **台账口径固化 + 实测取证。** `ci_environment_reds.txt` 增「T-0524 收账口径」与「全量对拍」两节；E-01/E-02/E-06 三条补齐取证字段（按 R87-M/R88-B 既有记录，未改判据文本）。`flaky_registry.txt` 增「T-0524 复核」节（含 5 条挂死的四路取证与 faulthandler 栈）。\n\n## 改了哪些文件\n- 新增 `tests/unit/test_ci_台账口径.py`；修改 `tests/ci_environment_reds.txt`、`tests/flaky_registry.txt`（均为注释/取证字段，条目集合仍为 E-01/E-02/E-06 + F-01~F-09）。**`tests/test_回归.py` 未改**（未碰判据逻辑）。\n\n## 验证（都在本 worktree 跑）\n- `python -m pytest -q tests/test_回归.py::test_env_red_baseline_report` → 1 skipped（非 FreeBSD 平台按设计跳过，exit 0）。\n- `python -m pytest -q tests/unit/test_ci_台账口径.py` → 8 passed。\n- `python tests/ci_judge_env_reds.py self-check` → 全部 PASS（台账 3 条，新增红恒 0）。\n- 0.88 全量对拍（e940664，641 例 / 597.8s / 19 red，扣 10 条 EXPECT_RED）：`judge` = 本轮 9 / 基线 3 / 命中环境账 3 / **新增红 6**。\n\n## 遗留（不在本卡允许路径内，需另开卡）\n1. **5 条确定性挂死**：修 `src/web服务器.light` —— 唤醒线程加停止标志 + `停止()` 里 join（或设守护线程）。这是 FreeBSD 自检仍红的 5/6 来源。\n2. **1 条固定路径污染**：`examples/test_会话持久化用户目录.light` 写死 `/tmp/lh_migrate_test`，撞上别的用户 0755 残留即 Permission denied（隔离 3/3 rc=1）；改成每轮唯一临时目录即可，非平台差异、非 flaky。\n3. 上述 6 条落地前，`test_env_red_baseline_report` 在 FreeBSD 全量下仍会红 —— 这是**如实报告真红**，不是口径噪音；台账本身已无多登/漏登。\n4. 风险：`test_确定性挂死用例不得登记为flaky` 是硬钉子；挂死修好后若真出现「隔离恒绿 + 全量偶发红」，需同步更新该判据再登记。",
+  "error": "",
+  "declared_paths": [
+    "tests/ci_environment_reds.txt",
+    "tests/flaky_registry.txt",
+    "tests/test_回归.py",
+    "tests/unit/test_ci_台账口径.py"
+  ],
+  "changed_files": [
+    "tests/ci_environment_reds.txt",
+    "tests/flaky_registry.txt",
+    "tests/unit/test_ci_台账口径.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "d388ae61da3541ef82bf4c51f6cc6c5c"
+}
