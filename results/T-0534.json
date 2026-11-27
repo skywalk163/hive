@@ -1,0 +1,79 @@
+{
+  "task": "T-0534",
+  "agent": "teleagent-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0534",
+  "base": "main",
+  "head": "25421ee635623779056cac72a78ba85ee2b5951c",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T21:46:31+08:00",
+  "finished_at": "2026-11-28T00:35:40+08:00",
+  "duration_s": 10149.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0534_语义名上线.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "...                                                                      [100%]",
+        "3 passed in 27.47s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0488_生产面快照.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "........                                                                 [100%]",
+        "8 passed in 32.59s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0502_改名与别名.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".....                                                                    [100%]",
+        "5 passed in 17.44s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0448_工具面装配.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 32.12s"
+      ]
+    }
+  ],
+  "summary": "# T-0534 工作说明（语义名上线：线名转写 + 白名单等价）\n\n## 做了什么\n\n1. **线名层点号转写**（`src/总入口.light`）\n   - `造线名` 四级确定性规则：① 固定线名表优先（核心 fs 四件套 read_file/write_file/\n     search_files/edit_file + bash，既有判据/文档/系统提示文案/示例按它们说话）→\n     ② 有语义名的工具把 `<域>.<动作>` 的 `.` → `__`（ctx.select_blocks → ctx__select_blocks）→\n     ③ 本来就合法的 ASCII 原样 → ④ 其余 `tool_<序>` 兜底。\n   - 新增 `线名转语义 / 语义线名 / 转写语义线名`：转写可逆、可查（旧名/语义名/线名三种\n     入参出同一条线名）；`回名` 改三级反查（线名表 → 线名转语义 → 原名）。\n   - 新增 `线名名单` 与 `模型面名表`：`跑一轮` 的 `本轮工具名表` = 注册名 + 线名（去重）。\n     注册名保留是给 `系统提示.工具在场` 的既有候选用，线名是模型真正收到的 function.name。\n   - 生产 standard 面实测线名：`bash, read_file, write_file, search_files, edit_file,\n     workflow__job_start/output/kill, skill__use, web__search/fetch, delegation__present,\n     workflow__todo_write, workflow__goal, workflow__ask_submit/answer_submit/ask_list/\n     answer_take, delegation__dispatch/collect, workflow__job_status, skill__list`\n     （22 件里 17 件 `域__动作`，5 件固定线名）。\n2. **白名单三口径等价**（`src/总入口.light`）\n   - `白名单命中` 增加「旧名 ↔ 语义名 ↔ 线名」归一（`归一语义键`；固定线名经\n     `固定线名反查表` 接回旧名）；无映射的插件名 / mcp__* 归一为空、不参与等价，防空键互配。\n   - 白名单表本身一字未改（T-0501 §7.4），`mcp__*` 通配仍走原分支。\n3. **判据**\n   - 新增 `tests/test_T0534_语义名上线.py`（3 例）：160 条映射逐条走真实 `兼容注册表.线名`\n     验转写规则/合法/≤64/可逆/不撞车；生产面形态数 == 实际可转写数且 ≥10（不许写 0 就过）；\n     白名单三口径等价；两条反证（老口径造线名 160 条全不转写；裸成员判定 22 件全注销）。\n   - `tests/test_T0488_生产面快照.py`：线名判据从「任意 ASCII」收紧为「`域__动作` 或固定\n     线名例外」，并断言形态数 == 实际可转写数。\n   - `tests/test_T0469_提示与工具面.py`（经用户授权追加路径）：旧口径「todo_write 线名 =\n     todo_write、目标 = tool_<序>」同步成 `workflow__todo_write` / `workflow__goal`。\n4. **文档**：`docs/工具命名规范.light.md` 新增 §5.5「模型面线名转写」（规则、固定线名例外、\n   可逆/可查口径、判据位置）。\n\n## 验证\n\n- Windows（本机 py3.12 + pytest 9.2）：卡面 4 条 23 passed；加 T0469/T0456 共 40 passed；\n  `examples/test_cli深化.light` PASS（其「首个工具名 = bash」断言靠 bash 固定线名保住）。\n- FreeBSD 192.168.0.88（~/t0534_tree，py3.12 + pytest 8.4.2）：同样 40 passed；\n  test_cli深化 / test_预设切换 示例与 `test_回归` 两条 example 门禁均绿。\n- 全量 `pytest -q tests`（Windows）：3020 例，14 red。逐条复核后：\n  · 1 条本卡引入 —— `test_回归::[test_cli深化.light]`（钉死 bash 线名）；已通过把 bash\n    列为固定线名消除，现绿；\n  · 13 条与本卡无关 —— `R23 词法边界`、`T0423 压缩遮蔽位`、`T0477::test_mcp工具无叶子`\n    （xdist worker 崩）、`T0508::分级回填 72≠75`、`T0426 端口回退`、`T0442 超时`、\n    `test_回归::[test_工作目录设置.light]`（Windows 路径分隔符）、`unit/test_fetch_deps_ps1`\n    ×2、`test_回归::[test_预设切换.light]`（并行下 worker 崩）、`unit/test_web服务器_退出`、\n    `unit/test_ci_台账口径`、`unit/test_会话占用释放`。\n    其中 6 条已用 HEAD 版 `src/总入口.light` 复现同样红，其余单跑即绿（并行/端口抖动）。\n- 波及面专项（Windows）：T0470/T0477/T0487/T0498/T0499/T0513/T0515/T0516/T0517/T0508/\n  T0511/T0482/R38/T0449/T0401/T0403/T0419/T0420/T0468/T0489 全跑，无本卡新增红。\n\n## 遗留 / 风险\n\n- 模型面 function.name 由 `tool_NN` 换成语义线名，但系统提示正文（规划段/工具选择段）仍按\n  旧名 `todo_write / web_search / goal` 说话；调用侧 `回名` 仍能解析旧名，故不致命，\n  提示文案同步属后续工作（收口报告已把 README / 快速开始 / API参考 同步列为后续项）。\n- `工具执行` 与 `总入口` 两套注册表口径仍并存（本卡只统一了「线名 → 语义名」的可逆映射，\n  未动 `工具执行` 的登记面，卡面红线要求不碰）。\n- `.temp/` 里的本地辅助脚本（0.88 同步/远端执行）不提交。\n\n> AI生成",
+  "error": "",
+  "declared_paths": [
+    "src/总入口.light",
+    "tests/test_T0488_生产面快照.py",
+    "tests/test_T0534_语义名上线.py",
+    "docs/工具命名规范.light.md"
+  ],
+  "changed_files": [
+    "docs/工具命名规范.light.md",
+    "src/总入口.light",
+    "tests/test_T0469_提示与工具面.py",
+    "tests/test_T0488_生产面快照.py",
+    "tests/test_T0534_语义名上线.py"
+  ],
+  "out_of_paths": [
+    "tests/test_T0469_提示与工具面.py"
+  ],
+  "lease_id": "aa546ce955d24e159f507e464874194d"
+}
