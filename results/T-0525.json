@@ -1,0 +1,61 @@
+{
+  "task": "T-0525",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0525",
+  "base": "main",
+  "head": "f914faca36cb671c37b759c54b6eb007a49a7fcd",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T07:23:06+08:00",
+  "finished_at": "2026-11-27T07:37:26+08:00",
+  "duration_s": 860.3,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0501_命名映射表.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".......                                                                  [100%]",
+        "7 passed in 21.60s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0502_改名与别名.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".....                                                                    [100%]",
+        "5 passed in 14.40s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0503_中英混合治理.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "...                                                                      [100%]",
+        "3 passed in 8.68s"
+      ]
+    }
+  ],
+  "summary": "# T-0525 工作说明\n\n## 做了什么\n把 `test_与真实注册表逐位一致` 从「长度硬等 + zip 逐位」改成两条互补、与环境无关的判据：\n1. 正向（前缀一致）：§6 的 160 条按登记序必须等于注册表最前 160 位的 `现名` + `域`；缺基线 /\n   移位 / 改名 / 域漂移逐条点名判红（追加只允许发生在末尾，顺序契约不放松）。\n2. 反向（未登记清单）：注册表里既不在 §6、也不在 `不上叶子表`、也不以 `mcp__` 开头的条目，\n   逐条点名判红，专抓真·漏登记。\n`不上叶子表` 由同一个 dump 驱动 `从 工具面装配 导入` 打印 `EXEMPT|` 行，测试里不留第二份名单。\n`len(reg) == len(ROWS)` 全等断言已删除，由上面两条补上更强约束；注册表与 `组装注册表` 一字未改。\n\n## 改了哪些文件\n- `tests/test_T0501_命名映射表.py`：dump 驱动加 `不上叶子表` 导出；新增 `_prefix_violations` /\n  `_unregistered` 与哨兵等待 `_dump`；新增自检 `test_判据自检_基线漂移与漏登记必红`（不依赖环境）。\n- `docs/工具命名规范.light.md`：新增 §6.1 豁免口径（权威范围=基线 160、两个豁免源及出处），\n  §8 第 6 条同步改写。\n\n## 验证（本机 Windows，全部实跑）\n- 不挂 MCP：REG=160 EXEMPT=125，正向/反向均空 → 7 passed。\n- 挂 MCP（examples/mcp_服务器.py，临时 mcp.json + HARNESS_MCP_CONFIG）：REG=162\n  （末尾 `mcp__t0525__echo` / `add`），正向/反向仍空 → 7 passed。\n- 反证：追加 `我的新工具` → 反向红并点名「我的新工具（域 其他）」；第 3 位改名 → 「登记序第 3 位\n  现名漂移：映射表=搜索文件 注册表=临时改名」；删一条基线 → 「基线工具在注册表里缺失（被删或改名）：搜索文件」\n  + 条数不足；追加 `注册成员`（不上叶子表）/ `mcp__fake__echo` → 不误伤。\n- `test_T0502_改名与别名` 5 passed、`test_T0503_中英混合治理` 3 passed，均无回归。\n\n## 遗留风险\n- 本机没有 hive/lightmem 真实 MCP 配置，199 条那档用「挂 MCP fixture」+ 上述反证等价覆盖；\n  若后续插件让基线工具在中段插入（而非末尾追加），正向前缀会红——属顺序契约预期，不是本卡放宽。\n- 真正全空的注册面（连核心四件套都没有）仍走 skip，但理由改为「注册面未装配」而非数量门槛。",
+  "error": "",
+  "declared_paths": [
+    "tests/test_T0501_命名映射表.py",
+    "docs/工具命名规范.light.md"
+  ],
+  "changed_files": [
+    "docs/工具命名规范.light.md",
+    "tests/test_T0501_命名映射表.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "d317c1d27adc46af8f115a4abdb56b20"
+}
