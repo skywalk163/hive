@@ -1,0 +1,52 @@
+{
+  "task": "T-0531",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0531",
+  "base": "main",
+  "head": "175efed2737b78acad6dbfa1535d3680a29b0187",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T15:52:49+08:00",
+  "finished_at": "2026-11-27T16:37:53+08:00",
+  "duration_s": 2704.7,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_回归.py -k \"会话模型选择\"",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".                                                                        [100%]",
+        "1 passed in 33.59s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/unit/test_会话占用释放.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".                                                                        [100%]",
+        "1 passed in 25.01s"
+      ]
+    }
+  ],
+  "summary": "# T-0531 工作说明\n## 取证结论：竞态（非永久钉死）\n④ 后按 10ms 轮询 `队是否忙`：忙标志在约 0.31~0.51s 翻回不忙，深度恒 0；⑤ 前打印 `busy=False depth=0`，此时再发 ⑤ 得 200。抓栈时后台跑线程已结束，只剩 T-0526 的 `排队唤醒循环`，未卡在 `队列.投递`/`跑一轮`。故按竞态分支修，不改产品侧 `src/web服务器.light`，不碰 T-0526 的 `唤醒停止`/`停止()`/`取队列闸门`。\n## 改动\n`examples/test_会话模型选择.light`：新增 `等本轮结束`，用 `队是否忙` 按 10ms 轮询、5s 超时即断言失败（无无限等/固定 sleep），仅在 ⑤ 前调用；④/⑤ 状态与落盘断言一字未改。\n`tests/unit/test_会话占用释放.py`（新增）：直调处理器发 `stream=true` 完全不消费返回体；同会话忙标志 ≤5s 翻回；随后 `stream=false` 要求 200。无 skip/xfail/flaky，pytest 60s 硬超时未改。\n两用例在断言全部完成后显式 `os._exit(0)` 收口：本分支未含 T-0526 的兜底线程退出修复，非守护线程会把解释器钉在退出阶段；该行不参与断言，T-0526 land 后可删。\n## 验证\n`python -m pytest -q tests/test_回归.py -k \"会话模型选择\"` → 1 passed（41.31s，基线 worker crash）。\n`python -m pytest -q tests/unit/test_会话占用释放.py` → 1 passed（37.63s）。改动仅上述两个允许路径，未改 `src/`。\n## 遗留风险\n本机编译 web服务器 模块图约 25~35s，单测子进程上限设 50s（非 pytest timeout）；更慢的验收机若总时长超 60s 需另减编译开销。`os._exit(0)` 是绕过 T-0526 的临时收口，若验收机已合入 T-0526 行为不变。",
+  "error": "",
+  "declared_paths": [
+    "examples/test_会话模型选择.light",
+    "src/web服务器.light",
+    "tests/unit"
+  ],
+  "changed_files": [
+    "examples/test_会话模型选择.light",
+    "tests/unit/test_会话占用释放.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "37f40b2099444f0abf4ac39a45de9b1f",
+  "fence": 1
+}
