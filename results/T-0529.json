@@ -1,0 +1,53 @@
+{
+  "task": "T-0529",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0529",
+  "base": "main",
+  "head": "c2d8a0d4bde79e85e7979c05afe0ca3032aeee55",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T14:23:43+08:00",
+  "finished_at": "2026-11-27T15:31:50+08:00",
+  "duration_s": 4087.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/unit/test_括号比较优先级.py",
+      "code": 0,
+      "tail": [
+        "0.02s call     tests/unit/test_括号比较优先级.py::test_括号组作比较左操作数_语义不反转[(\\u5047 \\u4e14 \\u771f) == \\u5047-\\u5bf9]",
+        "0.02s call     tests/unit/test_括号比较优先级.py::test_括号组作比较左操作数_语义不反转[((\\u771f \\u6216 \\u5047) == \\u5047)-\\u5426\\u5219]",
+        "",
+        "(5 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "10 passed in 15.62s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/unit -k \"括号 or 优先级\"",
+      "code": 0,
+      "tail": [
+        "0.02s call     tests/unit/test_lpd_006_行尾续行.py::Test对照_合法写法不受影响::test_括号内行尾加号续行仍正常",
+        "0.02s call     tests/unit/test_LH22_续行.py::TestLH22括号外续行::test_卡面原形_行首加上",
+        "0.02s call     tests/unit/test_括号比较优先级.py::test_括号组作比较左操作数_语义不反转[((\\u771f \\u6216 \\u5047) + 0) == 0-\\u5426\\u5219]",
+        "0.02s call     tests/unit/test_括号比较优先级.py::test_括号组作比较左操作数_语义不反转[(\\u5047 \\u4e14 \\u771f) == \\u5047-\\u5bf9]",
+        "24 passed, 4 warnings in 44.92s"
+      ]
+    }
+  ],
+  "summary": "# T-0529 收口说明（2026-11-27）\n\n## 结论先说\n\n`(A 或 B) == 假` 条件反转**不是 Windows 特有**，是**编译器版本缺陷**：`_fold_binary_spine`\n（R225/T-0445 引入的二元链迭代折叠）在左操作数优先级更低时，只给**整个节点**加括号，\n漏了给**左操作数**加括号，于是 `((A or B) == 假)` 发射成 `(A or B == False)`，被 Python\n按自己的优先级重读成 `A or (B == False)`。0.88 之所以\"正常\"，是因为它那份 `~/light-merge`\n是不带 T-0445 的旧副本（递归基线路径 `_generate_binary_chain_recursive` 的左操作数本来就\n带括号）。已用 A/B 证明：同一棵树上把 `_iterative_binary_chain` 置 False，\n`__generate_expr` 立刻回到正确的 `((甲 or 乙) == False)`。\n\n## 改了什么\n\n1. `src/code_generator.py` · `_fold_binary_spine`（唯一的生产改动，+14/−8）：\n   - `need_parens` 成立时把**累积左文本**括起来（`(a or b) == c`），而不是只括整节点；\n   - 左文本已被一对括号完整包裹时（`self._is_fully_parenthesized`）不再重复套，\n     避免深链平白加深嵌套（R225 改迭代本来就是为了躲 CPython 括号嵌套上限）；\n   - `@@contains@@` 走同一条统一判定（原来它在循环开头提前 continue，这次合并进来，\n     语义不变：`X 包含 Y` 仍是 `(Y in X)`，只是左操作数该括时也会括）。\n2. `tests/unit/test_括号比较优先级.py`（新增，10 条）：只断**可观察输出**（真跑一遍看走哪支），\n   覆盖 `(真 或 假)==假` / `(真 或 真)==假` / `(假 且 真)==假` / `(真 且 假)==假` /\n   双层括号 / `!= 假` / 同优先级比较 `(1 == 2) == 假` / 低优先级左操作数接算术 `((真 或 假)+0)==0`，\n   外加\"先赋值再比较\"对照与\"无括号普通逻辑/算术链不变\"的反向保护。\n3. `tests/unit/test_stdlib_import_consistency.py`（+57/−13）：**只为让卡面验收命令能在\n   Windows 上跑起来**。它原来在**模块级** `subprocess.run([\"grep\", …])`，Windows 无 grep →\n   collection 阶段直接 `FileNotFoundError: [WinError 2]`，于是\n   `pytest -q tests/unit -k \"括号 or 优先级\"` 不论挑谁都会红（POSIX 判据假失败）。\n   换成等价的 `os.walk + re` 扫描（同样递归 tests/、同样排除 `__pycache__` 与本文件），\n   判据口径不变。这不是\"转绿\"，是让判据在声明平台上真的可执行。\n\n## 验证（Windows 10 / python 3.13.18，本机）\n\n- 双向证明：把 `src/code_generator.py` 退回 HEAD 跑新判据 → **6 failed, 4 passed**；\n  装回修复 → **10 passed**（manufactured 红/绿，证明确实命中缺陷，不是空判据）。\n- 卡面命令1：`python -m pytest -q tests/unit/test_括号比较优先级.py` → **10 passed**。\n- 卡面命令2：`python -m pytest -q tests/unit -k \"括号 or 优先级\"` → **24 passed**（修 grep 前是 4 errors）。\n- 反向不破坏：`python -m pytest -q tests/unit` 全层 → **5773 passed, 97 skipped, 2 xfailed,\n  11 failed**；11 条逐条看过，全是本机环境缺件（`psutil` 未装 3 条、`antlr4` 未装 4 条、\n  `grep`/临时目录缺失 1 条、时间戳对拍偏差 1 条、凭证钩子 1 条），**没有一条与括号/优先级\n  或本次 codegen 改动有关**（改前同样红，属既有环境红，未登记、未绕过）。\n- lightharness 连带（在 T-0526 的 worktree 里把 `LIGHT_MERGE` 指向本 worktree）：\n  `examples/test_web路由.light` 不再报 `字号必须是数字: 14`，现在是既有缺陷\n  `断言失败[R107_预设页_内置卡数==预设数] 实际=4 期望=9`（0.88 基线上同样 4 vs 9，\n  属设置页/预设清单不同步，另卡处理）。即：**编译器这一层的红色消失了**。\n\n## 没做 / 边界\n\n- `light6.py` 未改（缺陷在 `src/code_generator.py`，`light6.py` 只是入口）。\n- 0.88 上的复跑没做：它的 `~/light-merge` 是旧副本（不带 T-0445），本来就走正确路径；\n  要复现得先把 0.88 的编译器更新到 `700eb12b0`。**这条是本次没收口的部分**，\n  若判据要求\"双平台必跑\"，需要先把 0.88 的编译器副本同步到同一提交再做对照。\n- 5 条环境红（psutil/antlr4/grep/时间戳/凭证钩子）未登记进 `tests/ci_environment_reds.txt`：\n  那是门禁台账，属主控口径，不由本卡私自改。\n\n## 风险\n\n- `_is_fully_parenthesized` 判断依赖括号配对扫描（含 `<`/`[`）；光明的类型标注在**表达式**\n  文本里几乎不会出现（那是声明侧），且原有 `_map_type` 已用同一函数，风险面与既有实现一致。\n- 只改发射文本的括号，不改 AST、不改结合顺序；`tests/unit` 全层 5773 绿即是回归面证据。",
+  "error": "",
+  "declared_paths": [
+    "light6.py",
+    "tests/unit"
+  ],
+  "changed_files": [
+    "src/code_generator.py",
+    "tests/unit/test_stdlib_import_consistency.py",
+    "tests/unit/test_括号比较优先级.py"
+  ],
+  "out_of_paths": [
+    "src/code_generator.py"
+  ],
+  "lease_id": "c17b85e5db5241f687445f7d9619b908"
+}
