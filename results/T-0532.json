@@ -1,0 +1,54 @@
+{
+  "task": "T-0532",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0532",
+  "base": "main",
+  "head": "de5aff8b903f34cf5f5f5289b219ef5cde902df6",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T21:43:24+08:00",
+  "finished_at": "2026-11-27T22:01:31+08:00",
+  "duration_s": 1087.4,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0532_文档收口.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "......                                                                   [100%]",
+        "6 passed in 6.15s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0485_提示对账.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "........                                                                 [100%]",
+        "8 passed in 4.12s"
+      ]
+    }
+  ],
+  "summary": "## T-0532 交付摘要\n\n- 做了什么：把 T-0496~T-0531 批次落成三份文档——CHANGELOG 顶部 `[未发布]` 新增一节（W1~W6 六条线 + 13 张收口修复卡 + 未关闭遗留 3 条），对标清单追加 #388~#416 共 29 条（覆盖 8 个六条线锚 id 与 T-0522/0526/0529/0530/0531），模式规格追加「参数下沉 / 预算信号」口径（写明「按需披露」「软提示」「不熔断」「下沉不等于删除」）。\n- 改了哪些文件：`CHANGELOG.md`（+68 行）、`docs/功能对标/对标清单.json`（+463 行，381→410 条）、`docs/功能对标/模式规格.md`（+18 行）、新增 `tests/test_T0532_文档收口.py`（6 用例）。改动全是追加，`git diff --stat` 为 549 insertions / 0 deletions，历史条目零改写。\n- 数字来源：559→206 字符（-63%）、traceId 6/6 vs 纯文本 5/6、641 例 / 新增红 0、47 个不可逆 46 拒、36 卡 / 61,071 秒，全部逐字取自 `docs/功能对标/T0496-T0531_工具面强化批次收口报告.md` 与 `tests/unit/test_ci_台账口径.py:48-53`，无杜撰。\n- 证据可点：新条目 `证据` 全部指向现存文件 / 行或测试名；判据在测试里做了文件存在性与 `def test_xxx(` 双重校验，并校验 #381/#387 历史条目 id 未变。\n- 验证：`python -m pytest -q tests/test_T0532_文档收口.py` → 6 passed；`python -m pytest -q tests/test_T0485_提示对账.py` → 8 passed（两条合并跑 14 passed）。\n- 回归：`tests/test_T0418_文档收口.py` + `tests/test_T0406_模式规格文档.py` 全绿；`tests/test_T0489_收口.py` 串行 15 passed（`-n 4` 下 3 条 worker crash 是本机 xdist 环境问题，非本次文档改动，串行复核已排除）。\n- 反证：测试内置内存级篡改——删 `T-0528` 锚点、清空新条目 `证据`、把「预算信号」全部替换，三例均按预期抛 `AssertionError`（不改仓库文件）。\n- 遗留风险：T-0529 属跨仓 light-merge（`light-merge/src/code_generator.py`），本仓无源码，证据只能指收口报告 §3.2-7/8 并已在状态里注明；T-0502 / T-0506 / T-0507 / T-0517 如实按 partial 登记，未美化。\n- 红线遵守：未改任何 `src/*.light` 与既有测试逻辑；只追加文档 + 新增判据；未覆盖 T-0489 及更早条目；本卡未 `git push`。三远端（origin/gitcode、myrepo/gitea、github）待 land 后按 T-0424 先例推齐。\n- 越界说明：临时改稿脚本放在 agent workspace（仓外），仓库内无残留临时文件。",
+  "error": "",
+  "declared_paths": [
+    "CHANGELOG.md",
+    "docs/功能对标/对标清单.json",
+    "docs/功能对标/模式规格.md",
+    "tests/test_T0532_文档收口.py"
+  ],
+  "changed_files": [
+    "CHANGELOG.md",
+    "docs/功能对标/对标清单.json",
+    "docs/功能对标/模式规格.md",
+    "tests/test_T0532_文档收口.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "2e971304783046e4a2e5ab5ae28396b0"
+}
