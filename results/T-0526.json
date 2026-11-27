@@ -1,0 +1,68 @@
+{
+  "task": "T-0526",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0526",
+  "base": "main",
+  "head": "75c6b6f01d65994c93d420b36ed99044656ec7b6",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T18:46:58+08:00",
+  "finished_at": "2026-11-27T18:50:34+08:00",
+  "duration_s": 216.8,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/unit/test_web服务器_退出.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".                                                                        [100%]",
+        "1 passed in 80.07s (0:01:20)"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_回归.py -k \"R41_真实IO端到端 or R41_真实网络IO or 流式推流E2E or web路由 or 会话模型选择\"",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".....                                                                    [100%]",
+        "5 passed in 63.07s (0:01:03)"
+      ]
+    }
+  ],
+  "summary": "# T-0526 收口说明（2026-11-27，第二轮：合入 main 后重跑）\n\n## 本轮做了什么\n\n1. `task/T-0526` 之前只基于 main `e940664`，而 main 已经往前走了（T-0527 / T-0530 / T-0531 等），\n   第一轮 verify 的两条红（`web路由` 预设数 4≠9、`会话模型选择` 202≠200）都已被上游卡修掉。\n   本轮把 `origin/main`（`58c771b`）**合入** `task/T-0526`（合并非重置，无 force push），head = `e37f9f0`。\n2. 合并唯一冲突在 `src/web服务器.light` 的 `取队列闸门()`：main 侧（T-0530 收口）把兜底线程改成了守护线程，\n   本卡侧（T-0526）加了 `唤醒停止` 标志与 `停止()` 里的 join。两边**互补、不是二选一**，解法：\n   - 起线程条件取本卡版本 `如果 己.唤醒停止 == 假 且 己.唤醒线程 == 空:`；\n   - 起法取 main 版本 `创建线程(排队唤醒循环, 己, 守护线程=真)`（保留「创建线程即启动、勿再调 开始()」的注释）；\n   - 两段注释都保留，写清「守护是最后一道保险，正常路径靠 停止() 置标志 + join 收」。\n   合并后 `唤醒停止` 的四处在位：属性区 223、`构造` 258、`配置()` 复位 333、`停止()` 置真 370；\n   `排队唤醒循环` 的退出判断在 2956-2960，语义未变（2s 整段睡眠，不切片）。\n\n## 验证（Windows 10 / python 3.13.18，合并后的树）\n\n- 卡面命令1：`python -m pytest -q tests/unit/test_web服务器_退出.py` → **1 passed in 99.04s**\n  （3 条场景顺序跑：流式推流E2E / R41 真实网络IO / 同实例起停往返；阈值 35s/40s 未动）。\n- 卡面命令2：`python -m pytest -q tests/test_回归.py -k \"R41_真实IO端到端 or R41_真实网络IO or 流式推流E2E or web路由 or 会话模型选择\"`\n  → **5 passed in 78.20s**（上一轮 3 passed / 2 failed）。\n- 上一轮那两条红的归属（都在本卡改动面之外，已由上游卡合入 main）：\n  - `web路由` 的「字号必须是数字: 14」= T-0529（`src/code_generator.py` 迭代折叠丢括号，已 land）；\n  - `web路由` 的 `R107 预设数 4≠9` = T-0530（判据口径按类别对齐 + 各组合计==全量）；\n  - `会话模型选择` 的 `202 vs 200` = T-0531（直调不消费流时上一轮仍占着会话）。\n\n## 本卡自身的改动（未变，供复核）\n\n- `src/web服务器.light`：新增 `属性 唤醒停止`；`构造` 初始化；`配置()` 起服务（含同实例「停止→再起」）时复位为假；\n  `停止()` 先置真、再 `join(3)`、确认退出后把引用置空（可重复调用，未起线程 no-op），最后仍照旧 `己.服务端.停止()`；\n  `排队唤醒循环` 在睡眠前/后各查一次 `服务.唤醒停止`，见真返回；`取队列闸门()` 只在未停止且无存活线程时起线程。\n  没动 `examples/*.light`，没动 `stdlib/线程.light`，没登记 flaky、没加宽 timeout。\n- `tests/unit/test_web服务器_退出.py`（新增）：三个场景在同一个测试里顺序跑（避免 `-n 4` 并发编译抢 CPU 假红），\n  每个场景用 `%TEMP%` 短目录做 cwd（`tempfile.mkdtemp(prefix='t0526_')`；第一轮踩过 pytest `tmp_path` 长路径\n  撞 Windows 260 字符上限 → 会话保存 `WinError 3` 假红），`_must_exit` 只对 `TimeoutExpired` 补一次重试；\n  阈值 `WALL_LIMIT=35s / SUB_TIMEOUT=40s`（原挂死态是「永不返回」，实测 >=90s，无假绿空间）。\n\n## 风险\n\n- 合并后 main 的守护线程口径与本卡的停止标志叠加：`停止()` 之后既不起新线程也不再 join；若将来有人在\n  `停止()` 里把 `唤醒停止` 复位（现无此路径），守护线程仍随进程退出被回收，不会挂死。\n- `停止()` 的 `join(3)` 上限 3s，2s 睡眠下最坏一个周期内退出，实测无超时。",
+  "error": "",
+  "declared_paths": [
+    "src/web服务器.light",
+    "stdlib/线程.light",
+    "tests/unit/test_web服务器_退出.py"
+  ],
+  "changed_files": [
+    "src/web服务器.light",
+    "tests/unit/test_web服务器_退出.py",
+    "_sm_sess/--G-dswork-duan-light-merge-.worktrees-doubao-win-T-0526--/session_20261127_153736_e84bf3/session.jsonl",
+    "_sm_sess/session-models.json",
+    "_w3_webui/app.js",
+    "_w3_webui/index.html",
+    "_w3_webui/settings.css",
+    "_w3_webui/settings.js",
+    "_w3_webui/slash-palette.js",
+    "_w3_webui/style.css"
+  ],
+  "out_of_paths": [
+    "_sm_sess/--G-dswork-duan-light-merge-.worktrees-doubao-win-T-0526--/session_20261127_153736_e84bf3/session.jsonl",
+    "_sm_sess/session-models.json",
+    "_w3_webui/app.js",
+    "_w3_webui/index.html",
+    "_w3_webui/settings.css",
+    "_w3_webui/settings.js",
+    "_w3_webui/slash-palette.js",
+    "_w3_webui/style.css"
+  ],
+  "lease_id": "84b1479b61bd4bebb1a21335e07d3311"
+}
