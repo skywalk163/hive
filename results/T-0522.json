@@ -1,0 +1,55 @@
+{
+  "task": "T-0522",
+  "agent": "workbuddy-win11",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0522",
+  "base": "main",
+  "head": "eb3ad648a543209deedd976e1a9a157ee44a6f44",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T07:21:28+08:00",
+  "finished_at": "2026-11-27T08:09:37+08:00",
+  "duration_s": 2889.7,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0468_MCP挂载.py tests/test_T0478_技能段.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "..................                                                       [100%]",
+        "18 passed in 93.39s (0:01:33)"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0498_MCP叶子与技能顺序.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".....                                                                    [100%]",
+        "5 passed in 32.84s"
+      ]
+    }
+  ],
+  "summary": "# T-0522 工作说明\n\n## 做了什么\n\n1. **D1 · MCP 工具自持叶子**：`工具名到叶子` 段首新增 `mcp__` 分支，真挂载的 MCP 工具按「自身即叶子」\n   返回 `[名字]`，装配挂载集里从此看得见 MCP 工具（原来 `MAP_MCP` 空串 → `造条目表带映射` 给不出条目）。\n   数据来源侧新增 `工具面装配.MCP挂载工具表`（真挂载登记表）+ `登记MCP挂载工具` / `是已挂载MCP工具`；\n   `组装注册表` 在 `挂载MCP服务器` 之后把 `已注册` 名单登记进去。\n2. **D2 · 技能清单顺序确定**：`发现技能` 改为「每个扫描根收一组 → 组内按技能名排序 → 按固定组序追加」，\n   `收集目录技能` 的目录项也先 `排序列表`（同名去重谁赢不再取决于 readdir 序）。\n   顺序契约写进注释：主根 `skills/` → 主根 `.skills/` → 额外根，组内按技能名升序。\n3. 新增判据 `tests/test_T0498_MCP叶子与技能顺序.py`（5 条）：真挂载 MCP 有自持叶子且进挂载集、\n   臆造 mcp__ 名无叶子（守 T-0477/T-0491 口径）、静态反跑锚、技能顺序 + 两次调用逐字相同、\n   shadow 反跑（去掉组内排序 → 顺序用例立红，证明不是假绿）。\n\n## 关键取舍（请复核）\n\n任务卡 D1 给的写法是「无条件 `开头(名字,\"mcp__\")` → 返回 [名字]」。但 T-0477 / T-0491（均晚于 T-0468，\n且 T-0491 就是为 T-0469 的 MCP 断言做的修复）把「人造 mcp__ 名硬塞叶子」钉成了反跑锚点：\n`tests/test_T0469_提示与工具面.py:460`、`tests/test_T0477_工具面白名单.py:264` 都断言\n`工具名到叶子(\"mcp__demo__echo\") == []`。无条件版本会让这两条（当时全绿）立刻变红。\n故按**数据来源侧**收窄为「只对真挂载出来的 MCP 工具自持叶子」：真挂载 → 自持叶子；凭空塞进注册表的\n臆造名 → 无叶子（去留仍由 `mcp__*` 通配 + `HARNESS_MCP_TOOLS` 决定）。这样 T-0468 两条红转绿，\nT-0469/T-0477/T-0491 保持绿，且没有改动任何判据文件。\n\n## 改了哪些文件\n\n- `src/总入口.light`：导入登记函数；`组装注册表` 登记已挂载 MCP 工具名；`工具名到叶子` 增 `mcp__` 分支。\n- `src/工具面装配.light`：新增 `MCP挂载工具表` + `登记MCP挂载工具` + `是已挂载MCP工具`（导出 2 项）。\n- `src/技能目录.light`：`收集目录技能` 目录项排序；新增 `技能名键` / `技能组排序`；`发现技能` 分组排序后合并。\n- `tests/test_T0498_MCP叶子与技能顺序.py`：新增（本卡判据）。\n- 未改 `src/提示_MCP段.light` / `src/提示_技能段.light` 文案；未改任何既有判据。\n\n## 验证\n\n- `pytest -q tests/test_T0468_MCP挂载.py tests/test_T0478_技能段.py` → **18 passed**（基线 2 failed）。\n- `pytest -q tests/test_T0498_MCP叶子与技能顺序.py` → **5 passed**。\n- 防回归（串行 `-n 0` 跑）：T0489 15 passed、T0487 9 passed、T0488 8 passed、T0469 10 passed、\n  T0477 9 passed、T0456 7 passed、T0419/T0448/T0451 合计 17 passed、T0481 通过。\n- 观测：真挂载后 `MAP_MCP=mcp__<服务器>__echo`、`MCP在挂载集=1`、`未映射(应=0)=0`；\n  技能顺序 `alpha,zeta,beta`（+额外根 `omega`），两次调用逐字相同。\n\n## 遗留风险\n\n- `pytest -n 4` 在本机跑 T0489/T0469 时会偶发 `worker crashed`（同一现象在改动前的基线也出现，\n  与本卡改动无关）；串行全绿。判据本身无 skip/xfail。\n- 自持叶子依赖「装配期先 `组装注册表`」这一点：`工具名到叶子` 是纯函数，叶子依据来自装配期登记表，\n  进程外单独调用（未经挂载）会得到 `[]` —— 与 T-0477 的「臆造名无叶子」口径一致，属有意为之。\n- 未跑的既有红：`tests/test_T0403_新模式预设.py::test_工具集按规格表_装配层`（bottomup 17 < 20）。\n  已用 `git stash` 在基线复现，属其它分组遗留，不在本卡范围。",
+  "error": "",
+  "declared_paths": [
+    "src/总入口.light",
+    "src/工具面装配.light",
+    "src/技能目录.light",
+    "tests/test_T0498_MCP叶子与技能顺序.py"
+  ],
+  "changed_files": [
+    "src/工具面装配.light",
+    "src/总入口.light",
+    "src/技能目录.light",
+    "tests/test_T0498_MCP叶子与技能顺序.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "eba386bbfa86499d8ad22b187a55e6c4",
+  "fence": 1
+}
