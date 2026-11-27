@@ -1,0 +1,68 @@
+{
+  "task": "T-0521",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0521",
+  "base": "main",
+  "head": "d5395a0c2bc620069986f8906117f1804b72cdf4",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T08:05:56+08:00",
+  "finished_at": "2026-11-27T08:09:09+08:00",
+  "duration_s": 193.9,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0403_新模式预设.py tests/test_T0407_收口接线.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "....................                                                     [100%]",
+        "20 passed in 70.61s (0:01:10)"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0497_预设分组契约.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".                                                                        [100%]",
+        "1 passed in 24.40s"
+      ]
+    }
+  ],
+  "summary": "# T-0521 交付说明（装配层 / 预设契约 6 条）\n\n## 做了什么\n- D6 400 文案：`预设组合.解析组合` 的未知预设错误改为「未知预设：X（可用：standard / ptc / … / lazy）」，新增 `可用预设文案()`（用两张静态清单拼，错误路径不顺手建 9 份行表）。`web服务器` 的 400 直接透传这条错误，故未改 web 层。\n- D1 预设分组（**判定：实现权威**）：数据层 `预设分组()` 是 2 维（agent/method，T-0441 正交语义），设置页是 3 组（两维 + 自定义空组，T-0439 分层语义）——「2 vs 3」是两个层次，不是矛盾。改两条示例按 3 组断言并钉住 4/5/0、组序、两组合并==预设清单()（比旧断言更强）。\n- D2 内置组件数（**判定：实现权威**）：`test_设置页` 5d 由「首组==预设清单()(9)」改为「Agent 模式组==代理预设清单()(4)」+ 新增「工作方法组==5」+ 组数==3。\n- D3 条目表自洽：`test_预设切换` 10c 改为「挂载+跳过 == 造条目表带映射(注册表) 实算长度」，跳过数改为「表长-挂载」推导（实测 3/37，旧口径 10 已随 T-0448/T-0477 收口过时）。\n- D4 ptc 工具表（**判定：实现权威**）：`test_预设挂载对话内切换` 4a/5a/3a/6a/6b 不再写死 4/1，改为 `白名单(标识) ∩ 全量注册表名单` 现算（实测 minimal=1、ptc=cordis=22）。\n- D5 bottomup 件数（**判定：实现权威**）：白名单收口是刻意的，bottomup=17、lazy=18、brainstorm=12 是收口后的正确面；`test_T0403` 装配层改为「装配 == 白名单∩注册表」精确对拍 + 按档下限（standard 类 20 / bottomup 16 / lazy 17 / brainstorm 10 / minimal 钉死 1），未加长白名单。\n- 新增 `tests/test_T0497_预设分组契约.py`：钉住「数据层 2 维 ↔ 呈现层 3 组」三处同源（设置预设页/设置页深化/设置页），单一用例起一次探针（xdist 并起 .light 会撑爆 worker）。\n\n## 改了哪些文件\n- 卡内：`src/预设组合.light`、5 个示例、`tests/test_T0497_预设分组契约.py`（新建）。\n- **卡外（已就地说明，请 worker 复核）**：\n  1. `tests/test_T0403_新模式预设.py` —— 卡内 D5「修法方向」明确要求把判据改成按预设分档，属授权外溢；另按 T0456 先例给三条装配层用例加 `@pytest.mark.timeout(300)`（整仓编译单跑 35–37s，默认 60s 与并跑不匹配会被 worker kill）；\n  2. `src/设置页.light` —— 修 D2 后示例 `test_设置页` 露出 8f（fontSize=12 边界判非法）：根因是 `(是整数(新值) 或 是浮点(新值)) == 假` 踩光明优先级坑（`==` 比 `或` 先结合且括号不救），恒真 → 一切数字都被判「必须是数字」。改成「两判各与 假 比再 且」。这是修 D2 的必要前置，无其它卡覆盖该文件。\n\n## 验证（T-0523 已合入后重跑，三条全绿）\n- `python -m pytest -q tests/test_T0403_新模式预设.py tests/test_T0407_收口接线.py` → **20 passed**。\n- `python -m pytest -q` 5 个示例 `test_example_exit_code[...]` → **5 passed**。\n- `python -m pytest -q tests/test_T0497_预设分组契约.py` → **1 passed**。\n- 相关回归：T0439/T0441/T0406（30 passed）、T0477/T0456/T0421（23 passed）。\n- 反证：把 `设置预设页.分组列表` 改回 2 组 → 契约用例立红（`('预设页','分组数应为 3…','2')`），已还原。\n\n## 说明\n- 白名单未加长；`tests/ci_environment_reds.txt` / `flaky_registry.txt` 未动。\n- 上一轮 verify 的两条红（goal/change 未落事件、起服务冷启动撞 60s）经确认属 T-0523，已随其合入消失；本轮为 merge origin/main 后的干净分支重跑。",
+  "error": "",
+  "declared_paths": [
+    "src/预设组合.light",
+    "src/工具面装配.light",
+    "src/预设切换.light",
+    "src/系统提示.light",
+    "examples/test_设置页.light",
+    "examples/test_设置页深化.light",
+    "examples/test_设置预设页.light",
+    "examples/test_预设切换.light",
+    "examples/test_预设挂载对话内切换.light",
+    "tests/test_T0497_预设分组契约.py"
+  ],
+  "changed_files": [
+    "examples/test_设置页.light",
+    "examples/test_设置页深化.light",
+    "examples/test_设置预设页.light",
+    "examples/test_预设切换.light",
+    "examples/test_预设挂载对话内切换.light",
+    "src/设置页.light",
+    "src/预设组合.light",
+    "tests/test_T0403_新模式预设.py",
+    "tests/test_T0497_预设分组契约.py"
+  ],
+  "out_of_paths": [
+    "src/设置页.light",
+    "tests/test_T0403_新模式预设.py"
+  ],
+  "lease_id": "8e5e66b23c3b4a37b7e216cbd952a77d"
+}
