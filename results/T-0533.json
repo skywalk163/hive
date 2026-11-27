@@ -1,0 +1,63 @@
+{
+  "task": "T-0533",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0533",
+  "base": "main",
+  "head": "55b64e896d900bc930a6d6fcd9e2a7d343f5afa8",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T21:44:52+08:00",
+  "finished_at": "2026-11-27T22:11:44+08:00",
+  "duration_s": 1612.8,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_T0508_可逆性分级.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".....                                                                    [100%]",
+        "5 passed in 29.08s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0533_可逆性基线漂移.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        ".....                                                                    [100%]",
+        "5 passed in 30.21s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_T0511_守卫一致性回归.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "..........                                                               [100%]",
+        "10 passed in 44.08s"
+      ]
+    }
+  ],
+  "summary": "# T-0533 工作说明：可逆性判据基线漂移根治（160 vs 168 环境无关化）\n\n## 做了什么\n\n- `tests/test_T0508_可逆性分级.py`（改写判据）：\n  - 删掉写死的计数断言（`75/40/5/48` + 表 168 条）；改为从真实 `组装注册表()` 的 dump\n    实时推导：逐名 `档:<名>=<级别>` 还原档位图，四档计数从档位图聚合，\n    只断言「未分级 0 + 非法档位 0 + 并集 == 总数 + 四档求和 == 总数 + 统计 == 逐名 dump」。\n  - 静态表 168 项作为**超集**保留：断言「表条数 >= 注册表总数」，不随注册表裁剪，\n    也不要求等于某个具体数字。\n  - `test_关键工具档位与不可逆风险面` 逐名钉住 33 个关键工具（含 T-0508 已钉过的\n    `present`/`skill`/宿主/命令类：`读文件`/`bash`/`写入终端`/`SSH执行` 等），\n    并断言关键工具必须在当前注册表里（防「靠删工具假绿」）；160/168 两环境都覆盖。\n  - 查询语义 / fail-closed / 注册接口回填 / 文档可复核 4 个用例保持原判据不变。\n  - 文首与 `docs/风险分级规范.light.md` 对齐：显式标注环境无关化口径。\n\n- `docs/风险分级规范.light.md`（§2 / §7 同步）：\n  - §2：`未分级 0` 改为「环境无关不变量」，计数从 dump 实时推导；静态表 168 项\n    说明为**超集**（含随插件开关位移的 8 个团队/交付/会话工具）。\n  - §7：删掉过时的 `read_only 75 / reversible 40 / semi 5 / irreversible 48`\n    基线断言句；改为「静态表 168 项超集 vs 真实注册表 160/168 四档浮动」分开表述，\n    160/168 数字标为实测参考、**不写死在断言里**；给出可复跑的取数命令；\n    注明 T-0511 钉住运行时 160/72/36/5/47 与本卡静态判据互不耦合。\n\n- `tests/test_T0533_可逆性基线漂移.py`（新增防回潮判据，5 个用例）：\n  - AST 反写死：扫 T0508 源码里 `assert kv[...档位...] == 数字/数字字符串` 形状，\n    命中即红；文档不许残留 75/40/5/48 基线句。\n  - 保留关键工具逐名断言形状检查（>= 5 个，含横切/宿主/命令类）。\n  - 真实注册表双环境计数自洽（160 / 168 都接受，计数不写死）。\n  - 反证 1：删掉某工具档位 → 未分级 > 0 立红。\n  - 反证 2：`irreversible` 改成 `reversible` → 关键档位立红；恢复后全绿。\n\n## 红线遵守\n\n- 未改 `src/工具面装配.light` 的分级表本体（168 项静态超集保持原样）。\n- 未改 `src/工具执行.light` / `src/工具_路径安全.light` 的守卫逻辑。\n- 未把 160/168 差异登记成 flaky 或环境红；判据环境无关地覆盖两者。\n- 未改 `tests/test_T0511_守卫一致性回归.py`。\n\n## 验证\n\n- Windows worktree（REG=160，72/36/5/47）：\n  - `python -m pytest -q tests/test_T0508_可逆性分级.py` → 5 passed\n  - `python -m pytest -q tests/test_T0533_可逆性基线漂移.py` → 5 passed\n  - `python -m pytest -q tests/test_T0511_守卫一致性回归.py` → 10 passed\n- 把改后的判据临时复制到 `~/lightharness`（REG=168，75/40/5/48，插件开关打开）复跑：\n  - T0508 + T0533 合并跑 → 10 passed（验证后已还原该 checkout，未留改动）\n- 计数从 dump 实时推导，两种环境均绿；未使用 POSIX 判据语法，Windows 无 exit 255 假失败。",
+  "error": "",
+  "declared_paths": [
+    "tests/test_T0508_可逆性分级.py",
+    "docs/风险分级规范.light.md",
+    "tests/test_T0533_可逆性基线漂移.py"
+  ],
+  "changed_files": [
+    "docs/风险分级规范.light.md",
+    "tests/test_T0508_可逆性分级.py",
+    "tests/test_T0533_可逆性基线漂移.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "f568580954644dbf96f41b7e6f5450cb"
+}
