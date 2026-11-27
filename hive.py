@@ -1509,6 +1509,58 @@ def store_close(tid: str, done: bool = True, note: str = "") -> dict | None:
         return None
 
 
+def store_reopen_reset(tid: str, card: dict | None = None) -> dict:
+    """reopen 的 store 侧清理：置回 ready，清掉陈旧结果 / 租约 / 归档待办。
+
+    T-0535（T-0497 现场）：`cmd_reopen` 过去只改 Git 卡面、删 Git 侧 res/claim
+    分支，**leader store 完全没动** —— store 里任务仍是 `done`、还留着归档结果，
+    `hive_claim` 的 store 闸门（E_CLOSED / E_HAS_RESULT）直接把卡挡回去，只能
+    人工 `store_retry`。这里把那次人工动作固化进 reopen 的正常路径。
+
+    只走 store 协议里已有的动作（hive_store / hive_cluster 不在本卡可改路径内）：
+      1. ingest 本机 Git 卡面：leader 起始后新建的卡可能缺行，retry 会补出一行
+         只有 id 的占位记录；先把定义送进去，标题 / 仓库等字段不丢。已有行时
+         ingest 只补定义，不动运行时 state。
+      2. retry(clear_result=True)：tasks.state 写回 ready、owner 清空、claims 行
+         删除、results 行删除 —— 归档结果随之消失，archive_pending 自然归零，
+         于是 claim 不会再被「已关闭 / 已经有结果」挡住。
+
+    副作用：store 的 `tasks.retries` 会像 retry 一样 +1（协议里唯一能清结果并
+    置回 ready 的动作就是 retry；卡面 retries 不动，且只有「有有效租约」时
+    store 的 retries 才覆盖卡面，不影响 claim/submit/land 的正常判定）。
+
+    **失败一律抛出**：调用方必须在写 Git 卡面之前失败，否则就会留下
+    「Git ready、store done」的半状态 —— 正是 T-0497 卡住人的那种状态。
+    """
+    if isinstance(card, dict):
+        try:
+            store_ingest_card(tid, card)
+        except StoreCallError as exc:
+            if exc.kind != "unsupported":
+                raise
+            # 旧版 leader 没有 ingest 动作：跳过补登记，retry 照样能置回 ready。
+            log(f"{tid} 的 leader 不认识 ingest（旧协议），跳过补登记")
+    out = store_call("retry", {"task": tid, "agent": "", "clear_result": True})
+    # 写完必须核实：leader 回的是新的 task 行。状态没回到 ready 就是协议/旧版
+    # 节点没按预期清，宁可当场报错，也不能让「Git ready、store 还是 done」静默过关。
+    row = (out or {}).get("task") or {}
+    if str(row.get("state") or "") != "ready":
+        raise HiveError(
+            f"{tid} store 侧清理后状态仍是 {row.get('state')!r}（应为 ready）；"
+            f"leader 可能是不识别 clear_result 的旧版节点，请升级后再重开")
+    return out
+
+
+def store_reopen_rollback(tid: str, old_state: str) -> dict | None:
+    """reopen 在 Git 侧失败时的补偿：把 store 退回重开前的终态。
+
+    只是把状态写回 done/closed 让闸门继续生效；被清掉的结果内容不会恢复
+    （原文本仍在 Git 的 res/<tid> 历史里）。调用方应把两侧状态一起报给用户。
+    """
+    return store_call("close", {"task": tid, "done": old_state == "done",
+                                "note": f"reopen {tid} 在 Git 侧失败，回滚"})
+
+
 # --------------------------------------------------------------------------- #
 # verify 执行：Windows 上给 POSIX 惯用法垫一层（hive_compat.py）
 # --------------------------------------------------------------------------- #
@@ -3408,6 +3460,31 @@ class Hive:
         clear_local_lease(tid)
         log(f"{tid} 已{'关闭（完成）' if done else '关闭（作废，卡面 state=closed）'}")
 
+    def _store_mismatch_note(self, tid: str) -> str:
+        """终态判断失败时补一句 store 侧实况（只读本机副本，读不到就沉默）。
+
+        T-0535 的另一半：旧版 reopen 只改了 Git，会留下「Git ready、store done」
+        的半状态 —— 人再跑 reopen 只会撞上「不是终态卡」，看不出真正的原因。
+        这里把两侧不一致说明白，让人知道该先清 store，而不是去怀疑卡面。
+        """
+        if claim_backend() != "store":
+            return ""
+        store = local_store()
+        if store is None:
+            return ""
+        try:
+            row = store.task(tid) or {}
+            state = str(row.get("state") or "")
+            has_result = store.result_info(tid) is not None
+        except Exception:  # noqa: BLE001  诊断提示不能反过来弄挂命令
+            return ""
+        if not (state in ("done", "closed") or has_result):
+            return ""      # store 与 Git 都是活卡，两侧没分歧，不用补话
+        return (f"；另外本机 store 里这张卡是 {state or '（空状态）'}"
+                + ("、还留着陈旧结果" if has_result else "")
+                + f" —— 两侧不一致（多半是旧版 reopen 只改了 Git）。先让总控清 store"
+                  f"（store_retry({tid})），再决定重开还是重派")
+
     def cmd_reopen(self, tid: str, reason: str = "", who: str = "controller") -> None:
         """把已完成 / 已作废的卡拉回 ready（人工纠错用）。
 
@@ -3415,6 +3492,12 @@ class Hive:
         丢的：一张没跑完的卡被关掉，想接着干只能手改文件。重开会清 owner、删
         claim/res 分支、撤掉归档结果（不撤 worker 会当成已完成），并在卡面留一条
         「谁在什么时候、为什么把卡从 X 拉回 ready」，别让纠错本身变成新的黑盒。
+
+        store 模式（claim_backend=store）还要清 store 侧：只改 Git 卡面的话，
+        leader store 里仍是 done + 归档结果，`hive_claim` 的 store 闸门会继续
+        报「已关闭」（T-0497）。见 `store_reopen_reset`。两侧顺序是 store 先、
+        Git 后：store 写不进去就整笔失败，Git 侧报错则把 store 退回原终态，
+        不允许留下「Git ready、store done」的半状态。
         """
         self.fetch()
         card = self.card(tid)
@@ -3422,28 +3505,57 @@ class Hive:
         if old not in ("done", "closed"):
             raise HiveError(
                 f"{tid} 当前是 {old}，只有已完成(done)/已作废(closed)的卡才需要重开；"
-                f"在跑的卡请用 unassign（退回待领取）")
-        for ref in (f"res/{tid}", f"claim/{tid}"):
-            if rev_parse(self.dir, f"origin/{ref}"):
-                git_net(["push", "origin", f":refs/heads/{ref}"], self.dir, check=False)
-                log(f"已删除 {ref}")
-        claim = self.claim_info(tid) or {}
-        self._bump_fence(card, claim)
-        clear_local_lease(tid)
-        archived = self.dir / "results" / f"{tid}.json"
-        extra = ""
-        if archived.exists():
-            archived.unlink()   # 原内容还在 git 历史里，工作区必须撤掉，否则被当成已完成
-            extra = "，已撤掉归档结果（原文仍在 git 历史）"
-        card["state"] = "ready"
-        card["owner"] = None
-        body = (card["_body"]
-                + f"\n\n---\n\n**重开（{iso()}，by {who}）**：从 {old} 拉回 ready"
-                + (f"；原因：{reason}" if reason else "")
-                + f"{extra}\n")
-        self.save_card(card, body)
-        self.commit_and_push(f"reopen {tid}" + (f": {reason}" if reason else ""),
-                             self._card_paths(tid))
+                f"在跑的卡请用 unassign（退回待领取）"
+                + self._store_mismatch_note(tid))
+        store_mode = claim_backend() == "store"
+        if store_mode:
+            # T-0535：store 先清、Git 后改。反过来的顺序一旦 store 写不进去，
+            # 就会留下「Git ready、store 仍 done」——hive_claim 的 store 闸门
+            # 继续报「已关闭」（T-0497 的实际现场，当时只能人工 store_retry）。
+            try:
+                store_reopen_reset(tid, card)
+            except HiveError as exc:
+                raise HiveError(
+                    f"{tid} 的 store 侧清理失败（Git 卡面未改动，仍是 {old}）："
+                    f"{exc}；确认本机集群 / leader store 可用后重试 "
+                    f"hive reopen {tid}") from exc
+        try:
+            for ref in (f"res/{tid}", f"claim/{tid}"):
+                if rev_parse(self.dir, f"origin/{ref}"):
+                    git_net(["push", "origin", f":refs/heads/{ref}"],
+                            self.dir, check=False)
+                    log(f"已删除 {ref}")
+            claim = self.claim_info(tid) or {}
+            self._bump_fence(card, claim)
+            clear_local_lease(tid)
+            archived = self.dir / "results" / f"{tid}.json"
+            extra = ""
+            if archived.exists():
+                archived.unlink()   # 原内容还在 git 历史里，工作区必须撤掉，否则被当成已完成
+                extra = "，已撤掉归档结果（原文仍在 git 历史）"
+            card["state"] = "ready"
+            card["owner"] = None
+            body = (card["_body"]
+                    + f"\n\n---\n\n**重开（{iso()}，by {who}）**：从 {old} 拉回 ready"
+                    + (f"；原因：{reason}" if reason else "")
+                    + f"{extra}\n")
+            self.save_card(card, body)
+            self.commit_and_push(f"reopen {tid}" + (f": {reason}" if reason else ""),
+                                 self._card_paths(tid))
+        except Exception as exc:                            # noqa: BLE001
+            if not store_mode:
+                raise
+            # Git 侧没写成：把 store 退回原终态，别留单向半状态。
+            try:
+                store_reopen_rollback(tid, old)
+            except Exception as exc2:                       # noqa: BLE001
+                raise HiveError(
+                    f"{tid} reopen 失败：Git 侧报错（{exc}）；store 回滚也失败"
+                    f"（{exc2}）—— store 侧现在可能是 ready，先跑 "
+                    f"hive cluster status / doctor 人工核对，别直接领卡") from exc
+            raise HiveError(
+                f"{tid} reopen 失败：Git 侧写回报错（{exc}）；store 已回滚为 "
+                f"{old}，卡面未改动，修正原因后重试") from exc
         cluster_release_lease(tid)
         log(f"{tid} 已从 {old} 重开为 ready（未分配）")
 
