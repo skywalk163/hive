@@ -1,0 +1,53 @@
+{
+  "task": "T-0535",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0535",
+  "base": "main",
+  "head": "a49b2edca390c397a311835e456d891984111cf6",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T22:17:58+08:00",
+  "finished_at": "2026-11-27T23:38:34+08:00",
+  "duration_s": 4836.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/test_reopen_store_cleanup.py",
+      "code": 0,
+      "tail": [
+        "......                                                                   [100%]",
+        "6 passed in 316.45s (0:05:16)"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_store.py",
+      "code": 0,
+      "tail": [
+        "...............                                                          [100%]",
+        "15 passed in 118.91s (0:01:58)"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/test_mcp_controller.py",
+      "code": 0,
+      "tail": [
+        "...                                                                      [100%]",
+        "3 passed in 813.42s (0:13:33)"
+      ]
+    }
+  ],
+  "summary": "# T-0535 收口：`hive reopen` 同步清 store\n\n- 根因：`cmd_reopen` 只改 Git 卡面、删 res/claim 分支，leader store 里任务仍是 `done` 且留着归档结果，`Store.claim` 的 E_CLOSED / E_HAS_RESULT 闸门把领卡挡住（T-0497 现场只能人工 `store_retry`）。\n- 改动（hive.py）：新增 `store_reopen_reset` —— 先把本机 Git 卡面 ingest 进 store（leader 起始后新建的卡补上定义；旧 leader 不认 ingest 就跳过），再走协议已有的 `retry(clear_result=True)`：tasks.state→ready、owner 清空、claims/results 行删除（归档结果随之消失、archive_pending 归零），最后核对返回的 `task.state` 必须是 ready，否则当场报错。\n- `cmd_reopen`：store 模式**先清 store、再改 Git**。store 写不进去就整笔失败、Git 卡面一点不动；Git 侧写回失败则 `store_reopen_rollback` 把 store 退回原终态并抛明确错误，不留「Git ready、store done」的半状态。git-only 模式逻辑逐字未动。\n- 非终态卡撞上旧版留下的半状态（Git ready / store done）时，报错里补 store 实况和清场指引（`_store_mismatch_note`），不静默。\n- 新增 `tests/test_reopen_store_cleanup.py`（6 例）：完整回路 reopen→claim 成功、反证（跳过 store 清理则 claim 必被闸门挡回）、store 不可用不留半状态、git-only 不碰 store、leader 缺行补登记、半状态报错可读。store 侧复用真 `Cluster._store_op_for` + `Store.commit_op`，只把 pytest 里被屏蔽的 HTTP 换成进程内直连，避免另写假协议。\n- 验证（192.168.0.88 FreeBSD 15.1，全绿）：`test_reopen_store_cleanup` 6 passed、`test_store` 15 passed、`test_mcp_controller` 3 passed。\n- 平台说明：Windows 上 `test_mcp_controller` 的 3 例因 verify `true` 走 POSIX 判据必红；用基线 main 单独复现同样失败，与本次改动无关。本机 Windows 上 `test_close_reopen + test_reopen_store_cleanup` 10 passed。判据按卡面指引以 0.88 为准。\n- 已知副作用（已在代码注释写明）：store 的 `tasks.retries` 会 +1 —— 协议里唯一能「清结果并置回 ready」的动作就是 retry，而 hive_store / hive_cluster 不在本卡可改路径。卡面 retries 不动，且只有「有有效租约」时 store 才覆盖卡面，不影响 claim/submit/land 判定。\n- 行为变化（有意）：store 模式且 leader 不可用时 reopen 会明确失败（旧行为是静默只改 Git，等于把 T-0497 的坑继续留着）。\n- 未动 mcp_server.py：reopen 只有 CLI 一个入口（看板也是 shell 出去跑 `hive reopen`），没有独立 MCP 工具面。\n- 遗留：store 侧 retried 次数语义（是否该给 retry 加「不计次」参数）值得后续开卡在 hive_store 协议层解决。",
+  "error": "",
+  "declared_paths": [
+    "hive.py",
+    "mcp_server.py",
+    "tests/test_reopen_store_cleanup.py"
+  ],
+  "changed_files": [
+    "hive.py",
+    "tests/test_reopen_store_cleanup.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "68c1fe569f4243f89d28ec3eb8dc0109"
+}
