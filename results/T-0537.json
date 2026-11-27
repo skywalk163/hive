@@ -1,0 +1,53 @@
+{
+  "task": "T-0537",
+  "agent": "deepseek-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0537",
+  "base": "main",
+  "head": "6f23b6cd95af760aa5e0b596d129e489972531dc",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-27T22:31:37+08:00",
+  "finished_at": "2026-11-27T23:01:01+08:00",
+  "duration_s": 1764.6,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q tests/unit/test_括号整除取模.py",
+      "code": 0,
+      "tail": [
+        "0.02s call     tests/unit/test_括号整除取模.py::test_卡面基础样例[(100 + 50) % 4294967296-150]",
+        "0.02s call     tests/unit/test_括号整除取模.py::test_多层括号整除取模不丢运算[(a + (b // c)) // a-1]",
+        "0.02s call     tests/unit/test_括号整除取模.py::test_多层括号整除取模不丢运算[(a + (b * c)) // a-1]",
+        "0.02s call     tests/unit/test_括号整除取模.py::test_多层括号整除取模不丢运算[(a - (b + c)) // a-0]",
+        "22 passed in 28.85s"
+      ]
+    },
+    {
+      "cmd": "python -m pytest -q tests/unit/test_括号比较优先级.py",
+      "code": 0,
+      "tail": [
+        "0.02s call     tests/unit/test_括号比较优先级.py::test_括号组作比较左操作数_语义不反转[(1 == 2) == \\u5047-\\u5bf9]",
+        "0.02s call     tests/unit/test_括号比较优先级.py::test_先赋值再比较_对照",
+        "",
+        "(5 durations < 0.005s hidden.  Use -vv to show these durations.)",
+        "10 passed in 23.95s"
+      ]
+    }
+  ],
+  "summary": "# T-0537 工作说明\n\n## 做了什么\n定位并修复 `(x + y) // z` / `(x + y) % z` 及多层括号形态丢运算的残余根因。\nT-0520 报告的基础样例 `(4+1)//2` 等已在 main（T-0529）上恢复正确，但用 595 条二元链组合做对拍时发现多层括号形态仍错：`((a + (b + c)) // a)` 被编成 `((a + (b + c) // a))`，`//` 被 Python 按自身优先级挪到内层，结果从 1 变 7（`%`、`*` 同形）。\n\n## 根因与改了什么（均在允许路径内）\n- `src/code_generator.py`：修 `_is_fully_parenthesized`。旧实现只检查「某个括号对恰在末位闭合」，不要求最外层那对从串首开始，于是 `a + (b + c)` 被误判为「已完整加括号」。T-0529 的 `_fold_binary_spine` 依赖此判断跳过重复加括号，误判直接导致多层括号左操作数没被包裹。补上「串首必须是 `(` 且串尾是 `)`」这一必要条件；L-178 类型注解调用点传入的串都已 strip 且以 `(` 起始，行为不变。**未触碰 T-0529 对 `_fold_binary_spine` 的修复**。\n- `tests/unit/test_括号整除取模.py`（新增，22 条）：全部断言可观察输出（真实编译+exec），覆盖卡面基础样例、多层括号 `//`/`%`、连续加法、与乘法/比较混排、拆中间变量等价性、右操作数为括号。\n\n## 验证\n- `python -m pytest -q tests/unit/test_括号整除取模.py` → 22 passed\n- `python -m pytest -q tests/unit/test_括号比较优先级.py` → 10 passed（T-0529 无回归）\n- 两条验收命令合并跑 → 32 passed\n- `python -m pytest -q tests/unit -k \"括号 or 优先级 or 整除 or 取模\"` → 47 passed\n- 595 条二元链组合对拍（+ - * // % 三层嵌套）→ 0 不一致\n- 反证：把 `code_generator.py` 退回 HEAD（临时副本，不动原文件）跑新增用例的核心断言 → 14/16 转红（如 `(a+(b+c))//a` 期望 1 实得 7），修复后全绿，证明判据有效。\n\n## 遗留风险\n- 卡面三条基础样例在 HEAD 上已正确（T-0529 顺带修好），它们作为防回归保留；真正使本卡判据在 HEAD 转红的是多层括号形态（14 条）。\n- `_is_fully_parenthesized` 用于类型注解与二元折叠两处，本次加的前置条件对两处均单调收紧（只排除误判）；全量 `tests/unit` 过滤跑 47 passed 未见回归，但未跑全仓全量。\n- 反证用临时模块加载 HEAD 版 generator，非真实 checkout 回滚，但走的是同一 LightParser+exec 管线，结论一致。\n\n> AI生成",
+  "error": "",
+  "declared_paths": [
+    "src/parser_expr.py",
+    "src/ast_nodes.py",
+    "src/code_generator.py",
+    "light6.py",
+    "tests/unit/test_括号整除取模.py"
+  ],
+  "changed_files": [
+    "src/code_generator.py",
+    "tests/unit/test_括号整除取模.py"
+  ],
+  "out_of_paths": [],
+  "lease_id": "777adb26195640d7a0a6bb5e8f363a56"
+}
