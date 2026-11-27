@@ -73,6 +73,35 @@ WHITELIST: dict[tuple[str, str, str], str] = {
     ("llm_controller.py", "McpStdioBackend.__init__", "Popen"):
         "MCP stdio 子进程：全管道通信、控制器启动时拉一次，不在周期刷新路径上；"
         "本卡允许修改的路径不含 llm_controller.py",
+    # T-0538：以下 8 处是分支基线就已存在的调用点（本卡 paths 不含这些文件）。
+    # 有的其实是 AST 认不出的包装器/字典拼装，有的根本不在 Windows 看板刷新路径上。
+    ("hive.py", "Hive.submit_async", "Popen"):
+        "verify 后台进程：creationflags 拼在 kwargs 字典里（DETACHED_PROCESS|"
+        "CREATE_NEW_PROCESS_GROUP），AST 只看字面量故漏判；父进程退出不能带走 verify"
+        "（T-0492）；DETACHED 本身不建 conhost",
+    ("hive_autoupdate.py", "_run", "run"):
+        "git 调用走 `**_no_window()` 包装器（内部就是 no_window_kwargs()），"
+        "AST 只认字面名字；本卡允许路径不含该文件",
+    ("hive_autoupdate.py", "schedule_dashboard_restart", "Popen"):
+        "POSIX cron 下的延迟重启 helper：start_new_session=True 拼在 kwargs 里"
+        "（AST 看不到）；不在 Windows 看板刷新路径上，本卡允许路径不含该文件",
+    ("hive_autoupdate.py", "_crontab_read", "run"):
+        "`crontab -l` 是 POSIX 专属命令，经 `**_no_window()` 包装器 guarded；"
+        "Windows 看板不触发，本卡允许路径不含该文件",
+    ("hive_autoupdate.py", "_crontab_write", "run"):
+        "同上：`crontab -` 经 `**_no_window()` 包装器 guarded，POSIX 专属；"
+        "本卡允许路径不含该文件",
+    ("hive_repos.py", "_git", "run"):
+        "带 _GIT_CACHE 的轻量 git 调用；status 的 sync-health 走 _git_live 而非此处，"
+        "不在看板 20s 刷新路径上；本卡允许路径不含 hive_repos.py，留待后续卡收口",
+    ("hive_repos.py", "_git_live", "run"):
+        "status --sync-health 的实时 git 判定（assess_sync_state 调用）：刻意不带 flag，"
+        "继承父进程的控制台——父进程是 CREATE_NO_WINDOW 时不会多建 conhost；"
+        "若改用 DETACHED 反而会新建可见控制台（T-0206 复发）。"
+        "本卡允许路径不含 hive_repos.py，留待后续卡收口",
+    ("hive_repos.py", "lock_holders", "run"):
+        "POSIX procstat/fstat 查文件句柄，Windows 走另一分支；不在看板刷新路径上；"
+        "本卡允许路径不含 hive_repos.py，留待后续卡收口",
 }
 
 # 整文件豁免：端到端自测脚本（人手动跑，不是产品常驻路径；也不在本卡允许路径内）
@@ -370,3 +399,70 @@ def test_run_keeps_encoding_redlines(monkeypatch):
     assert captured.get("encoding") == "utf-8"
     assert captured.get("errors") == "replace"
     assert captured.get("capture_output") is True
+
+
+# --------------------------------------------------------------------------- #
+# 5. T-0538：DETACHED_PROCESS —— 真正不建 conhost 的那条路
+# --------------------------------------------------------------------------- #
+
+def _func_segment(module: str, qualname: str) -> str:
+    src = _read(ROOT / module)
+    tree = ast.parse(src)
+    for qual, node in _iter_functions(tree.body, []):
+        if qual == qualname:
+            return ast.get_source_segment(src, node) or ""
+    raise AssertionError(f"{module} 里找不到 {qualname}")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="DETACHED_PROCESS 只在 Windows 上有意义")
+def test_detached_kwargs_on_windows(monkeypatch):
+    """detached=True → 唯一 flag 是 DETACHED_PROCESS，绝不与 CREATE_NO_WINDOW 混用。"""
+    monkeypatch.delenv(hive_compat.DETACHED_ENV, raising=False)
+    kw = hive_compat.no_window_kwargs(detached=True)
+    assert kw == {"creationflags": hive_compat.subprocess.DETACHED_PROCESS}
+    assert not (kw["creationflags"] & hive_compat.subprocess.CREATE_NO_WINDOW)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="同上")
+def test_detached_env_reaches_nested_git(monkeypatch):
+    """看板给 status 子进程设的 env 必须穿透到内部 git（hive.run() 的无参调用）。"""
+    monkeypatch.setenv(hive_compat.DETACHED_ENV, "1")
+    assert hive_compat.no_window_kwargs() == {
+        "creationflags": hive_compat.subprocess.DETACHED_PROCESS}
+    captured: dict = {}
+    monkeypatch.setattr(hive.subprocess, "run", _fake_run(captured))
+    hive.run(["git", "--version"])
+    assert captured.get("creationflags") == hive.subprocess.DETACHED_PROCESS
+
+
+@pytest.mark.parametrize("val", ["1", "true", "YES", "on"])
+def test_detached_flag_is_noop_off_windows(monkeypatch, val):
+    """POSIX 上即使误设了 detached 开关，两个入口都必须返回空 dict。"""
+    monkeypatch.setattr(hive_compat.os, "name", "posix")
+    monkeypatch.setenv(hive_compat.DETACHED_ENV, val)
+    assert hive_compat.no_window_kwargs() == {}
+    assert hive_compat.no_window_kwargs(detached=True) == {}
+
+
+def test_detached_escape_valve_still_wins(monkeypatch):
+    """HIVE_NO_WINDOW=0 优先级最高：即使要求 detached 也退回「可能有窗」原行为。"""
+    monkeypatch.setenv(hive_compat.NO_WINDOW_ENV, "0")
+    monkeypatch.setenv(hive_compat.DETACHED_ENV, "1")
+    assert hive_compat.no_window_kwargs(detached=True) == {}
+
+
+def test_dashboard_refresh_loop_uses_detached():
+    """源码级：给 status 子进程设 detached 环境变量，顶层仍保留 CREATE_NO_WINDOW。
+
+    顶层不能改 DETACHED：status 里的 `hive_repos._git_live` 不带任何 flag，
+    在 DETACHED 父进程下会新建**可见**控制台（T-0206 复发，实测 conhost
+    重新出现）。CREATE_NO_WINDOW 给整条链留一个隐藏控制台供它继承。
+    """
+    src = _read(ROOT / "dashboard" / "serve.py")
+    assert "DETACHED_ENV" in src and "DETACHED_PYTHON_ENV" in src, \
+        "刷新循环没把 detached 开关传给 status 子进程"
+    seg = _func_segment("dashboard/serve.py", "refresh_loop")
+    assert "DETACHED_PYTHON_ENV" in seg
+    assert "**no_window_kwargs()" in seg, "顶层必须保留 CREATE_NO_WINDOW（T-0206）"
+    assert "no_window_kwargs(detached=True)" not in seg, \
+        "顶层改 DETACHED 会让 _git_live 新建可见控制台（T-0206 复发）"

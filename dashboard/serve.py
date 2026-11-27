@@ -46,11 +46,19 @@ except ImportError:  # pragma: no cover - 单独拷走 dashboard 时的兜底
 
 # 子进程「无窗」（T-0206）：refresh_loop 每 --refresh-interval（默认 30s）跑一次
 # `hive status --json`，不给 CREATE_NO_WINDOW 就会每 30 秒闪一次黑窗。
+# T-0538：周期刷新路径要的是「真·无控制台」——CREATE_NO_WINDOW 只藏窗口、仍建
+# conhost；DETACHED_PROCESS 不建 conhost，且 stdout 走管道照常捕获。
 try:
-    from hive_compat import no_window_kwargs
+    from hive_compat import DETACHED_ENV, no_window_kwargs
 except ImportError:  # pragma: no cover - 单独拷走 dashboard 时的兜底
-    def no_window_kwargs():
-        return {}
+    DETACHED_ENV = "HIVE_DETACHED_SUBPROCESS"
+
+    def no_window_kwargs(detached=False):
+        if os.name != "nt":
+            return {}
+        name = "DETACHED_PROCESS" if detached else "CREATE_NO_WINDOW"
+        flag = getattr(subprocess, name, 0)
+        return {"creationflags": flag} if flag else {}
 
 # 系统级核心配置：Hub 地址 + 集中式仓库列表，与 agents/<name>.json 共同构成 hive 配置
 HIVE_CONFIG_PATH = HIVE_ROOT / "hive-config.json"
@@ -78,8 +86,12 @@ STATIC_FILES = {
     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/sample-status.json": ("sample-status.json", "application/json; charset=utf-8"),
-    "/ci.json": ("ci.json", "application/json; charset=utf-8"),
 }
+
+# T-0538：`ci.json` 是 scripts/ci-check.sh 生成、且被 .gitignore 忽略的运行时产物，
+# 新机器/新 worktree 里天然没有它。走专用接口，缺数据时返回 200 空 JSON，
+# 不再落到静态文件的 500 分支（前端每 30s 请求一次，日志曾刷 1700+ 条 500）。
+API_CI = "/ci.json"
 
 API_PATH = "/api/status"
 API_CONFIG = "/api/config"
@@ -146,6 +158,11 @@ UPGRADE_POST_ACTIONS = ("check", "apply", "publish", "rollout")
 # ✓ / 全角符号会以 UnicodeEncodeError 退出（rc=1、stdout 空），状态文件于是一直写不出来，
 # 看板就永远停在旧快照或 503。三个平台用同一套环境变量最省事。
 PYTHON_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+# T-0538：看板拉起的 hive CLI 内部那些走 `no_window_kwargs()` 的 git 一律改用
+# DETACHED_PROCESS（不建 conhost）。顶层 CLI 本身仍用 CREATE_NO_WINDOW 保留一个
+# 隐藏控制台，供 `_git_live` 这类不带 flag 的 git 继承——实测顶层若改成 DETACHED，
+# 这些 git 反而会新建可见控制台（T-0206 复发）。环境变量随子进程继承。
+DETACHED_PYTHON_ENV = {**PYTHON_ENV, DETACHED_ENV: "1"}
 # 用当前解释器，别硬编码 python3：Windows 上 python3 常常是 Store 的 App 别名存根
 PYTHON = sys.executable or "python3"
 
@@ -722,8 +739,12 @@ def refresh_loop(status_path, interval):
     argv = hive_argv("status", "--json", "--sync-health")
     while True:
         try:
+            # 顶层仍用 CREATE_NO_WINDOW：它给整条调用链留一个隐藏控制台，
+            # status 里那些不带 flag 的 git（hive_repos._git_live）会继承它，
+            # 不会各自新建（可见的）控制台。真正要消灭的是 no_window_kwargs
+            # 出口下每调一次就建一个 conhost 的那些 git —— 靠 env 让它们走 DETACHED。
             proc = subprocess.run(argv, capture_output=True, text=True,
-                                  encoding="utf-8", env=PYTHON_ENV,
+                                  encoding="utf-8", env=DETACHED_PYTHON_ENV,
                                   timeout=_hive_op_timeout(),
                                   **no_window_kwargs())
             if proc.returncode == 0 and proc.stdout.strip():
@@ -886,9 +907,33 @@ def build_handler(status_path, write_auth="off"):
                 return
             self._send(200, body, ctype)
 
+        def serve_ci(self):
+            """/ci.json：CI 数据时有时无，但接口本身必须永远 200（T-0538）。
+
+            `dashboard/ci.json` 由 `scripts/ci-check.sh` 生成且被 .gitignore 忽略：
+            新机器没跑过 ci-check 就没有这个文件。旧实现把它当静态文件，缺文件
+            直接 500，前端每 30s 请求 → 错误日志无限刷屏。这里把缺文件/坏 JSON
+            归一化成 `renderCI()` 认识的空数据（runners 数组 + repos 对象），
+            有真实数据时原样吐出。
+            """
+            try:
+                data = json.loads((BASE_DIR / "ci.json").read_bytes()
+                                  .decode("utf-8"))
+            except (OSError, ValueError, UnicodeDecodeError):
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data.setdefault("checked_at", "")
+            data.setdefault("runners", [])
+            data.setdefault("repos", {})
+            self._send_json(200, data)
+
         # ---- 路由 ----
         def do_GET(self):  # noqa: N802 （BaseHTTPRequestHandler 的命名约定）
             path = urlparse(self.path).path
+            if path == API_CI:
+                self.serve_ci()
+                return
             if path == API_PATH:
                 self.serve_status()
                 return
@@ -1881,7 +1926,7 @@ def build_handler(status_path, write_auth="off"):
             op_timeout = _hive_op_timeout()
             try:
                 proc = subprocess.run(argv, capture_output=True, text=True,
-                                     encoding="utf-8", env=PYTHON_ENV,
+                                     encoding="utf-8", env=DETACHED_PYTHON_ENV,
                                      timeout=op_timeout, **no_window_kwargs())
             except FileNotFoundError:
                 append_audit({"action": action, "task": tid, "ok": False,
@@ -1925,7 +1970,7 @@ def build_handler(status_path, write_auth="off"):
                 timeout = _hive_op_timeout()
             proc = subprocess.run(hive_argv(*args), capture_output=True,
                                   text=True, encoding="utf-8",
-                                  env=PYTHON_ENV, timeout=timeout,
+                                  env=DETACHED_PYTHON_ENV, timeout=timeout,
                                   **no_window_kwargs())
             return (proc.returncode, (proc.stdout or "").strip(),
                     (proc.stderr or "").strip())
@@ -2058,7 +2103,7 @@ def build_handler(status_path, write_auth="off"):
                 proc = subprocess.run(
                     hive_argv("status", "--json"),
                     capture_output=True, text=True, encoding="utf-8",
-                    env=PYTHON_ENV, timeout=_hive_op_timeout(),
+                    env=DETACHED_PYTHON_ENV, timeout=_hive_op_timeout(),
                     **no_window_kwargs())
                 if proc.returncode == 0 and proc.stdout.strip():
                     write_status_atomic(status_path, proc.stdout)

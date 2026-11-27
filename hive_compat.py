@@ -139,28 +139,39 @@ MISSING_INTERPRETER_RC = 127      # POSIX 的「command not found」惯例，非
 # `HIVE_NO_WINDOW=0` 让全仓的 no_window_kwargs() 立刻退回空 dict，不用改代码。
 NO_WINDOW_ENV = "HIVE_NO_WINDOW"
 
+# T-0538：`CREATE_NO_WINDOW` 只把窗口藏起来，Windows **仍会为每个 console 子进程
+# 建一个 conhost.exe**。看板每 20s 跑一次 `hive status --json --sync-health`，内部
+# 多次 git；远端卡住时这些 conhost 不回收，几分钟堆出几十个。`DETACHED_PROCESS`
+# 才是真正「不分配控制台」（stdout/stderr 走管道照常可捕获）。看板刷新循环在
+# status 子进程的环境里设这个开关，让其中走本出口的 git 无参调用也自动切过去。
+DETACHED_ENV = "HIVE_DETACHED_SUBPROCESS"
 
-def no_window_kwargs() -> dict:
-    """子进程无窗的统一出口：Windows 返回 `{"creationflags": CREATE_NO_WINDOW}`。
 
-    为什么需要：Windows 上 console 程序（git / tasklist / python …）在**父进程
-    没有控制台**时，CreateProcess 会为它新建一个可见控制台窗口——这就是看板每
-    30 秒刷新一次就闪一下黑窗的来源。`CREATE_NO_WINDOW` 让子进程完全不分配控制台，
-    输出照旧走管道，不影响任何 `capture_output` 调用方。
+def no_window_kwargs(detached: bool = False) -> dict:
+    """子进程无窗的统一出口，Windows 下二选一，绝不混用。
 
-    与 `DETACHED_PROCESS` **互斥**（两者都管控制台，混用会起不来），所以后台
-    daemon 拉起那几处（`_dashboard_spawn` / `hive_cluster._spawn_background`）
-    刻意不走这个出口，见 tests/test_no_window.py 的白名单。
+    默认 `{"creationflags": CREATE_NO_WINDOW}`：Windows 上 console 程序
+    （git / tasklist / python …）在**父进程没有控制台**时，CreateProcess 会为它
+    新建一个可见控制台窗口——这就是看板每 30 秒刷新一次就闪一下黑窗的来源
+    （T-0206）。`CREATE_NO_WINDOW` 把窗口藏掉，输出照旧走管道。
+
+    T-0538：`detached=True` 或 `HIVE_DETACHED_SUBPROCESS` 为真时改用
+    `DETACHED_PROCESS`——它不建 conhost，从根上止住看板刷新导致的进程堆积。
+    两者互斥（都管控制台，混用会起不来），所以这里只取其中一个。
 
     非 Windows 一律返回 `{}`：POSIX 上没有这个概念，也绝不改变既有行为。
-    `HIVE_NO_WINDOW=0`（或 false/no/off）时同样返回 `{}`。
+    `HIVE_NO_WINDOW=0`（或 false/no/off）是优先级最高的逃生阀，同样返回 `{}`。
     """
     if os.name != "nt":
         return {}
     if str(os.environ.get(NO_WINDOW_ENV, "1")).strip().lower() in (
             "0", "false", "no", "off"):
         return {}
-    flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    want_detached = bool(detached) or str(
+        os.environ.get(DETACHED_ENV, "")).strip().lower() in (
+            "1", "true", "yes", "on")
+    name = "DETACHED_PROCESS" if want_detached else "CREATE_NO_WINDOW"
+    flag = getattr(subprocess, name, 0)
     if not flag:  # pragma: no cover - 只有残缺的 subprocess 才会走到
         return {}
     return {"creationflags": flag}
