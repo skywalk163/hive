@@ -1,0 +1,49 @@
+{
+  "task": "T-0539",
+  "agent": "doubao-win",
+  "mode": "manual",
+  "status": "done",
+  "branch": "task/T-0539",
+  "base": "main",
+  "head": "9859e78386a9e4a8a23fd95b6338ccc31fdfea6d",
+  "exit_code": 0,
+  "timed_out": false,
+  "started_at": "2026-11-28T09:42:44+08:00",
+  "finished_at": "2026-11-28T09:42:44+08:00",
+  "duration_s": 0.5,
+  "verify": [
+    {
+      "cmd": "python -m pytest -q --timeout=150 -n4 tests/test_T0534_语义名上线.py",
+      "code": 0,
+      "tail": [
+        "bringing up nodes...",
+        "bringing up nodes...",
+        "",
+        "...                                                                      [100%]",
+        "3 passed in 67.52s (0:01:07)"
+      ]
+    }
+  ],
+  "summary": "# T-0539 工作说明\n\n- 做了什么：把模型面工具名从旧名（`todo_write` / `web_search` / `web_fetch` / `goal`）统一改成 T-0534 的语义线名（`workflow__todo_write` / `web__search` / `web__fetch` / `workflow__goal`），旧名只在「兼容别名」语境保留一句说明；同步 README / 快速开始 / API 参考的线名口径。\n- 改的文件：`src/系统提示.light`（规划段、待办与目标段、工具选择段、网页/目标指导段、两处在场判断）、`src/提示_纪律段.light`（web 候选表加线名）、`src/提示_协作段.light`（goal 候选加 `workflow__goal`）、`README.md`（新增「模型面工具名（线名）」节）、`docs/快速开始.md`、`docs/API参考.md`、新增判据 `tests/test_T0539_语义线名口径.py`。\n- 验证（FreeBSD 192.168.0.88，卡面兜底口径）：`python3 -m pytest -q tests/test_T0534_语义名上线.py` → 3 passed（26.99s）；`tests/test_T0539_语义线名口径.py` → 4 passed（26.22s）。Windows 串行 `-n0` 同样 3 passed（150s）；提示/工具面回归 T-0469/T-0482/T-0483/T-0485/T-0487/T-0488/T-0489 + T-0534 共 67 passed；README/文档相关 T-0418、T-0399 文档用例、fetch-deps 均绿。生产提示原文 2563→2716 字，预算 6000 未截断。\n- 兼容：`回名` 仍能把线名落回基线注册名（workflow__todo_write→todo_write、web__search→web_search、workflow__goal→目标），旧名解析未动；未碰 `src/总入口.light` 的线名转写/白名单逻辑。\n- 风险/遗留一：卡面 `paths` 只写了 `README.md`，但本任务交付物（提示正文/文档/判据）必然落在 `src/`、`docs/`、`tests/`；按任务正文「具体路径由执行者定位并写进 paths」执行，提交时会出现 out_of_paths 警告（非严格模式仅告警），建议把上面 6 个文件 + 新测试补进卡面 paths。\n- 风险/遗留二：卡面 verify 仍只跑 T-0534 判据，新增强验收未被覆盖；建议 verify 追加 `python -m pytest -q tests/test_T0539_语义线名口径.py`。\n- Windows 门禁假失败（本机实测）：卡面 verify 走 `pytest.ini` 的 `--timeout=60 -n4`，本机单例耗时已 ~52–56s，4 并发后每例 >60s → pytest-timeout 杀 worker，报 `node down: Not properly terminated`（3 failed）。同机同命令加 `--timeout=150 -n4` → 3 passed（65.4s），`-n0` → 3 passed。属宿主超时阈值过紧，不是产物问题；建议把 `pytest.ini` 的 `--timeout` 放宽，或本卡 verify 固定到 88 跑。\n- 风险/遗留三：xdist 并发跑 `tests/test_T0399_新会话对齐.py` 时 4 个服务器类用例 worker 崩溃（同属上面的超时/负载问题），单进程（-n0）逐个跑全绿，与本卡改动无关；已清掉该次运行残留的 8 个 web/mock 进程。\n\n\n## 结果未落 store（T-0296）\n\n- Git 侧已完成：res/T-0539 分支、task/T-0539（head 9859e78386a9e4a8a23fd95b6338ccc31fdfea6d）\n- store 侧**未写入**：T-0539 结果写入 leader store 失败（已尝试 4 次）：store 未启用\n- 影响：看板/claim 的 store 视图看不到结果，租约过期后这张卡可能被重新派发；Git 结果不会丢，`hive land` 读的是Git 侧 res/T-0539，可以照常合入。\n- 下一步：**不要直接重跑 `hive submit T-0539`**（`result_info` 会报「已经有结果」把重跑挡住）；要让 store 视图一致，先删 res/T-0539 分支再重跑，或用 `hive doctor` 体检 / `hive repair --apply` 对齐状态。",
+  "error": "",
+  "declared_paths": [
+    "README.md",
+    "docs/API参考.md",
+    "docs/快速开始.md",
+    "src/提示_协作段.light",
+    "src/提示_纪律段.light",
+    "src/系统提示.light",
+    "tests/test_T0539_语义线名口径.py"
+  ],
+  "changed_files": [
+    "README.md",
+    "docs/API参考.md",
+    "docs/快速开始.md",
+    "src/提示_协作段.light",
+    "src/提示_纪律段.light",
+    "src/系统提示.light",
+    "tests/test_T0539_语义线名口径.py"
+  ],
+  "out_of_paths": [],
+  "lease": "missing"
+}
