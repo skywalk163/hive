@@ -1,6 +1,8 @@
 """P0：repo.updated 事件、land 事件载荷、RepoSyncAgent 的安全快进。"""
 from __future__ import annotations
 
+import time
+
 import hive
 import hive_cluster as hc
 from conftest import sh
@@ -129,3 +131,138 @@ def test_cluster_starts_mcp_http(world, tmp_path):
         assert body["result"]["protocolVersion"] == "2025-03-26"
     finally:
         c.stop()
+
+
+# ---- T-0541：事件消费路径节流 ------------------------------------------- #
+
+def _stub_agent(tmp_path, monkeypatch, calls, *, interval=None):
+    """造一个不打真实 git 的 RepoSyncAgent，返回 (agent, 假 cluster)。"""
+    cfg = hc.Config(state_dir=tmp_path / "sync-state", hive_dir=tmp_path / "repo",
+                    discover=False, port=0)
+    monkeypatch.setattr(cfg, "sync_enabled", True, raising=False)
+
+    class FakeCluster:
+        config = cfg
+        events = []
+
+        @classmethod
+        def snapshot(cls):
+            return {"events": list(cls.events)}
+
+    class FakeHive:
+        @staticmethod
+        def _sync_one_repo(name, path):
+            calls.append(name)
+            return {"status": "up-to-date"}
+
+    agent = hc.RepoSyncAgent(FakeCluster())
+    if interval is not None:
+        agent.event_min_interval_s = interval
+    monkeypatch.setattr(agent, "_repos", lambda: {
+        "light": tmp_path / "light", "hive": tmp_path / "hive"})
+    monkeypatch.setattr(agent, "_hive_obj", lambda: FakeHive())
+    monkeypatch.setattr(agent, "_git_rev", lambda path, ref: "a" * 12)
+    return agent, FakeCluster
+
+
+def _emit(cluster, event_id, repos):
+    cluster.events.append({
+        "id": str(event_id), "type": "repo.updated", "data": {"repos": repos},
+    })
+
+
+def test_event_storm_throttled_per_repo(tmp_path, monkeypatch):
+    """同一 repo 的 N 条事件在最小间隔内只跑 1 次 git。"""
+    calls = []
+    agent, cluster = _stub_agent(tmp_path, monkeypatch, calls, interval=180)
+    for i in range(10):
+        _emit(cluster, i, [{"name": "light", "sha": "b" * 12}])
+        agent._consume_events()
+
+    assert calls == ["light"], calls
+    assert agent.status()["last_event_id"] == "9"
+
+
+def test_event_throttle_independent_per_repo(tmp_path, monkeypatch):
+    """不同 repo 互不阻塞：同轮两条仓的事件都同步。"""
+    calls = []
+    agent, cluster = _stub_agent(tmp_path, monkeypatch, calls, interval=180)
+    _emit(cluster, 1, [{"name": "light", "sha": "b" * 12},
+                       {"name": "hive", "sha": "c" * 12}])
+    agent._consume_events()
+    assert sorted(calls) == ["hive", "light"], calls
+
+
+def test_event_throttle_expires(tmp_path, monkeypatch):
+    """间隔到达后同一 repo 重新可同步，不是永久钉死。"""
+    calls = []
+    agent, cluster = _stub_agent(tmp_path, monkeypatch, calls, interval=1)
+    _emit(cluster, 1, [{"name": "light", "sha": "b" * 12}])
+    agent._consume_events()
+    assert calls == ["light"]
+
+    # 把游标时间推到 2 秒前，模拟间隔到期。
+    agent._state["repos"]["light"]["synced_at"] = hc._iso(time.time() - 2)
+    _emit(cluster, 2, [{"name": "light", "sha": "c" * 12}])
+    agent._consume_events()
+    assert calls == ["light", "light"], calls
+
+
+def test_event_throttle_disabled_by_zero(tmp_path, monkeypatch):
+    """interval=0 关闭节流，恢复旧行为（每条事件都同步）。"""
+    calls = []
+    agent, cluster = _stub_agent(tmp_path, monkeypatch, calls, interval=0)
+    for i in range(3):
+        _emit(cluster, i, [{"name": "light", "sha": "b" * 12}])
+        agent._consume_events()
+    assert len(calls) == 3, calls
+
+
+def test_event_terminal_state_skipped(tmp_path, monkeypatch):
+    """ahead/diverged 且 target 未变时，事件不再跑 git。"""
+    calls = []
+    agent, cluster = _stub_agent(tmp_path, monkeypatch, calls, interval=180)
+    agent._state["repos"]["light"] = {
+        "status": "ahead", "target": "b" * 12, "sha": "a" * 12,
+        "synced_at": hc._iso(time.time() - 999),
+    }
+    _emit(cluster, 1, [{"name": "light", "sha": "b" * 12}])
+    agent._consume_events()
+    assert calls == [], calls
+
+    # target 变了就要放行。
+    _emit(cluster, 2, [{"name": "light", "sha": "d" * 12}])
+    agent._consume_events()
+    assert calls == ["light"], calls
+
+
+def test_inflight_blocks_reentrant_sync(tmp_path, monkeypatch):
+    """在飞标志阻止同一 repo 的重入调用。"""
+    calls = []
+    agent, _ = _stub_agent(tmp_path, monkeypatch, calls, interval=0)
+    agent._inflight.add("light")
+    assert agent._event_need_sync("light", "b" * 12) is False
+    assert agent._event_need_sync("hive", "b" * 12) is True
+    agent._inflight.discard("light")
+
+    # _sync_repo 本身也要挡住在飞调用。
+    agent._inflight.add("light")
+    agent._sync_repo("light", "b" * 12)
+    assert calls == [], calls
+
+
+def test_first_sync_not_throttled(tmp_path, monkeypatch):
+    """没有历史游标的仓（首次同步）不能被节流挡掉。"""
+    calls = []
+    agent, cluster = _stub_agent(tmp_path, monkeypatch, calls, interval=180)
+    _emit(cluster, 1, [{"name": "light", "sha": "b" * 12}])
+    agent._consume_events()
+    assert calls == ["light"], calls
+
+
+def test_status_exposes_throttle_config(tmp_path, monkeypatch):
+    calls = []
+    agent, _ = _stub_agent(tmp_path, monkeypatch, calls, interval=42)
+    st = agent.status()
+    assert st["event_min_interval_s"] == 42
+    assert st["inflight"] == []
