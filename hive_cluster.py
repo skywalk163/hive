@@ -1101,11 +1101,27 @@ def _git_capture(cmd: list, timeout: float, env=None) -> tuple:
                 ferr.read().decode("utf-8", "replace"))
 
 
+# T-0541：repo.updated 事件消费的 per-repo 最小同步间隔（秒）。
+#
+# 现场：2026-11-27 20:51–20:53 的 2 分钟里刷了 43 条 sync，每 2–3 秒一条，
+# lightharness / hive 交替、每条 target sha 都不同 —— `_consume_events` 过去
+# 对每条事件的每个 repo 都直接 `_sync_repo()`，一次同步内部又跑 ls-remote /
+# fetch / merge 多个 git 子进程，Windows 上就会堆出几十个 conhost。
+#
+# 这是**防抖下限**，不是同步周期：真有新提交的仓仍会在间隔到达后同步，
+# 5 分钟 `_reconcile` 补偿通道也不受影响。设 0 可关闭（恢复旧行为）。
+EVENT_SYNC_MIN_ENV = "HIVE_CLUSTER_EVENT_SYNC_MIN_S"
+DEFAULT_EVENT_SYNC_MIN_S = 180.0
+
+
 class RepoSyncAgent:
     """P0 轻量代码同步器：消费 repo.updated 事件 + 5 分钟游标补偿。
 
     不参与一致性；只做安全快进（复用 hive.Hive._sync_one_repo 的 ff-only 边界）。
     没有 git 仓/没有 hive 模块时自动降级为 no-op，不影响集群本身。
+
+    T-0541：事件消费路径有 per-repo 最小间隔 + 在飞标志，避免事件风暴时
+    几秒一轮地打 git；终态（ahead/diverged）同样跳过。
     """
 
     def __init__(self, cluster):
@@ -1119,6 +1135,10 @@ class RepoSyncAgent:
         self._hive_failed = False
         self._last_error = ""
         self._last_run = 0.0
+        # T-0541：在飞集合只记 repo 名；同一 repo 上一轮未结束不再启动。
+        self._inflight: set[str] = set()
+        self.event_min_interval_s = max(
+            0.0, _env_float(EVENT_SYNC_MIN_ENV, DEFAULT_EVENT_SYNC_MIN_S))
         saved = _read_json(self.state_path, {}) or {}
         self._state = saved if isinstance(saved, dict) else {}
         self._state.setdefault("repos", {})
@@ -1151,6 +1171,9 @@ class RepoSyncAgent:
                 "last_run": _iso(self._last_run) if self._last_run else "",
                 "last_error": self._last_error,
                 "repos": copy.deepcopy(self._state.get("repos") or {}),
+                # T-0541：暴露节流配置和在飞仓，便于看板/诊断确认节流已生效。
+                "event_min_interval_s": self.event_min_interval_s,
+                "inflight": sorted(self._inflight),
             }
 
     # -- 主循环 ------------------------------------------------------------ #
@@ -1191,10 +1214,43 @@ class RepoSyncAgent:
                 if not isinstance(item, dict):
                     continue
                 name = str(item.get("name") or "").strip()
-                if name:
-                    self._sync_repo(name, str(item.get("sha") or ""))
+                if not name:
+                    continue
+                target = str(item.get("sha") or "")
+                # T-0541：事件风暴里同一 repo 会被连发 N 条；不节流就会
+                # 每条都跑一轮 git（现场 2 分钟 43 条）。先判定再决定是否
+                # 真同步；跳过的事件仍推进游标，避免下一 tick 重复处理。
+                if not self._event_need_sync(name, target):
+                    continue
+                self._sync_repo(name, target)
             self._last_event_id = str(ev.get("id") or self._last_event_id)
             self._save()
+
+    def _event_need_sync(self, name: str, target: str) -> bool:
+        """T-0541：一条 repo.updated 事件是否值得跑一轮 git。
+
+        三类跳过（都不影响 `_last_event_id` 推进）：
+          1. 在飞：同一 repo 上一轮 `_sync_repo` 还没结束；
+          2. 终态：ahead/diverged 且远端 target 没变，重跑只会撞同一堵墙
+             （与 `_reconcile` 的判定口径一致）；
+          3. 间隔内：距上次成功同步不足 `event_min_interval_s`。
+        首次同步（游标里没有该仓记录）恒放行，不会被节流挡掉。
+        """
+        with self._lock:
+            if name in self._inflight:
+                return False
+        cur = (self._state.get("repos") or {}).get(name) or {}
+        if not cur:
+            return True
+        if target and str(cur.get("status") or "") in ("ahead", "diverged"):
+            if str(cur.get("target") or "") == target:
+                return False
+        if self.event_min_interval_s <= 0:
+            return True
+        last = _epoch(cur.get("synced_at") or cur.get("updated_at"))
+        if last and (_now() - last) < self.event_min_interval_s:
+            return False
+        return True
 
     # -- 补偿 -------------------------------------------------------------- #
     def _reconcile(self) -> None:
@@ -1256,6 +1312,21 @@ class RepoSyncAgent:
 
     # -- 单仓 -------------------------------------------------------------- #
     def _sync_repo(self, name: str, target: str = "") -> None:
+        # T-0541：在飞标志。_lock 只保证同一时刻一个线程在跑，却挡不住
+        # 「刚跑完又被下一条事件叫起来」；_event_need_sync 用这个集合把
+        # 正在跑的仓排除掉。finally 保证异常路径也释放，不会永久钉住。
+        with self._lock:
+            if name in self._inflight:
+                return
+            self._inflight.add(name)
+        try:
+            self._sync_repo_locked(name, target)
+        finally:
+            with self._lock:
+                self._inflight.discard(name)
+
+    def _sync_repo_locked(self, name: str, target: str = "") -> None:
+        """真正跑一轮 git（由 `_sync_repo` 持有在飞标志后调用）。"""
         with self._lock:
             repos = self._repos()
             path = repos.get(name)
